@@ -2,9 +2,21 @@
 
 Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 
+## 当前开发与交付规则 · 2026-11-12
+
+用户最新明确要求：“不要写任何测试不要跑任何测试”“不要搞个单独分支还构建”“直接合到 main 跑 cicd 用户来测试验证”。
+
+本节适用于 MangaFlow 后续全部开发、修复和交付，取代本文历史记录及 DESIGN.md 等项目文档中冲突的测试、分支和构建流程。
+
+- **不编写任何测试，不运行任何测试。** 开发期间和 CI/CD 都不执行单元、冒烟、集成、契约、回归、截图、UI 自动化、模拟器、端到端或 API 测试，也不新增测试框架、测试用例或测试专用环境。此前的真实 API 测试授权仅作为历史记录，不再作为当前执行许可。
+- **统一直接提交到 main。** 不为开发、验证或构建另建 feature、临时或发布分支；不执行“单独分支构建通过后再合入 main”的流程。提交前读取 main 最新 HEAD，保留其他会话的并发修改，完成源码和差异审阅后直接提交到 main；禁止强推覆盖他人修改。
+- **构建与发布交给 main 的现有 CI/CD。** 不做提交前的本地预构建或分支预构建；CI/CD 只负责构建、打包、签名和发布，不运行任何测试。
+- **确认 CI/CD 已触发即可交付。** 不继续等待构建或发布完成；未观察到构建结果就明确说明，不能宣称构建成功或功能通过。
+- **由用户亲自测试和验证。** 用户负责安装、功能、界面与手感验收，后续修改以用户反馈为依据。代理可做源码审阅、差异与文件完整性核对；这些不代表实际使用已经验证。
+
 ## Working rules
 
-- CI remains build/package/release only; do not add test or lint jobs. The user subsequently authorized real API verification ("你接 api 你接之前好好测试下啊"). Verify the affected real source path when changing an integration; compilation or mock responses do not prove that reading or login works. Do not add automated test suites. This batch does not run emulator checks, UI automation, or screenshot verification.
+- CI/CD remains build/package/sign/release only; do not add test or lint jobs. Follow the current development and delivery rules above. Source review and build results do not establish successful real usage.
 - Main automatically builds and publishes a signed release. Keep the existing signing key and monotonically increasing version code.
 - Never commit credentials, signing keys, downloaded comics, personal data, or session tokens.
 - Keep public reading anonymous. Do not silently attach account credentials to catalog, chapter, image, or review requests.
@@ -13,19 +25,19 @@ Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 - Treat artwork as the focal point. Use quiet surfaces, deliberate spacing, clear type hierarchy, subtle outlines and restrained motion. Do not default to a stack of large cards.
 - Preserve the source URL, attribution and author of external reviews. Do not conflate anime and manga, or attach the first search result without matching titles.
 - Keep source metrics distinct: Copy popularity is heat, Bangumi is out of 10, and AniList is out of 100. Comment reply counts are not likes. Chapter discussions must use the exact chapter UUID and never include whole-work reviews as a substitute.
-- Compile feature branches before integrating into main. Reader discussion pages must not increase image page counts or corrupt saved image offsets.
+- Reader discussion pages must not increase image page counts or corrupt saved image offsets.
 - Downloads must be resumable, cancellable and usable without network access after completion.
 
 ## Detail density update · 2026-11-12
 
-The user's later screenshots reject the paginated three-tab detail page. The latest accepted direction is the **two-tab (chapters / comments), inline synopsis, side-tool drawer, four-column-leaning lazy infinite chapter grid** documented in the final section of DESIGN.md. Treat this as superseding the earlier "Dense detail redesign" spec that required pagers and an Introduction tab. Download-mode toggles must not insert rows or move the grid; reserve icon space within each tile. Continue-reading buttons must display the actual chapter name. Keep real source badges with restrained multiple accents. Compile the feature branch before integration; do not add tests or UI automation.
+The user's later screenshots reject the paginated three-tab detail page. The latest accepted direction is the **two-tab (chapters / comments), inline synopsis, side-tool drawer, four-column-leaning lazy infinite chapter grid** documented in the final section of DESIGN.md. Treat this as superseding the earlier "Dense detail redesign" spec that required pagers and an Introduction tab. Download-mode toggles must not insert rows or move the grid; reserve icon space within each tile. Continue-reading buttons must display the actual chapter name. Keep real source badges with restrained multiple accents. Review the source, commit directly to main and let its CI/CD build; the user performs testing and verification.
 
 ## Current feedback and scope · 2026-11-12
 
 - The user initially reported "其实我现在用的 0.13 这版已经能稳定看漫画了", then corrected this after another empty-directory screenshot: "不是啊 v13 有时候也这样报错很奇怪". Both old and new versions can fail intermittently; v0.1.3 is not a proven reliable source baseline. Investigate the actual anonymous catalog → chapter → image path; do not repeat blind header variations or infer a version regression from the screenshot.
 - Current fixes: "账号网页登录展示被来源限制 210"; "上下滑动特别特别不流畅会卡一下"; "从历史记录点看某个漫画还得再先进那个漫画详情页 loading 再进实际的漫画"; "翻页看漫画过程中也有不少 loading". The later login feedback below supersedes the website-login UI. Preserve direct history resume, background directory loading, less work on the scrolling thread, and bounded page/chapter prefetch.
 - Preserve each chapter's exact page, scroll offset, and long-image position. Continue reading must not require loading the detail screen first. Background directory/prefetch failures must not interrupt the current chapter.
-- Double-page/spread grouping, chapter-specific manual alignment, and full-height webtoon mode are now in source. Validate actual device behavior after the feature-branch build before calling them verified; page-turn motion remains follow-up work.
+- Double-page/spread grouping, chapter-specific manual alignment, and full-height webtoon mode are now in source. Keep actual device behavior unverified until the user checks the main CI/CD artifact; page-turn motion remains follow-up work.
 - Android device smoothness and successful login to the user's own account require real device feedback. An API response, source review, or successful APK build does not establish either result.
 - Source evidence from this batch: the current official login bundle still calls `/api/kb/web/login` and displays the returned `message`; the existing app discarded that detail for 210. A real production-Kotlin direct chapter request at 05:35 UTC made one anonymous GET and passed the HTML comic-ownership check, but this cloud connection received an empty `contentKey`. No image-read success or successful account login was established by that call; do not turn it into a claim that the user's working v0.1.3 reader is broken.
 - Active repair after "不是哥们怎么又这样了": the screenshot again shows one website group with zero chapters and disabled reading. Catalog and body now use the anonymous App protocol together, with a persistent random installation identity and ordered chapter2 images; no account credentials, mirror hopping or identity rotation. Keep a previously usable directory or saved chapter usable when refreshing metadata fails.
@@ -37,7 +49,7 @@ The user's later screenshots reject the paginated three-tab detail page. The lat
 - READER-SPREAD-01: fit each page proportionally inside its available half, align the left image's right edge and the right image's left edge at the center spine, and leave unused screen space outside the pair. Preserve white margins contained in the original artwork; do not crop or stretch images to fill the screen.
 - READER-SPREAD-02: reading direction determines the physical page order independently of the system locale. Single covers, wide artwork and manually isolated pages remain centered; original image indexes, chapter-specific alignment, long-image positions and chapter discussions keep their existing behavior.
 - Adapt the existing Telephoto 0.16.0 `ZoomableAsyncImage` alignment parameter. Its Fit transform already recomputes from the viewport; the screenshot does not establish a separate rotation-scale or bottom-cropping defect. Do not reset saved zoom or long-image state speculatively.
-- Scope is the two-page alignment in `ReaderScreen.kt` and this record. Source review and feature compilation precede main; no tests, emulator checks or UI automation. The supplied screenshot is the before-state evidence; the corrected phone layout remains pending user experience.
+- Scope is the two-page alignment in `ReaderScreen.kt` and this record. Review source and commit directly to main for CI/CD; the user verifies the result. Do not run tests, emulator checks or UI automation. The supplied screenshot is the before-state evidence; the corrected phone layout remains pending user experience.
 
 ## Login repair · 2026-11-12
 
@@ -53,9 +65,9 @@ The user's later screenshots reject the paginated three-tab detail page. The lat
 - Current official website JavaScript still matches the existing web form; Relay `0079af7` has no newer fix. The error occurs before token/profile validation. Changing only the profile endpoint cannot fix this submission rejection.
 - This slice migrates password login to the normal App account protocol referenced by Neo `36ec484` and Venera `a04e055`: fixed App login endpoint, stable existing installation identity, current App metadata and public timestamp HMAC, then the App profile before committing. It is a compatibility candidate, not a proven explanation for the source's 210. No secret credentials, official private signing material, identity rotation, fallback or automatic password replay is introduced.
 - Persist the credential channel inside the authenticated encrypted payload. Legacy v1 credentials and manual Cookie / Token imports remain Web credentials and keep their existing verification path. App login, profile, collection changes and chapter reporting must share the App protocol. Public reading remains anonymous; account credentials never enter its request helpers.
-- Scope: account protocol, credential persistence, supporting protocol metadata and this documentation. Preserve the screenshot-capable login UI and removal of the website-login button. Feature compilation and real unauthenticated API observations do not prove successful login with the user's account; that remains pending device feedback. Do not add tests, emulator/UI automation or unrelated reader changes.
+- Scope: account protocol, credential persistence, supporting protocol metadata and this documentation. Preserve the screenshot-capable login UI and removal of the website-login button. The earlier compilation and unauthenticated API observations are historical evidence, not authorization to run new tests or proof of successful login with the user's account; that remains pending user feedback. Do not add tests, emulator/UI automation or unrelated reader changes.
 - Real follow-up observation on 2026-11-12: the production Kotlin App request builder and identity compiled against OkHttp 4.12.0. A single request generated by that code, transported through this environment's normal proxy/CA with empty username/password and no user token, reached the fixed App login endpoint and returned HTTP 210 with the same install-official-App / wait-one-hour message. Stopped immediately; no profile request, alternate endpoint, changed identity or password retry followed. This cloud network is not the user's phone network. The candidate was initially held on a feature branch; no account credentials were requested or used, and successful login remains unverified.
-- The user's next instruction was "直接和啊网页登不了" (2026-11-12). In the immediate merge discussion, this means merge directly and confirms that the official website also cannot log in, while the official App can. This explicitly authorizes merging the App protocol change and publishing through the existing signed-release workflow after feature compilation. Do not ask for the same approval again or keep the earlier temporary branch-only hold. Preserve the cloud 210 observation and report actual phone login as pending user feedback, not fixed merely because the APK builds.
+- The user's next instruction was "直接和啊网页登不了" (2026-11-12). In the immediate merge discussion, this means merge directly and confirms that the official website also cannot log in, while the official App can. This explicitly authorized merging the App protocol change and publishing through the existing signed-release workflow. The former feature-compilation gate is superseded by the current main-only workflow above. Do not ask for the same approval again or keep the earlier temporary branch-only hold. Preserve the cloud 210 observation and report actual phone login as pending user feedback, not fixed merely because the APK builds.
 
 ## Discovery and discussion batch · 2026-11-12
 
@@ -94,4 +106,4 @@ The user's later screenshots reject the paginated three-tab detail page. The lat
 - Latest user instruction: "没事 ci 触发了就行别管了你去改新的这个问题漫画详情我希望做成 kayokoi.site 这个网站那样的大图而且这个网站滑动那个大图相关的逻辑也要学过来以及为什么要弄黑色背景额". This supersedes the fixed small header / no outer artwork motion, but retains the dense continuous catalog, inline synopsis, side tools, stable download icons and chapter-named read action. See the final contract in DESIGN.md.
 - The detail page must use the app's Material theme, including comments, sheets, chapter states and system-bar icons. Do not hardcode an always-dark detail palette.
 - Use the real cover as large stationary artwork; move the foreground information and chapter surface over it. Reuse Material3 nested scrolling and Foundation gestures, with a smooth contents shortcut. No invented artwork or metadata and no source/auth changes.
-- For this follow-up, the user explicitly says CI being triggered is sufficient. Submit the reviewed implementation and verify the workflow trigger; do not wait for builds/releases or claim a build/device visual result that was not observed. This replaces the earlier feature-build-before-main waiting requirement for this slice. No tests, emulator or UI automation.
+- The CI-trigger-only instruction is now part of the project-wide current workflow above: review source, commit directly to main, confirm CI/CD triggered, and leave all testing and actual-use verification to the user. Do not create a separate build branch, wait for builds/releases, or claim an unobserved result.
