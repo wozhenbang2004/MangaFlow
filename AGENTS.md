@@ -16,6 +16,10 @@ Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 - Compile feature branches before integrating into main. Reader discussion pages must not increase image page counts or corrupt saved image offsets.
 - Downloads must be resumable, cancellable and usable without network access after completion.
 
+## Detail density update · 2026-11-12
+
+The user's later screenshots reject the paginated three-tab detail page. The latest accepted direction is the **two-tab (chapters / comments), inline synopsis, side-tool drawer, four-column-leaning lazy infinite chapter grid** documented in the final section of DESIGN.md. Treat this as superseding the earlier "Dense detail redesign" spec that required pagers and an Introduction tab. Download-mode toggles must not insert rows or move the grid; reserve icon space within each tile. Continue-reading buttons must display the actual chapter name. Keep real source badges with restrained multiple accents. Compile the feature branch before integration; do not add tests or UI automation.
+
 ## Current feedback and scope · 2026-11-12
 
 - The user initially reported "其实我现在用的 0.13 这版已经能稳定看漫画了", then corrected this after another empty-directory screenshot: "不是啊 v13 有时候也这样报错很奇怪". Both old and new versions can fail intermittently; v0.1.3 is not a proven reliable source baseline. Investigate the actual anonymous catalog → chapter → image path; do not repeat blind header variations or infer a version regression from the screenshot.

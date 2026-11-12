@@ -5,6 +5,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -40,6 +41,9 @@ import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -151,29 +155,24 @@ fun DetailScreen(
                     onClick = onToggleFavorite,
                 )
             }
-            if (!compactHeader) CompactBookHeader(current)
+            CompactBookHeader(current)
             if (showHeaderMetrics) {
                 MangaMetricBadges(current, Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp),
                     foreground = DetailWhite)
             }
             DetailSections(
                 selected = section,
-                labels = listOf(if (chapters.isEmpty()) "章节" else "章节 " + chapters.size, "简介", "评论"),
+                labels = listOf(if (chapters.isEmpty()) "章节" else "章节 " + chapters.size, "评论"),
                 onSelect = { section = it },
             )
-            Crossfade(
-                targetState = section,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                animationSpec = tween(120), label = "detail-section",
-            ) { selected ->
-                sections.SaveableStateProvider(selected) {
-                    when (selected) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                sections.SaveableStateProvider(section) {
+                    when (section) {
                         0 -> DetailCatalog(
                             mangaId = current.id, chapters = chapters, downloaded = downloaded,
                             progress = resume, loading = loading, error = error,
                             onRetry = onRetry, onRead = onRead, onDownload = onDownload,
                         )
-                        1 -> DetailIntroduction(current, loading)
                         else -> CommunityPanel(
                             mangaId = current.id, sources = reviews, loading = reviewsLoading,
                             onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
@@ -191,27 +190,96 @@ fun DetailScreen(
 }
 
 /**
- * Adapted from Mihon's MangaAndSourceTitlesSmall (524fa530), Apache-2.0.
- * Keeps its horizontal cover/info grouping, with bounded metadata and MangaFlow's own actions.
- * See THIRD_PARTY_NOTICES.md.
+ * Artwork, synopsis and native metadata share one compact header. Full synopsis appears
+ * in a sheet instead of taking the chapter catalog's space or becoming a separate tab.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CompactBookHeader(manga: Manga) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(top = 2.dp, bottom = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically,
-    ) {
-        DetailCover(manga)
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(manga.title, color = DetailWhite, fontSize = 22.sp, lineHeight = 28.sp,
-                fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (manga.authors.isNotEmpty()) Text(manga.authors.joinToString(" / "),
-                color = DetailSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (manga.status.isNotBlank()) Text(manga.status, color = DetailSecondary, fontSize = 11.sp)
-            if (manga.tags.isNotEmpty()) Text(manga.tags.take(4).joinToString(" · "),
-                color = DetailMuted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    var fullIntroduction by remember(manga.id) { mutableStateOf(false) }
+    val synopsis = manga.description.ifBlank { "来源暂无简介" }
+    val tags = remember(manga.status, manga.tags, manga.latestChapter) {
+        buildList {
+            if (manga.status.isNotBlank()) add(manga.status.trim())
+            addAll(manga.tags.filter(String::isNotBlank).distinct().take(12))
+            if (manga.latestChapter.isNotBlank()) add("更新 · " + manga.latestChapter)
+        }.distinct()
+    }
+    Column(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(top = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            DetailCover(manga)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(
+                    manga.title, color = DetailWhite, fontSize = 19.sp, lineHeight = 24.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
+                if (manga.authors.isNotEmpty()) Text(
+                    manga.authors.joinToString(" / "), color = DetailSecondary, fontSize = 11.sp,
+                    lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    "简介 · " + synopsis,
+                    modifier = Modifier.clip(RoundedCornerShape(4.dp))
+                        .clickable(enabled = manga.description.isNotBlank(),
+                            onClickLabel = "查看完整简介") { fullIntroduction = true },
+                    color = DetailSecondary, fontSize = 11.sp, lineHeight = 16.sp,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (tags.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                tags.forEachIndexed { index, tag -> DetailTag(tag, index) }
+            }
         }
     }
+    if (fullIntroduction) {
+        ModalBottomSheet(
+            onDismissRequest = { fullIntroduction = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = DetailSurface, contentColor = DetailWhite,
+        ) {
+            SelectionContainer {
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 24.dp).padding(bottom = 28.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(manga.title, fontSize = 17.sp, lineHeight = 24.sp,
+                        color = DetailWhite, fontWeight = FontWeight.SemiBold)
+                    Text(synopsis, fontSize = 14.sp, lineHeight = 23.sp, color = DetailSecondary)
+                    Text("内容来源 · 拷贝漫画", fontSize = 11.sp, color = DetailMuted)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailTag(label: String, index: Int) {
+    val accent = when (index % 4) {
+        0 -> Color(0xFFD9B49E)  // muted apricot
+        1 -> Color(0xFFAFC4E2)  // soft blue
+        2 -> Color(0xFFC7B0DC)  // dusty lilac
+        else -> Color(0xFFD5AFBB) // muted rose
+    }
+    Text(
+        label,
+        modifier = Modifier.clip(RoundedCornerShape(7.dp))
+            .background(accent.copy(alpha = .12f))
+            .padding(horizontal = 7.dp, vertical = 4.dp),
+        color = accent, fontSize = 10.sp, lineHeight = 14.sp,
+        maxLines = 1,
+    )
 }
 
 @Composable
@@ -225,7 +293,7 @@ private fun DetailCover(manga: Manga) {
                 .set("Referer", manga.sourceUrl.ifBlank { "https://www.copy3000.com/comic/" + manga.id }).build())
             .crossfade(160).memoryCacheKey("detail-cover:" + manga.coverUrl + ":" + retry).build()
     }
-    Box(Modifier.size(width = 84.dp, height = 112.dp).clip(RoundedCornerShape(10.dp)).background(DetailSurface),
+    Box(Modifier.size(width = 78.dp, height = 104.dp).clip(RoundedCornerShape(10.dp)).background(DetailSurface),
         contentAlignment = Alignment.Center) {
         Icon(Icons.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f), modifier = Modifier.size(28.dp))
         if (manga.coverUrl.isNotBlank()) {
@@ -238,65 +306,35 @@ private fun DetailCover(manga: Manga) {
     }
 }
 
-/** Compose adaptation of Ovio Liquid Tabs minimal's independently sprung indicator edges. */
+/** Quiet text tabs: the synopsis belongs to the header, not another route. */
 @Composable
 private fun DetailSections(selected: Int, labels: List<String>, onSelect: (Int) -> Unit) {
-    var movingRight by remember { mutableStateOf(true) }
-    val left = animateFloatAsState(selected.toFloat(),
-        spring(dampingRatio = 1f, stiffness = if (movingRight) 230f else 520f), label = "section-left")
-    val right = animateFloatAsState(selected + 1f,
-        spring(dampingRatio = 1f, stiffness = if (movingRight) 520f else 230f), label = "section-right")
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 4.dp)
-            .height(48.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = .035f))
-            .drawBehind {
-                val slot = size.width / labels.size
-                val inset = 4.dp.toPx()
-                val l = left.value * slot + inset
-                val r = right.value * slot - inset
-                val stretch = ((r - l) / (slot - 2 * inset) - 1f).coerceAtLeast(0f)
-                val squash = (1f - .06f * stretch).coerceAtLeast(.8f)
-                val h = (size.height - 2 * inset) * squash
-                drawRoundRect(
-                    color = Color.White.copy(alpha = .12f),
-                    topLeft = Offset(l, (size.height - h) / 2),
-                    size = Size((r - l).coerceAtLeast(h), h),
-                    cornerRadius = CornerRadius(h / 2),
-                )
-            }.selectableGroup(),
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 2.dp)
+            .selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(22.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         labels.forEachIndexed { index, label ->
-            Box(
-                Modifier.weight(1f).height(48.dp).selectable(
-                    selected = index == selected, role = Role.Tab,
-                    onClick = { movingRight = index.toFloat() > left.value; onSelect(index) },
-                ),
-                contentAlignment = Alignment.Center,
+            Column(
+                Modifier.height(38.dp).selectable(
+                    selected = selected == index, role = Role.Tab, onClick = { onSelect(index) },
+                ).padding(horizontal = 3.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(label, color = if (index == selected) DetailWhite else DetailMuted, fontSize = 13.sp,
-                    fontWeight = if (index == selected) FontWeight.SemiBold else FontWeight.Normal,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        label, color = if (selected == index) DetailWhite else DetailMuted,
+                        fontSize = 13.sp,
+                        fontWeight = if (selected == index) FontWeight.SemiBold else FontWeight.Normal,
+                    )
+                }
+                Box(
+                    Modifier.width(if (selected == index) 32.dp else 32.dp).height(2.dp)
+                        .background(if (selected == index) DetailWhite else Color.Transparent,
+                            RoundedCornerShape(2.dp)),
+                )
             }
-        }
-    }
-}
-
-@Composable
-private fun DetailIntroduction(manga: Manga, loading: Boolean) {
-    SelectionContainer {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(manga.title, color = DetailWhite, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, lineHeight = 27.sp)
-            if (manga.authors.isNotEmpty()) Text(manga.authors.joinToString(" / "),
-                color = DetailSecondary, fontSize = 13.sp, lineHeight = 21.sp)
-            val metadata = (listOf(manga.status) + manga.tags).filter(String::isNotBlank).joinToString(" · ")
-            if (metadata.isNotBlank()) Text(metadata, color = DetailMuted, fontSize = 12.sp, lineHeight = 20.sp)
-            if (manga.latestChapter.isNotBlank()) Text("更新至 " + manga.latestChapter,
-                color = DetailSecondary, fontSize = 12.sp, lineHeight = 20.sp)
-            Text(manga.description.ifBlank { if (loading) "正在读取简介" else "来源暂无简介" },
-                color = DetailSecondary, fontSize = 14.sp, lineHeight = 24.sp)
-            Text("内容来源 · 拷贝漫画", color = DetailMuted, fontSize = 11.sp)
         }
     }
 }
@@ -310,10 +348,17 @@ private fun DetailReadAction(
     onRead: (Chapter) -> Unit,
 ) {
     val canRead = resume != null || firstChapter != null
+    val label = when {
+        resume != null -> "继续阅读 · " + resume.chapterTitle
+        firstChapter != null -> "开始阅读 · " + firstChapter.title
+        loading -> "加载章节"
+        else -> "暂无可读章节"
+    }
     Button(
         onClick = { if (resume != null) onContinue(resume) else firstChapter?.let(onRead) },
         enabled = canRead,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).heightIn(min = 48.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+            .heightIn(min = 50.dp),
         shape = RoundedCornerShape(14.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = DetailWhite, contentColor = DetailInk,
@@ -321,16 +366,18 @@ private fun DetailReadAction(
         ),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        if (loading && !canRead) CircularProgressIndicator(Modifier.size(18.dp), color = DetailMuted, strokeWidth = 1.5.dp)
+        if (loading && !canRead) CircularProgressIndicator(
+            Modifier.size(18.dp), color = DetailMuted, strokeWidth = 1.5.dp)
         else Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(22.dp))
         Spacer(Modifier.width(8.dp))
-        Text(if (resume != null) "继续阅读" else if (loading && !canRead) "加载章节" else "开始阅读",
-            fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
         if (resume != null) Text(
-            " · " + resume.chapterTitle + " · 第 " + (resume.pageIndex + 1) + " 页",
-            modifier = Modifier.weight(1f, fill = false).padding(start = 4.dp),
-            color = DetailInk.copy(alpha = .6f), fontSize = 11.sp,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            "第 " + (resume.pageIndex + 1) + " 页",
+            color = DetailInk.copy(alpha = .65f), fontSize = 11.sp,
+            maxLines = 1,
         )
     }
 }
