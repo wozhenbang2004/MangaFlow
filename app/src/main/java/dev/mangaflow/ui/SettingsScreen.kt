@@ -14,6 +14,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +27,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -40,10 +45,13 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -64,6 +72,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -76,6 +87,8 @@ import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
+import dev.mangaflow.storage.WebDavBackupConfig
+import dev.mangaflow.storage.WebDavBackupStore
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
@@ -120,6 +133,10 @@ fun SettingsScreen(
     var backupBusy by remember { mutableStateOf<String?>(null) }
     var backupNotice by remember { mutableStateOf<String?>(null) }
     var pendingRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
+    val webDavStore = remember(context.applicationContext) { WebDavBackupStore(context.applicationContext) }
+    val webDavConfig by webDavStore.config.collectAsStateWithLifecycle()
+    var showWebDav by remember { mutableStateOf(false) }
+    var webDavNotice by remember { mutableStateOf<String?>(null) }
 
     val exportBackup = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
@@ -205,6 +222,54 @@ fun SettingsScreen(
         }
     }
 
+    fun runWebDav(action: String, draft: WebDavBackupDraft? = null) {
+        if (backupBusy != null) return
+        backupBusy = "webdav-$action"
+        webDavNotice = null
+        cacheScope.launch {
+            try {
+                if (action == "clear") {
+                    webDavStore.clearConfiguration()
+                    showWebDav = false
+                    webDavNotice = "WebDAV 本机配置已清除，远端备份未删除"
+                    return@launch
+                }
+                val values = draft ?: error("缺少 WebDAV 配置")
+                webDavStore.saveConfiguration(
+                    endpoint = values.endpoint,
+                    username = values.username,
+                    remotePath = values.remotePath,
+                    password = values.password.takeIf { it.isNotEmpty() },
+                )
+                when (action) {
+                    "save" -> {
+                        showWebDav = false
+                        webDavNotice = "WebDAV 配置已安全保存"
+                    }
+                    "upload" -> {
+                        val payload = libraryStore.exportBackup()
+                        webDavStore.upload(payload)
+                        showWebDav = false
+                        webDavNotice = "阅读备份已上传并覆盖远端文件"
+                    }
+                    "download" -> {
+                        val payload = webDavStore.download()
+                        val info = libraryStore.inspectBackup(payload)
+                        pendingRestore = PendingLibraryRestore(payload, info)
+                        showWebDav = false
+                        webDavNotice = "已读取远端备份，确认后才会恢复"
+                    }
+                    else -> error("未知 WebDAV 操作")
+                }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                webDavNotice = failure.message ?: "WebDAV 操作失败，请稍后重试"
+            } finally {
+                backupBusy = null
+            }
+        }
+    }
+
     DisposableEffect(lifecycleOwner, context) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
@@ -286,13 +351,26 @@ fun SettingsScreen(
             ) {
                 if (backupBusy == null) importBackup.launch(arrayOf("application/json", "text/plain"))
             }
+            SettingsLinkRow(
+                "WebDAV 阅读备份",
+                webDavStatusDetail(webDavConfig, backupBusy),
+            ) {
+                if (backupBusy == null) {
+                    webDavNotice = null
+                    showWebDav = true
+                }
+            }
             Text(
-                "不包含账号登录态、缓存和已下载图片；恢复前会再次确认。",
+                "文件与 WebDAV 备份都不包含账号登录态、WebDAV 密码、缓存和已下载图片；恢复前会再次确认。",
                 style = MaterialTheme.typography.bodySmall,
                 color = secondary,
                 modifier = Modifier.padding(top = 2.dp),
             )
             backupNotice?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
+                    modifier = Modifier.padding(top = 8.dp))
+            }
+            webDavNotice?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
                     modifier = Modifier.padding(top = 8.dp))
             }
@@ -446,12 +524,179 @@ fun SettingsScreen(
             }
         },
     )
+    WebDavBackupDialog(
+        visible = showWebDav,
+        config = webDavConfig,
+        busy = backupBusy?.takeIf { it.startsWith("webdav-") },
+        notice = webDavNotice,
+        onDismiss = { if (backupBusy == null) showWebDav = false },
+        onSave = { runWebDav("save", it) },
+        onUpload = { runWebDav("upload", it) },
+        onDownload = { runWebDav("download", it) },
+        onClear = { runWebDav("clear") },
+    )
 }
 
 private data class PendingLibraryRestore(
     val payload: String,
     val info: LibraryBackupInfo,
 )
+
+private data class WebDavBackupDraft(
+    val endpoint: String,
+    val username: String,
+    val password: String,
+    val remotePath: String,
+)
+
+@Composable
+private fun WebDavBackupDialog(
+    visible: Boolean,
+    config: WebDavBackupConfig,
+    busy: String?,
+    notice: String?,
+    onDismiss: () -> Unit,
+    onSave: (WebDavBackupDraft) -> Unit,
+    onUpload: (WebDavBackupDraft) -> Unit,
+    onDownload: (WebDavBackupDraft) -> Unit,
+    onClear: () -> Unit,
+) {
+    var endpoint by remember(visible, config.endpoint) { mutableStateOf(config.endpoint) }
+    var username by remember(visible, config.username) { mutableStateOf(config.username) }
+    var password by remember(visible, config.hasPassword) { mutableStateOf("") }
+    var remotePath by remember(visible, config.remotePath) { mutableStateOf(config.remotePath) }
+    val enabled = busy == null && endpoint.isNotBlank() && remotePath.isNotBlank()
+    val draft = {
+        WebDavBackupDraft(
+            endpoint = endpoint,
+            username = username,
+            password = password,
+            remotePath = remotePath,
+        )
+    }
+
+    MotionDialog(visible = visible, onDismissRequest = onDismiss) {
+        val colors = MaterialTheme.colorScheme
+        Surface(
+            modifier = Modifier.padding(20.dp).fillMaxWidth().imePadding(),
+            shape = RoundedCornerShape(24.dp),
+            color = colors.surface,
+        ) {
+            Column(
+                Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 16.dp)
+                    .heightIn(max = 680.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text("WebDAV 阅读备份", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "只同步收藏、阅读位置、书签和阅读偏好。服务器必须提供可信 HTTPS，密码仅加密保存在本机。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = endpoint,
+                    onValueChange = { endpoint = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = busy == null,
+                    singleLine = true,
+                    label = { Text("WebDAV HTTPS 地址") },
+                    placeholder = { Text("https://cloud.example.com/dav/") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+                    shape = RoundedCornerShape(17.dp),
+                    colors = settingsInputColors(),
+                )
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = busy == null,
+                    singleLine = true,
+                    label = { Text("用户名") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                    shape = RoundedCornerShape(17.dp),
+                    colors = settingsInputColors(),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = busy == null,
+                    singleLine = true,
+                    label = { Text("密码") },
+                    placeholder = {
+                        Text(if (config.hasPassword) "留空保留已保存密码" else "可留空")
+                    },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Next),
+                    shape = RoundedCornerShape(17.dp),
+                    colors = settingsInputColors(),
+                )
+                OutlinedTextField(
+                    value = remotePath,
+                    onValueChange = { remotePath = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = busy == null,
+                    singleLine = true,
+                    label = { Text("远端备份文件") },
+                    placeholder = { Text(WebDavBackupConfig.DEFAULT_REMOTE_PATH) },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    shape = RoundedCornerShape(17.dp),
+                    colors = settingsInputColors(),
+                )
+                Text(
+                    "上传会覆盖这个远端文件；下载只读取并展示恢复确认。暂不后台自动同步，也不会上传漫画图片。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                notice?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                }
+                busy?.let { operation ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            when (operation) {
+                                "webdav-save" -> "正在安全保存配置…"
+                                "webdav-upload" -> "正在上传阅读备份…"
+                                "webdav-download" -> "正在读取远端备份…"
+                                else -> "正在处理 WebDAV 配置…"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    if (config.configured) {
+                        TextButton(onClick = onClear, enabled = busy == null) { Text("清除本机配置") }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onDismiss, enabled = busy == null) { Text("取消") }
+                    TextButton(onClick = { onSave(draft()) }, enabled = enabled) { Text("保存") }
+                }
+                FilledTonalButton(
+                    onClick = { onDownload(draft()) },
+                    enabled = enabled,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(15.dp),
+                ) {
+                    Text("下载并检查远端备份")
+                }
+                Button(
+                    onClick = { onUpload(draft()) },
+                    enabled = enabled,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(15.dp),
+                    elevation = null,
+                ) {
+                    Text("上传当前阅读备份")
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun BackupRestoreDialog(
@@ -502,6 +747,40 @@ private fun BackupRestoreDialog(
         }
     }
 }
+
+private fun webDavStatusDetail(config: WebDavBackupConfig, busy: String?): String {
+    return when (busy) {
+        "webdav-save" -> "正在保存…"
+        "webdav-upload" -> "正在上传…"
+        "webdav-download" -> "正在下载…"
+        "webdav-clear" -> "正在清除…"
+        else -> {
+            if (!config.configured) return "未配置"
+            val uploadIsLatest = config.lastUploadAt >= config.lastDownloadAt
+            val timestamp = if (uploadIsLatest) config.lastUploadAt else config.lastDownloadAt
+            if (timestamp <= 0L) "已配置" else {
+                val action = if (uploadIsLatest) "上次上传" else "上次下载"
+                val date = DateFormat.getDateTimeInstance(
+                    DateFormat.SHORT,
+                    DateFormat.SHORT,
+                    Locale.getDefault(),
+                ).format(Date(timestamp))
+                "$action $date"
+            }
+        }
+    }
+}
+
+@Composable
+private fun settingsInputColors() = OutlinedTextFieldDefaults.colors(
+    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+    disabledTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    focusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
+    unfocusedBorderColor = Color.Transparent,
+    disabledBorderColor = Color.Transparent,
+)
 
 @Composable
 private fun SettingsSectionLabel(text: String) {
