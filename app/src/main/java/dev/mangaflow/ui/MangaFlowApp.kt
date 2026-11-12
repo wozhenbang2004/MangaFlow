@@ -188,7 +188,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val focus = LocalFocusManager.current
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
     if (recentReadingOpen) {
-        RecentReadingSheet(history, model.repository,
+        RecentReadingSheet(history, model.repository, model.library,
             onDismiss = { recentReadingOpen = false },
             onContinue = { model.continueReading(it) },
             onRemoveHistory = model::removeHistory)

@@ -6,6 +6,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -16,6 +17,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** Only a resumed reader owns the minute ticker; returning from the background refreshes now. */
 @Composable
@@ -38,10 +40,15 @@ internal fun rememberReaderClock(active: Boolean): String {
 
 /** Flush monotonic foreground intervals; cancellation also settles the unfinished tail. */
 @Composable
-internal fun RecordReaderActivity(manga: Manga, eligible: Boolean, library: LibraryStore) {
+internal fun RecordReaderActivity(
+    manga: Manga, eligible: Boolean, library: LibraryStore,
+    chapterId: String = "", onReadingConfirmed: (String, String) -> Unit = { _, _ -> },
+) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    LaunchedEffect(lifecycle, manga.id, eligible, library) {
+    val confirm by rememberUpdatedState(onReadingConfirmed)
+    LaunchedEffect(lifecycle, manga.id, chapterId, eligible, library) {
         if (eligible) lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            val confirmation = launch { delay(3_000L); confirm(manga.id, chapterId) }
             var last = SystemClock.elapsedRealtime()
             fun flush() {
                 val now = SystemClock.elapsedRealtime()
@@ -55,6 +62,7 @@ internal fun RecordReaderActivity(manga: Manga, eligible: Boolean, library: Libr
                     flush()
                 }
             } finally {
+                confirmation.cancel()
                 flush()
             }
         }

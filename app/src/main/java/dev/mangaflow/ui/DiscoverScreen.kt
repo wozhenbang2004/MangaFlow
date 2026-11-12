@@ -114,6 +114,8 @@ import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.storage.LibraryStore
+import androidx.compose.material.icons.outlined.History
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
@@ -674,6 +676,7 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
 internal fun ContinueRow(
     progress: ReadingProgress, repository: MangaRepository, onContinue: (ReadingProgress) -> Unit,
     onManage: (() -> Unit)? = null,
+    onHistory: (() -> Unit)? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
@@ -690,7 +693,9 @@ internal fun ContinueRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             MangaMetricBadges(progress.manga)
         }
-        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (onHistory != null) MotionIconButton(onClick = onHistory, modifier = Modifier.size(44.dp)) {
+            Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else Icon(Icons.Outlined.PlayArrow, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -699,35 +704,48 @@ internal fun ContinueRow(
 internal fun RecentReadingSheet(
     history: List<ReadingProgress>,
     repository: MangaRepository,
+    library: LibraryStore,
     onDismiss: () -> Unit,
     onContinue: (ReadingProgress) -> Unit,
     onRemoveHistory: (String) -> Unit,
 ) {
+    var chapterManga by remember { mutableStateOf<Manga?>(null) }
+    val recentPosition = rememberLazyListState()
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background) { dismiss ->
-        Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("最近阅读", fontSize = 16.sp, fontWeight = FontWeight.Medium, lineHeight = 22.sp)
-            Text(history.size.toString(), style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            items(history, key = { it.manga.id }) { progress ->
-                SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                        .clickable(onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() })
-                        .padding(horizontal = 4.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        MangaCover(progress.manga, repository, Modifier.width(32.dp).height(44.dp).clip(RoundedCornerShape(5.dp)))
-                        Column(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                            Text(progress.manga.title, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页",
-                                fontSize = 12.sp, lineHeight = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        MotionTabContent(selected = chapterManga, modifier = Modifier.fillMaxWidth(),
+            contentKey = { it?.id ?: "recent-books" }, order = { if (it == null) 0 else 1 },
+            fillContent = false, soft = true) { selected ->
+            if (selected != null) ChapterHistoryContent(selected, library,
+                onContinue = { onContinue(it); dismiss() }, onBack = { chapterManga = null })
+            else Column(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("最近阅读", fontSize = 16.sp, fontWeight = FontWeight.Medium, lineHeight = 22.sp)
+                    Text(history.size.toString(), style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(), state = recentPosition,
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    items(history, key = { it.manga.id }) { progress ->
+                        SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
+                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                .clickable(onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() })
+                                .padding(horizontal = 4.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                MangaCover(progress.manga, repository, Modifier.width(32.dp).height(44.dp).clip(RoundedCornerShape(5.dp)))
+                                Column(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                                    Text(progress.manga.title, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页",
+                                        fontSize = 12.sp, lineHeight = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                MotionIconButton(onClick = { chapterManga = progress.manga }, modifier = Modifier.size(44.dp)) {
+                                    Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
                         }
-                        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }

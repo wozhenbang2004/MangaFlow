@@ -32,6 +32,8 @@ data class ChapterProgress(
     val pageIndex: Int,
     val pageCount: Int,
     val scrollOffset: Int = 0,
+    val chapterTitle: String = "",
+    val updatedAt: Long = 0L,
 )
 
 enum class ShelfState { NORMAL, FOLLOWING, HOARDING, PAUSED }
@@ -56,6 +58,7 @@ class LibraryStore(context: Context) {
     private var restoreLegacyLongImages = readLegacyLongImageMigration()
     private val _favorites = MutableStateFlow(readArray("favorites") { readManga(it) }.distinctBy(Manga::id))
     private val _history = MutableStateFlow(readArray("history", ::readProgress).distinctBy { it.manga.id })
+    private val _chapterHistoryRevision = MutableStateFlow(0L)
     private val _shelfStates = MutableStateFlow(readShelfStates())
     private val _pageCollections = MutableStateFlow(readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key))
     private val _readingActivity = MutableStateFlow(readArray(READING_ACTIVITY_KEY, ::readReadingActivity).distinctBy { it.manga.id })
@@ -75,6 +78,7 @@ class LibraryStore(context: Context) {
 
     val favorites: StateFlow<List<Manga>> = _favorites.asStateFlow()
     val history: StateFlow<List<ReadingProgress>> = _history.asStateFlow()
+    val chapterHistoryRevision: StateFlow<Long> = _chapterHistoryRevision.asStateFlow()
     val shelfStates: StateFlow<Map<String, ShelfState>> = _shelfStates.asStateFlow()
     val pageCollections: StateFlow<List<PageCollection>> = _pageCollections.asStateFlow()
     val readingActivity: StateFlow<List<ReadingActivity>> = _readingActivity.asStateFlow()
@@ -193,6 +197,7 @@ class LibraryStore(context: Context) {
             restoreLegacyLongImages = readLegacyLongImageMigration()
             _favorites.value = readArray("favorites") { readManga(it) }.distinctBy(Manga::id)
             _history.value = readArray("history", ::readProgress).distinctBy { it.manga.id }
+            _chapterHistoryRevision.value++
             _shelfStates.value = readShelfStates()
             _pageCollections.value = readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key)
             _readingActivity.value = readArray(READING_ACTIVITY_KEY, ::readReadingActivity).distinctBy { it.manga.id }
@@ -270,10 +275,48 @@ class LibraryStore(context: Context) {
                     pageIndex = json.getInt("pageIndex").coerceAtLeast(0),
                     pageCount = json.getInt("pageCount").coerceAtLeast(0),
                     scrollOffset = json.optInt("scrollOffset").coerceAtLeast(0),
+                    chapterTitle = json.optString("chapterTitle").take(160),
+                    updatedAt = json.optLong("updatedAt").coerceAtLeast(0L),
                 )
             }.getOrNull()
         }
         stored ?: progressFor(mangaId)?.takeIf { it.chapterId == chapterId }?.chapterProgress()
+    }
+
+    /** Read compact per-chapter keys on IO; manga metadata is shared, never copied to each key. */
+    suspend fun chapterHistoryFor(manga: Manga): List<ReadingProgress> = withContext(Dispatchers.IO) {
+        val prefix = "$CHAPTER_PROGRESS_PREFIX${manga.id.length}:${manga.id}"
+        val (encoded, pending, recent) = synchronized(lock) {
+            val stored = if (ignoreStoredProgress || manga.id in pendingProgressRemovals) emptyMap() else
+                disk.all.mapNotNull { (key, value) ->
+                    if (key.startsWith(prefix) && key.length > prefix.length && value is String)
+                        key.removePrefix(prefix) to value else null
+                }.toMap()
+            Triple(stored, pendingChapterPositions.filterKeys { it.startsWith(prefix) && it.length > prefix.length }
+                .mapKeys { it.key.removePrefix(prefix) }, progressFor(manga.id))
+        }
+        // Parse away from the reader's lock. The UI owns cancellation via the revision above.
+        val positions = linkedMapOf<String, ChapterProgress>()
+        encoded.forEach { (chapterId, value) ->
+            runCatching {
+                val json = JSONObject(value)
+                ChapterProgress(json.getInt("pageIndex").coerceAtLeast(0),
+                    json.getInt("pageCount").coerceAtLeast(0), json.optInt("scrollOffset").coerceAtLeast(0),
+                    json.optString("chapterTitle").take(160), json.optLong("updatedAt").coerceAtLeast(0L))
+            }.getOrNull()?.let { positions[chapterId] = it }
+        }
+        positions.putAll(pending)
+        recent?.let {
+            val saved = positions[it.chapterId]
+            if (saved == null) positions[it.chapterId] = it.chapterProgress()
+            else if (saved.chapterTitle.isBlank()) positions[it.chapterId] = saved.copy(
+                chapterTitle = it.chapterTitle, updatedAt = maxOf(saved.updatedAt, it.updatedAt))
+        }
+        positions.mapNotNull { (chapterId, position) ->
+            if (position.pageCount <= 0) null else ReadingProgress(manga, chapterId, position.chapterTitle,
+                position.pageIndex.coerceIn(0, position.pageCount - 1), position.pageCount,
+                position.scrollOffset, position.updatedAt)
+        }.sortedWith(compareByDescending<ReadingProgress> { it.updatedAt }.thenBy { it.chapterTitle }.thenBy { it.chapterId })
     }
 
     fun longImagePositionFor(mangaId: String, chapterId: String, pageIndex: Int): Float? = synchronized(lock) {
@@ -288,6 +331,7 @@ class LibraryStore(context: Context) {
     fun saveProgress(
         manga: Manga, chapter: Chapter, pageIndex: Int, pageCount: Int, scrollOffset: Int = 0,
         clearLegacyLongImagePosition: Boolean = false,
+        updateRecent: Boolean = true,
     ) {
         if (pageCount <= 0) return
         synchronized(lock) {
@@ -299,13 +343,17 @@ class LibraryStore(context: Context) {
                 pageCount = pageCount,
                 scrollOffset = scrollOffset.coerceAtLeast(0),
             )
-            val next = (listOf(progress) + _history.value.filterNot { it.manga.id == manga.id }).take(500)
+            val recent = progressFor(manga.id)
+            val replaceRecent = updateRecent || recent == null || recent.chapterId == chapter.id
             val write = pendingWrite()
             // Retain the 0.1.2 resume point before another chapter replaces it in recent history.
             progressFor(manga.id)?.let { previous ->
                 val previousKey = chapterProgressKey(manga.id, previous.chapterId)
-                if (previousKey !in pendingChapterPositions && (ignoreStoredProgress || !disk.contains(previousKey))) {
-                    val position = previous.chapterProgress()
+                val saved = progressFor(manga.id, previous.chapterId)
+                if ((previousKey !in pendingChapterPositions && (ignoreStoredProgress || !disk.contains(previousKey))) ||
+                    saved == null || saved.chapterTitle.isBlank() || saved.updatedAt <= 0L) {
+                    val position = (saved ?: previous.chapterProgress()).copy(
+                        chapterTitle = previous.chapterTitle.take(160), updatedAt = previous.updatedAt)
                     pendingChapterPositions[previousKey] = position
                     write.chapters[previousKey] = position
                 }
@@ -320,14 +368,19 @@ class LibraryStore(context: Context) {
                 pendingLongImagePositions[legacyKey] = 0f
                 write.longImages[legacyKey] = 0f
             }
-            _history.value = next
-            write.history = next
+            if (replaceRecent) {
+                val next = (listOf(progress) + _history.value.filterNot { it.manga.id == manga.id }).take(500)
+                _history.value = next
+                write.history = next
+            }
+            _chapterHistoryRevision.value++
             startProgressWriter()
         }
     }
 
     fun clearHistory() = synchronized(lock) {
         _history.value = emptyList()
+        _chapterHistoryRevision.value++
         pendingChapterPositions.clear()
         pendingLongImagePositions.clear()
         pendingProgressRemovals.clear()
@@ -343,6 +396,7 @@ class LibraryStore(context: Context) {
     fun removeHistory(mangaId: String) = synchronized(lock) {
         val next = _history.value.filterNot { it.manga.id == mangaId }
         _history.value = next
+        _chapterHistoryRevision.value++
         pendingChapterPositions.keys.removeAll { isProgressKeyFor(it, mangaId) }
         pendingLongImagePositions.keys.removeAll { isProgressKeyFor(it, mangaId) }
         val write = pendingWrite()
@@ -701,12 +755,14 @@ class LibraryStore(context: Context) {
     }
 }
 
-private fun ReadingProgress.chapterProgress() = ChapterProgress(pageIndex, pageCount, scrollOffset)
+private fun ReadingProgress.chapterProgress() = ChapterProgress(pageIndex, pageCount, scrollOffset, chapterTitle.take(160), updatedAt)
 
 private fun ChapterProgress.toJson(): JSONObject = JSONObject().apply {
     put("pageIndex", pageIndex)
     put("pageCount", pageCount)
     put("scrollOffset", scrollOffset)
+    if (chapterTitle.isNotBlank()) put("chapterTitle", chapterTitle.take(160))
+    if (updatedAt > 0L) put("updatedAt", updatedAt)
 }
 
 internal fun Manga.toJson(): JSONObject = JSONObject().apply {

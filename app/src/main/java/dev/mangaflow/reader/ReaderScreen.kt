@@ -268,6 +268,7 @@ fun ReaderScreen(
     var progressInteracting by remember(chapterId) { mutableStateOf(false) }
     val dimPreview = remember { mutableStateOf<Float?>(null) }
     var imageVisible by remember(chapterId) { mutableStateOf(false) }
+    var recentConfirmed by remember(manga.id, chapterId) { mutableStateOf(false) }
     var chapterVisibilityReported by rememberSaveable(manga.id, chapterId) { mutableStateOf(false) }
     var nextChapterPrefetched by remember(manga.id, chapterId) { mutableStateOf(false) }
     var leavingReader by remember { mutableStateOf(false) }
@@ -319,9 +320,14 @@ fun ReaderScreen(
     val delayedLoading = rememberDelayedBusy(loading)
 
     val clock = rememberReaderClock(active && !leavingReader)
-    RecordReaderActivity(manga, active && !leavingReader && !loading && error == null && imageVisible &&
-        !showSettings && !showChapters && !showComments && !showSpreadAdjustment && !showPageNavigator,
-        libraryStore)
+    val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
+        !showSettings && !showChapters && !showComments && !showSpreadAdjustment && !showPageNavigator
+    RecordReaderActivity(manga, readingEligible, libraryStore, chapterId) { owner, confirmedChapter ->
+        if (owner == manga.id && confirmedChapter == chapterId && readingEligible) {
+            recentConfirmed = true
+            libraryStore.saveProgress(manga, chapter, pageIndex, pages.size, cursor.scrollOffset)
+        }
+    }
     fun updatePreferences(next: ReaderPreferences) {
         // Persist only settings the user actually changed, never the collection's temporary layout.
         val saved = savedPreferences.copy(
@@ -455,7 +461,11 @@ fun ReaderScreen(
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },
                         onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
                         onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, pages.size, offset,
-                            clearLegacyLongImagePosition = preferences.mode == ReadingMode.VERTICAL) },
+                            clearLegacyLongImagePosition = preferences.mode == ReadingMode.VERTICAL,
+                            updateRecent = recentConfirmed && chapterId == chapter.id && active && !leavingReader) },
+                        onReadingNavigation = {
+                            if (chapterId == chapter.id && readingEligible) recentConfirmed = true
+                        },
                         longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
                         onVisibleImageChanged = { visible ->
                             imageVisible = visible
@@ -779,6 +789,7 @@ private fun ChapterPages(
     onTargetConsumed: () -> Unit,
     onLocation: (Int, Int) -> Unit,
     onSave: (Int, Int) -> Unit,
+    onReadingNavigation: () -> Unit,
     longImagePosition: (Int) -> Float?,
     onVisibleImageChanged: (Boolean) -> Unit,
     onNearEnd: () -> Unit,
@@ -789,6 +800,7 @@ private fun ChapterPages(
     endContent: @Composable (BottomPullLoadState) -> Unit,
 ) {
     val save by rememberUpdatedState(onSave)
+    val readingNavigation by rememberUpdatedState(onReadingNavigation)
     val location by rememberUpdatedState(onLocation)
     val visibleImageChanged by rememberUpdatedState(onVisibleImageChanged)
     val nearEnd by rememberUpdatedState(onNearEnd)
@@ -840,7 +852,7 @@ private fun ChapterPages(
                 restoring = false
             }
         }
-        LaunchedEffect(dragging) { if (dragging) restoring = false }
+        LaunchedEffect(dragging) { if (dragging) { restoring = false; readingNavigation() } }
         LaunchedEffect(list) {
             snapshotFlow {
                 val layout = list.layoutInfo
@@ -868,6 +880,7 @@ private fun ChapterPages(
         }
         LaunchedEffect(targetPage, targetOffset) {
             targetPage?.let {
+                readingNavigation()
                 restoring = false
                 list.scrollToItem(it.coerceIn(0, pages.lastIndex), targetOffset.coerceAtLeast(0))
                 onTargetConsumed()
@@ -915,6 +928,8 @@ private fun ChapterPages(
             groups.indexOfFirst { it.contains(startPage) }.coerceAtLeast(0)
         }
         val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size })
+        val dragging by pager.interactionSource.collectIsDraggedAsState()
+        LaunchedEffect(dragging) { if (dragging) readingNavigation() }
         val swipeReadyPages = remember { mutableStateMapOf<Int, Boolean>() }
         val atEnd by remember(pager, groups) {
             derivedStateOf {
@@ -958,6 +973,7 @@ private fun ChapterPages(
         }
         LaunchedEffect(targetPage, groups) {
             targetPage?.let { imageIndex ->
+                readingNavigation()
                 val groupIndex = groups.indexOfFirst { it.contains(imageIndex.coerceIn(0, pages.lastIndex)) }
                 if (groupIndex >= 0) pager.scrollToPage(groupIndex)
                 onTargetConsumed()

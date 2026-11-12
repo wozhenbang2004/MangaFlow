@@ -97,6 +97,7 @@ fun LibraryScreen(
     val collections by libraryStore.pageCollections.collectAsStateWithLifecycle()
     val readingActivity by libraryStore.readingActivity.collectAsStateWithLifecycle()
     var managedId by remember { mutableStateOf<String?>(null) }
+    var chapterHistoryManga by remember { mutableStateOf<Manga?>(null) }
     var draggedFavorite by remember { mutableStateOf<Manga?>(null) }
     var dragPoint by remember { mutableStateOf(Offset.Unspecified) }
     var trashBounds by remember { mutableStateOf<Rect?>(null) }
@@ -123,6 +124,9 @@ fun LibraryScreen(
         onDismiss = { showCollections = false })
     if (showStats) ReadingStatsSheet(readingActivity, repository,
         onDismiss = { showStats = false }, onOpenManga = { showStats = false; onOpen(it) })
+    chapterHistoryManga?.let { manga ->
+        ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
+    }
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(backdrop)) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -140,7 +144,8 @@ fun LibraryScreen(
                         items(history, key = { "history-${it.manga.id}" }) { progress ->
                             SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
                                 ContinueRow(progress, repository, onContinue,
-                                    onManage = { onCancelOpen(); managedId = progress.manga.id })
+                                    onManage = { onCancelOpen(); managedId = progress.manga.id },
+                                    onHistory = { onCancelOpen(); managedId = null; chapterHistoryManga = progress.manga })
                                 RecordActionsMenu(managedId == progress.manga.id,
                                     onDismiss = { managedId = null },
                                     onDetails = { onDetails(progress.manga) })
