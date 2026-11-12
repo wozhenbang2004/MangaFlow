@@ -678,11 +678,11 @@ fun ReaderScreen(
 
         if (!controlsVisible && pages.isNotEmpty()) Text(
             "$clock · ${pageIndex + 1} / ${pages.size}",
-            color = colors.onSurfaceVariant, fontSize = 11.sp,
+            color = preferences.theme.foreground().copy(alpha = .5f), fontSize = 11.sp,
             modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
                 .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = if (atChapterEnd) 72.dp else 12.dp)
-                .clip(RoundedCornerShape(8.dp)).background(colors.surface.copy(alpha = .9f)).padding(horizontal = 8.dp, vertical = 4.dp)
-                .clickable { controlsVisible = true },
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { controlsVisible = true }
+                .padding(horizontal = 4.dp, vertical = 4.dp),
         )
         AnimatedVisibility(
             visible = downloadMessage != null,

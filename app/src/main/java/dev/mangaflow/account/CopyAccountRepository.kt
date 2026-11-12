@@ -23,6 +23,7 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody
 import okio.BufferedSink
@@ -33,8 +34,10 @@ import java.util.Base64
 /** Relay's owner-only routes. Public catalogs, pages and downloads never use this client. */
 class CopyAccountRepository(context: Context) {
     private val store = AccountTokenStore(context)
-    private val accountClient = sourceClient()
-    private val loginClient = sourceClient()
+    // Relay's HttpClient requests use HTTP/1.1. Keep that wire profile for
+    // owner requests instead of negotiating OkHttp's default HTTP/2 path.
+    private val accountClient = sourceClient().newBuilder().protocols(listOf(Protocol.HTTP_1_1)).build()
+    private val loginClient = sourceClient().newBuilder().protocols(listOf(Protocol.HTTP_1_1)).build()
     private val accountHttp = SourceHttp(accountClient)
     private val loginHttp = SourceHttp(loginClient)
     private val appContext = context.applicationContext

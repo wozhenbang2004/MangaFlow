@@ -29,7 +29,13 @@ import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -49,6 +55,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.ReviewSource
+import dev.mangaflow.data.ReviewStatus
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -61,9 +68,16 @@ internal fun DetailCommentFilter(
     onSelect: (String?) -> Unit,
     onLongOnly: (Boolean) -> Unit,
     onHidePromotions: (Boolean) -> Unit,
+    onRetry: (String) -> Unit,
+    onMatch: (String, String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val density = LocalDensity.current
+    var sourceSettings by remember { mutableStateOf(false) }
+    val pending = sources.filter {
+        it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null ||
+            (it.status == ReviewStatus.NO_MATCH && it.candidates.isNotEmpty())
+    }
     val width = (LocalConfiguration.current.screenWidthDp.dp - 32.dp).coerceAtMost(300.dp)
     val changed = selected != null || longOnly || !hidePromotions
     Popup(alignment = Alignment.TopEnd, offset = with(density) { IntOffset(-12.dp.roundToPx(), 40.dp.roundToPx()) },
@@ -93,6 +107,20 @@ internal fun DetailCommentFilter(
                 Column {
                     FilterToggle(Icons.Outlined.Article, "仅看长评", longOnly) { onLongOnly(!longOnly) }
                     FilterToggle(Icons.Outlined.VisibilityOff, "折叠推广", hidePromotions) { onHidePromotions(!hidePromotions) }
+                }
+                if (pending.isNotEmpty()) {
+                    TextButton(onClick = { sourceSettings = !sourceSettings }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (sourceSettings) "收起来源设置" else "来源设置", color = DetailSecondary, fontSize = 12.sp)
+                    }
+                    if (sourceSettings) pending.forEach { source ->
+                        key(source.id) {
+                            if (source.status == ReviewStatus.UNAVAILABLE || source.reviewsError != null) {
+                                CommentLoadNotice(source, onRetry)
+                            } else {
+                                CommentMatchChoice(source, onMatch)
+                            }
+                        }
+                    }
                 }
             }
         }

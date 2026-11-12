@@ -1,5 +1,17 @@
 # MangaFlow detail · 2026-11-12
 
+## Quiet comments, reader status and Relay account compatibility · 2026-11-12 (current)
+
+User: “这个评论加载就别显示这些了啊”“登录还是会报错啊我电脑 relay 桌面端都可以啊”“再研究下还有什么功能接口可以接入拓宽我们的内容和功能”. Follow-up: “时间页码那些就别弄边框了直接淡在某个角落”. Screenshot: unmatched provider rows, metadata failures and the reader's white time/page plate. Exact message IDs are unavailable. This supersedes DETAIL-CONT-06's inline source-status footer and the historical status plate.
+
+| ID | Current decision | Acceptance and evidence |
+| --- | --- | --- |
+| COMMENTS-QUIET-01 | Keep only real comments and one compact loading/end/empty state in the work-comment feed. Remove per-source failure/matching rows from its footer. The existing filter discloses “来源设置” only when needed; it contains the original explicit matching and retry controls, including metadata-only failures. | Unmatched works are never automatically bound; per-source failures remain reachable without occupying the comment flow. Existing replies, provider labels and pagination remain. Source/diff and independent read-only review only; phone appearance pending. |
+| READER-STATUS-01 | Time and the original-image page count are 11sp text in the lower-right safe area, at 50% opacity of the independent reader theme's foreground. Remove its plate, clipping and press indication. Retain a quiet tap to reveal controls and existing chapter-end clearance. | The status follows light/dark reading paper separately from the app theme, with no border, fill or rounded container. Original page counts, lifecycle-owned clock and saved progress remain unchanged. Device legibility pending. |
+| ACCOUNT-RELAY-02 | Compare Relay main `0079af7` WebLogin/Protocol/Account and HttpClient construction. Current Web form and profile pair already match after `c2d46ad`; fix owner login/account transport to HTTP/1.1, matching Relay's default HttpRequestMessage version rather than OkHttp's HTTP/2 negotiation. | Keep independent clients, one password submission, no alternate endpoint replay, verified-before-persisting credentials, legacy channel identity and anonymous public reading. HTTP/1.1 parity is a compatibility change, not evidence that it causes or fixes 210. Personal login remains open until user feedback. |
+
+Research: [Content/API expansion](research/content-api-expansion-20261112.md) records concrete official endpoints, priorities and unresolved branches. New provider features remain candidates, separate from the three implemented corrections. No tests, API probes, local builds or UI automation; direct main commit and confirmation of the existing CI trigger remain the delivery path.
+
 ## Screenshot correction: folding, source marks and carousel · 2026-11-12 (current)
 
 User: “问题很多评论的 filter 做好看点以及那些热度那些评分站可以用我们的强调色图标啊以及底部的那个继续阅读那个框可以弄好看点弄成玻璃的，以及图三划上去就这样了太恶心了太突兀了以及轮播图没之前好看 uiux 可以参考审美库里的啊”. Four supplied screenshots show the detached white title crossing a dark band, a separately whitened toolbar, an oversized single-column source menu, an opaque-looking dock and the rejected unframed recommendation composition. This is actual user feedback on the prior implementation, not approval of it. Exact message IDs are unavailable.

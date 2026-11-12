@@ -180,8 +180,6 @@ internal fun CommunityPanel(
         if (active && !loading && nearEnd && sources.none { it.loadingMore } &&
             (clusters.isNotEmpty() || (!longOnly && selectedSource == null))) nextSource?.let { onMore(it.id) }
     }
-    val failures = sources.filter { (selectedSource == null || it.id == selectedSource) &&
-        (it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null) }
     val resetPosition = { scope.launch { listState.scrollToItem(0) }; Unit }
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().then(if (filterOpen && active) Modifier.hazeSource(backdrop) else Modifier)) {
@@ -217,17 +215,11 @@ internal fun CommunityPanel(
                             loading || sources.any { it.loadingMore } -> SmallLoading()
                             clusters.isEmpty() -> Text(if (selectedSource != null || longOnly) "暂没有符合筛选的评论" else "还没有可显示的评论",
                                 color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 18.dp))
-                            nextSource == null && failures.isEmpty() -> Text("当前可获取的评论已加载完毕",
+                            nextSource == null -> Text("当前可获取的评论已加载完毕",
                                 color = CommunityMuted, fontSize = 11.sp, modifier = Modifier.padding(vertical = 16.dp))
                         }
                         if (clusters.isEmpty() && nextSource != null && !loading && sources.none { it.loadingMore }) {
                             TextButton(onClick = { onMore(nextSource.id) }) { Text("继续查找评论", color = CommunityMuted) }
-                        }
-                        sources.filter { selectedSource == null || it.id == selectedSource }.forEach { source ->
-                            key(mangaId, source.id) {
-                                if (source.status == ReviewStatus.UNAVAILABLE || source.reviewsError != null) CommentLoadNotice(source, onRetry)
-                                if (source.status == ReviewStatus.NO_MATCH && source.candidates.isNotEmpty()) CommentMatchChoice(source, onMatch)
-                            }
                         }
                     }
                 }
@@ -236,7 +228,8 @@ internal fun CommunityPanel(
         if (filterOpen && active) DetailCommentFilter(backdrop, sources, selectedSource, longOnly, hidePromotions,
             onSelect = { selectedSource = it; resetPosition() },
             onLongOnly = { longOnly = it; resetPosition() },
-            onHidePromotions = { hidePromotions = it; resetPosition() }, onDismiss = { filterOpen = false })
+            onHidePromotions = { hidePromotions = it; resetPosition() },
+            onRetry = onRetry, onMatch = onMatch, onDismiss = { filterOpen = false })
     }
 }
 
@@ -280,9 +273,9 @@ private fun CuratedReviewCluster(
     }
 }
 
-/** Failures belong beside the affected content, without a separate management screen. */
+/** Source-specific recovery is disclosed inside the existing comment filter. */
 @Composable
-private fun CommentLoadNotice(source: ReviewSource, onRetry: (String) -> Unit) {
+internal fun CommentLoadNotice(source: ReviewSource, onRetry: (String) -> Unit) {
     val content = if (source.hasWorkReviews) "评论" else "条目资料"
     val message = source.reviewsError?.takeIf(String::isNotBlank)
         ?: source.message.takeIf { source.status == ReviewStatus.UNAVAILABLE && it.isNotBlank() }
