@@ -42,6 +42,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -49,6 +50,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
@@ -67,6 +69,7 @@ private data class BottomPullLoadInputs(
     val motion: Boolean,
     val canScrollForward: () -> Boolean,
     val onLoadMore: () -> Unit,
+    val onThresholdReached: () -> Unit,
     val actionLabel: String,
 )
 
@@ -84,6 +87,7 @@ internal class BottomPullLoadState private constructor(
 
     private var distancePulled = 0f
     private var pointerDown = false
+    private var thresholdAnnounced = false
     private var consumeReleaseVelocity = false
     private var dispatchPending = false
     private var disposed = false
@@ -103,6 +107,7 @@ internal class BottomPullLoadState private constructor(
             val consumed = minOf(available.y, distancePulled)
             distancePulled -= consumed
             progress = (distancePulled / thresholdPx).coerceIn(0f, 1f)
+            if (distancePulled < thresholdPx) thresholdAnnounced = false
             return Offset(0f, consumed)
         }
 
@@ -115,6 +120,12 @@ internal class BottomPullLoadState private constructor(
             distancePulled = (distancePulled - available.y).coerceAtMost(thresholdPx)
             // The displayed fraction is this gesture's actual distance, without a trailing animation.
             progress = (distancePulled / thresholdPx).coerceIn(0f, 1f)
+            if (distancePulled >= thresholdPx && !thresholdAnnounced) {
+                thresholdAnnounced = true
+                inputs().onThresholdReached()
+            } else if (distancePulled < thresholdPx) {
+                thresholdAnnounced = false
+            }
             val taken = distancePulled - previous
             return Offset(0f, -taken)
         }
@@ -131,6 +142,7 @@ internal class BottomPullLoadState private constructor(
 
     internal fun beginGesture() {
         pointerDown = true
+        thresholdAnnounced = false
         consumeReleaseVelocity = false
         distancePulled = 0f
         settleJob?.cancel()
@@ -142,6 +154,7 @@ internal class BottomPullLoadState private constructor(
         val ready = released && distancePulled >= thresholdPx && !inputs().canScrollForward()
         consumeReleaseVelocity = distancePulled > 0f
         pointerDown = false
+        thresholdAnnounced = false
         distancePulled = 0f
         if (ready && requestMore()) progress = 1f
         else if (!loading) settle()
@@ -169,9 +182,11 @@ internal class BottomPullLoadState private constructor(
     internal fun updatePresentation() {
         if (loading) {
             settleJob?.cancel()
+            thresholdAnnounced = false
             distancePulled = 0f
             progress = 1f
         } else if (!inputs().enabled || distancePulled == 0f) {
+            thresholdAnnounced = false
             distancePulled = 0f
             settle()
         }
@@ -208,8 +223,18 @@ internal class BottomPullLoadState private constructor(
             onLoadMore: () -> Unit,
             actionLabel: String,
         ): BottomPullLoadState {
+            val haptics = LocalHapticFeedback.current
             val inputs = rememberUpdatedState(BottomPullLoadInputs(
-                enabled, loading, LocalMotionEnabled.current, canScrollForward, onLoadMore, actionLabel))
+                enabled = enabled,
+                loading = loading,
+                motion = LocalMotionEnabled.current,
+                canScrollForward = canScrollForward,
+                onLoadMore = onLoadMore,
+                onThresholdReached = {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                },
+                actionLabel = actionLabel,
+            ))
             val threshold = with(LocalDensity.current) { 96.dp.toPx() }
             val scope = rememberCoroutineScope()
             val state = remember(key, threshold) { BottomPullLoadState(threshold, scope) { inputs.value } }

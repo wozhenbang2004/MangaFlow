@@ -2,11 +2,15 @@ package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -86,6 +90,12 @@ internal fun MangaMetricBadges(
                         (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact, metric.sourceId)
             }
         }
+        // Reserve the score row before providers answer. A neutral slot is less misleading than
+        // a fabricated zero and prevents the title/progress below it from shifting as results arrive.
+        val reservedScores = if (compact) maxScores.coerceIn(0, 2) else if (visible.isEmpty()) 1 else visible.size
+        repeat((reservedScores - visible.size).coerceAtLeast(0)) {
+            MetricPlaceholder(foreground, compact)
+        }
         if (compact && showMore && scores.size > visible.size) {
             MetricBadge("+${scores.size - visible.size}", "评分", "更多来源评分可在漫画详情查看",
                 foreground, compact, "more")
@@ -115,6 +125,7 @@ private fun MetricBadge(
     Row(
         modifier = Modifier.clip(RoundedCornerShape(6.dp))
             .background(accent.copy(alpha = if (onDark) .14f else .085f))
+            .widthIn(min = if (compact) 56.dp else 64.dp)
             .semantics(mergeDescendants = true) { contentDescription = description }
             .padding(horizontal = if (compact) 4.dp else 6.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -128,6 +139,24 @@ private fun MetricBadge(
     }
 }
 
+@Composable
+private fun MetricPlaceholder(foreground: Color, compact: Boolean) {
+    Row(
+        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+            .background(foreground.copy(alpha = .045f))
+            .widthIn(min = if (compact) 56.dp else 64.dp)
+            .semantics(mergeDescendants = true) { contentDescription = "评分来源尚未返回" }
+            .padding(horizontal = if (compact) 5.dp else 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Box(Modifier.size(5.dp).clip(CircleShape).background(foreground.copy(alpha = .22f)))
+        Text("评分", color = foreground.copy(alpha = .42f),
+            fontSize = if (compact) 10.sp else 11.sp, lineHeight = 14.sp,
+            fontWeight = FontWeight.Medium, maxLines = 1)
+    }
+}
+
 private fun metricScore(value: Double): String =
     if (value == value.toInt().toDouble()) value.toInt().toString() else String.format(Locale.ROOT, "%.1f", value)
 
@@ -136,4 +165,3 @@ private fun metricCount(value: Long): String = when {
     value >= 10_000 -> String.format(Locale.ROOT, "%.1f万", value / 10_000.0)
     else -> value.toString()
 }
-

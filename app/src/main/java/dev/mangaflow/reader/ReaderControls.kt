@@ -10,11 +10,13 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,21 +28,29 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.LayoutDirection
@@ -54,6 +64,7 @@ import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.LocalGlassSkin
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
+import kotlin.math.roundToInt
 
 /** Reader controls follow the app theme, independently from the artwork background preference. */
 @Composable
@@ -106,9 +117,10 @@ internal fun ReaderSeekBar(
     val colors = MaterialTheme.colorScheme
     val pressed by interactions.collectIsPressedAsState()
     val dragged by interactions.collectIsDraggedAsState()
+    val engaged = enabled && (pressed || dragged)
     val motion = LocalMotionEnabled.current
     val engagement = animateFloatAsState(
-        if (pressed || dragged) 1f else 0f,
+        if (engaged) 1f else 0f,
         tween(if (motion) MangaMotion.Quick else 0), label = "reader-slider-engagement",
     )
     val fraction = ((value - valueRange.start) /
@@ -116,47 +128,104 @@ internal fun ReaderSeekBar(
     val foreground = colors.onSurface.copy(alpha = if (enabled) .72f else .24f)
     val liquidThumb = LocalGlassSkin.current == GlassSkin.LIQUID && Build.VERSION.SDK_INT >= 33 &&
         backdrop != null && backdrop.blurEnabled
-    Slider(
-        value = value.coerceIn(valueRange),
-        onValueChange = onValueChange,
-        onValueChangeFinished = onValueChangeFinished,
-        enabled = enabled,
-        valueRange = valueRange,
-        interactionSource = interactions,
-        modifier = modifier.heightIn(min = 48.dp).semantics { contentDescription = label },
-        thumb = {
-            // Both skins keep the same measured bounds and the Slider owns the drag gesture.
-            Box(Modifier.size(width = 36.dp, height = 24.dp), contentAlignment = Alignment.Center) {
-                if (liquidThumb && backdrop != null) {
-                    LiquidGlassSurface(
-                        state = backdrop, modifier = Modifier.size(width = 30.dp, height = 20.dp),
-                        cornerRadius = 10.dp, role = GlassSurfaceRole.THUMB,
-                        interactionSource = interactions,
-                    ) {
-                        Canvas(Modifier.size(20.dp).align(Alignment.Center)) {
-                            drawCircle(foreground, radius = (2.5f + engagement.value * .5f).dp.toPx())
-                        }
-                    }
-                } else Canvas(Modifier.size(20.dp)) {
-                    drawCircle(foreground.copy(alpha = .10f * engagement.value), radius = 10.dp.toPx())
-                    drawCircle(colors.surface, radius = 7.dp.toPx())
-                    drawCircle(foreground, radius = (5f + engagement.value).dp.toPx())
+    val pageCount = remember(label) {
+        Regex("""共\s*(\d+)\s*页""").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    }
+    val previewText = pageCount?.let { count ->
+        "${value.roundToInt().coerceIn(0, (count - 1).coerceAtLeast(0)) + 1} / $count"
+    } ?: "${(fraction * 100f).roundToInt()}%"
+    val haptics = LocalHapticFeedback.current
+    var lastStep by remember { mutableIntStateOf(value.roundToInt()) }
+    LaunchedEffect(engaged, value, pageCount) {
+        val step = value.roundToInt()
+        val count = pageCount
+        if (!engaged || count == null) {
+            lastStep = step
+        } else if (step != lastStep) {
+            val stride = when {
+                count <= 48 -> 1
+                count <= 120 -> 2
+                else -> 5
+            }
+            if (step == 0 || step == count - 1 || step / stride != lastStep / stride) {
+                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            }
+            lastStep = step
+        }
+    }
+    val layoutDirection = LocalLayoutDirection.current
+    val visualFraction = if (layoutDirection == LayoutDirection.Rtl) 1f - fraction else fraction
+    BoxWithConstraints(modifier.height(58.dp)) {
+        val bubbleWidth = 68.dp
+        val travel = (maxWidth - 36.dp).coerceAtLeast(0.dp)
+        val bubbleLimit = (maxWidth - bubbleWidth).coerceAtLeast(0.dp)
+        val bubbleX = (18.dp + travel * visualFraction - bubbleWidth / 2f).coerceIn(0.dp, bubbleLimit)
+        Surface(
+            modifier = Modifier.width(bubbleWidth).height(24.dp).align(Alignment.TopStart)
+                .offset(x = bubbleX)
+                .graphicsLayer {
+                    alpha = engagement.value
+                    val scale = .94f + engagement.value * .06f
+                    scaleX = scale
+                    scaleY = scale
+                    translationY = (1f - engagement.value) * 4.dp.toPx()
                 }
+                .clearAndSetSemantics { },
+            shape = RoundedCornerShape(9.dp),
+            color = colors.surface.copy(alpha = .96f),
+            contentColor = colors.onSurface,
+            border = BorderStroke(.5.dp, colors.outlineVariant.copy(alpha = .38f)),
+            shadowElevation = if (engaged) 2.dp else 0.dp,
+            tonalElevation = 0.dp,
+        ) {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text(previewText, color = colors.onSurface.copy(alpha = .86f),
+                    fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1)
             }
-        },
-        track = {
-            Canvas(Modifier.fillMaxWidth().height(6.dp)) {
-                val middle = size.height / 2f
-                val start = if (layoutDirection == LayoutDirection.Rtl) size.width else 0f
-                val end = if (layoutDirection == LayoutDirection.Rtl) 0f else size.width
-                val width = (2f + engagement.value * .5f).dp.toPx()
-                drawLine(colors.onSurface.copy(alpha = .12f), Offset(start, middle),
-                    Offset(end, middle), width, StrokeCap.Round)
-                if (fraction > 0f) drawLine(foreground, Offset(start, middle),
-                    Offset(start + (end - start) * fraction, middle), width, StrokeCap.Round)
-            }
-        },
-    )
+        }
+        Slider(
+            value = value.coerceIn(valueRange),
+            onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
+            enabled = enabled,
+            valueRange = valueRange,
+            interactionSource = interactions,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).align(Alignment.BottomCenter)
+                .semantics { contentDescription = label },
+            thumb = {
+                // Both skins keep the same measured bounds and the Slider owns the drag gesture.
+                Box(Modifier.size(width = 36.dp, height = 24.dp), contentAlignment = Alignment.Center) {
+                    if (liquidThumb && backdrop != null) {
+                        LiquidGlassSurface(
+                            state = backdrop, modifier = Modifier.size(width = 30.dp, height = 20.dp),
+                            cornerRadius = 10.dp, role = GlassSurfaceRole.THUMB,
+                            interactionSource = interactions,
+                        ) {
+                            Canvas(Modifier.size(20.dp).align(Alignment.Center)) {
+                                drawCircle(foreground, radius = (2.5f + engagement.value * .5f).dp.toPx())
+                            }
+                        }
+                    } else Canvas(Modifier.size(20.dp)) {
+                        drawCircle(foreground.copy(alpha = .10f * engagement.value), radius = 10.dp.toPx())
+                        drawCircle(colors.surface, radius = 7.dp.toPx())
+                        drawCircle(foreground, radius = (5f + engagement.value).dp.toPx())
+                    }
+                }
+            },
+            track = {
+                Canvas(Modifier.fillMaxWidth().height(6.dp)) {
+                    val middle = size.height / 2f
+                    val start = if (layoutDirection == LayoutDirection.Rtl) size.width else 0f
+                    val end = if (layoutDirection == LayoutDirection.Rtl) 0f else size.width
+                    val width = (2f + engagement.value * .5f).dp.toPx()
+                    drawLine(colors.onSurface.copy(alpha = .12f), Offset(start, middle),
+                        Offset(end, middle), width, StrokeCap.Round)
+                    if (fraction > 0f) drawLine(foreground, Offset(start, middle),
+                        Offset(start + (end - start) * fraction, middle), width, StrokeCap.Round)
+                }
+            },
+        )
+    }
 }
 
 @Composable
