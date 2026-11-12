@@ -38,8 +38,6 @@ import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.History
-import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
@@ -89,7 +87,6 @@ import dev.mangaflow.reader.ReaderScreen
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.update.UpdatePhase
 import kotlinx.coroutines.launch
@@ -317,10 +314,33 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             .background(MaterialTheme.colorScheme.onSurface, CircleShape))
                                 }
                                 if (current.section == Section.DISCOVER) {
-                                    BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label }, Modifier.weight(1f)) { index ->
-                                        keyboard?.hide()
-                                        searchExpanded = false
-                                        model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
+                                    ExpandingSearchBar(
+                                        expanded = searchExpanded,
+                                        query = browse.query,
+                                        active = current.key == frame.key && !drawer.isOpen && !recentReadingOpen,
+                                        onExpandedChange = { expanded ->
+                                            searchExpanded = expanded
+                                            if (!expanded) model.setQuery("")
+                                        },
+                                        onQuery = model::setQuery,
+                                        onSearch = model::refresh,
+                                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                                    ) {
+                                        Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+                                            BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label }, Modifier.weight(1f)) { index ->
+                                                keyboard?.hide()
+                                                searchExpanded = false
+                                                model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
+                                            }
+                                            if (history.isNotEmpty()) MotionIconButton(onClick = {
+                                                keyboard?.hide()
+                                                searchExpanded = false
+                                                model.setQuery("")
+                                                recentReadingOpen = true
+                                            }) {
+                                                Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
+                                            }
+                                        }
                                     }
                                 } else {
                                     Text(if (current.section == Section.LIBRARY) "书架" else "漫流",
@@ -333,25 +353,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 if (current.section == Section.LIBRARY) {
                                     TextButton(onClick = { sectionName = Section.ACCOUNT.name }) { Text("云端书架") }
                                 }
-                                if (current.section == Section.DISCOVER) {
-                                    if (history.isNotEmpty()) MotionIconButton(onClick = {
-                                        keyboard?.hide()
-                                        searchExpanded = false
-                                        model.setQuery("")
-                                        recentReadingOpen = true
-                                    }) {
-                                        Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
-                                    }
-                                    MotionIconButton(onClick = {
-                                        searchExpanded = !searchExpanded
-                                        if (!searchExpanded) { keyboard?.hide(); model.setQuery("") }
-                                    }) {
-                                        MotionSwap(searchExpanded, Modifier.size(22.dp)) { expanded ->
-                                            Icon(if (expanded) Icons.Outlined.Close else Icons.Outlined.Search,
-                                                if (expanded) "关闭搜索" else "搜索漫画、作者", Modifier.size(22.dp))
-                                        }
-                                    }
-                                }
                             }
                             Box(Modifier.weight(1f).fillMaxWidth()) {
                                 when (current.section) {
@@ -362,7 +363,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         active = current.key == frame.key && !drawer.isOpen && !recentReadingOpen,
                                         canAutoAdvance = !drawer.isOpen && !recentReadingOpen && !searchExpanded && current.key == frame.key,
                                         onCloseSearch = { searchExpanded = false; model.setQuery("") },
-                                        onQuery = model::setQuery, onRefresh = model::refresh,
+                                        onRefresh = model::refresh,
                                         onRetry = model::retryBrowse, onMore = model::loadMore,
                                         onOpen = { model.openManga(it) },
                                         onPeriod = { model.selectDiscovery(browse.mode, period = it) },

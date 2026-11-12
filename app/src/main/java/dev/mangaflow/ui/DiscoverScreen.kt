@@ -43,24 +43,18 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
-import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -77,8 +71,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.CornerRadius
@@ -96,7 +88,6 @@ import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -140,7 +131,6 @@ fun DiscoverScreen(
     onCloseSearch: () -> Unit,
     canAutoAdvance: Boolean,
     repository: MangaRepository,
-    onQuery: (String) -> Unit,
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onMore: () -> Unit,
@@ -150,7 +140,6 @@ fun DiscoverScreen(
     active: Boolean = true,
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
-    val searchFocus = remember { FocusRequester() }
     val focus = LocalFocusManager.current
     val motion = LocalMotionEnabled.current
     val dismissSearch = {
@@ -176,15 +165,6 @@ fun DiscoverScreen(
         searchPositions[search.cacheKey] = saved
         while (searchPositions.size > 24) searchPositions.remove(searchPositions.keys.first())
         saved
-    }
-    // Search is a floating layer: opening it must never insert a row above the carousel.
-    LaunchedEffect(searchExpanded, active) {
-        if (searchExpanded && active) {
-            searchFocus.requestFocus()
-            keyboard?.show()
-        } else {
-            focus.clearFocus(force = true)
-        }
     }
     Box(Modifier.fillMaxSize().navigationBarsPadding()) {
         Column(Modifier.fillMaxSize().hazeSource(searchBackdrop)
@@ -231,104 +211,79 @@ fun DiscoverScreen(
                 val panelMaxHeight = (maxHeight - 8.dp).coerceAtLeast(0.dp)
                 Box(
                     Modifier.fillMaxSize()
-                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = .16f))
+                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = .08f))
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null, onClickLabel = "关闭搜索", onClick = dismissSearch,
                         ),
                 )
-                LiquidGlassSurface(
+                if (search.query.isNotBlank()) LiquidGlassSurface(
                     state = searchBackdrop,
                     modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
                         .padding(start = 14.dp, end = 14.dp, top = 8.dp)
                         .pointerInput(Unit) {},
                     cornerRadius = 22.dp,
                 ) {
-                    Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).padding(12.dp)) {
-                        OutlinedTextField(
-                            value = search.query,
-                            onValueChange = { if (searchExpanded && active) onQuery(it) },
-                            singleLine = true,
-                            readOnly = !searchExpanded || !active,
-                            placeholder = { Text("搜索漫画、作者", style = MaterialTheme.typography.bodyMedium) },
-                            leadingIcon = { Icon(Icons.Outlined.Search, null, Modifier.size(20.dp)) },
-                            trailingIcon = {
-                                if (search.query.isNotEmpty()) MotionIconButton(onClick = { onQuery("") }) {
-                                    Icon(Icons.Outlined.Close, "清空搜索", Modifier.size(18.dp))
-                                }
-                            },
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                            keyboardActions = KeyboardActions(onSearch = { keyboard?.hide(); onRefresh() }),
-                            shape = RoundedCornerShape(15.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .7f),
-                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .7f),
-                                focusedBorderColor = Color.Transparent,
-                                unfocusedBorderColor = Color.Transparent,
-                            ),
-                            modifier = Modifier.fillMaxWidth().focusRequester(searchFocus),
-                        )
-                        if (search.query.isNotBlank()) {
-                            Row(
-                                Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 12.dp, bottom = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                    Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).padding(8.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("搜索结果", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.weight(1f))
+                            if (search.loading && search.items.isEmpty()) {
+                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            } else if (search.items.isNotEmpty()) {
+                                Text("${search.items.size} 条", style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        when {
+                            search.loading && search.items.isEmpty() -> Box(
+                                Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
+                            ) { Text("正在查找…", style = MaterialTheme.typography.bodySmall) }
+                            search.items.isEmpty() -> Column(
+                                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
                             ) {
-                                Text("搜索结果", style = MaterialTheme.typography.titleSmall)
-                                Spacer(Modifier.weight(1f))
-                                if (search.loading && search.items.isEmpty()) {
-                                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                                } else if (search.items.isNotEmpty()) {
-                                    Text("${search.items.size} 条", style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(if (search.error != null) "搜索暂时不可用" else "没有找到相关漫画",
+                                    style = MaterialTheme.typography.bodyMedium)
+                                if (search.error != null) {
+                                    Text(search.error, modifier = Modifier.padding(top = 6.dp),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    TextButton(onClick = onRetry) { Text("重试") }
                                 }
                             }
-                            when {
-                                search.loading && search.items.isEmpty() -> Box(
-                                    Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
-                                ) { Text("正在查找…", style = MaterialTheme.typography.bodySmall) }
-                                search.items.isEmpty() -> Column(
-                                    Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 16.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                ) {
-                                    Text(if (search.error != null) "搜索暂时不可用" else "没有找到相关漫画",
-                                        style = MaterialTheme.typography.bodyMedium)
-                                    if (search.error != null) {
-                                        Text(search.error, modifier = Modifier.padding(top = 6.dp),
-                                            style = MaterialTheme.typography.bodySmall,
+                            else -> LazyColumn(
+                                state = retainedResults,
+                                modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                                contentPadding = PaddingValues(bottom = 4.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                items(search.items, key = Manga::id) { manga ->
+                                    SearchResultRow(manga, repository) {
+                                        dismissSearch()
+                                        onOpen(manga)
+                                    }
+                                }
+                                if (search.hasMore || search.loadingMore) {
+                                    item(key = "search-more") {
+                                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                            if (search.loadingMore) {
+                                                CircularProgressIndicator(Modifier.padding(12.dp).size(19.dp), strokeWidth = 2.dp)
+                                            } else TextButton(onClick = onMore) { Text("更多结果") }
+                                        }
+                                    }
+                                }
+                                if (search.error != null) item(key = "search-error") {
+                                    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(search.error, style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             maxLines = 3, overflow = TextOverflow.Ellipsis)
                                         TextButton(onClick = onRetry) { Text("重试") }
-                                    }
-                                }
-                                else -> LazyColumn(
-                                    state = retainedResults,
-                                    modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
-                                    contentPadding = PaddingValues(bottom = 4.dp),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                                ) {
-                                    items(search.items, key = Manga::id) { manga ->
-                                        SearchResultRow(manga, repository) {
-                                            dismissSearch()
-                                            onOpen(manga)
-                                        }
-                                    }
-                                    if (search.hasMore || search.loadingMore) {
-                                        item(key = "search-more") {
-                                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                                if (search.loadingMore) {
-                                                    CircularProgressIndicator(Modifier.padding(12.dp).size(19.dp), strokeWidth = 2.dp)
-                                                } else TextButton(onClick = onMore) { Text("更多结果") }
-                                            }
-                                        }
-                                    }
-                                    if (search.error != null) item(key = "search-error") {
-                                        Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
-                                            horizontalAlignment = Alignment.CenterHorizontally) {
-                                            Text(search.error, style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                            TextButton(onClick = onRetry) { Text("重试") }
-                                        }
                                     }
                                 }
                             }
