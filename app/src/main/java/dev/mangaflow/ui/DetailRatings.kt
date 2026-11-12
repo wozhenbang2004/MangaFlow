@@ -23,6 +23,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -37,7 +38,7 @@ import java.util.Locale
 import kotlinx.coroutines.awaitCancellation
 
 @Composable
-private fun observedDetailMetrics(manga: Manga): List<MangaMetric> {
+internal fun observedDetailMetrics(manga: Manga): List<MangaMetric> {
     val state = LocalMangaMetrics.current
     LaunchedEffect(manga.id) {
         state.request(manga)
@@ -61,18 +62,22 @@ internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean
         Row(Modifier.weight(1f).horizontalScroll(rememberScrollState(), enabled = enabled),
             horizontalArrangement = Arrangement.spacedBy(15.dp), verticalAlignment = Alignment.CenterVertically) {
             heat?.let {
-                Text("热度 ${detailMetricCount(it)}", color = foreground.copy(alpha = .78f), fontSize = 11.sp)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "热度 $it" }) {
+                    ReviewSourceMark("copy", size = 18.dp, onDark = foreground.luminance() > .5f, heat = true)
+                    Text(detailMetricCount(it), color = foreground.copy(alpha = .86f), fontSize = 12.sp)
+                }
             }
             visible.forEach { metric ->
                 val score = metric.score ?: return@forEach
-                val name = ReviewProviders.find(metric.sourceId)?.mark ?: metric.name
                 val scale = if (metric.scoreScale > 0 && metric.scoreScale != 10) "/${metric.scoreScale}" else ""
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.semantics(mergeDescendants = true) {
                         contentDescription = "${metric.name} ${detailMetricScore(score)}" +
                             (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "") + "，${metric.scoreLabel}"
                     }) {
-                    Text(name, color = foreground.copy(alpha = .76f), fontSize = 11.sp)
+                    ReviewSourceMark(metric.sourceId, size = if (metric == primary) 21.dp else 18.dp,
+                        onDark = foreground.luminance() > .5f)
                     Text(detailMetricScore(score) + scale, color = foreground,
                         fontSize = if (metric == primary) 17.sp else 13.sp,
                         fontWeight = if (metric == primary) FontWeight.SemiBold else FontWeight.Medium)
@@ -97,7 +102,9 @@ internal fun DetailRatingSheet(manga: Manga, onDismiss: () -> Unit) {
             Text("保留来源原始分制与统计口径，不合成为跨站总分。", color = DetailSecondary, fontSize = 12.sp)
             if (metrics.isEmpty()) Text("暂未取得可显示的评分", color = DetailSecondary, fontSize = 14.sp)
             metrics.forEach { metric ->
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ReviewSourceMark(metric.sourceId, size = 24.dp)
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(metric.name, color = DetailForeground, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                         val details = listOfNotNull(metric.scoreLabel.takeIf(String::isNotBlank),
@@ -115,10 +122,10 @@ internal fun DetailRatingSheet(manga: Manga, onDismiss: () -> Unit) {
     }
 }
 
-private fun detailMetricScore(value: Double): String =
+internal fun detailMetricScore(value: Double): String =
     if (value == value.toInt().toDouble()) value.toInt().toString() else String.format(Locale.ROOT, "%.1f", value)
 
-private fun detailMetricCount(value: Long): String = when {
+internal fun detailMetricCount(value: Long): String = when {
     value >= 100_000_000 -> String.format(Locale.ROOT, "%.1f亿", value / 100_000_000.0)
     value >= 10_000 -> String.format(Locale.ROOT, "%.1f万", value / 10_000.0)
     else -> value.toString()

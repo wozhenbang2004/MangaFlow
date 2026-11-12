@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -100,12 +101,13 @@ internal fun DetailReadingDock(
                     })
                 }
             }.motionPress(interaction, enabled = canRead, pressedScale = .985f),
-        cornerRadius = 22.dp, role = GlassSurfaceRole.CONTROL,
+        cornerRadius = 24.dp, role = GlassSurfaceRole.READING_DOCK,
         interactionSource = interaction, trackPointer = true) {
         Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 16.dp, vertical = 8.dp)
             .semantics(mergeDescendants = true) { contentDescription = "${if (resume != null) "继续阅读" else "开始阅读"}，$subtitle" },
             verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.PlayArrow, null, tint = DetailForeground, modifier = Modifier.size(23.dp))
+            Icon(Icons.Filled.PlayArrow, null, tint = reviewSourceAccent("anilist", DetailForeground.luminance() > .5f),
+                modifier = Modifier.size(23.dp))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(if (resume != null) "继续阅读" else "开始阅读", color = DetailForeground,

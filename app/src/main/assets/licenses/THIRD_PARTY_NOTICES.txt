@@ -287,3 +287,13 @@ The adaptation uses uniform corners and bounded reader presets, adds interaction
 lighting, and applies an independent uniform readability tint after refraction.
 Labels and icons remain outside the optical layer. This is a source adaptation;
 the complete Backdrop framework and its sample applications are not included.
+
+## Source marks
+
+AniList, MyAnimeList and Kitsu vector path data comes from Simple Icons,
+commit `cd796c98565fc466923fc1128b962e133fa3c612`, `icons/anilist.svg`,
+`icons/myanimelist.svg` and `icons/kitsu.svg`. Original paths are retained in
+`drawable/ic_source_*.xml`; colors are applied by the UI. The complete CC0 1.0
+text is bundled as `licenses/SimpleIcons-CC0.txt`. Other site labels use plain
+short wordmarks and are not claimed to be original brand logos.
+Source: `https://github.com/simple-icons/simple-icons/tree/cd796c98565fc466923fc1128b962e133fa3c612`.

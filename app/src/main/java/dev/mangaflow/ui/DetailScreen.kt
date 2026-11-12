@@ -76,8 +76,6 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -168,9 +166,6 @@ fun DetailScreen(
     var dockHidden by remember(manga.id) { mutableStateOf(false) }
     val dockTravel = remember(manga.id) { floatArrayOf(0f) }
     var commentsList by remember(manga.id) { mutableStateOf<LazyListState?>(null) }
-    var expandedTitle by remember(manga.id) { mutableStateOf<DetailTitleAnchor?>(null) }
-    var collapsedTitle by remember(manga.id) { mutableStateOf<DetailTitleAnchor?>(null) }
-    var titleOrigin by remember { mutableStateOf(Offset.Zero) }
     val commentCount = detailCommentCount(reviews)
     var coverFailed by remember(current.coverUrl) { mutableStateOf(false) }
     var coverLight by remember(current.coverUrl) { mutableStateOf(false) }
@@ -194,8 +189,7 @@ fun DetailScreen(
 
     BoxWithConstraints(
         Modifier.fillMaxSize().background(DetailBackground)
-            .navigationBarsPadding().imePadding()
-            .onGloballyPositioned { titleOrigin = it.positionInRoot() },
+            .navigationBarsPadding().imePadding(),
     ) {
         val density = LocalDensity.current
         val readingInset = (60f * density.fontScale.coerceAtLeast(1f) + 28f).dp
@@ -278,15 +272,19 @@ fun DetailScreen(
                     }.getOrNull()?.let { coverLight = it }
                 },
             )
-            Box(Modifier.fillMaxWidth().height(statusInset + 96.dp)
-                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .46f), Color.Transparent))))
+            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(heroHeight * .72f)
+                .background(Brush.verticalGradient(0f to Color.Transparent,
+                    .48f to Color.Black.copy(alpha = .46f), 1f to Color.Black.copy(alpha = .86f))))
+            // The whole visible cover yields to the neutral scene together; no toolbar-only white band.
+            Box(Modifier.matchParentSize().graphicsLayer {
+                alpha = if (compactHero) 1f else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
+            }.background(DetailBackground))
         }
         Column(Modifier.fillMaxSize().hazeSource(readingBackdrop).nestedScroll(scrolling)) {
             ArtworkToolbar(
                 header = header, compact = compactHero, title = current.title, backdrop = artworkBackdrop,
                 favorite = isFavorite, coverFailed = coverFailed, active = active, coverLight = coverLight,
                 comments = activeSection == 1, commentCount = commentCount,
-                onTitleAnchor = { collapsedTitle = it },
                 onBack = onBack, onIntroduction = { fullIntroduction = true },
                 onToggleFavorite = onToggleFavorite, onRetryCover = {
                     coverFailed = false
@@ -318,9 +316,6 @@ fun DetailScreen(
                         HeroBookInformation(current, onIntroduction = { fullIntroduction = true },
                             onRatings = { fullRatings = true },
                             collapse = { header.collapsedFraction },
-                            onTitleAnchor = { coordinates ->
-                                expandedTitle = coordinates.copy(position = coordinates.position - Offset(0f, header.heightOffset))
-                            },
                             modifier = Modifier.scrollable(artworkScroll, Orientation.Vertical,
                                 reverseDirection = true, enabled = active))
                     } else {
@@ -373,11 +368,6 @@ fun DetailScreen(
                 }
             }
         }
-        CollapsingDetailTitle(current.title, expandedTitle, collapsedTitle, titleOrigin,
-            header.collapsedFraction, compactHero, activeSection == 1,
-            modifier = Modifier.nestedScroll(scrolling)
-                .scrollable(artworkScroll, Orientation.Vertical, reverseDirection = true, enabled = active),
-            onClick = { fullIntroduction = true })
         DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
             resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
             hidden = dockHidden, active = active,
@@ -401,21 +391,22 @@ private fun ArtworkToolbar(
     coverLight: Boolean,
     comments: Boolean,
     commentCount: String?,
-    onTitleAnchor: (DetailTitleAnchor) -> Unit,
     onBack: () -> Unit,
     onIntroduction: () -> Unit,
     onToggleFavorite: () -> Unit,
     onRetryCover: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val progress = if (compact) 1f else header.collapsedFraction.coerceIn(0f, 1f)
+    val progress = if (compact) 1f else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
     val artworkTint = if (coverLight) Color(0xFF242426) else Color.White
     val tint = lerp(artworkTint, DetailForeground, progress)
     val glassTone = if (coverLight) Color(0xFFFCFCFA) else Color(0xFF202023)
     val activity = LocalContext.current.activityOrNull()
     val lightSurface = colors.surface.luminance() > .5f
-    val lightStatusBars by remember(header, lightSurface, compact) {
-        derivedStateOf { lightSurface && (compact || header.collapsedFraction > .7f) }
+    val lightStatusBars by remember(header, lightSurface, compact, coverLight) {
+        derivedStateOf {
+            if (compact || header.collapsedFraction > .9f) lightSurface else coverLight
+        }
     }
     LaunchedEffect(active, activity, lightStatusBars, lightSurface) {
         if (active) activity?.let {
@@ -425,22 +416,21 @@ private fun ArtworkToolbar(
             }
         }
     }
-    Row(Modifier.fillMaxWidth().background(colors.background.copy(alpha = progress))
-        .statusBarsPadding().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, 1f - progress, tint, glassTone, onBack)
-        Column(Modifier.weight(1f).padding(horizontal = 12.dp)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp).graphicsLayer { alpha = progress }
+            .then(if (progress > .02f) Modifier else Modifier.clearAndSetSemantics { })
             .clickable(enabled = progress > .7f, role = Role.Button, onClickLabel = "查看作品信息", onClick = onIntroduction),
             verticalArrangement = Arrangement.Center) {
-            if (comments) Row(Modifier.graphicsLayer { alpha = ((progress - .55f) / .45f).coerceIn(0f, 1f) },
+            if (comments) Row(
                 horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("评论", color = DetailForeground, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 commentCount?.let { Text(it, color = DetailSecondary, fontSize = 11.sp) }
             }
-            Text(title, color = Color.Transparent,
+            Text(title, color = if (comments) DetailSecondary else DetailForeground,
                 fontSize = if (comments) 11.sp else 15.sp, lineHeight = if (comments) 15.sp else 20.sp,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth().clearAndSetSemantics { }
-                    .onGloballyPositioned { onTitleAnchor(DetailTitleAnchor(it.positionInRoot(), it.size.width.toFloat())) })
+                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth())
         }
         if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, 1f - progress, tint, glassTone, onRetryCover)
         ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
@@ -469,20 +459,17 @@ private fun HeroBookInformation(
     onIntroduction: () -> Unit,
     onRatings: () -> Unit,
     collapse: () -> Float,
-    onTitleAnchor: (DetailTitleAnchor) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val infoVisible = collapse() < .28f
-    Column(modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .74f), Color.Black.copy(alpha = .87f))))
-        .padding(horizontal = 22.dp).padding(top = 32.dp, bottom = 14.dp),
+    val infoVisible = collapse() < .22f
+    Column(modifier.fillMaxWidth().graphicsLayer { alpha = (1f - collapse() / .3f).coerceIn(0f, 1f) }
+        .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })
+        .padding(horizontal = 22.dp).padding(top = 20.dp, bottom = 14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(manga.title, color = Color.Transparent, fontSize = 22.sp, lineHeight = 28.6.sp,
+        Text(manga.title, color = Color.White, fontSize = 22.sp, lineHeight = 29.sp,
             fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().clearAndSetSemantics { }
-                .onGloballyPositioned { onTitleAnchor(DetailTitleAnchor(it.positionInRoot(), it.size.width.toFloat())) })
-        Column(Modifier.graphicsLayer { alpha = (1f - collapse() / .28f).coerceIn(0f, 1f) }
-            .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { }),
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            modifier = Modifier.fillMaxWidth())
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             val metadata = listOfNotNull(manga.authors.take(2).joinToString(" / ").takeIf(String::isNotBlank),
                 manga.status.takeIf(String::isNotBlank), manga.latestChapter.takeIf(String::isNotBlank)?.let { "更新至 $it" })
                 .joinToString(" · ")

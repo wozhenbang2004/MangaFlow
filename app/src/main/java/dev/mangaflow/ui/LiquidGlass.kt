@@ -53,7 +53,7 @@ import kotlin.math.min
 
 internal val LocalGlassSkin = compositionLocalOf { GlassSkin.LIQUID }
 
-internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB }
+internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER }
 
 /** Haze captures the background; Backdrop optics affect that layer only. */
 @OptIn(ExperimentalHazeApi::class)
@@ -99,9 +99,15 @@ internal fun LiquidGlassSurface(
             // An explicit transparent tint prevents inheriting a frosted LocalHazeStyle.
             // Liquid's uniform readability tint is applied after the author's refraction.
             tints = listOf(HazeTint(if (liquid) Color.Transparent
-                else colors.surface.copy(alpha = if (light) .72f else .78f))),
+                else colors.surface.copy(alpha = when (role) {
+                    GlassSurfaceRole.READING_DOCK -> if (light) .40f else .52f
+                    GlassSurfaceRole.POPOVER -> if (light) .64f else .72f
+                    else -> if (light) .72f else .78f
+                }))),
             blurRadius = when {
                 role == GlassSurfaceRole.THUMB -> if (liquid) 1.dp else 4.dp
+                role == GlassSurfaceRole.READING_DOCK -> if (liquid) 10.dp else 18.dp
+                role == GlassSurfaceRole.POPOVER -> if (liquid) 16.dp else 24.dp
                 role == GlassSurfaceRole.PANEL -> if (liquid) 14.dp else 24.dp
                 role == GlassSurfaceRole.NAVIGATION -> if (liquid) 18.dp else 28.dp
                 role == GlassSurfaceRole.ARTWORK -> if (liquid) 9.dp else 20.dp

@@ -90,9 +90,12 @@ internal fun MangaMetricBadges(
     val tokenPadding = with(density) { (if (plain) 0.dp else 2.dp).toPx() }
     val innerGap = with(density) { 3.dp.toPx() }
     val outerGap = with(density) { 7.dp.toPx() }
-    fun tokenWidth(token: MetricToken): Float =
-        measurer.measure(token.mark, markStyle, maxLines = 1).size.width + innerGap +
-            measurer.measure(token.value, textStyle, maxLines = 1).size.width + tokenPadding * 2f
+    fun tokenWidth(token: MetricToken): Float {
+        val markWidth = if (token.sourceId in listOf("copy", "anilist", "myanimelist", "kitsu"))
+            with(density) { 15.dp.toPx() }
+        else measurer.measure(token.mark, markStyle.copy(fontWeight = FontWeight.Bold), maxLines = 1).size.width.toFloat()
+        return markWidth + innerGap + measurer.measure(token.value, textStyle, maxLines = 1).size.width + tokenPadding * 2f
+    }
     fun moreWidth(count: Int): Float =
         measurer.measure("+$count", textStyle, maxLines = 1).size.width.toFloat()
 
@@ -121,11 +124,11 @@ internal fun MangaMetricBadges(
             // Reserve only these two text lines, without drawing fake source placeholders.
             Column(Modifier.heightIn(min = with(density) { 16.sp.toDp() * 2f } + 2.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                heatToken?.let { MetricBadge(it, foreground, textStyle, markStyle, plain) }
+                heatToken?.let { MetricBadge(it, foreground, textStyle, plain) }
                 if (visible.isNotEmpty() || more > 0) {
                     Row(horizontalArrangement = Arrangement.spacedBy(7.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        visible.forEach { MetricBadge(it, foreground, textStyle, markStyle, plain) }
+                        visible.forEach { MetricBadge(it, foreground, textStyle, plain) }
                         if (more > 0) MoreMetricCount(more, moreDescription, foreground, textStyle)
                     }
                 }
@@ -134,9 +137,9 @@ internal fun MangaMetricBadges(
             Row(horizontalArrangement = Arrangement.spacedBy(7.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 // A very narrow band gives the accurate more-count room before clipping heat text.
-                heatToken?.let { MetricBadge(it, foreground, textStyle, markStyle, plain,
+                heatToken?.let { MetricBadge(it, foreground, textStyle, plain,
                     Modifier.weight(1f, fill = false)) }
-                visible.forEach { MetricBadge(it, foreground, textStyle, markStyle, plain) }
+                visible.forEach { MetricBadge(it, foreground, textStyle, plain) }
                 if (more > 0) MoreMetricCount(more, moreDescription, foreground, textStyle)
             }
         }
@@ -148,25 +151,15 @@ private fun MetricBadge(
     token: MetricToken,
     foreground: Color,
     textStyle: TextStyle,
-    markStyle: TextStyle,
     plain: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val onDark = foreground.luminance() > .5f
-    val accent = when (token.sourceId) {
-        "copy" -> if (onDark) Color(0xFFD8B79E) else Color(0xFF855B43)
-        "bangumi" -> if (onDark) Color(0xFFAFC5E4) else Color(0xFF526D92)
-        "anilist" -> if (onDark) Color(0xFFC8B4DC) else Color(0xFF745C91)
-        "mangaupdates", "mangadex" -> if (onDark) Color(0xFFD8BE96) else Color(0xFF806132)
-        "myanimelist" -> if (onDark) Color(0xFFAAC5DF) else Color(0xFF426589)
-        "kitsu" -> if (onDark) Color(0xFFD9AAA3) else Color(0xFF8B5148)
-        else -> foreground
-    }
     Row(modifier.semantics(mergeDescendants = true) { contentDescription = token.description }
         .padding(horizontal = if (plain) 0.dp else 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(token.mark, color = accent, style = markStyle, maxLines = 1, overflow = TextOverflow.Clip)
+        ReviewSourceMark(token.sourceId, size = 15.dp, onDark = onDark, heat = token.sourceId == "copy")
         Text(token.value, color = foreground.copy(alpha = .86f), style = textStyle,
             modifier = Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }

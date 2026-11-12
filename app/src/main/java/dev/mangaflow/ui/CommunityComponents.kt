@@ -267,13 +267,15 @@ private fun CuratedReviewCluster(
             shown.forEach { row -> key(row.stableKey()) {
                 CommunityDiscussionComment(row.source, row.review, loadReplies, comfortable = true)
             } }
-            if (cluster.rows.size > 1) Text(
-                if (showSimilar) "收起相似内容" else "相似内容 ${cluster.rows.size} 条",
-                color = CommunityMuted, fontSize = 11.sp,
-                modifier = Modifier.padding(start = 38.dp).clickable(role = Role.Button) { showSimilar = !showSimilar }
-                    .padding(vertical = 10.dp))
-            if (hidePromotions && cluster.promotion) Text("折叠推广内容", color = CommunityMuted, fontSize = 11.sp,
-                modifier = Modifier.padding(start = 38.dp).clickable(role = Role.Button) { revealPromotion = false }.padding(vertical = 8.dp))
+            Row(Modifier.padding(start = 38.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                if (cluster.rows.size > 1) Text(
+                    if (showSimilar) "收起相似内容" else "相似内容 ${cluster.rows.size} 条",
+                    color = CommunityMuted, fontSize = 11.sp, lineHeight = 16.sp,
+                    modifier = Modifier.clickable(role = Role.Button) { showSimilar = !showSimilar }.padding(vertical = 7.dp))
+                if (hidePromotions && cluster.promotion) Text("折叠推广", color = CommunityMuted,
+                    fontSize = 11.sp, lineHeight = 16.sp,
+                    modifier = Modifier.clickable(role = Role.Button) { revealPromotion = false }.padding(vertical = 7.dp))
+            }
         }
     }
 }
@@ -360,16 +362,7 @@ internal fun CommentMatchChoice(source: ReviewSource, onMatch: (String, String) 
 @Composable
 internal fun CommentSourceBadge(sourceId: String) {
     val onLight = MaterialTheme.colorScheme.background.luminance() > .5f
-    val accent = when (sourceId) {
-        "copy" -> if (onLight) Color(0xFF815941) else Color(0xFFD5B7A0)
-        "bangumi" -> if (onLight) Color(0xFF506B92) else Color(0xFFB5C8E4)
-        "anilist" -> if (onLight) Color(0xFF725B8C) else Color(0xFFC7B2DD)
-        "mangaupdates", "mangadex" -> if (onLight) Color(0xFF806132) else Color(0xFFD8BE96)
-        "myanimelist" -> if (onLight) Color(0xFF426589) else Color(0xFFAAC5DF)
-        "kitsu" -> if (onLight) Color(0xFF8B5148) else Color(0xFFD9AAA3)
-        "shikimori", "dantotsu" -> if (onLight) Color(0xFF4F7167) else Color(0xFFA9CBC0)
-        else -> CommunityMuted
-    }
+    val accent = reviewSourceAccent(sourceId, !onLight)
     val name = when (sourceId) {
         "copy" -> "拷贝"; "bangumi" -> "bgm"; "anilist" -> "AniList"
         else -> dev.mangaflow.data.ReviewProviders.find(sourceId)?.mark ?: providerName(sourceId)

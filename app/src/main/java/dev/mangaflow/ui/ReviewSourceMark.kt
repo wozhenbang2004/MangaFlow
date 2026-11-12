@@ -1,0 +1,63 @@
+package dev.mangaflow.ui
+
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.LocalFireDepartment
+import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import dev.mangaflow.R
+import dev.mangaflow.data.ReviewProviders
+
+internal fun reviewSourceAccent(id: String, onDark: Boolean): Color = when (id) {
+    "copy" -> if (onDark) Color(0xFFE7BA88) else Color(0xFF94653F)
+    "bangumi" -> if (onDark) Color(0xFFE9B1C8) else Color(0xFF9D5C78)
+    "anilist" -> if (onDark) Color(0xFFAFCBE9) else Color(0xFF53749A)
+    "mangaupdates" -> if (onDark) Color(0xFFD4BFE8) else Color(0xFF7B638F)
+    "mangadex" -> if (onDark) Color(0xFFE5C38D) else Color(0xFF96753E)
+    "myanimelist" -> if (onDark) Color(0xFFB4C5EA) else Color(0xFF5C709C)
+    "kitsu" -> if (onDark) Color(0xFFE4B8A0) else Color(0xFF9B6B52)
+    "shikimori" -> if (onDark) Color(0xFFC8C4DE) else Color(0xFF77718E)
+    else -> if (onDark) Color(0xFFCFCCD4) else Color(0xFF76717E)
+}
+
+/** Original CC0 vectors where available; other providers retain their honest short wordmarks. */
+@Composable
+internal fun ReviewSourceMark(
+    id: String,
+    modifier: Modifier = Modifier,
+    size: Dp = 18.dp,
+    onDark: Boolean = MaterialTheme.colorScheme.onSurface.luminance() > .5f,
+    heat: Boolean = false,
+) {
+    val color = reviewSourceAccent(id, onDark)
+    val resource = when (id) {
+        "anilist" -> R.drawable.ic_source_anilist
+        "myanimelist" -> R.drawable.ic_source_myanimelist
+        "kitsu" -> R.drawable.ic_source_kitsu
+        else -> null
+    }
+    when {
+        heat -> Icon(Icons.Outlined.LocalFireDepartment, null, tint = color,
+            modifier = modifier.size(size).clearAndSetSemantics { })
+        id == "copy" -> Icon(Icons.Outlined.MenuBook, null, tint = color,
+            modifier = modifier.size(size).clearAndSetSemantics { })
+        resource != null -> Icon(painterResource(resource), null, tint = color,
+            modifier = modifier.size(size).clearAndSetSemantics { })
+        else -> Text(when (id) { "bangumi" -> "bgm"; "mangaupdates" -> "MU"; "mangadex" -> "MD"
+            else -> ReviewProviders.find(id)?.mark ?: id.take(2).uppercase() },
+            color = color, fontWeight = FontWeight.Bold, fontSize = (size.value * .66f).sp,
+            lineHeight = size.value.sp, modifier = modifier.clearAndSetSemantics { })
+    }
+}

@@ -51,6 +51,8 @@ internal class BackdropGlassOptics {
                 GlassSurfaceRole.NAVIGATION -> 18f
                 GlassSurfaceRole.PANEL -> 18f
                 GlassSurfaceRole.THUMB -> 7f
+                GlassSurfaceRole.READING_DOCK -> 12f
+                GlassSurfaceRole.POPOVER -> 14f
             }
             val rim = min(rimDp * density, shortSide * .28f).coerceAtLeast(.1f)
             val depth = when (role) {
@@ -59,6 +61,8 @@ internal class BackdropGlassOptics {
                 GlassSurfaceRole.NAVIGATION -> .52f
                 GlassSurfaceRole.PANEL -> .62f
                 GlassSurfaceRole.THUMB -> 1.05f
+                GlassSurfaceRole.READING_DOCK -> .9f
+                GlassSurfaceRole.POPOVER -> .65f
             }
             lens.setFloatUniform("size", width, height)
             lens.setFloatUniform("offset", 0f, 0f)
@@ -74,6 +78,8 @@ internal class BackdropGlassOptics {
                 GlassSurfaceRole.NAVIGATION -> if (light) .68f else .76f
                 GlassSurfaceRole.PANEL -> if (light) .74f else .80f
                 GlassSurfaceRole.THUMB -> if (light) .22f else .38f
+                GlassSurfaceRole.READING_DOCK -> if (light) .20f else .34f
+                GlassSurfaceRole.POPOVER -> if (light) .44f else .60f
             })
             android.graphics.RenderEffect.createRuntimeShaderEffect(lens, "content")
                 .asComposeRenderEffect().also { cached = it; previous = frame }
