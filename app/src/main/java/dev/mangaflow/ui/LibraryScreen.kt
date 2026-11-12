@@ -239,7 +239,7 @@ fun LibraryScreen(
                             contentPadding = PaddingValues(start = 16.dp, end = 16.dp,
                                 top = headerPadding + 8.dp, bottom = 32.dp),
                             horizontalArrangement = Arrangement.spacedBy(gap),
-                            verticalArrangement = Arrangement.spacedBy(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             if (favorites.isEmpty()) item(key = "empty-collection", span = {
                                 androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
@@ -289,15 +289,15 @@ fun LibraryScreen(
                                                 onLongClick = { onCancelOpen(); managedId = manga.id },
                                                 onClick = { onOpen(manga) })
                                             .padding(horizontal = 2.dp)) {
-                                            Text(manga.title, modifier = Modifier.padding(top = 5.dp),
+                                            Text(manga.title, modifier = Modifier.padding(top = 4.dp),
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.Medium,
-                                                minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                                maxLines = 2, overflow = TextOverflow.Ellipsis)
                                             val progressText = saved?.let {
                                                 it.chapterTitle.ifBlank { "继续阅读" } +
                                                     if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
                                             } ?: "未读"
-                                            Text(progressText, modifier = Modifier.padding(top = 3.dp),
+                                            Text(progressText, modifier = Modifier.padding(top = 2.dp),
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 fontSize = 11.sp, lineHeight = 15.sp,
                                                 maxLines = 1, overflow = TextOverflow.Ellipsis)

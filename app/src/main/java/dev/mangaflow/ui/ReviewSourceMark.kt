@@ -74,7 +74,9 @@ internal fun ReviewSourceMark(
             else -> {
                 val mark = when (id) { "bangumi" -> "bgm"; "mangaupdates" -> "MU"; "mangadex" -> "MD"
                     else -> ReviewProviders.find(id)?.mark ?: id.take(2).uppercase() }
-                val labelUnits = mark.sumOf { if (it.code >= 0x2E80) 2 else 1 }.coerceAtLeast(1)
+                val labelUnits = mark.fold(0) { count, character ->
+                    count + if (character.code >= 0x2E80) 2 else 1
+                }.coerceAtLeast(1)
                 val labelScale = minOf(.68f, 2.8f / labelUnits)
                 Text(mark, color = color, style = MaterialTheme.typography.labelSmall.copy(
                     fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,

@@ -88,15 +88,15 @@ internal fun DownloadBookRow(
             onClickLabel = if (managing) "选择这部作品的章节" else "继续阅读 ${manga.title}",
             onClick = if (managing) onSelect else onRead,
             onLongClickLabel = "管理这部作品的下载", onLongClick = onManage,
-        ).motionPress(interaction, pressedScale = .99f).padding(vertical = 10.dp),
+        ).motionPress(interaction, pressedScale = .99f).padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically) {
             if (manga.sourceUrl == LOCAL_SOURCE_URL) {
-                AsyncImage(manga.coverUrl, null, contentScale = ContentScale.Fit,
+                AsyncImage(manga.coverUrl, null, contentScale = ContentScale.Crop,
                     modifier = Modifier.size(48.dp, 68.dp).mangaCoverCard(8.dp)
                         .background(colors.surfaceVariant))
             } else {
                 MangaCover(manga, repository, Modifier.size(48.dp, 68.dp).mangaCoverCard(8.dp),
-                    scale = ContentScale.Fit)
+                    scale = ContentScale.Crop)
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {

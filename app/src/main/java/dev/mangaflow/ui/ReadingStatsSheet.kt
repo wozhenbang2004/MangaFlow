@@ -143,7 +143,7 @@ internal fun ReadingStatsSheet(
 private fun ReadingTimeSummary(millis: Long, activeDays: Int, books: Int, range: String) {
     val colors = MaterialTheme.colorScheme
     Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 16.dp).clearAndSetSemantics {
-        contentDescription = "$range阅读 ${readingDuration(millis)}，活跃 $activeDays 天，$books 部作品。仅累计前台阅读时间。"
+        contentDescription = "${range}阅读 ${readingDuration(millis)}，活跃 $activeDays 天，$books 部作品。仅累计前台阅读时间。"
     }, verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Outlined.Schedule, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
         Spacer(Modifier.width(8.dp))

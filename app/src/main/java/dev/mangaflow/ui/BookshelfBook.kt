@@ -175,7 +175,7 @@ internal fun BookshelfBook(
             role = Role.Button, onClickLabel = if (progress == null) "开始阅读" else "继续阅读",
             onClick = onOpen)) {
         MangaCover(manga, repository, Modifier.fillMaxSize().mangaCoverCard(),
-            scale = ContentScale.Fit)
+            scale = ContentScale.Crop)
         if (opening) Box(Modifier.align(Alignment.BottomEnd).padding(7.dp).size(22.dp)
             .background(colors.surface.copy(alpha = .94f), RoundedCornerShape(11.dp)),
             contentAlignment = Alignment.Center) {

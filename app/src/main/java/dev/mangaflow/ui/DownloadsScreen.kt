@@ -330,7 +330,7 @@ fun DownloadsScreen(
                                 }
                             }
                             item(key = "space:$mangaId", contentType = "download-separator") {
-                                HorizontalDivider(Modifier.padding(start = 60.dp, top = 5.dp, bottom = 5.dp),
+                                HorizontalDivider(Modifier.padding(start = 60.dp, top = 2.dp, bottom = 2.dp),
                                     color = foreground.copy(alpha = .05f))
                             }
                         }

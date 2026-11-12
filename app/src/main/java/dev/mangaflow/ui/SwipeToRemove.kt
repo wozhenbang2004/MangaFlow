@@ -32,6 +32,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -94,6 +97,7 @@ internal fun SwipeToRemove(
         label = "record-delete-ready")
     val haptics = LocalHapticFeedback.current
     val colors = MaterialTheme.colorScheme
+    val wallpaper = LocalWallpaperActive.current
     LaunchedEffect(fraction, dragging) {
         if (armed && dragging && !thresholdAnnounced) {
             thresholdAnnounced = true
@@ -148,8 +152,13 @@ internal fun SwipeToRemove(
             customActions = if (enabled) listOf(CustomAccessibilityAction(label) { remove(); true }) else emptyList()
         }
         .then(gesture)) {
-        if (offset < 0f || returning) Box(
-            Modifier.matchParentSize().drawBehind {
+        if (enabled && (offset < 0f || returning)) Box(
+            Modifier.matchParentSize().drawWithContent {
+                // A wallpaper row has no opaque backing to mask the action underneath.
+                // Keep the complete reveal (including icons) inside the exposed strip.
+                val left = (size.width + drawnOffset()).coerceIn(0f, size.width)
+                clipRect(left = left) { this@drawWithContent.drawContent() }
+            }.drawBehind {
                 val reveal = (-drawnOffset()).coerceIn(0f, size.width)
                 val progress = (reveal / (size.width * .55f).coerceAtLeast(1f)).coerceIn(0f, 1f)
                 val eased = if (motion) MangaMotion.SearchEasing.transform(progress) else progress
@@ -194,7 +203,7 @@ internal fun SwipeToRemove(
         }
         Box(Modifier.fillMaxWidth().graphicsLayer {
             translationX = if (!enabled) 0f else drawnOffset()
-        }.background(colors.background)) { content() }
+        }.background(if (wallpaper) Color.Transparent else colors.background)) { content() }
     }
 }
 

@@ -1,5 +1,20 @@
 # MangaFlow detail · 2026-11-12
 
+## Book spacing correction · 2026-11-13 (BOOK-SPACING-07)
+
+User: “你自己去看每一本书上下空白这么多”, screenshots `1000121485.jpg` / `1000121486.jpg` (downloads and flat collection over wallpaper). Source review found stacked 10dp row padding and 5dp separator padding, a forced second title line and an unconditional opaque swipe foreground. The screenshot alone does not prove whitespace embedded in the original image.
+
+- Download rows retain their 48×68dp cover, natural long-title/status/error height and real actions; vertical padding is 4dp, separator padding 2dp. Adjacent ordinary covers now have approximately 13dp geometry between them rather than 31dp. Single/multi-chapter reading, expansion, progress and removal are unchanged.
+- Flat collection titles use only their actual one/two lines, with 4dp cover-to-title and 2dp title-to-progress spacing. Keep the caption's 48dp minimum accessible click area and reduce inter-row gap to 10dp. Do not invent empty book positions or change saved order/data.
+- These download/collection thumbnail calls use Crop to fill the existing portrait frame rather than Fit's proportion-dependent bands; light edge cropping is the explicit tradeoff for filled frames here. The global cover default and the actual reader/source images are untouched. This supersedes the older Fit/full-thumbnail wording only for these two surfaces.
+- Wallpaper swipe foregrounds are transparent. Clip the entire delete reveal, including icons/text, to the actually exposed strip so it cannot show through the translated row. Retain the curved reveal drawing, 55% release commitment, cancellation/return motion and undo behavior; plain backgrounds keep their previous fill.
+
+Keep current headers, glass, wallpaper source/overlay, cover identity and actions. Independent source geometry review and diff review only; no tests, local builds, screenshots, device/API automation. Publish directly to current main and observe CI trigger; phone appearance and interaction remain pending user feedback.
+
+User clarified “核心原因是我现在加了背景没适配吧”. The opaque swipe foreground is the confirmed wallpaper adaptation bug: its formerly blended-in background becomes visible rectangular space over artwork. Prioritize that surface correction together with the already identified redundant spacing, without changing the wallpaper itself or adding a new card treatment.
+
+Release-base check also found two actual 0.1.96 Kotlin compiler errors: the statistics accessibility string parsed `range阅读` as one identifier, and source-mark `sumOf` had an ambiguous numeric overload. Use explicit interpolation braces and an integer `fold` respectively. These compile-recovery changes are included in the same replacement release; no local compilation or tests were run.
+
 ## Compact information and browse presentation · 2026-11-13 (implemented; device acceptance pending)
 
 User screenshot feedback: “能不写文字就不写文字能用微型图标元素表示就用图标”, “每一话的读的状态别用文字了”, “没有全部默认单行本三个 tab 的话就空很多”, “默认就没必要显示了”, “更新页那个也是空很多”, “评分的那几个图标大小不一致”, “设置页能不能对齐？没图标的补上图标”, “阅读时间系统 uiux 可以重做重新设计”. Attachments: 1000121474–1478.jpg. Follow-up: “更新页和发现页可以改列表的形式比如几列最多 4 列吧”.
