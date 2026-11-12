@@ -441,7 +441,7 @@ private fun ArtworkToolbar(
     }
     Row(Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, 1f - progress, tint, glassTone, onBack)
-        Column(Modifier.weight(1f).padding(horizontal = 12.dp).graphicsLayer { alpha = progress }
+        Column(Modifier.weight(1f).padding(horizontal = 8.dp).graphicsLayer { alpha = progress }
             .then(if (progress > .02f) Modifier else Modifier.clearAndSetSemantics { })
             .clickable(enabled = progress > .7f, role = Role.Button, onClickLabel = "查看作品信息", onClick = onIntroduction),
             verticalArrangement = Arrangement.Center) {

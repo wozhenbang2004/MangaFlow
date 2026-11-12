@@ -90,7 +90,7 @@ fun LibraryScreen(
 ) {
     val density = LocalDensity.current
     var headerHeightPx by remember { mutableIntStateOf(with(density) { 88.dp.toPx().toInt() }) }
-    val headerPadding = with(density) { headerHeightPx.toDp() } + 4.dp
+    val headerPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showCollections by rememberSaveable { mutableStateOf(false) }
     var showStats by rememberSaveable { mutableStateOf(false) }

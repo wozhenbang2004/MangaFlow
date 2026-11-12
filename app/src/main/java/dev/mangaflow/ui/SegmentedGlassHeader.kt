@@ -3,6 +3,7 @@ package dev.mangaflow.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,7 +19,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import dev.chrisbanes.haze.HazeState
 
-/** Menu navigation and page controls are two independent pieces of captured glass. */
+internal val HeaderContentGap = 2.dp
+
+/** Independent menu/control glass; ordinary bars fit their widest actual content row. */
 @Composable
 internal fun SegmentedGlassHeader(
     backdrop: HazeState,
@@ -28,12 +31,12 @@ internal fun SegmentedGlassHeader(
     controlsAlpha: () -> Float = { 1f },
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+    Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.Top) {
         LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
             role = GlassSurfaceRole.NAVIGATION, trackPointer = true) { navigation() }
         Box(Modifier.weight(1f), contentAlignment = Alignment.TopEnd) {
-            LiquidGlassSurface(backdrop, (if (controlsWidth == null) Modifier.fillMaxWidth() else Modifier.width(controlsWidth)).graphicsLayer {
+            LiquidGlassSurface(backdrop, (if (controlsWidth == null) Modifier.width(IntrinsicSize.Max) else Modifier.width(controlsWidth)).graphicsLayer {
                 alpha = controlsAlpha()
                 compositingStrategy = CompositingStrategy.ModulateAlpha
             }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {

@@ -145,7 +145,7 @@ fun DownloadsScreen(
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
     var headerHeightPx by remember { mutableIntStateOf(with(density) { 88.dp.toPx().toInt() }) }
-    val contentTopPadding = with(density) { headerHeightPx.toDp() } + 4.dp
+    val contentTopPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
     val activeEntries = entries.filter { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
@@ -323,7 +323,7 @@ fun DownloadsScreen(
                         }
                     }
                 }
-                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     MotionTabs(
                         selected = filter.ordinal, labels = DownloadFilter.entries.map { it.label },
                         onSelect = { filter = DownloadFilter.entries[it] }, modifier = Modifier.weight(1f),
@@ -332,7 +332,7 @@ fun DownloadsScreen(
                         fontSize = MaterialTheme.typography.labelLarge.fontSize,
                         selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
                     )
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(4.dp))
                     Row(Modifier.semantics(mergeDescendants = true) {
                         contentDescription = if (loading) "正在恢复下载" else "已下载 ${completedEntries.size} 章，共 ${entries.size} 章"
                     }, horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {

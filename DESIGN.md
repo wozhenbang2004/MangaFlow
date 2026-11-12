@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## Compact headers across destinations · 2026-11-12 (current)
+
+User: “不光是发现页都顶栏间距缩小其他的也一样啊”. Apply HEADER-07's content-fitting behavior to the other destinations as well; keep the latest borderless captured-glass/shadow material and independent navigation button.
+
+| ID | Current decision | Acceptance boundary |
+| --- | --- | --- |
+| HEADER-08 | SegmentedGlassHeader's ordinary right bar uses the maximum intrinsic width of its actual control rows, instead of filling all remaining width. Library/downloads fit their widest of title/actions and tabs/counts; account/settings fit the title and any actual update action. Keep right alignment, constrain to the available space and reduce the menu/control separation from 8 to 6dp. | Existing weighted tabs include their labels/counts/actions in sizing. Discovery keeps its explicit font-scaled width because ranking uses BoxWithConstraints. Keep lazy/subcomposed content outside the intrinsic header subtree; download menus remain independent Popup windows. Do not alter the fixed search trigger or left navigation hit area. |
+| HEADER-SPACE-02 | Share a 2dp measured content gap below root/library/download headers (previously 4dp). Downloads use the same 8dp row inset as other bars and 4dp before the count. Reader's two-line top controls use a 52dp minimum with 4dp vertical title padding; detail title side padding becomes 8dp. | Preserve 44dp root and 48dp reader action areas, font-growth support, measured list insets, selected tab motion, reader/header collapse geometry, glass/shadow capture and all actions. Do not change the bottom reader controls or reading progress. |
+
+Reuse: the existing SegmentedGlassHeader, ordinary Compose Row/Column intrinsic measurement and current controls. Independent source review confirmed that the library's BoxWithConstraints stays in the list and download Popup contents do not participate in anchor intrinsic sizing; the wrapping Box must retain its default unconstrained minimums. No new dependency, tests, local build, API probes or UI automation. Main CI packaging and user device feedback remain the delivery path. Preserve current main's chapter-history and body-identity fixes.
+
 ## Per-chapter reading history and accidental-open protection · 2026-11-12 (current)
 
 User: “关于历史记录我希望是做个每一话的记录这个会不会很耗费磁盘？因为我有时候不小心点到其他话就把我最新的记录覆盖了”. Exact message ID unavailable. Source inspection finds that LibraryStore already retains each chapter's page/count/outer offset, but the visible history and continue target contain only one latest record per manga. Initial pager/list saves also immediately replace that target.

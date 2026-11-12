@@ -382,7 +382,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 (if (current.section == Section.DISCOVER && rankingPresence.targetState) 88.dp else 44.dp).toPx().toInt()
                             })
                         }
-                        val chromePadding = with(chromeDensity) { chromeHeightPx.toDp() } + 4.dp
+                        val chromePadding = with(chromeDensity) { chromeHeightPx.toDp() } + HeaderContentGap
                         val discoveryControlWidth = with(chromeDensity) {
                             val labelSlot = maxOf(52.dp, 14.sp.toDp() * 2 + 24.dp)
                             val mainWidth = labelSlot * DiscoveryMode.entries.size +
