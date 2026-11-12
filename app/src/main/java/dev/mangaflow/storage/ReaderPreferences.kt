@@ -1,6 +1,6 @@
 package dev.mangaflow.storage
 
-enum class ReadingMode { VERTICAL, LEFT_TO_RIGHT, RIGHT_TO_LEFT }
+enum class ReadingMode { VERTICAL, WEBTOON, LEFT_TO_RIGHT, RIGHT_TO_LEFT }
 
 enum class ReaderTheme { INK, PAPER, SEPIA }
 
@@ -9,5 +9,7 @@ data class ReaderPreferences(
     val theme: ReaderTheme = ReaderTheme.INK,
     val keepScreenOn: Boolean = true,
     val pageGap: Boolean = false,
+    val doublePage: Boolean = false,
+    val coverAlone: Boolean = true,
     val dimAmount: Float = 0f,
 )

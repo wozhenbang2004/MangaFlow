@@ -209,6 +209,24 @@ class LibraryStore(context: Context) {
         val longImages: MutableMap<String, Float> = linkedMapOf(),
     )
 
+    /** Explicit spread corrections live separately from reading history and source image data. */
+    fun spreadSinglesFor(mangaId: String, chapterId: String): Set<Int> = synchronized(lock) {
+        val value = disk.getString(spreadKey(mangaId, chapterId), "[]") ?: "[]"
+        runCatching {
+            val json = JSONArray(value)
+            (0 until json.length()).mapNotNull { json.optInt(it, -1).takeIf { index -> index >= 0 } }.toSet()
+        }.getOrDefault(emptySet())
+    }
+
+    fun saveSpreadSingles(mangaId: String, chapterId: String, pages: Set<Int>) = synchronized(lock) {
+        val key = spreadKey(mangaId, chapterId)
+        val cleaned = pages.filter { it >= 0 }.sorted()
+        val editor = disk.edit()
+        if (cleaned.isEmpty()) editor.remove(key)
+        else editor.putString(key, JSONArray(cleaned).toString())
+        editor.apply()
+    }
+
     fun updatePreferences(preferences: ReaderPreferences) = synchronized(lock) {
         val next = preferences.copy(dimAmount = preferences.dimAmount.coerceIn(0f, 0.65f))
         _preferences.value = next
@@ -217,6 +235,8 @@ class LibraryStore(context: Context) {
             put("theme", next.theme.name)
             put("keepScreenOn", next.keepScreenOn)
             put("pageGap", next.pageGap)
+            put("doublePage", next.doublePage)
+            put("coverAlone", next.coverAlone)
             put("dimAmount", next.dimAmount.toDouble())
         }.toString()).apply()
     }
@@ -228,6 +248,8 @@ class LibraryStore(context: Context) {
             theme = ReaderTheme.entries.firstOrNull { it.name == json.optString("theme") } ?: ReaderTheme.INK,
             keepScreenOn = json.optBoolean("keepScreenOn", true),
             pageGap = json.optBoolean("pageGap", false),
+            doublePage = json.optBoolean("doublePage", false),
+            coverAlone = json.optBoolean("coverAlone", true),
             dimAmount = json.optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
         )
     }.getOrDefault(ReaderPreferences())
@@ -245,7 +267,11 @@ class LibraryStore(context: Context) {
     private fun longImagePositionKey(mangaId: String, chapterId: String, pageIndex: Int) =
         "$LONG_IMAGE_POSITION_PREFIX${mangaId.length}:$mangaId${chapterId.length}:$chapterId:$pageIndex"
 
+    private fun spreadKey(mangaId: String, chapterId: String) =
+        "${SPREAD_PREFIX}${mangaId.length}:$mangaId${chapterId.length}:$chapterId"
+
     private companion object {
+        const val SPREAD_PREFIX = "spread_singles:"
         const val CHAPTER_PROGRESS_PREFIX = "chapter_progress:"
         const val LONG_IMAGE_POSITION_PREFIX = "long_image_position:"
     }
