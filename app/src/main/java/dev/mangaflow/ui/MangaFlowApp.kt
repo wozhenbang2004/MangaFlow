@@ -154,8 +154,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     SideEffect {
         if (frame !is Frame.Reader && activity != null) {
             WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
-                isAppearanceLightStatusBars = frame is Frame.Root && !darkSystem
-                isAppearanceLightNavigationBars = frame is Frame.Root && !darkSystem
+                isAppearanceLightStatusBars = !darkSystem
+                isAppearanceLightNavigationBars = !darkSystem
             }
         }
     }

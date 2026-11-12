@@ -1,6 +1,8 @@
 # MangaFlow detail · 2026-11-12
 
-## Active user requirement
+Current detail contract: [Large artwork and scrolling](#large-artwork-and-scrolling--2026-11-12-current-contract). Older decisions below are retained with their superseding requirements.
+
+## Original density requirement
 
 “我不希望漫画详情页是这样的 uiux 请你把信息密度做高点我不希望我是滑下去的请你设计好 uiux”
 
@@ -59,3 +61,22 @@ The user rejected the three-tab/paginated screenshot and explicitly requested th
 - Keep exact chapter progress, anonymous source use, existing downloads, comments, and cache intact. The grid and comment list remain in a fixed content area beneath the header. No outer detail scroll, test suite or emulator automation for this change.
 
 This section overrides older paging and section-transition advice in the same document. A successful CI build confirms compilation only; device interaction remains unverified.
+
+## Large artwork and scrolling · 2026-11-12 (current contract)
+
+User: "没事 ci 触发了就行别管了你去改新的这个问题漫画详情我希望做成 kayokoi.site 这个网站那样的大图而且这个网站滑动那个大图相关的逻辑也要学过来以及为什么要弄黑色背景额". Recorded 2026-11-12 07:31 UTC. This replaces DETAIL-01/02's fixed small header and the revised contract's prohibition on outer header motion. The dense catalog and two-tab requirements remain active.
+
+| ID | Implementation decision | Observable requirement and evidence boundary |
+| --- | --- | --- |
+| DETAIL-ART-01 | Real cover artwork fills the upper background, at a stable size while the foreground moves. Portrait uses a roughly 60% viewport hero, capped at 560dp and reduced on short screens to leave the reading controls reachable. Landscape uses Fit for the portrait source. | Artwork is the focal point. No tiny cover beside a large empty black area; no fabricated landscape asset. The phone composition adapts the site's full-viewport blog cover to leave the catalog visible. |
+| DETAIL-ART-02 | Reuse Material3 1.3.2 exitUntilCollapsed nested scroll with Foundation 1.8.2 gestures. Upward input moves the foreground information out and brings the content surface over the fixed image; the list then scrolls. Downward input returns the list to its beginning before expanding the artwork. Disable Material endpoint snapping; retain Foundation fling. | Artwork does not resize, zoom or gain blur according to scroll. A visible down-arrow smoothly exposes the catalog; new vertical user input cancels that shortcut animation. Header and each list retain their own scroll state. |
+| DETAIL-ART-03 | Place title, authors, a two-line inline synopsis, real tags and metrics on a readable theme-colored surface over the art. Tapping synopsis or the toolbar title opens the full information sheet. Short-height layouts keep the toolbar title/sheet and more space for the catalog. | No Introduction tab. Preserve quiet Chapters / Comments tabs, compact lazy chapter tiles, side tools, reserved download-status icons, exact return position and chapter-named reading action. |
+| DETAIL-ART-04 | Replace hardcoded detail dark constants with Material color roles. Adapt accent text for light/dark contrast, including comments, drawer, search, errors and download states. Let non-reader system bars follow the same app theme. | Light system theme produces the app's warm light detail background with readable dark text. Dark system theme stays coherent. Reader-specific background preferences stay independent. |
+
+### Reference and reuse evidence
+
+- The requested https://kayokoi.site/ returned public HTML declaring Sakurairo 3.0.10, repository mirai-mamori/Sakurairo, tag commit bd4a4a33f27da4a3b52baf9dccf0507cd5393f01. Live HTML has centerbg height 100vh and site_bg_as_cover=true. Same-version source `style.css` body uses background-attachment:fixed; `src/app/coverBackground.ts` assigns the body background; `src/app/global-func.js` headertop_down smoothly scrolls to content. Live body uses background-size:auto, so our portrait Crop is an explicit mobile adaptation, not a claim about the site.
+- Same-version mobile navigation hides on downward scroll and reappears upward; this app keeps a small reachable navigation row for back/favorite and changes the content title with the header state. The fixed-artwork/foreground relationship and smooth content shortcut are adopted; blog waves, social controls, random artwork and desktop wheel interception are not part of this manga task.
+- The site's live style/scripts failed to load in this environment (upstream 503 / smoothscroll 404), and the browser displayed its loader. Actual rendered site motion is unverified. Source evidence does not establish an unmodified live deployment. No scroll-driven zoom or blur was found; the theme's 0.8-second blur is an entry animation only.
+- Sakurairo is GPL v2 or later. Its behavior is used as a reference; no theme code or assets are copied. The implementation reuses existing MangaFlow artwork, metadata and catalog components plus Apache-2.0 AndroidX APIs: Google Maven BOM 2025.05.01 maps to Material3 1.3.2 and Foundation/UI 1.8.2. Their published source JARs were read, including AppBar.kt ExitUntilCollapsed and Scrollable.kt pre/self/post dispatch.
+- Source review is required; tests and UI automation remain prohibited. Per the latest explicit instruction, verify CI triggered and stop waiting. Compilation, actual device layout, image crop and gesture feel remain unverified until build/user feedback; do not call the new design visually accepted.

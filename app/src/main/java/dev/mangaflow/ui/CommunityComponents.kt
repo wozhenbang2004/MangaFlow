@@ -38,6 +38,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -80,9 +81,9 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
-private val CommunityWhite = Color(0xFFF3F3F1)
-private val CommunityMuted = Color(0xFF9B9BA1)
-private val CommunityLine = Color.White.copy(alpha = 0.07f)
+private val CommunityWhite: Color @Composable get() = MaterialTheme.colorScheme.onSurface
+private val CommunityMuted: Color @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
+private val CommunityLine: Color @Composable get() = MaterialTheme.colorScheme.onSurface.copy(alpha = .07f)
 private val CommunityProviders = listOf("copy", "bangumi", "anilist")
 
 @Composable
@@ -204,7 +205,7 @@ private fun ProviderStrip(
             val source = sources.firstOrNull { it.id == id }
             val selected = id == selectedId
             val background by animateColorAsState(
-                if (selected) Color.White.copy(alpha = 0.09f) else Color.White.copy(alpha = 0.025f),
+                CommunityWhite.copy(alpha = if (selected) .09f else .025f),
                 animationSpec = tween(150), label = "provider-selection",
             )
             Row(Modifier.heightIn(min = 48.dp).widthIn(min = 96.dp).clip(RoundedCornerShape(12.dp))

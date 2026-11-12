@@ -1,6 +1,9 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
@@ -46,6 +49,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -67,6 +71,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -100,6 +106,7 @@ internal fun DetailCatalog(
     progress: ReadingProgress?,
     loading: Boolean,
     error: String?,
+    scrolling: NestedScrollConnection,
     onRetry: () -> Unit,
     onRead: (Chapter) -> Unit,
     onDownload: (Chapter) -> Unit,
@@ -159,7 +166,7 @@ internal fun DetailCatalog(
             ModalDrawerSheet(
                 modifier = Modifier.width(290.dp),
                 drawerContainerColor = DetailSurface,
-                drawerContentColor = DetailWhite,
+                drawerContentColor = DetailForeground,
                 drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
             ) {
                 Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
@@ -167,7 +174,7 @@ internal fun DetailCatalog(
                         Modifier.fillMaxWidth().padding(start = 22.dp, end = 6.dp, top = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("目录工具", color = DetailWhite, fontSize = 17.sp,
+                        Text("目录工具", color = DetailForeground, fontSize = 17.sp,
                             fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                         DetailAction(Icons.Outlined.Close, "关闭目录工具", onClick = closeDrawer)
                     }
@@ -216,7 +223,7 @@ internal fun DetailCatalog(
             ) {
                 Text(
                     if (downloadMode) "点选章节下载" else (shown.size.toString() + " 话"),
-                    color = if (downloadMode) DetailWhite else DetailMuted,
+                    color = if (downloadMode) DetailForeground else DetailMuted,
                     fontSize = 12.sp, modifier = Modifier.weight(1f),
                 )
                 if (error != null) {
@@ -239,7 +246,9 @@ internal fun DetailCatalog(
                     modifier = Modifier.fillMaxSize(), color = DetailSecondary, trackColor = Color.Transparent)
             }
             if (shown.isEmpty()) {
-                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Box(Modifier.weight(1f).fillMaxWidth().nestedScroll(scrolling)
+                    .scrollable(rememberScrollableState { 0f }, Orientation.Vertical),
+                    contentAlignment = Alignment.Center) {
                     Text(
                         when {
                             loading && chapters.isEmpty() -> "正在读取章节"
@@ -258,7 +267,8 @@ internal fun DetailCatalog(
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = (74f * fontScale).dp),
                     state = grid,
-                    modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+                    modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)
+                        .nestedScroll(scrolling),
                     contentPadding = PaddingValues(top = 5.dp, bottom = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -285,7 +295,7 @@ internal fun DetailCatalog(
         ModalBottomSheet(
             onDismissRequest = { showError = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = DetailSurface, contentColor = DetailWhite,
+            containerColor = DetailSurface, contentColor = DetailForeground,
         ) {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
@@ -293,7 +303,7 @@ internal fun DetailCatalog(
                 Text(error, color = DetailSecondary, fontSize = 14.sp, lineHeight = 23.sp,
                     modifier = Modifier.padding(vertical = 16.dp))
                 TextButton(onClick = { showError = false; onRetry() }, enabled = !loading) {
-                    Text("重新加载", color = DetailWhite)
+                    Text("重新加载", color = DetailForeground)
                 }
             }
         }
@@ -303,7 +313,7 @@ internal fun DetailCatalog(
         ModalBottomSheet(
             onDismissRequest = { selectedChapterId = null },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = DetailSurface, contentColor = DetailWhite,
+            containerColor = DetailSurface, contentColor = DetailForeground,
         ) {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
@@ -317,12 +327,12 @@ internal fun DetailCatalog(
                 )
                 TextButton(onClick = { selectedChapterId = null; openChapter(chapter) },
                     modifier = Modifier.fillMaxWidth()) {
-                    Text("阅读这一章", color = DetailWhite)
+                    Text("阅读这一章", color = DetailForeground)
                 }
                 TextButton(onClick = { selectedChapterId = null; onDownload(chapter) },
                     enabled = canDownload(entry), modifier = Modifier.fillMaxWidth()) {
                     Text(if (entry?.status == DownloadStatus.COMPLETED) "已下载" else "下载这一章",
-                        color = if (canDownload(entry)) DetailWhite else DetailMuted)
+                        color = if (canDownload(entry)) DetailForeground else DetailMuted)
                 }
             }
         }
@@ -340,18 +350,18 @@ private fun DrawerChoice(
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)
             .heightIn(min = 42.dp).clip(RoundedCornerShape(11.dp))
-            .background(if (selected) Color.White.copy(alpha = .09f) else Color.Transparent)
+            .background(if (selected) DetailForeground.copy(alpha = .09f) else Color.Transparent)
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         if (icon != null) Icon(icon, null, tint = DetailSecondary, modifier = Modifier.size(18.dp))
-        Text(label, color = if (selected) DetailWhite else DetailSecondary,
+        Text(label, color = if (selected) DetailForeground else DetailSecondary,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             fontSize = 13.sp, modifier = Modifier.weight(1f))
         if (count != null) Text(count.toString(), color = DetailMuted, fontSize = 11.sp)
-        if (selected) Icon(Icons.Outlined.Check, null, tint = DetailWhite, modifier = Modifier.size(16.dp))
+        if (selected) Icon(Icons.Outlined.Check, null, tint = DetailForeground, modifier = Modifier.size(16.dp))
     }
 }
 
@@ -380,7 +390,7 @@ private fun ChapterTile(
         Modifier.fillMaxWidth().height(height)
             .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
             .clip(RoundedCornerShape(9.dp))
-            .background(Color.White.copy(alpha = if (progress != null) .12f else .055f))
+            .background(DetailForeground.copy(alpha = if (progress != null) .12f else .055f))
             .combinedClickable(
                 interactionSource = interaction, indication = null, enabled = enabled,
                 role = Role.Button,
@@ -398,7 +408,7 @@ private fun ChapterTile(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                chapter.title, color = if (progress != null) DetailWhite else if (enabled) DetailSecondary else DetailMuted,
+                chapter.title, color = if (progress != null) DetailForeground else if (enabled) DetailSecondary else DetailMuted,
                 fontSize = 11.sp, lineHeight = 15.sp, maxLines = if (showGroup) 1 else 2,
                 overflow = TextOverflow.Ellipsis,
                 fontWeight = if (progress != null) FontWeight.SemiBold else FontWeight.Normal,
@@ -411,11 +421,11 @@ private fun ChapterTile(
                     DownloadStatus.RUNNING, DownloadStatus.QUEUED -> CircularProgressIndicator(
                         Modifier.size(12.dp), color = DetailSecondary, strokeWidth = 1.dp)
                     DownloadStatus.COMPLETED -> Icon(Icons.Outlined.Check, "已下载",
-                        tint = Color(0xFFB5C8E2), modifier = Modifier.size(14.dp))
+                        tint = DetailForeground, modifier = Modifier.size(14.dp))
                     DownloadStatus.PAUSED, DownloadStatus.WAITING -> Icon(Icons.Outlined.Pause,
                         "下载暂停", tint = DetailMuted, modifier = Modifier.size(14.dp))
                     DownloadStatus.FAILED -> Icon(Icons.Outlined.Refresh, "下载失败",
-                        tint = Color(0xFFDBB0A8), modifier = Modifier.size(14.dp))
+                        tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
                     else -> if (downloadMode) Icon(Icons.Outlined.Download, "下载",
                         tint = DetailMuted, modifier = Modifier.size(14.dp))
                 }
@@ -455,7 +465,7 @@ private fun ChapterSearch(
     val keyboard = LocalSoftwareKeyboardController.current
     BasicTextField(
         value = query, onValueChange = { onChange(it.take(100)) }, singleLine = true,
-        textStyle = TextStyle(color = DetailWhite, fontSize = 14.sp), cursorBrush = SolidColor(DetailWhite),
+        textStyle = TextStyle(color = DetailForeground, fontSize = 14.sp), cursorBrush = SolidColor(DetailForeground),
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
         keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
@@ -464,7 +474,7 @@ private fun ChapterSearch(
             Row(
                 Modifier.fillMaxWidth().heightIn(min = 46.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color.White.copy(alpha = .055f)).padding(start = 12.dp),
+                    .background(DetailForeground.copy(alpha = .055f)).padding(start = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(Icons.Outlined.Search, null, tint = DetailMuted, modifier = Modifier.size(18.dp))
