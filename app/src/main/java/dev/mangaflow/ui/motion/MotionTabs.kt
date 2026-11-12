@@ -69,6 +69,7 @@ internal fun MotionTabs(
     indicator: Color = foreground.copy(alpha = .10f),
     underline: Boolean = false,
     compact: Boolean = false,
+    fullWidthIndicator: Boolean = false,
     fontSize: TextUnit = 13.sp,
     indicatorHeight: Dp? = null,
     selectedFontWeight: FontWeight = FontWeight.Medium,
@@ -140,11 +141,17 @@ internal fun MotionTabs(
                     if (compact) labelWidths[i] + 24.dp.toPx() else (slot - 6.dp.toPx()).coerceAtLeast(1f),
                 )
             }
-            val start = interpolate(left.value, centers) - interpolate(left.value, widths) / 2f
-            val end = interpolate(right.value - 1f, centers) + interpolate(right.value - 1f, widths) / 2f
+            val inset = 4.dp.toPx().coerceAtMost(slot / 2f)
+            val fillSegment = fullWidthIndicator && !compact
+            val start = if (fillSegment) left.value.coerceIn(0f, labels.size.toFloat()) * slot + inset
+                else interpolate(left.value, centers) - interpolate(left.value, widths) / 2f
+            val end = if (fillSegment) right.value.coerceIn(0f, labels.size.toFloat()) * slot - inset
+                else interpolate(right.value - 1f, centers) + interpolate(right.value - 1f, widths) / 2f
             val width = (end - start).coerceAtLeast(2.dp.toPx())
-            val stretch = (width / widths[index].coerceAtLeast(1f) - 1f).coerceAtLeast(0f)
-            val h = (indicatorHeight?.toPx() ?: (if (compact) 28.dp else 32.dp).toPx()) *
+            val restingWidth = if (fillSegment) slot - inset * 2f else widths[index]
+            val stretch = (width / restingWidth.coerceAtLeast(1f) - 1f).coerceAtLeast(0f)
+            val h = (indicatorHeight?.toPx() ?: if (fillSegment) size.height - 8.dp.toPx()
+                else (if (compact) 28.dp else 32.dp).toPx()).coerceAtLeast(1f) *
                 (1f - .06f * stretch).coerceAtLeast(.8f)
             val topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - end else start,
                 (size.height - h) / 2)

@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -31,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -171,12 +173,12 @@ internal fun BookshelfBook(
             ),
         contentAlignment = Alignment.BottomCenter,
     ) {
-        val bookWidth = (maxWidth - 8.dp).coerceAtLeast(1.dp)
+        val bookWidth = (maxWidth - 4.dp).coerceAtLeast(1.dp)
         val bookHeight = (maxHeight - 6.dp).coerceAtLeast(1.dp)
-        val topDepth = 2.dp
+        val topDepth = 4.dp
         val planeHeight = (bookHeight - topDepth).coerceAtLeast(1.dp)
-        val pageEdge = 2.dp
-        val spineWidth = 3.dp
+        val pageEdge = 5.dp
+        val spineWidth = 4.dp
         val coverWidth = (bookWidth - spineWidth - pageEdge).coerceAtLeast(1.dp)
 
         Box(
@@ -186,15 +188,15 @@ internal fun BookshelfBook(
                     val amount = lift.value
                     translationY = -6.dp.toPx() * amount
                     rotationX = -2f * amount
-                    rotationY = -3f * amount
+                    rotationY = -7f - 3f * amount
                     rotationZ = -1f * amount
                     transformOrigin = TransformOrigin(0f, 1f)
                     cameraDistance = size.height * 8f
                     alpha = if (!motion && pressed) .82f else 1f
                 }
-                .shadow(2.dp, RoundedCornerShape(3.dp), clip = false,
+                .shadow(4.dp, RoundedCornerShape(3.dp), clip = false,
                     ambientColor = Color.Black.copy(alpha = .035f),
-                    spotColor = Color.Black.copy(alpha = .08f)),
+                    spotColor = Color.Black.copy(alpha = .10f)),
         ) {
             // A complete front cover with a fine binding and paper edge.
             Box(
@@ -205,8 +207,8 @@ internal fun BookshelfBook(
                     .drawWithContent {
                         drawContent()
                         drawRect(Brush.horizontalGradient(listOf(
-                            Color.Black.copy(alpha = .06f), Color.Transparent,
-                            Color.Transparent, Color.White.copy(alpha = .025f),
+                            Color.Black.copy(alpha = .16f), Color.Transparent,
+                            Color.Transparent, Color.White.copy(alpha = .07f),
                         )))
                     },
                 contentAlignment = Alignment.Center,
@@ -248,6 +250,11 @@ internal fun BookshelfBook(
                     startX = size.width - edge, endX = size.width),
                     topLeft = Offset(size.width - edge, depth),
                     size = Size(edge, size.height - depth))
+                repeat(3) { line ->
+                    val x = size.width - edge + edge * (line + 1) / 4f
+                    drawLine(ink.copy(alpha = .09f), Offset(x, depth + 1.dp.toPx()),
+                        Offset(x, size.height - 1.dp.toPx()), .4.dp.toPx())
+                }
                 drawLine(ink.copy(alpha = .10f), Offset(spine, depth),
                     Offset(spine, size.height), .5.dp.toPx())
             }
@@ -285,26 +292,55 @@ internal fun BookshelfBook(
     }
 }
 
+/** Shared case back and continuous side boards, kept outside book hit/drag bounds. */
+@Composable
+internal fun BookshelfCabinetBay(modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val ink = colors.onSurface
+    Box(modifier.drawBehind {
+        val wall = 7.dp.toPx()
+        val recess = 12.dp.toPx()
+        drawRect(colors.surfaceContainerLow)
+        drawRect(Brush.verticalGradient(listOf(ink.copy(alpha = .065f), Color.Transparent),
+            endY = 24.dp.toPx()))
+        drawRect(Brush.horizontalGradient(listOf(ink.copy(alpha = .10f), Color.Transparent),
+            startX = wall, endX = wall + recess), topLeft = Offset(wall, 0f),
+            size = Size(recess, size.height))
+        drawRect(Brush.horizontalGradient(listOf(Color.Transparent, ink.copy(alpha = .09f)),
+            startX = size.width - wall - recess, endX = size.width - wall),
+            topLeft = Offset(size.width - wall - recess, 0f), size = Size(recess, size.height))
+        drawRect(Brush.horizontalGradient(listOf(colors.surfaceContainerHigh, colors.surface)),
+            size = Size(wall, size.height))
+        drawRect(Brush.horizontalGradient(listOf(colors.surface, colors.surfaceContainerHigh)),
+            topLeft = Offset(size.width - wall, 0f), size = Size(wall, size.height))
+        drawLine(colors.surface.copy(alpha = .9f), Offset(wall, 0f), Offset(wall, size.height), .7.dp.toPx())
+        drawLine(ink.copy(alpha = .08f), Offset(size.width - wall, 0f),
+            Offset(size.width - wall, size.height), .7.dp.toPx())
+    }, content = content)
+}
+
 /** Quiet shelf depth; the ledge is decoration and owns no touch or accessibility node. */
 @Composable
 internal fun BookshelfPlank(modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
     Canvas(modifier.clearAndSetSemantics { }) {
-        val topDepth = 3.dp.toPx().coerceAtMost(size.height * .3f)
-        val frontHeight = 3.dp.toPx().coerceAtMost(size.height * .3f)
+        val topDepth = 8.dp.toPx().coerceAtMost(size.height * .4f)
+        val frontHeight = 6.dp.toPx().coerceAtMost(size.height * .3f)
         val frontBottom = topDepth + frontHeight
-        drawRect(Brush.verticalGradient(listOf(colors.onSurface.copy(alpha = .065f),
-            colors.onSurface.copy(alpha = .018f), Color.Transparent),
+        drawRect(Brush.verticalGradient(listOf(colors.onSurface.copy(alpha = .14f),
+            colors.onSurface.copy(alpha = .04f), Color.Transparent),
             startY = frontBottom, endY = size.height),
             topLeft = Offset(0f, frontBottom), size = Size(size.width, size.height - frontBottom))
         val top = Path().apply {
-            moveTo(3.dp.toPx(), 0f)
-            lineTo(size.width - 3.dp.toPx(), 0f)
+            moveTo(8.dp.toPx(), 0f)
+            lineTo(size.width - 8.dp.toPx(), 0f)
             lineTo(size.width, topDepth)
             lineTo(0f, topDepth)
             close()
         }
         drawPath(top, Brush.verticalGradient(listOf(colors.surfaceVariant, colors.surface), endY = topDepth))
+        drawLine(colors.onSurface.copy(alpha = .08f), Offset(8.dp.toPx(), 0f),
+            Offset(size.width - 8.dp.toPx(), 0f), 1.dp.toPx())
         drawRect(Brush.verticalGradient(listOf(colors.surfaceContainerHigh, colors.surfaceVariant),
             startY = topDepth, endY = frontBottom),
             topLeft = Offset(0f, topDepth), size = Size(size.width, frontHeight))

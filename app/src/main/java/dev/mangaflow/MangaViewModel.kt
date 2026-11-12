@@ -29,6 +29,7 @@ import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
+import dev.mangaflow.storage.PageCollection
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.ReaderCatalogStore
 import dev.mangaflow.storage.BrowseCache
@@ -87,6 +88,7 @@ data class ReadingSession(
     val chapterId: String,
     val chaptersLoading: Boolean = false,
     val chaptersError: String? = null,
+    val collection: PageCollection? = null,
 )
 
 data class LibraryOpenState(
@@ -745,6 +747,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         openSavedChapter(progress.manga, progress.chapterId, progress.chapterTitle)
     }
 
+    fun openPageCollection(collection: PageCollection) {
+        openSavedChapter(collection.manga, collection.chapter.id, collection.chapter.title,
+            fallback = collection.chapter, collection = collection)
+    }
+
     fun readFromLibrary(manga: Manga) {
         if (_libraryOpening.value?.let { it.manga.id == manga.id && it.loading } == true) return
         cancelLibraryReading()
@@ -819,7 +826,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _reading.value = session
     }
 
-    private fun openSavedChapter(manga: Manga, chapterId: String, chapterTitle: String, fallback: Chapter? = null) {
+    private fun openSavedChapter(
+        manga: Manga, chapterId: String, chapterTitle: String, fallback: Chapter? = null,
+        collection: PageCollection? = null,
+    ) {
         val local = manga.sourceUrl == LOCAL_SOURCE_URL
         val cached = if (local) null else repository.cachedDetail(manga.id)
         val offline = if (local) downloadedChapters(manga.id) else knownDownloadChapters(manga.id)
@@ -836,7 +846,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         // Neither download-store initialization nor a directory request blocks
         // this navigation. A fresh catalog is useful only for adjacent chapters.
         beginReading(ReadingSession(cached?.manga ?: manga, chapters, chapter.id,
-            chaptersLoading = needsCatalog))
+            chaptersLoading = needsCatalog, collection = collection))
         if (needsCatalog) loadReadingCatalog()
     }
 

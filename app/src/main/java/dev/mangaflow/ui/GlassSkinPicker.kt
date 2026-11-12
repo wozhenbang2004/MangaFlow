@@ -30,6 +30,7 @@ internal fun GlassSkinPicker(
         role = Role.RadioButton,
         track = colors.surfaceContainerHigh,
         indicator = colors.surface,
+        fullWidthIndicator = true,
         fontSize = MaterialTheme.typography.labelLarge.fontSize,
         selectedFontWeight = FontWeight.SemiBold,
         unselectedFontWeight = FontWeight.Normal,

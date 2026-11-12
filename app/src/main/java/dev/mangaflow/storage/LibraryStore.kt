@@ -15,6 +15,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
+import java.time.ZoneId
 
 data class ReadingProgress(
     val manga: Manga,
@@ -55,6 +57,8 @@ class LibraryStore(context: Context) {
     private val _favorites = MutableStateFlow(readArray("favorites") { readManga(it) }.distinctBy(Manga::id))
     private val _history = MutableStateFlow(readArray("history", ::readProgress).distinctBy { it.manga.id })
     private val _shelfStates = MutableStateFlow(readShelfStates())
+    private val _pageCollections = MutableStateFlow(readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key))
+    private val _readingActivity = MutableStateFlow(readArray(READING_ACTIVITY_KEY, ::readReadingActivity).distinctBy { it.manga.id })
     private val _preferences = MutableStateFlow(readPreferences())
     private val _mangaPreferences = MutableStateFlow(readMangaPreferences())
     private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -66,10 +70,14 @@ class LibraryStore(context: Context) {
     private var progressWriterRunning = false
     private var progressEpoch = 0L
     private var ignoreStoredProgress = false
+    private var readingActivityWrites = 0
+    private var readingActivityRevision = 0L
 
     val favorites: StateFlow<List<Manga>> = _favorites.asStateFlow()
     val history: StateFlow<List<ReadingProgress>> = _history.asStateFlow()
     val shelfStates: StateFlow<Map<String, ShelfState>> = _shelfStates.asStateFlow()
+    val pageCollections: StateFlow<List<PageCollection>> = _pageCollections.asStateFlow()
+    val readingActivity: StateFlow<List<ReadingActivity>> = _readingActivity.asStateFlow()
     val preferences: StateFlow<ReaderPreferences> = _preferences.asStateFlow()
     val mangaPreferences: StateFlow<Map<String, ReaderPreferences>> = _mangaPreferences.asStateFlow()
 
@@ -176,6 +184,7 @@ class LibraryStore(context: Context) {
             check(editor.commit()) { "无法写入备份，请检查存储空间" }
 
             progressEpoch++
+            readingActivityRevision++
             progressWrite = null
             pendingChapterPositions.clear()
             pendingLongImagePositions.clear()
@@ -185,6 +194,8 @@ class LibraryStore(context: Context) {
             _favorites.value = readArray("favorites") { readManga(it) }.distinctBy(Manga::id)
             _history.value = readArray("history", ::readProgress).distinctBy { it.manga.id }
             _shelfStates.value = readShelfStates()
+            _pageCollections.value = readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key)
+            _readingActivity.value = readArray(READING_ACTIVITY_KEY, ::readReadingActivity).distinctBy { it.manga.id }
             _preferences.value = readPreferences()
             _mangaPreferences.value = readMangaPreferences()
             backupInfo(decoded)
@@ -192,7 +203,7 @@ class LibraryStore(context: Context) {
     }
 
     private suspend fun waitForProgressWriter() {
-        while (synchronized(lock) { progressWriterRunning }) delay(12)
+        while (synchronized(lock) { progressWriterRunning || readingActivityWrites > 0 }) delay(12)
     }
 
     private data class DecodedBackup(
@@ -235,7 +246,15 @@ class LibraryStore(context: Context) {
             createdAt = decoded.createdAt,
             favorites = arraySize("favorites"),
             history = arraySize("history"),
-            bookmarks = decoded.values.keys.count { it.startsWith(BOOKMARK_PREFIX) },
+            bookmarks = arraySize(PAGE_COLLECTIONS_KEY) + decoded.values.keys
+                .filter { it.startsWith(BOOKMARK_PREFIX) }
+                .sumOf { key ->
+                    val done = (decoded.values["picture_migrated:$key"] as? Set<*>)?.filterIsInstance<String>().orEmpty().toSet()
+                    val old = runCatching { JSONArray(decoded.values[key] as? String ?: "[]") }.getOrDefault(JSONArray())
+                    (0 until old.length()).count { index ->
+                        old.optJSONObject(index)?.optInt("pageIndex", -1)?.let { it >= 0 && it.toString() !in done } == true
+                    }
+                },
         )
     }
 
@@ -419,6 +438,80 @@ class LibraryStore(context: Context) {
         val removedManga: MutableMap<String, Long> = linkedMapOf(),
     )
 
+    fun togglePageCollection(collection: PageCollection) = synchronized(lock) {
+        val present = _pageCollections.value.any { it.key == collection.key }
+        val next = _pageCollections.value.filterNot { it.key == collection.key }
+        persistPageCollections(if (present) next else listOf(collection) + next)
+    }
+
+    fun removePageCollection(key: String) = synchronized(lock) {
+        persistPageCollections(_pageCollections.value.filterNot { it.key == key })
+    }
+
+    private fun persistPageCollections(values: List<PageCollection>) {
+        _pageCollections.value = values
+        disk.edit().putString(PAGE_COLLECTIONS_KEY, JSONArray(values.map { it.toJson() }).toString()).apply()
+    }
+
+    /** Old explicit page markers become pictures once their real chapter images are available. */
+    fun migratePageBookmarks(manga: Manga, chapter: Chapter, pages: List<Page>) = synchronized(lock) {
+        val migrated = "picture_migrated:" + bookmarkKey(manga.id, chapter.id)
+        val done = disk.getStringSet(migrated, emptySet()).orEmpty()
+        val old = bookmarksFor(manga.id, chapter.id).filterNot { it.pageIndex.toString() in done }
+            .mapNotNull { bookmark ->
+                pages.getOrNull(bookmark.pageIndex)?.let { page ->
+                    PageCollection(manga, chapter, bookmark.pageIndex,
+                        previewUrls = listOf(page.url), savedAt = bookmark.updatedAt)
+                }
+            }
+        if (old.isNotEmpty()) {
+            persistPageCollections((_pageCollections.value + old)
+                .distinctBy(PageCollection::key).sortedByDescending(PageCollection::savedAt))
+            disk.edit().putStringSet(migrated, done + old.map { it.firstPage.toString() }).apply()
+        }
+    }
+
+    /** Monotonic foreground time is allocated to local calendar days, including midnight/DST. */
+    fun recordReadingTime(manga: Manga, elapsedMillis: Long, endedAt: Long = System.currentTimeMillis()) {
+        if (elapsedMillis <= 0L) return
+        synchronized(lock) {
+            val previous = _readingActivity.value.firstOrNull { it.manga.id == manga.id }
+                ?: ReadingActivity(manga)
+            val days = previous.days.toMutableMap()
+            val zone = ZoneId.systemDefault()
+            var cursor = endedAt - elapsedMillis
+            while (cursor < endedAt) {
+                val date = Instant.ofEpochMilli(cursor).atZone(zone).toLocalDate()
+                val boundary = date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+                val end = minOf(endedAt, boundary)
+                val amount = end - cursor
+                if (amount <= 0) break
+                val old = days[date.toString()] ?: 0L
+                days[date.toString()] = old + amount.coerceAtMost(Long.MAX_VALUE - old)
+                cursor = end
+            }
+            val next = ReadingActivity(manga,
+                previous.totalMillis + elapsedMillis.coerceAtMost(Long.MAX_VALUE - previous.totalMillis),
+                endedAt, days.toMap())
+            val values = listOf(next) + _readingActivity.value.filterNot { it.manga.id == manga.id }
+            _readingActivity.value = values
+            val revision = ++readingActivityRevision
+            readingActivityWrites++
+            progressScope.launch {
+                try {
+                    val encoded = JSONArray(values.map { it.toJson() }).toString()
+                    synchronized(lock) {
+                        if (revision == readingActivityRevision) {
+                            disk.edit().putString(READING_ACTIVITY_KEY, encoded).apply()
+                        }
+                    }
+                } finally {
+                    synchronized(lock) { readingActivityWrites-- }
+                }
+            }
+        }
+    }
+
     /** Explicit page bookmarks survive ordinary history cleanup because the user created them deliberately. */
     fun bookmarksFor(mangaId: String, chapterId: String): List<ReaderBookmark> = synchronized(lock) {
         val encoded = disk.getString(bookmarkKey(mangaId, chapterId), "[]") ?: "[]"
@@ -598,6 +691,8 @@ class LibraryStore(context: Context) {
         const val BACKUP_FORMAT = "MangaFlowLibraryBackup"
         const val BACKUP_VERSION = 1
         const val SHELF_STATES_KEY = "shelf_states"
+        const val PAGE_COLLECTIONS_KEY = "page_collections"
+        const val READING_ACTIVITY_KEY = "reading_activity"
         const val MANGA_READER_PREFERENCES_KEY = "reader_preferences_by_manga"
         const val BOOKMARK_PREFIX = "reader_bookmarks:"
         const val SPREAD_PREFIX = "spread_singles:"

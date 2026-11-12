@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -81,8 +80,7 @@ internal fun ChapterEndFooter(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (onNext != null) Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
-            BottomPullLoadIndicator(pull, Modifier.size(26.dp), color = foreground.copy(alpha = .65f))
-            Icon(Icons.Outlined.ArrowUpward, null, Modifier.size(13.dp), tint = foreground.copy(alpha = .65f))
+            BottomPullLoadIndicator(pull, Modifier.size(32.dp), color = foreground.copy(alpha = .65f))
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
             Text(when {

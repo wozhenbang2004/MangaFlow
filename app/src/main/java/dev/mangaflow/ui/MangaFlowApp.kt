@@ -84,6 +84,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.core.view.WindowCompat
 import dev.mangaflow.BuildConfig
+import dev.mangaflow.storage.WallpaperStore
 import dev.mangaflow.DetailState
 import dev.mangaflow.MangaViewModel
 import dev.mangaflow.ReadingSession
@@ -107,7 +108,7 @@ private sealed interface Frame {
     val key: String
     data class Root(val section: Section) : Frame { override val key = "root-${section.name}" }
     data class Detail(val state: DetailState) : Frame { override val key = "detail-${state.manga.id}" }
-    data class Reader(val session: ReadingSession) : Frame { override val key = "reader-${session.manga.id}-${session.chapterId}" }
+    data class Reader(val session: ReadingSession) : Frame { override val key = "reader-${session.manga.id}-${session.chapterId}-${session.collection?.key.orEmpty()}" }
 }
 
 private val Frame.depth: Int get() = when (this) {
@@ -118,6 +119,9 @@ private val Frame.depth: Int get() = when (this) {
 
 @Composable
 fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = viewModel()) {
+    val wallpaperContext = LocalContext.current.applicationContext
+    val wallpaperStore = remember(wallpaperContext) { WallpaperStore.get(wallpaperContext) }
+    val wallpaper by wallpaperStore.state.collectAsStateWithLifecycle()
     val browse by model.browse.collectAsStateWithLifecycle()
     val metrics by model.metrics.collectAsStateWithLifecycle()
     val detail by model.detail.collectAsStateWithLifecycle()
@@ -207,6 +211,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     CompositionLocalProvider(
         LocalMangaMetrics provides MangaMetricState(metrics, model::retainMetrics, model::releaseMetrics),
         LocalGlassSkin provides preferences.glassSkin,
+        LocalWallpaperActive provides (frame is Frame.Root && wallpaper.mediaPath != null),
     ) {
     ModalNavigationDrawer(
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant),
@@ -285,6 +290,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             containerColor = MaterialTheme.colorScheme.background,
             snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
         ) { _ ->
+            Box(Modifier.fillMaxSize()) {
+            if (frame is Frame.Root && wallpaper.mediaPath != null) {
+                AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = !drawerVisible && !recentReadingOpen)
+            }
             AnimatedContent(
                 targetState = frame,
                 contentKey = { it.key },
@@ -309,6 +318,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     is Frame.Reader -> ReaderScreen(
                         manga = current.session.manga, chapters = current.session.chapters,
                         initialChapterId = current.session.chapterId,
+                        initialCollection = current.session.collection,
                         repository = model.repository, libraryStore = model.library, downloadStore = model.downloads,
                         communityRepository = model.community,
                         reviewRepository = model.reviews,
@@ -415,6 +425,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     )
                                     Section.LIBRARY -> LibraryScreen(
                                         favorites = favorites, history = history, shelfStates = shelfStates,
+                                        libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
                                         repository = model.repository, opening = libraryOpening, active = rootActive,
                                         onOpen = model::readFromLibrary, onDetails = { model.openManga(it) },
                                         onContinue = model::continueReading,
@@ -467,6 +478,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             }
         }
     }
+}
 }
 }
 

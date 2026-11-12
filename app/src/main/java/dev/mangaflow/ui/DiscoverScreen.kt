@@ -2,7 +2,6 @@ package dev.mangaflow.ui
 
 import android.view.accessibility.AccessibilityManager
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -153,6 +152,14 @@ fun DiscoverScreen(
     val motion = LocalMotionEnabled.current
     val browse = if (state.query.isBlank()) state else backgroundState
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
+    var retainedBrowse by remember { mutableStateOf(browse) }
+    // Wait on data, never on an animation clock. A slow uncached selection keeps the previous
+    // real list visible instead of replacing it with loading and then entering a second time.
+    val holdingContent = browse.loading && browse.items.isEmpty() && retainedBrowse.items.isNotEmpty()
+    val displayedBrowse = if (holdingContent) retainedBrowse else browse
+    SideEffect { if (!holdingContent) retainedBrowse = browse }
+    val retainedAlpha = animateFloatAsState(if (holdingContent) .48f else 1f,
+        if (motion) tween(MangaMotion.Content) else snap(), label = "browse-pending-content")
     Column(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(searchBackdrop)
         .motionInputGate(active && !searchExpanded)) {
         // Filters stay outside the changing list, so their indicator keeps its velocity.
@@ -166,16 +173,37 @@ fun DiscoverScreen(
             RankingControls(browse, onPeriod, onAudience, onRefresh,
                 Modifier.motionInputGate(active && !searchExpanded && browse.mode == DiscoveryMode.RANKING))
         }
-        MotionTabContent(
-            selected = browse,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentKey = { it.cacheKey },
-            order = { it.mode.ordinal * 8 + it.period.ordinal * 2 + it.audience.ordinal },
-        ) { pane ->
-            DiscoveryPane(pane, positions, repository,
-                active = active && !searchExpanded && pane.cacheKey == browse.cacheKey,
-                canAutoAdvance = canAutoAdvance,
-                onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen)
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            MotionTabContent(
+                selected = displayedBrowse,
+                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = retainedAlpha.value },
+                // Loading -> first result gets one transition. Ratings, appends and refreshes
+                // retain the populated key and never replay the whole list's entrance.
+                contentKey = { it.cacheKey to it.items.isEmpty() },
+                order = { it.mode.ordinal * 8 + it.period.ordinal * 2 + it.audience.ordinal },
+                soft = true,
+            ) { pane ->
+                DiscoveryPane(pane, positions, repository,
+                    active = active && !searchExpanded && !holdingContent && pane.cacheKey == browse.cacheKey,
+                    canAutoAdvance = canAutoAdvance,
+                    onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen)
+            }
+            if (holdingContent) {
+                val label = if (browse.mode == DiscoveryMode.RANKING)
+                    "${browse.audience.label} · ${browse.period.label}" else browse.mode.label
+                Row(Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 20.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = .96f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (motion) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("正在载入$label", fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
     }
 }
@@ -390,16 +418,6 @@ private fun DiscoveryPane(
         derivedStateOf { grid.layoutInfo.visibleItemsInfo.any { it.key == "hero" } }
     }
     val ranking = state.mode == DiscoveryMode.RANKING
-    val motion = LocalMotionEnabled.current
-    val hasItems = state.items.isNotEmpty()
-    val firstResult = remember(state.cacheKey) { Animatable(if (hasItems) 1f else 0f) }
-    val revealDistance = with(LocalDensity.current) { 10.dp.toPx() }
-    LaunchedEffect(state.cacheKey, hasItems, motion) {
-        if (hasItems) {
-            if (motion) firstResult.animateTo(1f, tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing))
-            else firstResult.snapTo(1f)
-        }
-    }
     val pull = rememberBottomPullLoadState(
         key = state.cacheKey,
         enabled = active && state.items.isNotEmpty() && state.hasMore && !state.loading &&
@@ -413,13 +431,7 @@ private fun DiscoveryPane(
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 0.dp, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(if (ranking) 8.dp else 16.dp),
-        modifier = Modifier.fillMaxSize().bottomPullLoad(pull).graphicsLayer {
-            // An uncached selection first enters as loading; reveal its real rows once they arrive.
-            // Refreshes, metrics and appended pages keep this value at one and do not replay.
-            val visibility = if (ranking && hasItems) firstResult.value else 1f
-            alpha = visibility
-            translationY = (1f - visibility) * revealDistance
-        },
+        modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
     ) {
         if (state.loading && state.items.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "loading") { QuietLoading("正在翻开书页…") }
@@ -462,7 +474,7 @@ private fun DiscoveryPane(
                 } else {
                     Column(Modifier.fillMaxWidth().height(64.dp), horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterVertically)) {
-                        if (state.hasMore || state.loadingMore) BottomPullLoadIndicator(pull, Modifier.size(24.dp))
+                        if (state.hasMore || state.loadingMore) BottomPullLoadIndicator(pull, Modifier.size(32.dp))
                         Text(if (state.loadingMore) "正在加载" else if (!state.hasMore) "已经到底了"
                             else if (pull.progress >= 1f) "松手加载" else "上拉加载",
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

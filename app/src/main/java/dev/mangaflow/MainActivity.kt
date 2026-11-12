@@ -13,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import dev.mangaflow.ui.AppLaunchReveal
 import dev.mangaflow.ui.MangaFlowApp
 import dev.mangaflow.ui.MangaFlowTheme
 import dev.mangaflow.ui.motion.MangaMotionProvider
@@ -25,11 +26,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val animateLaunch = savedInstanceState == null &&
+            !intent.getBooleanExtra("open_updates", false) && !intent.getBooleanExtra("open_downloads", false)
         consumeNavigationIntent(intent)
         setContent {
             MangaFlowTheme {
                 MangaMotionProvider {
-                    MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
+                    AppLaunchReveal(play = animateLaunch) {
+                        MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
+                    }
                 }
             }
         }

@@ -18,7 +18,9 @@
 package dev.mangaflow.ui.motion
 
 import androidx.compose.animation.core.animate
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -42,6 +44,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -73,7 +77,7 @@ private data class BottomPullLoadInputs(
     val actionLabel: String,
 )
 
-/** A footer pull keeps the list stationary and uses only its unconsumed drag distance. */
+/** Unconsumed finger distance owns the threshold; a separate drawing layer supplies resistance. */
 @Stable
 internal class BottomPullLoadState private constructor(
     private val thresholdPx: Float,
@@ -82,6 +86,11 @@ internal class BottomPullLoadState private constructor(
 ) {
     var progress by mutableFloatStateOf(0f)
         private set
+    private var feedback by mutableFloatStateOf(0f)
+    private var gestureFeedbackOrigin = 0f
+    internal val feedbackFraction: Float get() = feedback
+    internal val contentOffsetPx: Float
+        get() = if (inputs().motion) -thresholdPx * .42f * feedback.coerceIn(-.06f, 1.25f) else 0f
     val loading: Boolean get() = inputs().loading
     val actionLabel: String get() = inputs().actionLabel
 
@@ -106,7 +115,7 @@ internal class BottomPullLoadState private constructor(
             settleJob?.cancel()
             val consumed = minOf(available.y, distancePulled)
             distancePulled -= consumed
-            progress = (distancePulled / thresholdPx).coerceIn(0f, 1f)
+            updateGesturePresentation()
             if (distancePulled < thresholdPx) thresholdAnnounced = false
             return Offset(0f, consumed)
         }
@@ -117,9 +126,9 @@ internal class BottomPullLoadState private constructor(
             settleJob?.cancel()
             // Bottom loading reverses Material3's pull direction; fling deltas never accumulate.
             val previous = distancePulled
-            distancePulled = (distancePulled - available.y).coerceAtMost(thresholdPx)
+            distancePulled = (distancePulled - available.y).coerceAtMost(thresholdPx * 1.35f)
             // The displayed fraction is this gesture's actual distance, without a trailing animation.
-            progress = (distancePulled / thresholdPx).coerceIn(0f, 1f)
+            updateGesturePresentation()
             if (distancePulled >= thresholdPx && !thresholdAnnounced) {
                 thresholdAnnounced = true
                 inputs().onThresholdReached()
@@ -146,7 +155,16 @@ internal class BottomPullLoadState private constructor(
         consumeReleaseVelocity = false
         distancePulled = 0f
         settleJob?.cancel()
+        gestureFeedbackOrigin = feedback.coerceIn(0f, 1f)
         if (!loading) progress = 0f
+    }
+
+    private fun updateGesturePresentation() {
+        val fraction = distancePulled / thresholdPx
+        progress = fraction.coerceIn(0f, 1f)
+        // A new gesture catches the returning surface, but its threshold starts from zero.
+        val resisted = if (fraction <= 1f) fraction else 1f + (fraction - 1f) * .5f
+        feedback = gestureFeedbackOrigin + (1f - gestureFeedbackOrigin) * resisted
     }
 
     internal fun finishGesture(released: Boolean) {
@@ -156,8 +174,10 @@ internal class BottomPullLoadState private constructor(
         pointerDown = false
         thresholdAnnounced = false
         distancePulled = 0f
-        if (ready && requestMore()) progress = 1f
-        else if (!loading) settle()
+        if (ready && requestMore()) {
+            progress = 1f
+            settle(resetProgress = false)
+        } else settle(resetProgress = !loading)
     }
 
     internal fun accessibilityLoadMore(): Boolean {
@@ -181,10 +201,10 @@ internal class BottomPullLoadState private constructor(
 
     internal fun updatePresentation() {
         if (loading) {
-            settleJob?.cancel()
             thresholdAnnounced = false
             distancePulled = 0f
             progress = 1f
+            settle(resetProgress = false)
         } else if (!inputs().enabled || distancePulled == 0f) {
             thresholdAnnounced = false
             distancePulled = 0f
@@ -192,17 +212,23 @@ internal class BottomPullLoadState private constructor(
         }
     }
 
-    private fun settle() {
+    private fun settle(resetProgress: Boolean = true) {
         settleJob?.cancel()
-        if (disposed || progress == 0f) return
+        if (disposed || (feedback == 0f && (!resetProgress || progress == 0f))) return
         if (!inputs().motion) {
-            progress = 0f
+            feedback = 0f
+            if (resetProgress) progress = 0f
             return
         }
+        val initialFeedback = feedback
+        val initialProgress = progress
         settleJob = scope.launch {
-            animate(initialValue = progress, targetValue = 0f,
-                animationSpec = tween(MangaMotion.Exit, easing = MangaMotion.EnterEasing)) { value, _ ->
-                progress = value
+            // The saved Jelly material and beUI press roles separate direct manipulation from
+            // a short damped release. Only the drawing layer rebounds; labels never stretch.
+            animate(initialValue = 1f, targetValue = 0f,
+                animationSpec = spring(dampingRatio = .78f, stiffness = 420f)) { value, _ ->
+                feedback = initialFeedback * value
+                if (resetProgress) progress = (initialProgress * value).coerceIn(0f, 1f)
             }
         }
     }
@@ -279,21 +305,31 @@ internal fun Modifier.bottomPullLoad(state: BottomPullLoadState): Modifier =
     }.semantics {
         customActions = if (state.loadActionAvailable)
             listOf(CustomAccessibilityAction(state.actionLabel, state::accessibilityLoadMore)) else emptyList()
-    }
+    }.graphicsLayer { translationY = state.contentOffsetPx }
 
-/** The caller reserves a footer slot; no drag-dependent size or list offset is introduced. */
+/** The fixed footer slot contains the moving ring/arrow; progress follows actual drag distance. */
 @Composable
 internal fun BottomPullLoadIndicator(
     state: BottomPullLoadState,
     modifier: Modifier = Modifier,
     color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
-    val indicator = modifier.size(22.dp).semantics {
+    val motion = LocalMotionEnabled.current
+    val ready = animateFloatAsState(
+        if (!state.loading && state.progress >= 1f) 1f else 0f,
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
+        label = "bottom-pull-ready",
+    )
+    val indicator = modifier.size(32.dp).semantics {
         contentDescription = state.actionLabel
         progressBarRangeInfo = if (state.loading) ProgressBarRangeInfo.Indeterminate
             else ProgressBarRangeInfo(state.progress, 0f..1f)
+    }.graphicsLayer {
+        val pull = if (motion) state.feedbackFraction.coerceIn(0f, 1f) else 0f
+        scaleX = 1f + .08f * pull
+        scaleY = 1f - .04f * pull
     }
-    if (state.loading && LocalMotionEnabled.current) {
+    if (state.loading && motion) {
         CircularProgressIndicator(modifier = indicator, color = color, strokeWidth = 2.dp)
     } else {
         Canvas(indicator) {
@@ -306,6 +342,20 @@ internal fun BottomPullLoadIndicator(
                 useCenter = false, topLeft = center - Offset(radius, radius),
                 size = Size(radius * 2f, radius * 2f), style = stroke,
             )
+            val checked = ready.value.coerceIn(0f, 1f)
+            val unit = (size.minDimension * .16f).coerceAtLeast(1f)
+            fun point(x: Float, y: Float) = center + Offset(x * unit, y * unit)
+            fun morph(arrow: Offset, check: Offset) = arrow + (check - arrow) * checked
+            val a = morph(point(-.65f, -.05f), point(-.85f, -.05f))
+            val b = morph(point(0f, -.7f), point(-.2f, .55f))
+            val c = morph(point(.65f, -.05f), point(.9f, -.65f))
+            rotate(if (motion) -18f * fraction * (1f - checked) else 0f, pivot = center) {
+                val glyph = color.copy(alpha = .62f + .38f * fraction)
+                drawLine(glyph, a, b, 1.7.dp.toPx(), StrokeCap.Round)
+                drawLine(glyph, b, c, 1.7.dp.toPx(), StrokeCap.Round)
+                if (checked < 1f) drawLine(glyph.copy(alpha = glyph.alpha * (1f - checked)),
+                    point(0f, -.7f), point(0f, .8f), 1.7.dp.toPx(), StrokeCap.Round)
+            }
         }
     }
 }

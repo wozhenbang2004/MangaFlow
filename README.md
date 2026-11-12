@@ -1,5 +1,7 @@
 # 漫流 · MangaFlow
 
+Current 2026-11-12 interface batch: physical collection cabinet; picture/spread hearts and image collection (replacing bookmark/notes controls); reader clock, actual foreground reading statistics; grouped reader settings with full-width segmented selection; softer ranking-list transitions; finger-driven pull and curved swipe removal; quieter glass search; immediate short cold-start reveal; local image/silent-video wallpaper; user-selected comic-window icon B. Settings → 外观 → 壁纸 imports ordinary image/video files. Wallpaper Engine scene/project/mobile packages are not generic videos. Build and device behavior remain pending the main CI/user feedback path.
+
 一个专注于阅读的 Android 漫画客户端。使用 Kotlin 和 Jetpack Compose，支持 Android 8.0 及以上。
 
 [项目主页](https://github.com/wozhenbang2004/MangaFlow)

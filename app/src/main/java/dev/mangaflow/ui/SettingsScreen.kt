@@ -282,7 +282,7 @@ fun SettingsScreen(
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+        modifier = Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background),
         contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 36.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
@@ -312,6 +312,8 @@ fun SettingsScreen(
                 color = secondary,
                 modifier = Modifier.padding(top = 8.dp),
             )
+            Spacer(Modifier.height(20.dp))
+            WallpaperSettings()
             Spacer(Modifier.height(24.dp))
             HorizontalDivider(color = colors.outlineVariant)
             Spacer(Modifier.height(28.dp))
@@ -341,7 +343,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(8.dp))
             SettingsLinkRow(
                 "导出阅读备份",
-                if (backupBusy == "export") "正在导出…" else "收藏、进度、书签与阅读习惯",
+                if (backupBusy == "export") "正在导出…" else "收藏、进度、画面收藏与阅读统计",
             ) {
                 if (backupBusy == null) exportBackup.launch("MangaFlow-backup.json")
             }
@@ -590,7 +592,7 @@ private fun WebDavBackupDialog(
             ) {
                 Text("WebDAV 阅读备份", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "只同步收藏、阅读位置、书签和阅读偏好。服务器必须提供可信 HTTPS，密码仅加密保存在本机。",
+                    "同步书架、阅读位置、画面收藏、时长和阅读偏好。服务器必须提供可信 HTTPS，密码仅加密保存在本机。",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant,
                 )
@@ -722,12 +724,12 @@ private fun BackupRestoreDialog(
                     } ?: "未知时间"
                     Text("备份时间 $date", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        "${restore.info.favorites} 本收藏 · ${restore.info.history} 条阅读记录 · ${restore.info.bookmarks} 个有书签的章节",
+                        "${restore.info.favorites} 本收藏 · ${restore.info.history} 条阅读记录 · ${restore.info.bookmarks} 项画面收藏",
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant,
                     )
                     Text(
-                        "这会覆盖本机书架、阅读位置、书签和阅读偏好。下载文件与登录状态保持不变。",
+                        "这会覆盖本机书架、阅读位置、画面收藏、时长和阅读偏好。下载文件与登录状态保持不变。",
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant,
                     )

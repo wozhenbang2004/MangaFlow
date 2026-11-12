@@ -65,8 +65,8 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.rounded.Bookmark
-import androidx.compose.material.icons.rounded.BookmarkBorder
+import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
@@ -78,7 +78,6 @@ import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -155,7 +154,7 @@ import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
-import dev.mangaflow.storage.ReaderBookmark
+import dev.mangaflow.storage.PageCollection
 import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
@@ -193,6 +192,7 @@ fun ReaderScreen(
     manga: Manga,
     chapters: List<Chapter>,
     initialChapterId: String,
+    initialCollection: PageCollection? = null,
     repository: MangaRepository,
     libraryStore: LibraryStore,
     downloadStore: DownloadStore,
@@ -207,13 +207,28 @@ fun ReaderScreen(
     onRetryChapters: () -> Unit = {},
     active: Boolean = true,
 ) {
+    var chapterId by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(initialChapterId) }
+    var collectionPresentation by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(initialCollection != null) }
+    var collectionPositionApplied by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(false) }
+    val presentedCollection = initialCollection?.takeIf { collectionPresentation && it.chapter.id == chapterId }
     val globalPreferences by libraryStore.preferences.collectAsState()
     val mangaPreferences by libraryStore.mangaPreferences.collectAsState()
-    val preferences = remember(globalPreferences, mangaPreferences, manga.id) {
+    val savedPreferences = remember(globalPreferences, mangaPreferences, manga.id) {
         (mangaPreferences[manga.id] ?: globalPreferences).copy(glassSkin = globalPreferences.glassSkin)
     }
+    var collectionLayout by remember(manga.id, initialCollection?.key) { mutableStateOf<ReaderPreferences?>(null) }
+    val preferences = remember(savedPreferences, presentedCollection, collectionLayout) {
+        presentedCollection?.let {
+            savedPreferences.copy(mode = collectionLayout?.mode ?: it.mode,
+                doublePage = collectionLayout?.doublePage ?: it.spread,
+                coverAlone = collectionLayout?.coverAlone ?: it.coverAlone)
+        } ?: savedPreferences
+    }
+    val pageCollections by libraryStore.pageCollections.collectAsState()
     val downloads by downloadStore.entries.collectAsState()
-    var chapterId by rememberSaveable(manga.id) { mutableStateOf(initialChapterId) }
+    LaunchedEffect(chapterId) {
+        if (initialCollection?.chapter?.id != chapterId) collectionPresentation = false
+    }
     val chapter = chapters.firstOrNull { it.id == chapterId }
         ?: Chapter(chapterId, libraryStore.progressFor(manga.id)?.takeIf { it.chapterId == chapterId }?.chapterTitle ?: "正在阅读", 0)
     val localImport = manga.sourceUrl == LOCAL_SOURCE_URL
@@ -233,16 +248,12 @@ fun ReaderScreen(
     var targetOffset by remember(chapterId) { mutableIntStateOf(0) }
     var returnLocation by remember(chapterId) { mutableStateOf<ReaderReturnLocation?>(null) }
     var showPageNavigator by remember(chapterId) { mutableStateOf(false) }
-    var bookmarks by remember(manga.id, chapterId) {
-        mutableStateOf(libraryStore.bookmarksFor(manga.id, chapterId))
-    }
-    var bookmarkEditor by remember(chapterId) { mutableStateOf<ReaderBookmark?>(null) }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showComments by remember(chapterId) { mutableStateOf(false) }
     var showSpreadAdjustment by remember(chapterId) { mutableStateOf(false) }
-    var manualSingles by remember(manga.id, chapterId) {
-        mutableStateOf(libraryStore.spreadSinglesFor(manga.id, chapterId))
+    var manualSingles by remember(manga.id, chapterId, presentedCollection?.key) {
+        mutableStateOf(presentedCollection?.singlePages ?: libraryStore.spreadSinglesFor(manga.id, chapterId))
     }
     var atChapterEnd by remember(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) {
         mutableStateOf(false)
@@ -253,6 +264,7 @@ fun ReaderScreen(
     var displayedDownloadMessage by remember(chapterId) { mutableStateOf("") }
     var progressInteracting by remember(chapterId) { mutableStateOf(false) }
     val dimPreview = remember { mutableStateOf<Float?>(null) }
+    var imageVisible by remember(chapterId) { mutableStateOf(false) }
     var chapterVisibilityReported by rememberSaveable(manga.id, chapterId) { mutableStateOf(false) }
     var nextChapterPrefetched by remember(manga.id, chapterId) { mutableStateOf(false) }
     var leavingReader by remember { mutableStateOf(false) }
@@ -303,12 +315,53 @@ fun ReaderScreen(
     val touchExploration = rememberReaderTouchExploration()
     val delayedLoading = rememberDelayedBusy(loading)
 
+    val clock = rememberReaderClock(active && !leavingReader)
+    RecordReaderActivity(manga, active && !leavingReader && !loading && error == null && imageVisible &&
+        !showSettings && !showChapters && !showComments && !showSpreadAdjustment && !showPageNavigator,
+        libraryStore)
+    fun updatePreferences(next: ReaderPreferences) {
+        // Persist only settings the user actually changed, never the collection's temporary layout.
+        val saved = savedPreferences.copy(
+            mode = if (next.mode != preferences.mode) next.mode else savedPreferences.mode,
+            theme = if (next.theme != preferences.theme) next.theme else savedPreferences.theme,
+            keepScreenOn = if (next.keepScreenOn != preferences.keepScreenOn) next.keepScreenOn else savedPreferences.keepScreenOn,
+            pageGap = if (next.pageGap != preferences.pageGap) next.pageGap else savedPreferences.pageGap,
+            doublePage = if (next.doublePage != preferences.doublePage) next.doublePage else savedPreferences.doublePage,
+            coverAlone = if (next.coverAlone != preferences.coverAlone) next.coverAlone else savedPreferences.coverAlone,
+            dimAmount = if (next.dimAmount != preferences.dimAmount) next.dimAmount else savedPreferences.dimAmount,
+            glassSkin = if (next.glassSkin != preferences.glassSkin) next.glassSkin else savedPreferences.glassSkin,
+        )
+        if (presentedCollection != null) collectionLayout = next
+        libraryStore.updateMangaPreferences(manga.id, saved)
+    }
+    fun picture(first: Int, last: Int = first): PageCollection? {
+        if (first !in pages.indices || last !in first..pages.lastIndex) return null
+        return PageCollection(manga, chapter, first, last,
+            previewUrls = (first..last).map { pages[it].url }, mode = preferences.mode,
+            coverAlone = preferences.coverAlone, singlePages = manualSingles)
+    }
+    val currentSpread = remember(pages, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles, pageIndex) {
+        if (pages.isEmpty()) null
+        else if (preferences.mode != ReadingMode.VERTICAL && preferences.doublePage)
+            pageSpreads(pages, preferences.coverAlone, manualSingles).firstOrNull { it.contains(pageIndex) }
+        else PageSpread(pageIndex.coerceIn(pages.indices))
+    }
+    val currentPicture = currentSpread?.let { picture(it.first, it.last) }
+    val currentPictureCollected = currentPicture?.key?.let { key -> pageCollections.any { it.key == key } } == true
+    fun togglePicture(first: Int, last: Int = first) {
+        picture(first, last)?.let { collection ->
+            val existed = pageCollections.any { it.key == collection.key }
+            libraryStore.togglePageCollection(collection)
+            downloadMessage = if (existed) "已取消画面收藏" else if (collection.spread) "已收藏跨页画面" else "已收藏画面"
+        }
+    }
+
     if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showChapters || showSpreadAdjustment || showComments, lightChrome)
     val leaveReader = { leavingReader = true; onBack() }
     BackHandler(enabled = active, onBack = leaveReader)
     LaunchedEffect(active) { leavingReader = !active }
 
-    LaunchedEffect(chapterId, retry) {
+    LaunchedEffect(chapterId, retry, initialCollection?.key) {
         loading = true
         error = null
         try {
@@ -321,8 +374,11 @@ fun ReaderScreen(
             } else repository.pages(manga.id, chapterId, forceRefresh = retry > 0)
             if (loaded.isEmpty()) throw IllegalStateException("这一章还没有可读取的图片")
             val saved = libraryStore.progressFor(manga.id, chapterId)
-            pageIndex = saved?.pageIndex?.coerceIn(0, loaded.lastIndex) ?: 0
-            cursor.scrollOffset = saved?.scrollOffset ?: 0
+            val collection = initialCollection?.takeIf { collectionPresentation && !collectionPositionApplied && it.chapter.id == chapterId }
+            pageIndex = (collection?.firstPage ?: saved?.pageIndex ?: 0).coerceIn(0, loaded.lastIndex)
+            cursor.scrollOffset = if (collection != null) 0 else saved?.scrollOffset ?: 0
+            if (collection != null) collectionPositionApplied = true
+            libraryStore.migratePageBookmarks(manga, chapter, loaded)
             downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
             pages = loaded
         } catch (cancelled: CancellationException) {
@@ -394,8 +450,9 @@ fun ReaderScreen(
                         onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, pages.size, offset,
                             clearLegacyLongImagePosition = preferences.mode == ReadingMode.VERTICAL) },
                         longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
-                        onVisibleImageLoaded = {
-                            if (active && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
+                        onVisibleImageChanged = { visible ->
+                            imageVisible = visible
+                            if (visible && active && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
                                 chapterVisibilityReported = true
                                 chapterVisible(manga, chapter)
                             }
@@ -476,7 +533,7 @@ fun ReaderScreen(
                     if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
                         TextButton(enabled = controlsVisible, onClick = {
                             cursor.scrollOffset = 0
-                            libraryStore.updateMangaPreferences(manga.id, preferences.copy(doublePage = !preferences.doublePage))
+                            updatePreferences(preferences.copy(doublePage = !preferences.doublePage))
                         }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                             Text(if (preferences.doublePage) "双页" else "单页", color = colors.onSurface, fontSize = 12.sp)
                         }
@@ -502,6 +559,7 @@ fun ReaderScreen(
                     if (pages.isNotEmpty()) key(chapterId) {
                         ReaderProgressSlider(
                             pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
+                            clock = clock,
                             enabled = controlsVisible,
                             onSeek = { destination ->
                                 if (destination != pageIndex) {
@@ -532,13 +590,12 @@ fun ReaderScreen(
                             siblings.getOrNull(chapterIndex - 1)?.let { chapterId = it.id }
                         }
                         ReaderIcon(Icons.Rounded.MenuBook, "章节目录", interactive = controlsVisible, emphasis = 1f) { showChapters = true }
-                        val currentBookmark = bookmarks.firstOrNull { it.pageIndex == pageIndex }
                         ReaderIcon(
-                            if (currentBookmark == null) Icons.Rounded.BookmarkBorder else Icons.Rounded.Bookmark,
-                            if (currentBookmark == null) "添加页书签" else "编辑页书签",
-                            enabled = pages.isNotEmpty(), interactive = controlsVisible, emphasis = .52f,
+                            if (currentPictureCollected) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                            if (currentPictureCollected) "取消画面收藏" else if (currentPicture?.spread == true) "收藏当前跨页" else "收藏当前画面",
+                            enabled = currentPicture != null, interactive = controlsVisible, emphasis = .65f,
                         ) {
-                            bookmarkEditor = currentBookmark ?: ReaderBookmark(pageIndex)
+                            currentPicture?.let { togglePicture(it.firstPage, it.lastPage) }
                         }
                         ReaderIcon(
                             Icons.Rounded.Forum,
@@ -612,10 +669,11 @@ fun ReaderScreen(
             }
         }
 
-        if (!controlsVisible && pages.isNotEmpty() && !atChapterEnd) Text(
-            "${pageIndex + 1} / ${pages.size}",
+        if (!controlsVisible && pages.isNotEmpty()) Text(
+            "$clock · ${pageIndex + 1} / ${pages.size}",
             color = colors.onSurfaceVariant, fontSize = 11.sp,
-            modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility).padding(12.dp)
+            modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+                .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = if (atChapterEnd) 72.dp else 12.dp)
                 .clip(RoundedCornerShape(8.dp)).background(colors.surface.copy(alpha = .9f)).padding(horizontal = 8.dp, vertical = 4.dp)
                 .clickable { controlsVisible = true },
         )
@@ -636,7 +694,9 @@ fun ReaderScreen(
         pages = pages,
         headers = headers,
         currentPage = pageIndex,
-        bookmarks = bookmarks,
+        collectedPages = pageCollections.filter { it.manga.id == manga.id && it.chapter.id == chapterId && !it.spread }
+            .map(PageCollection::firstPage).toSet(),
+        onToggleCollection = { togglePicture(it) },
         backdrop = readerBackdrop,
         onSelect = { destination ->
             if (destination != pageIndex) {
@@ -648,29 +708,15 @@ fun ReaderScreen(
         },
         onDismiss = { showPageNavigator = false },
     )
-    ReaderBookmarkDialog(
-        bookmark = bookmarkEditor,
-        canRemove = bookmarkEditor?.let { editing -> bookmarks.any { it.pageIndex == editing.pageIndex } } == true,
-        backdrop = readerBackdrop,
-        onSave = { editing, note ->
-            bookmarks = libraryStore.saveBookmark(manga.id, chapterId, editing.pageIndex, note)
-            bookmarkEditor = null
-        },
-        onRemove = { editing ->
-            bookmarks = libraryStore.removeBookmark(manga.id, chapterId, editing.pageIndex)
-            bookmarkEditor = null
-        },
-        onDismiss = { bookmarkEditor = null },
-    )
     ReaderSettingsDialog(visible = showSettings, preferences = preferences, backdrop = readerBackdrop,
         onDimPreview = { dimPreview.value = it }, update = { next ->
         if (next.mode != preferences.mode || next.doublePage != preferences.doublePage || next.coverAlone != preferences.coverAlone) {
             cursor.scrollOffset = 0
         }
-        libraryStore.updateMangaPreferences(manga.id, next)
+        updatePreferences(next)
     }) {
         dimPreview.value?.takeIf { it != preferences.dimAmount }?.let { amount ->
-            libraryStore.updateMangaPreferences(manga.id, preferences.copy(dimAmount = amount))
+            updatePreferences(preferences.copy(dimAmount = amount))
         }
         showSettings = false
     }
@@ -683,7 +729,7 @@ fun ReaderScreen(
         backdrop = readerBackdrop,
         onCoverChange = { cover ->
             cursor.scrollOffset = 0
-            libraryStore.updateMangaPreferences(manga.id, preferences.copy(coverAlone = cover))
+            updatePreferences(preferences.copy(coverAlone = cover))
         },
         onCorrection = { next ->
             cursor.scrollOffset = 0
@@ -723,7 +769,7 @@ private fun ChapterPages(
     onLocation: (Int, Int) -> Unit,
     onSave: (Int, Int) -> Unit,
     longImagePosition: (Int) -> Float?,
-    onVisibleImageLoaded: () -> Unit,
+    onVisibleImageChanged: (Boolean) -> Unit,
     onNearEnd: () -> Unit,
     onTap: () -> Unit,
     active: Boolean,
@@ -733,7 +779,7 @@ private fun ChapterPages(
 ) {
     val save by rememberUpdatedState(onSave)
     val location by rememberUpdatedState(onLocation)
-    val visibleImageLoaded by rememberUpdatedState(onVisibleImageLoaded)
+    val visibleImageChanged by rememberUpdatedState(onVisibleImageChanged)
     val nearEnd by rememberUpdatedState(onNearEnd)
     val atEndChanged by rememberUpdatedState(onAtEndChanged)
     val loadedPages = remember { mutableStateMapOf<Int, Boolean>() }
@@ -793,8 +839,8 @@ private fun ChapterPages(
                         item.offset + item.size > layout.viewportStartOffset
                 }?.index ?: -1
             }.distinctUntilChanged().collect { index ->
+                visibleImageChanged(index >= 0)
                 if (index >= 0) {
-                    visibleImageLoaded()
                     if (index >= pages.lastIndex - 3) nearEnd()
                 }
             }
@@ -817,8 +863,11 @@ private fun ChapterPages(
             }
         }
         DisposableEffect(list) {
-            onDispose { if (!restoring) save(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
-                if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0) }
+            onDispose {
+                visibleImageChanged(false)
+                if (!restoring) save(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
+                    if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0)
+            }
         }
         AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests, resolvePage,
             onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size }) {
@@ -885,8 +934,8 @@ private fun ChapterPages(
                     else -1
                 } ?: -1
             }.distinctUntilChanged().collect { lastVisible ->
+                visibleImageChanged(lastVisible >= 0)
                 if (lastVisible >= 0) {
-                    visibleImageLoaded()
                     if (lastVisible >= pages.lastIndex - 3) nearEnd()
                 }
             }
@@ -899,7 +948,10 @@ private fun ChapterPages(
             }
         }
         DisposableEffect(pager, groups) {
-            onDispose { save(groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex, 0) }
+            onDispose {
+                visibleImageChanged(false)
+                save(groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex, 0)
+            }
         }
         AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests, resolvePage) {
             val shown = groups.getOrNull(pager.currentPage)
@@ -1266,13 +1318,13 @@ private fun ReaderPageNavigatorDialog(
     pages: List<Page>,
     headers: Map<String, String>,
     currentPage: Int,
-    bookmarks: List<ReaderBookmark>,
+    collectedPages: Set<Int>,
+    onToggleCollection: (Int) -> Unit,
     backdrop: HazeState,
     onSelect: (Int) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    val bookmarked = remember(bookmarks) { bookmarks.map(ReaderBookmark::pageIndex).toSet() }
     MotionDialog(
         visible = visible,
         onDismissRequest = onDismiss,
@@ -1316,11 +1368,13 @@ private fun ReaderPageNavigatorDialog(
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier.fillMaxSize(),
                                 )
-                                if (page.index in bookmarked) Icon(
-                                    Icons.Rounded.Bookmark, null,
-                                    Modifier.align(Alignment.TopEnd).padding(4.dp).size(15.dp),
-                                    tint = MaterialTheme.colorScheme.onSurface,
-                                )
+                                MotionIconButton(onClick = { onToggleCollection(page.index) },
+                                    modifier = Modifier.align(Alignment.TopEnd).padding(2.dp).size(30.dp)
+                                        .clip(CircleShape).background(MaterialTheme.colorScheme.surface.copy(alpha = .92f))) {
+                                    Icon(if (page.index in collectedPages) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                        if (page.index in collectedPages) "取消这一页的收藏" else "单独收藏这一页",
+                                        Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurface)
+                                }
                             }
                             Text(
                                 "${page.index + 1}",
@@ -1338,46 +1392,11 @@ private fun ReaderPageNavigatorDialog(
 }
 
 @Composable
-private fun ReaderBookmarkDialog(
-    bookmark: ReaderBookmark?,
-    canRemove: Boolean,
-    backdrop: HazeState,
-    onSave: (ReaderBookmark, String) -> Unit,
-    onRemove: (ReaderBookmark) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var note by remember(bookmark?.pageIndex, bookmark?.note) { mutableStateOf(bookmark?.note.orEmpty()) }
-    MotionDialog(visible = bookmark != null, onDismissRequest = onDismiss) {
-        bookmark?.let { editing ->
-            ReaderDialogSurface(Modifier.padding(20.dp).widthIn(max = 460.dp).fillMaxWidth(), backdrop) {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp)) {
-                    ReaderPanelHeading("第 ${editing.pageIndex + 1} 页书签", "关闭书签", onDismiss)
-                    OutlinedTextField(
-                        value = note,
-                        onValueChange = { if (it.length <= 240) note = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 2,
-                        maxLines = 5,
-                        label = { Text("备注（可选）") },
-                        placeholder = { Text("记点什么，免得未来的你又问现在的你在看哪。") },
-                    )
-                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
-                        if (canRemove) TextButton(onClick = { onRemove(editing) }) {
-                            Text("删除", color = MaterialTheme.colorScheme.error)
-                        }
-                        TextButton(onClick = { onSave(editing, note) }) { Text("保存") }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun ReaderProgressSlider(
     pageIndex: Int,
     pageCount: Int,
     pendingPage: Int?,
+    clock: String,
     enabled: Boolean,
     onSeek: (Int) -> Unit,
     onOpenNavigator: () -> Unit,
@@ -1391,7 +1410,7 @@ private fun ReaderProgressSlider(
     var preview by remember { mutableStateOf<Float?>(null) }
     val lastPage = (pageCount - 1).coerceAtLeast(0)
     val shown = (preview ?: pendingPage?.toFloat() ?: pageIndex.toFloat()).coerceIn(0f, lastPage.toFloat())
-    val numberWidth = with(LocalDensity.current) { 12.sp.toDp() * (pageCount.toString().length * 2 + 3) * .65f }
+    val numberWidth = with(LocalDensity.current) { 12.sp.toDp() * (pageCount.toString().length * 2 + 3) * .65f } + 48.dp
 
     LaunchedEffect(pressed, dragged, enabled) {
         interactionChanged(enabled && (pressed || dragged))
@@ -1425,6 +1444,7 @@ private fun ReaderProgressSlider(
                 .padding(vertical = 5.dp),
             horizontalArrangement = Arrangement.Center,
         ) {
+            Text("$clock · ", color = colors.onSurfaceVariant, fontSize = 11.sp)
             Text("${shown.roundToInt() + 1}", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             Text(" / $pageCount", color = colors.onSurface.copy(alpha = .86f), fontSize = 12.sp)
         }
@@ -1485,85 +1505,6 @@ private fun ReaderWindow(keepScreenOn: Boolean, controlsVisible: Boolean, lightC
                 isAppearanceLightNavigationBars = lightChrome
                 systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 if (controlsVisible) show(WindowInsetsCompat.Type.systemBars()) else hide(WindowInsetsCompat.Type.systemBars())
-            }
-        }
-    }
-}
-
-@Composable
-private fun ReaderSettingsDialog(
-    visible: Boolean,
-    preferences: ReaderPreferences,
-    backdrop: HazeState,
-    onDimPreview: (Float) -> Unit,
-    update: (ReaderPreferences) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var dimAmount by remember { mutableFloatStateOf(preferences.dimAmount) }
-    val colors = MaterialTheme.colorScheme
-    val motion = LocalMotionEnabled.current
-    val modes = listOf(ReadingMode.VERTICAL to "纵向",
-        ReadingMode.RIGHT_TO_LEFT to "右翻", ReadingMode.LEFT_TO_RIGHT to "左翻")
-    val themes = listOf(ReaderTheme.PAPER, ReaderTheme.SEPIA, ReaderTheme.INK)
-    val availableHeight = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(160).dp
-    LaunchedEffect(visible, preferences.dimAmount) { if (visible) dimAmount = preferences.dimAmount }
-    MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth(), backdrop) {
-            Column(Modifier.heightIn(max = availableHeight).padding(horizontal = 18.dp)) {
-                ReaderPanelHeading("阅读设置", "关闭设置", onDismiss)
-                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
-                    .padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("阅读方式", color = colors.onSurfaceVariant, fontSize = 12.sp)
-                    MotionTabs(
-                        selected = modes.indexOfFirst { it.first == preferences.mode },
-                        labels = modes.map { it.second },
-                        onSelect = { update(preferences.copy(mode = modes[it].first)) },
-                        foreground = colors.onSurface, muted = colors.onSurfaceVariant,
-                        track = colors.onSurface.copy(alpha = .035f), indicator = colors.onSurface.copy(alpha = .08f),
-                        fontSize = 12.sp, role = Role.RadioButton,
-                    )
-                    Text("玻璃皮肤", color = colors.onSurfaceVariant, fontSize = 12.sp,
-                        modifier = Modifier.padding(top = 8.dp))
-                    GlassSkinPicker(
-                        selected = preferences.glassSkin,
-                        onSelected = { update(preferences.copy(glassSkin = it)) },
-                    )
-                    Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("纸面", Modifier.weight(1f), fontSize = 14.sp)
-                        MotionTabs(
-                            selected = themes.indexOf(preferences.theme), labels = listOf("纸白", "暖纸", "墨黑"),
-                            onSelect = { update(preferences.copy(theme = themes[it])) },
-                            modifier = Modifier.width(188.dp), foreground = colors.onSurface,
-                            muted = colors.onSurfaceVariant, indicator = colors.onSurface.copy(alpha = .08f), fontSize = 12.sp,
-                            role = Role.RadioButton,
-                        )
-                    }
-                    ReaderToggle("保持屏幕常亮", preferences.keepScreenOn) { update(preferences.copy(keepScreenOn = it)) }
-                    Column(Modifier.fillMaxWidth().animateContentSize(
-                        animationSpec = tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
-                    )) {
-                        if (preferences.mode == ReadingMode.VERTICAL) ReaderToggle("页间留白", preferences.pageGap) {
-                            update(preferences.copy(pageGap = it))
-                        }
-                        if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
-                            ReaderToggle("双页跨页", preferences.doublePage) { update(preferences.copy(doublePage = it)) }
-                            if (preferences.doublePage) ReaderToggle("封面独页", preferences.coverAlone) {
-                                update(preferences.copy(coverAlone = it))
-                            }
-                        }
-                    }
-                    Column(Modifier.padding(top = 2.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("降低亮度", fontSize = 14.sp)
-                            Text("${(dimAmount * 100).roundToInt()}%", color = colors.onSurfaceVariant, fontSize = 12.sp)
-                        }
-                        ReaderSeekBar(
-                            value = dimAmount, onValueChange = { dimAmount = it; onDimPreview(it) },
-                            onValueChangeFinished = { update(preferences.copy(dimAmount = dimAmount)) },
-                            valueRange = 0f..0.65f, modifier = Modifier.fillMaxWidth(), label = "降低阅读亮度",
-                        )
-                    }
-                }
             }
         }
     }
@@ -1721,7 +1662,7 @@ private fun ReaderChaptersDialog(
 }
 
 @Composable
-private fun ReaderPanelHeading(title: String, closeLabel: String, onDismiss: () -> Unit) {
+internal fun ReaderPanelHeading(title: String, closeLabel: String, onDismiss: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, color = MaterialTheme.colorScheme.onSurface, fontSize = 17.sp,
             fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))

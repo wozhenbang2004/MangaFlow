@@ -53,6 +53,7 @@ internal fun MangaMetricBadges(
     compact: Boolean = false,
     maxScores: Int = if (compact) 2 else Int.MAX_VALUE,
     showMore: Boolean = true,
+    plain: Boolean = false,
 ) {
     val state = LocalMangaMetrics.current
     // Lazy containers may briefly compose a passing item; don't start work for every fling.
@@ -65,14 +66,14 @@ internal fun MangaMetricBadges(
     val heat = if (manga.rank != null) manga.popularity
         else manga.totalPopularity ?: metrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: manga.popularity
     FlowRow(
-        modifier = modifier.heightIn(min = if (compact) 44.dp else 22.dp),
+        modifier = modifier.heightIn(min = if (plain && compact) 32.dp else if (compact) 44.dp else 22.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
         maxItemsInEachRow = if (compact) 2 else Int.MAX_VALUE,
     ) {
         heat?.let { value ->
             MetricBadge(if (compact) "热" else heatLabel, metricCount(value),
-                "$heatLabel $value", foreground, compact, "copy")
+                "$heatLabel $value", foreground, compact, "copy", plain)
         }
         val scores = metrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
             .sortedBy { ReviewProviders.order(it.sourceId) }
@@ -87,18 +88,18 @@ internal fun MangaMetricBadges(
                 MetricBadge(provider?.mark ?: metric.sourceId, value,
                     "${metric.name}，${metric.scoreLabel}${metricScore(score)} 分" +
                         (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "") +
-                        (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact, metric.sourceId)
+                        (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact, metric.sourceId, plain)
             }
         }
         // Reserve the score row before providers answer. A neutral slot is less misleading than
         // a fabricated zero and prevents the title/progress below it from shifting as results arrive.
         val reservedScores = if (compact) maxScores.coerceIn(0, 2) else if (visible.isEmpty()) 1 else visible.size
-        repeat((reservedScores - visible.size).coerceAtLeast(0)) {
+        if (!plain) repeat((reservedScores - visible.size).coerceAtLeast(0)) {
             MetricPlaceholder(foreground, compact)
         }
         if (compact && showMore && scores.size > visible.size) {
             MetricBadge("+${scores.size - visible.size}", "评分", "更多来源评分可在漫画详情查看",
-                foreground, compact, "more")
+                foreground, compact, "more", plain)
         }
     }
 }
@@ -111,6 +112,7 @@ private fun MetricBadge(
     foreground: Color,
     compact: Boolean,
     sourceId: String,
+    plain: Boolean,
 ) {
     val onDark = foreground.luminance() > .5f
     val accent = when (sourceId) {
@@ -123,11 +125,11 @@ private fun MetricBadge(
         else -> foreground
     }
     Row(
-        modifier = Modifier.clip(RoundedCornerShape(6.dp))
-            .background(accent.copy(alpha = if (onDark) .14f else .085f))
-            .widthIn(min = if (compact) 56.dp else 64.dp)
+        modifier = Modifier.then(if (plain) Modifier else Modifier.clip(RoundedCornerShape(6.dp))
+            .background(accent.copy(alpha = if (onDark) .14f else .085f)))
+            .widthIn(min = if (plain) 0.dp else if (compact) 56.dp else 64.dp)
             .semantics(mergeDescendants = true) { contentDescription = description }
-            .padding(horizontal = if (compact) 4.dp else 6.dp, vertical = 3.dp),
+            .padding(horizontal = if (plain) 0.dp else if (compact) 4.dp else 6.dp, vertical = if (plain) 0.dp else 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 5.dp),
     ) {
