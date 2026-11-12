@@ -8,15 +8,14 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Small, anonymous metadata shared by discovery, search, library and detail. */
 class MangaMetricsRepository(
@@ -28,10 +27,8 @@ class MangaMetricsRepository(
     private val file = AtomicFile(File(directory, "metrics.json"))
     private val lock = Any()
     private val disk = Mutex()
-    private val requests = List(32) { Mutex() }
-    private val network = Semaphore(2)
+    private val requests = mutableMapOf<String, InFlightRequest>()
     private val entries = LinkedHashMap<String, CachedManga>()
-    private val providerCooldown = mutableMapOf<String, Long>()
     private var loaded = false
     @Volatile private var generation = 0L
 
@@ -41,38 +38,52 @@ class MangaMetricsRepository(
     }
 
     /** Publish stored values before refreshing, then publish each independent source. */
-    suspend fun lookup(manga: Manga, onUpdate: (List<MangaMetric>) -> Unit = {}): List<MangaMetric> =
+    suspend fun lookup(
+        manga: Manga,
+        forceRefresh: Boolean = false,
+        onUpdate: (List<MangaMetric>) -> Unit = {},
+    ): List<MangaMetric> =
         withContext(Dispatchers.IO) {
             val epoch = generation
-            var dirty = false
+            val dirty = AtomicBoolean(false)
+            val updates = Any()
             loadDisk(epoch)
+            // Count holders and waiters so a cancelled waiter cannot replace a live lock.
+            val request = synchronized(lock) {
+                requests.getOrPut(manga.id) { InFlightRequest() }.also { it.references++ }
+            }
             try {
-                requests[(manga.id.hashCode() and Int.MAX_VALUE) % requests.size].withLock {
+                request.mutex.withLock {
                     if (epoch != generation) return@withLock emptyList()
                     val identity = identityKey(manga)
                     prepare(manga.id, identity)
                     // Overall heat is already in public list/detail metadata. A badge must not
                     // fetch a chapter directory or copy a day/week rank value into overall heat.
                     val copy = community.metric(manga)
-                    if (copy.popularity != null) dirty = remember(manga, identity, epoch, copy, preserveUnchangedTime = true)
-                    onUpdate(current(manga.id, identity))
+                    if (copy.popularity != null && remember(manga, identity, epoch, copy, preserveUnchangedTime = true)) {
+                        dirty.set(true)
+                    }
+                    if (epoch == generation && identity == identityKey(manga)) onUpdate(current(manga.id, identity))
 
                     val now = System.currentTimeMillis()
                     val due = synchronized(lock) {
-                        listOf("bangumi", "anilist").filter { source ->
+                        ReviewProviders.metricIds.filter { source ->
                             val next = entries[manga.id]?.sources?.get(source)?.nextFetchAt ?: 0
-                            next <= now || next > now + SCORE_TTL
+                            forceRefresh || next <= now || next > now + SCORE_TTL
                         }.toSet()
                     }
                     if (due.isNotEmpty()) {
-                        network.withPermit {
-                            currentCoroutineContext().ensureActive()
-                            if (epoch == generation && identity == identityKey(manga)) {
-                                val ready = synchronized(lock) { due.filter { (providerCooldown[it] ?: 0) <= System.currentTimeMillis() }.toSet() }
-                                reviews.lookupMetrics(manga, ready) { source ->
+                        currentCoroutineContext().ensureActive()
+                        if (epoch == generation && identity == identityKey(manga)) {
+                            reviews.lookupMetrics(manga, due) { source ->
+                                // Independent providers may finish together. Commit and publish
+                                // one complete snapshot at a time so an older callback cannot win.
+                                synchronized(updates) {
                                     if (remember(manga, identity, epoch, source)) {
-                                        dirty = true
-                                        onUpdate(current(manga.id, identity))
+                                        dirty.set(true)
+                                        if (epoch == generation && identity == identityKey(manga)) {
+                                            onUpdate(current(manga.id, identity))
+                                        }
                                     }
                                 }
                             }
@@ -82,9 +93,13 @@ class MangaMetricsRepository(
                     if (epoch == generation && identity == identityKey(manga)) current(manga.id, identity) else emptyList()
                 }
             } finally {
+                synchronized(lock) {
+                    request.references--
+                    if (request.references == 0 && requests[manga.id] === request) requests.remove(manga.id)
+                }
                 // Leaving a card cancels its network work, but keeps already received values.
                 // This bounded file write runs after releasing the request lock; no new fetch starts.
-                if (dirty && epoch == generation) withContext(NonCancellable + Dispatchers.IO) {
+                if (dirty.get() && epoch == generation) withContext(NonCancellable + Dispatchers.IO) {
                     persist(epoch)
                 }
             }
@@ -112,7 +127,6 @@ class MangaMetricsRepository(
             synchronized(lock) {
                 generation++
                 entries.clear()
-                providerCooldown.clear()
                 loaded = true
             }
             reviews.clearCache()
@@ -144,8 +158,6 @@ class MangaMetricsRepository(
             val entry = entries[manga.id]?.takeIf { it.identity == identity } ?: return@synchronized false
             val previous = entry.sources[source.id]
             val now = System.currentTimeMillis()
-            if (source.status == ReviewStatus.UNAVAILABLE) providerCooldown[source.id] = now + RETRY_TTL
-            else providerCooldown.remove(source.id)
             val metric = when (source.status) {
                 ReviewStatus.UNAVAILABLE -> previous?.metric
                 ReviewStatus.NO_MATCH -> null
@@ -160,6 +172,7 @@ class MangaMetricsRepository(
             val checkedAt = if (source.status == ReviewStatus.UNAVAILABLE) oldTime else now
             val ttl = when {
                 source.status == ReviewStatus.UNAVAILABLE -> RETRY_TTL
+                source.status == ReviewStatus.NO_MATCH -> NO_MATCH_TTL
                 source.id == "copy" -> HEAT_TTL
                 else -> SCORE_TTL
             }
@@ -202,7 +215,11 @@ class MangaMetricsRepository(
                             val count = value.nonNegativeLong("ratingCount")?.takeIf { it <= Int.MAX_VALUE }?.toInt()
                             val label = value.optString("scoreLabel").take(40)
                             val metric = if (score != null || heat != null) MangaMetric(source, sourceName(source), score, scale, count, heat, label) else null
-                            sources[source] = CachedMetric(metric, checked, next.takeIf { it in checked..(now + SCORE_TTL) } ?: 0)
+                            val validNext = next.takeIf { it in checked..(now + SCORE_TTL) } ?: 0
+                            // Older v1/v2 caches gave empty matches the six-hour score TTL.
+                            // Shorten only empty entries, preserving any shorter failure retry.
+                            val nextFetch = if (metric == null) minOf(validNext, checked + NO_MATCH_TTL) else validNext
+                            sources[source] = CachedMetric(metric, checked, nextFetch)
                         }
                         restored[id] = CachedManga(identity, accessed, sources)
                     }
@@ -257,6 +274,11 @@ class MangaMetricsRepository(
     private fun JSONObject.number(key: String): Double? = (opt(key) as? Number)?.toDouble()
     private fun JSONObject.nonNegativeLong(key: String): Long? = (opt(key) as? Number)?.toLong()?.takeIf { it >= 0 }
 
+    private class InFlightRequest {
+        val mutex = Mutex()
+        var references = 0
+    }
+
     private data class CachedManga(val identity: String, val accessedAt: Long, val sources: Map<String, CachedMetric> = emptyMap()) {
         fun metrics() = SOURCE_IDS.mapNotNull { sources[it]?.metric }
     }
@@ -268,6 +290,7 @@ class MangaMetricsRepository(
         const val HEAT_TTL = 30 * 60_000L
         const val SCORE_TTL = 6 * 60 * 60_000L
         const val RETRY_TTL = 5 * 60_000L
+        const val NO_MATCH_TTL = 15 * 60_000L
         const val MAX_AGE = 7 * 24 * 60 * 60_000L
         val SOURCE_IDS = listOf("copy") + ReviewProviders.metricIds
         fun sourceName(id: String) = if (id == "copy") "热度" else ReviewProviders.find(id)?.name ?: id

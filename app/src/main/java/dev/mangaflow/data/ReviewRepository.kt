@@ -5,10 +5,13 @@ import android.os.Build
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -35,6 +38,7 @@ class ReviewRepository(context: Context) {
         ShikimoriReviewProvider(providerHttp),
     )
     private val providerSlots = Semaphore(3)
+    private val metricProviderSlots = ReviewProviders.metricIds.associateWith { Semaphore(2) }
     private val chapterProviders = ChapterReviewProviders(providerHttp)
     private val chapterIdentityCache = LinkedHashMap<String, ChapterIdentitySnapshot>()
     private val associations = context.applicationContext.getSharedPreferences("review_associations", Context.MODE_PRIVATE)
@@ -87,38 +91,135 @@ class ReviewRepository(context: Context) {
         withContext(Dispatchers.IO) {
             val key = identityKey(manga)
             val epoch = cacheGeneration
-            var names = synchronized(confirmedNames) { confirmedNames[key] }.orEmpty()
-            if ("bangumi" in sourceIds) {
-                val matched = bangumi(manga, includeComments = false)
-                currentCoroutineContext().ensureActive()
-                if (epoch != cacheGeneration || key != identityKey(manga)) return@withContext
-                if (matched.source.status == ReviewStatus.READY) names = matched.names
-                onSource(matched.source)
+            val requested = ReviewProviders.metricIds.filter { it in sourceIds }
+            if (requested.isEmpty()) return@withContext
+            val identityLock = Any()
+            val knownNames = synchronized(confirmedNames) { confirmedNames[key] }.orEmpty()
+            // Metadata identities are local to this batch; READY here does not mean comments were loaded.
+            val knownSources = cachedSources(manga).filter { it.status == ReviewStatus.READY }
+                .associateByTo(LinkedHashMap<String, ReviewSource>(), ReviewSource::id)
+
+            fun isCurrent() = epoch == cacheGeneration && key == identityKey(manga)
+
+            fun identitySnapshot(): MetricLookupIdentity = synchronized(identityLock) {
+                val sources = knownSources.values.toList()
+                MetricLookupIdentity(
+                    aliases = (knownNames + confirmedAliases(manga, sources))
+                        .filter(String::isNotBlank).distinctBy(::normalize),
+                    externalIds = confirmedIds(sources),
+                )
             }
-            if ("anilist" in sourceIds) {
-                var source = aniList(manga, listOf(manga.title), includeComments = false)
-                currentCoroutineContext().ensureActive()
-                if (epoch != cacheGeneration || key != identityKey(manga)) return@withContext
-                if (source.status == ReviewStatus.NO_MATCH && names.isEmpty() && "bangumi" !in sourceIds) {
-                    // Scores survive a restart, but confirmed aliases are only held in memory.
-                    val matched = bangumi(manga, includeComments = false)
+
+            fun rememberIdentity(source: ReviewSource) {
+                if (source.status != ReviewStatus.READY || !isCurrent()) return
+                synchronized(identityLock) { knownSources[source.id] = source }
+            }
+
+            fun publish(source: ReviewSource) {
+                if (!isCurrent()) return
+                rememberIdentity(source)
+                onSource(source)
+            }
+
+            suspend fun attempt(sourceId: String, previous: MetricLookupIdentity? = null): MetricLookupAttempt? =
+                metricProviderSlots.getValue(sourceId).withPermit {
                     currentCoroutineContext().ensureActive()
-                    if (epoch != cacheGeneration || key != identityKey(manga)) return@withContext
-                    if (matched.source.status == ReviewStatus.READY) names = matched.names
+                    if (!isCurrent()) return@withPermit null
+                    // A queued source can use identities confirmed while it waited for its slot.
+                    val identity = identitySnapshot()
+                    val previousNames = previous?.aliases?.map(::normalize)?.toSet().orEmpty()
+                    val newNames = if (previous == null) emptyList() else
+                        identity.aliases.filter { normalize(it) !in previousNames }
+                    val aliases = (preferredMetricAliases(manga, newNames) + preferredMetricAliases(manga, identity.aliases))
+                        .distinctBy(::normalize)
+                    val info = ReviewProviders.find(sourceId)!!
+                    fun unavailable(message: String) = ReviewSource(sourceId, info.name,
+                        ReviewStatus.UNAVAILABLE, info.homeUrl, scoreScale = info.scoreScale ?: 10,
+                        message = message)
+                    val source = try {
+                        withTimeoutOrNull(30_000L) {
+                            val linked = savedId(manga, sourceId).ifBlank { identity.externalIds[sourceId].orEmpty() }
+                            when (sourceId) {
+                                "bangumi" -> {
+                                    val match = if (linked.isNotBlank()) bangumiSubject(requireSubjectId(linked), includeComments = false)
+                                        else bangumi(manga, includeComments = false, aliases = aliases)
+                                    if (linked.isNotBlank() && match.source.status == ReviewStatus.READY)
+                                        rememberNames(manga, key, epoch, match.names)
+                                    match.source
+                                }
+                                "anilist" -> if (linked.isNotBlank()) aniListSubject(requireSubjectId(linked), includeComments = false)
+                                    else aniList(manga, aliases, includeComments = false)
+                                else -> externalLookup(manga, externalProvider(sourceId), aliases,
+                                    identity.externalIds, includeComments = false)
+                            }
+                        } ?: unavailable("${info.name} 评分读取超时，请稍后重试。")
+                    } catch (cancel: CancellationException) { throw cancel }
+                      catch (failure: Exception) {
+                        unavailable(failure.reviewMessage("${info.name} 暂时无法连接，请稍后重试。"))
+                    }
+                    currentCoroutineContext().ensureActive()
+                    if (!isCurrent()) return@withPermit null
+                    MetricLookupAttempt(source, identity)
                 }
-                if (source.status == ReviewStatus.NO_MATCH && names.any { normalize(it) != normalize(manga.title) }) {
-                    source = aniList(manga, names + manga.title, includeComments = false)
+
+            coroutineScope {
+                val completed = Channel<Pair<String, MetricLookupAttempt?>>(requested.size + 1)
+                val unmatched = LinkedHashMap<String, MetricLookupAttempt>()
+                val retried = mutableSetOf<String>()
+                var inFlight = 0
+                var recoveryAttempted = false
+
+                fun start(sourceId: String, previous: MetricLookupIdentity? = null) {
+                    inFlight++
+                    launch { completed.send(sourceId to attempt(sourceId, previous)) }
                 }
-                currentCoroutineContext().ensureActive()
-                if (epoch == cacheGeneration && key == identityKey(manga)) onSource(source)
-            }
-            // Additional providers are resolved on detail. Card requests can reuse their
-            // saved association without turning every passing cover into a multi-site search.
-            externalProviders.filter { it.id in sourceIds }.forEach { provider ->
-                val source = externalLookup(manga, provider, names + manga.title,
-                    confirmedIds(cachedSources(manga)), includeComments = false)
-                currentCoroutineContext().ensureActive()
-                if (epoch == cacheGeneration && key == identityKey(manga)) onSource(source)
+
+                fun retryConfirmedIdentities() {
+                    val latest = identitySnapshot()
+                    val ready = unmatched.filter { (sourceId, earlier) ->
+                        val oldNames = earlier.identity.aliases.map(::normalize).toSet()
+                        val linked = latest.externalIds[sourceId]
+                        (!linked.isNullOrBlank() && linked != earlier.identity.externalIds[sourceId]) ||
+                            latest.aliases.any { normalize(it) !in oldNames }
+                    }
+                    ready.forEach { (sourceId, earlier) ->
+                        unmatched.remove(sourceId)
+                        retried.add(sourceId)
+                        start(sourceId, earlier.identity)
+                    }
+                }
+
+                requested.forEach { start(it) }
+                try {
+                    while (true) {
+                        if (inFlight == 0) {
+                            // Scores survive a restart; recover missing aliases at most once.
+                            if (unmatched.isNotEmpty() && !recoveryAttempted && "bangumi" !in requested &&
+                                identitySnapshot().aliases.none { normalize(it) != normalize(manga.title) }) {
+                                recoveryAttempted = true
+                                start("bangumi")
+                            } else break
+                        }
+                        val (sourceId, result) = completed.receive()
+                        inFlight--
+                        currentCoroutineContext().ensureActive()
+                        if (!isCurrent()) throw CancellationException("评分请求已失效")
+                        if (result != null) {
+                            when {
+                                sourceId !in requested -> rememberIdentity(result.source)
+                                result.source.status == ReviewStatus.NO_MATCH && sourceId !in retried ->
+                                    unmatched[sourceId] = result
+                                else -> publish(result.source)
+                            }
+                        }
+                        // A retry can confirm IDs useful to another source too. Process every
+                        // result immediately; no provider waits for unrelated work to finish.
+                        retryConfirmedIdentities()
+                    }
+                    unmatched.values.forEach { publish(it.source) }
+                } finally {
+                    completed.cancel()
+                }
             }
         }
 
@@ -341,6 +442,20 @@ class ReviewRepository(context: Context) {
     private fun preferredAniListAliases(manga: Manga, names: List<String>): List<String> =
         names.filter { normalize(it) != normalize(manga.title) } + names.filter { normalize(it) == normalize(manga.title) }
 
+    private fun preferredMetricAliases(manga: Manga, names: List<String>): List<String> {
+        val candidates = preferredAniListAliases(manga, names).filter(String::isNotBlank).distinctBy(::normalize)
+        val alternatives = candidates.filter { normalize(it) != normalize(manga.title) }.ifEmpty { candidates }
+        // Keep bounded searches from spending every query on translated-name variants.
+        val representative = listOfNotNull(
+            alternatives.firstOrNull { name -> name.any {
+                it in '\u3040'..'\u30ff' || it in '\u1100'..'\u11ff' || it in '\uac00'..'\ud7af'
+            } },
+            alternatives.firstOrNull { name -> name.any { it in 'A'..'Z' || it in 'a'..'z' } },
+            alternatives.firstOrNull(),
+        )
+        return (representative + candidates).distinctBy(::normalize)
+    }
+
     private fun confirmedIds(sources: List<ReviewSource>): Map<String, String> {
         val candidates = sources.filter { it.status == ReviewStatus.READY && it.subjectId.isNotBlank() }
             .flatMap { listOf(it.id to it.subjectId) + it.externalIds.toList() }
@@ -383,23 +498,26 @@ class ReviewRepository(context: Context) {
         }
     }
 
-    private suspend fun bangumi(manga: Manga, includeComments: Boolean = true): BangumiMatch {
+    private suspend fun bangumi(
+        manga: Manga, includeComments: Boolean = true, aliases: List<String> = listOf(manga.title),
+    ): BangumiMatch {
         val key = identityKey(manga)
         val epoch = cacheGeneration
+        val queryName = aliases.firstOrNull(String::isNotBlank) ?: manga.title
         val searchUrl = "https://bgm.tv".toHttpUrl().newBuilder().addPathSegment("subject_search")
-            .addPathSegment(manga.title).addQueryParameter("cat", "1").build().toString()
+            .addPathSegment(queryName).addQueryParameter("cat", "1").build().toString()
         try {
             savedId(manga, "bangumi").takeIf(String::isNotBlank)?.let {
                 return bangumiSubject(requireSubjectId(it), includeComments).also { rememberNames(manga, key, epoch, it.names) }
             }
-            val body = JSONObject().put("keyword", manga.title).put("sort", "match")
+            val body = JSONObject().put("keyword", queryName).put("sort", "match")
                 .put("filter", JSONObject().put("type", JSONArray().put(1)))
             val result = jsonRequest("https://api.bgm.tv/v0/search/subjects?limit=20&offset=0", "Bangumi 作品", searchUrl, body)
             val rows = result.optJSONArray("data") ?: throw SourceException("Bangumi 没有返回有效的搜索结果。", searchUrl)
             // Book (type 1) includes novels. Filter format BEFORE deciding whether names collide.
             val comics = rows.objects().filter { it.optInt("id") > 0 && it.isBangumiComic() }.distinctBy { it.optInt("id") }
-            val target = normalize(manga.title)
-            val matches = comics.filter { item -> target.isNotBlank() && bangumiNames(item).any { normalize(it) == target } }
+            val targets = (aliases + manga.title).map(::normalize).filter(String::isNotBlank).toSet()
+            val matches = comics.filter { item -> bangumiNames(item).any { normalize(it) in targets } }
             val candidate = resolveBangumiMatch(matches, manga.authors)
             if (candidate != null) return bangumiSubject(candidate.optInt("id"), includeComments)
                 .also { rememberNames(manga, key, epoch, it.names) }
@@ -706,6 +824,8 @@ class ReviewRepository(context: Context) {
         (opt(key) as? Number)?.toDouble()?.takeIf { it.isFinite() && (it > 0 || (allowZero && it == 0.0)) && it <= scale }
     private fun Exception.userMessage(fallback: String) = if (this is SourceException) message.orEmpty().ifBlank { fallback } else fallback
     private data class BangumiMatch(val source: ReviewSource, val names: List<String> = emptyList())
+    private data class MetricLookupIdentity(val aliases: List<String>, val externalIds: Map<String, String>)
+    private data class MetricLookupAttempt(val source: ReviewSource, val identity: MetricLookupIdentity)
     private data class CachedSource(val time: Long, val source: ReviewSource, val names: List<String> = emptyList())
     private data class ChapterIdentitySnapshot(val time: Long, val ids: Map<String, String>)
 

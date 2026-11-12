@@ -34,6 +34,8 @@ import dev.mangaflow.storage.BrowseCache
 import dev.mangaflow.storage.BrowseSnapshot
 import dev.mangaflow.update.UpdateManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -42,7 +44,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 
 data class BrowseState(
@@ -130,8 +134,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val events = messages.receiveAsFlow()
     private var browseJob: Job? = null
     private val metricJobs = mutableMapOf<String, Job>()
-    private val metricReferences = mutableMapOf<String, Int>()
+    private data class MetricReference(val manga: Manga, val count: Int)
+    private val metricReferences = mutableMapOf<String, MetricReference>()
+    private val metricReleaseJobs = mutableMapOf<String, Job>()
     private val metricWrites = mutableSetOf<Job>()
+    private var clearingMetadata = false
     @Volatile private var metricsRequestId = 0L
     private var detailJob: Job? = null
     private var reviewJob: Job? = null
@@ -211,6 +218,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refresh() {
+        reloadRetainedMetrics(forceRefresh = true)
         if (browseJob?.isActive == true && (_browse.value.loading || _browse.value.refreshing)) return
         browseJob?.cancel()
         val requestId = ++browseRequestId
@@ -294,19 +302,32 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Called for visible manga only; source matching never blocks a list or its images. */
-    fun loadMetrics(manga: Manga) {
+    fun loadMetrics(manga: Manga, forceRefresh: Boolean = false) {
+        metricReferences[manga.id]?.let { metricReferences[manga.id] = it.copy(manga = manga) }
+        if (clearingMetadata) return
         metricsRepository.cached(manga.id).takeIf { it.isNotEmpty() }?.let { cached ->
             publishMetrics(manga.id, cached)
         }
-        if (metricJobs[manga.id]?.isActive == true) return
+        if (!forceRefresh && metricJobs[manga.id]?.isActive == true) return
+        metricJobs.remove(manga.id)?.cancel()
         val requestId = metricsRequestId
-        metricJobs[manga.id] = viewModelScope.launch {
+        val request = viewModelScope.launch(start = CoroutineStart.LAZY) {
             val job = coroutineContext[Job] ?: return@launch
             try {
-                val result = metricsRepository.lookup(manga) { sources ->
-                    if (requestId == metricsRequestId && job.isActive) publishMetrics(manga.id, sources)
+                metricsRepository.lookup(manga, forceRefresh = forceRefresh) {
+                    // Providers publish from IO, but ownership changes stay on Main. Read
+                    // the latest snapshot there so an older callback cannot hide a new source.
+                    viewModelScope.launch {
+                        if (!clearingMetadata && requestId == metricsRequestId &&
+                            metricJobs[manga.id] === job && job.isActive) {
+                            publishMetrics(manga.id, metricsRepository.cached(manga.id))
+                        }
+                    }
                 }
-                if (requestId == metricsRequestId && job.isActive) publishMetrics(manga.id, result)
+                if (!clearingMetadata && requestId == metricsRequestId &&
+                    metricJobs[manga.id] === job && job.isActive) {
+                    publishMetrics(manga.id, metricsRepository.cached(manga.id))
+                }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: Exception) {
@@ -315,20 +336,49 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 if (metricJobs[manga.id] === job) metricJobs.remove(manga.id)
             }
         }
+        metricJobs[manga.id] = request
+        request.start()
     }
 
     fun retainMetrics(manga: Manga) {
-        metricReferences[manga.id] = (metricReferences[manga.id] ?: 0) + 1
+        metricReleaseJobs.remove(manga.id)?.cancel()
+        metricReferences[manga.id] = MetricReference(manga, (metricReferences[manga.id]?.count ?: 0) + 1)
         loadMetrics(manga)
     }
 
     fun releaseMetrics(mangaId: String) {
-        val count = metricReferences[mangaId] ?: return
-        if (count > 1) metricReferences[mangaId] = count - 1
-        else {
-            metricReferences.remove(mangaId)
-            metricJobs.remove(mangaId)?.cancel()
+        val reference = metricReferences[mangaId] ?: return
+        if (reference.count <= 0) return
+        if (reference.count > 1) {
+            metricReferences[mangaId] = reference.copy(count = reference.count - 1)
+            return
         }
+        metricReferences[mangaId] = reference.copy(count = 0)
+        metricReleaseJobs.remove(mangaId)?.cancel()
+        if (clearingMetadata) {
+            metricReferences.remove(mangaId)
+            return
+        }
+        val release = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val job = coroutineContext[Job] ?: return@launch
+            try {
+                // Leave room for the next tab/route's debounced subscriber to take over.
+                delay(600)
+                if (metricReferences[mangaId]?.count == 0) {
+                    metricReferences.remove(mangaId)
+                    metricJobs.remove(mangaId)?.cancel()
+                }
+            } finally {
+                if (metricReleaseJobs[mangaId] === job) metricReleaseJobs.remove(mangaId)
+            }
+        }
+        metricReleaseJobs[mangaId] = release
+        release.start()
+    }
+
+    private fun reloadRetainedMetrics(forceRefresh: Boolean) {
+        val retained = metricReferences.values.filter { it.count > 0 }.map { it.manga }
+        retained.forEach { loadMetrics(it, forceRefresh = forceRefresh) }
     }
 
     private fun publishMetrics(mangaId: String, values: List<MangaMetric>) {
@@ -343,28 +393,39 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun metadataCacheSize(): Long = metricsRepository.cacheSizeBytes() + readerCatalogs.sizeBytes()
 
-    suspend fun clearMetadataCache() {
+    suspend fun clearMetadataCache(): Unit = withContext(Dispatchers.Main.immediate) {
+        if (clearingMetadata) return@withContext
+        clearingMetadata = true
         metricsRequestId++
-        metricJobs.values.forEach { it.cancel() }
+        val jobs = metricJobs.values.toList() + metricWrites.toList() + metricReleaseJobs.values.toList()
         metricJobs.clear()
-        metricWrites.toList().forEach { it.cancel() }
         metricWrites.clear()
+        metricReleaseJobs.clear()
+        metricReferences.entries.removeAll { it.value.count <= 0 }
+        jobs.forEach { it.cancel() }
         _metrics.value = emptyMap()
-        metricsRepository.clearCache()
-        readerCatalogs.clear()
+        try {
+            jobs.joinAll()
+            metricsRepository.clearCache()
+            readerCatalogs.clear()
+        } finally {
+            clearingMetadata = false
+            reloadRetainedMetrics(forceRefresh = true)
+        }
     }
 
     private fun recordDetailMetrics(mangaId: String, detailId: Long) {
+        if (clearingMetadata) return
         val requestId = metricsRequestId
         viewModelScope.launch {
-            if (requestId != metricsRequestId) return@launch
+            if (clearingMetadata || requestId != metricsRequestId) return@launch
             val current = _detail.value?.takeIf { it.manga.id == mangaId && detailId == detailRequestId }
                 ?: return@launch
             val job = coroutineContext[Job] ?: return@launch
             metricWrites.add(job)
             try {
                 metricsRepository.recordSources(current.manga, current.reviews)
-                if (requestId == metricsRequestId) {
+                if (!clearingMetadata && requestId == metricsRequestId && job.isActive) {
                     publishMetrics(mangaId, metricsRepository.cached(mangaId))
                 }
             } catch (cancel: CancellationException) {
