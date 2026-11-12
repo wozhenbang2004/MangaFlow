@@ -125,6 +125,8 @@ class DownloadStore private constructor(context: Context) {
 
     internal suspend fun awaitReady() = initialized.await()
 
+    fun availableStorageBytes(): Long = root.usableSpace.coerceAtLeast(0L)
+
     /** Only explicit download actions create records; opening a reader reuses existing ones. */
     suspend fun enqueue(
         manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>,

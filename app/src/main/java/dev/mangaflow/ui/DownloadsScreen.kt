@@ -88,6 +88,8 @@ fun DownloadsScreen(
     var filter by rememberSaveable { mutableStateOf(DownloadFilter.ALL) }
     var remove by remember { mutableStateOf<DownloadEntry?>(null) }
     var removing by remember { mutableStateOf(false) }
+    var clearCompleted by remember { mutableStateOf(false) }
+    var bulkBusy by remember { mutableStateOf(false) }
     val allScroll = rememberLazyListState()
     val activeScroll = rememberLazyListState()
     val savedScroll = rememberLazyListState()
@@ -95,6 +97,11 @@ fun DownloadsScreen(
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
+    val activeEntries = entries.filter { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
+    val resumableEntries = entries.filter { it.status in setOf(DownloadStatus.PAUSED, DownloadStatus.FAILED) }
+    val completedEntries = entries.filter { it.status == DownloadStatus.COMPLETED }
+    val usedBytes = entries.sumOf { it.downloadedBytes }
+    val availableBytes = remember(entries, loading) { store.availableStorageBytes() }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(Modifier.fillMaxSize()) {
@@ -102,9 +109,30 @@ fun DownloadsScreen(
                 Text("下载", style = MaterialTheme.typography.headlineLarge, color = foreground, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    if (entries.isEmpty()) "把喜欢的故事带在身边" else "${entries.count { it.status == DownloadStatus.COMPLETED }} 章已下载 · ${downloadBytes(entries.sumOf { it.downloadedBytes })}",
+                    if (entries.isEmpty()) "把喜欢的故事带在身边"
+                    else "${completedEntries.size} 章已下载 · ${downloadBytes(usedBytes)} 已用 · ${downloadBytes(availableBytes)} 可用",
                     style = MaterialTheme.typography.bodyMedium, color = secondary,
                 )
+                if (entries.isNotEmpty()) {
+                    Spacer(Modifier.height(7.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (activeEntries.isNotEmpty()) DownloadTextAction(
+                            enabled = !bulkBusy,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            onClick = { activeEntries.forEach { store.pause(it.id) } },
+                        ) { Text("全部暂停", color = secondary, style = MaterialTheme.typography.labelMedium) }
+                        if (resumableEntries.isNotEmpty()) DownloadTextAction(
+                            enabled = !bulkBusy,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            onClick = { resumableEntries.forEach(onRetry) },
+                        ) { Text("继续未完成", color = secondary, style = MaterialTheme.typography.labelMedium) }
+                        if (completedEntries.isNotEmpty()) DownloadTextAction(
+                            enabled = !bulkBusy,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            onClick = { clearCompleted = true },
+                        ) { Text("清理已下载", color = secondary, style = MaterialTheme.typography.labelMedium) }
+                    }
+                }
                 Spacer(Modifier.height(20.dp))
                 MotionTabs(
                     selected = filter.ordinal, labels = DownloadFilter.entries.map { it.label },
@@ -171,6 +199,46 @@ fun DownloadsScreen(
             }
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
+    }
+
+    if (clearCompleted) {
+        AlertDialog(
+            onDismissRequest = { if (!bulkBusy) clearCompleted = false },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text("清理全部已下载章节？", style = MaterialTheme.typography.titleLarge) },
+            text = {
+                Text(
+                    "${completedEntries.size} 章 · ${downloadBytes(completedEntries.sumOf { it.downloadedBytes })}\n阅读记录、收藏和未完成任务保留。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = secondary,
+                )
+            },
+            confirmButton = {
+                DownloadTextAction(enabled = !bulkBusy, onClick = {
+                    val ids = completedEntries.map(DownloadEntry::id)
+                    bulkBusy = true
+                    scope.launch {
+                        var failed = 0
+                        ids.forEach { id ->
+                            try { store.remove(id) }
+                            catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { failed++ }
+                        }
+                        bulkBusy = false
+                        clearCompleted = false
+                        if (failed > 0) snackbar.showSnackbar("$failed 个章节未能清理，请重试")
+                    }
+                }) {
+                    Text(if (bulkBusy) "正在清理" else "清理", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                DownloadTextAction(enabled = !bulkBusy, onClick = { clearCompleted = false }) {
+                    Text("取消", color = foreground)
+                }
+            },
+        )
     }
 
     remove?.let { requested ->
