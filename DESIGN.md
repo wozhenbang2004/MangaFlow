@@ -80,3 +80,14 @@ User: "没事 ci 触发了就行别管了你去改新的这个问题漫画详情
 - The site's live style/scripts failed to load in this environment (upstream 503 / smoothscroll 404), and the browser displayed its loader. Actual rendered site motion is unverified. Source evidence does not establish an unmodified live deployment. No scroll-driven zoom or blur was found; the theme's 0.8-second blur is an entry animation only.
 - Sakurairo is GPL v2 or later. Its behavior is used as a reference; no theme code or assets are copied. The implementation reuses existing MangaFlow artwork, metadata and catalog components plus Apache-2.0 AndroidX APIs: Google Maven BOM 2025.05.01 maps to Material3 1.3.2 and Foundation/UI 1.8.2. Their published source JARs were read, including AppBar.kt ExitUntilCollapsed and Scrollable.kt pre/self/post dispatch.
 - Source review is required; tests and UI automation remain prohibited. Per the latest explicit instruction, verify CI triggered and stop waiting. Compilation, actual device layout, image crop and gesture feel remain unverified until build/user feedback; do not call the new design visually accepted.
+
+
+## Mixed-source comments · 2026-11-12
+
+The previous Comments tab consumed its first screen with three metric cards, a redundant matched manga title, and a single-source feed. This supersedes the provider-separated panel:
+
+- The default Comments tab is a single LazyColumn with confirmed Copy, Bangumi and AniList comments together, sorted by source-reported dates (newest first). Preserve provider IDs, original comment IDs, kind, attribution, score scale, replies and chronological order within each source when dates tie.
+- Each row carries a small subdued source badge. Keep native provider metrics in the existing detail header; remove the large repeated score row from the feed. Use a 28dp avatar, compact author/date line and 8dp item padding without shrinking the body below 13sp.
+- Source selection, unavailable/no-match explanations, retry, manual matching and relinking move to an on-demand Source sheet. Unconfirmed matches never enter the mixed list.
+- Automatically load provider pages near the end of the merged list, one provider at a time through the existing ViewModel callbacks. Do not fabricate comments or totals; report the actual loaded comment count.
+- Avoid changing network protocols or forcing the user to log in for public reviews. No added tests/emulator/UI automation; compilation alone does not verify phone UX.

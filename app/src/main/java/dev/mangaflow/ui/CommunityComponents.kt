@@ -33,15 +33,21 @@ import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -50,7 +56,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -86,6 +91,16 @@ private val CommunityMuted: Color @Composable get() = MaterialTheme.colorScheme.
 private val CommunityLine: Color @Composable get() = MaterialTheme.colorScheme.onSurface.copy(alpha = .07f)
 private val CommunityProviders = listOf("copy", "bangumi", "anilist")
 
+/** Mix only confirmed reviews, keeping each source's native ID and pagination. */
+private data class MixedReview(val source: ReviewSource, val review: MangaReview, val order: Int)
+
+private fun reviewDateKey(date: String): String {
+    val value = date.trim().replace('T', ' ')
+    return if (value.length >= 10 && value[4] == '-' && value[7] == '-' &&
+        value.take(4).all(Char::isDigit)) value.take(19) else ""
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun CommunityPanel(
     mangaId: String,
@@ -98,89 +113,130 @@ internal fun CommunityPanel(
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
     modifier: Modifier = Modifier,
 ) {
+    val mixed = remember(sources) {
+        sources.asSequence().filter { it.status == ReviewStatus.READY }
+            .flatMap { source -> source.reviews.mapIndexed { index, review ->
+                MixedReview(source, review, index)
+            }.asSequence() }
+            .sortedWith(compareByDescending<MixedReview> { reviewDateKey(it.review.date) }
+                .thenBy { CommunityProviders.indexOf(it.source.id).let { n -> if (n < 0) 99 else n } }
+                .thenBy(MixedReview::order)).toList()
+    }
+    val listState = rememberLazyListState()
+    val nearEnd by remember(listState) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            info.totalItemsCount > 0 &&
+                (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 4
+        }
+    }
+    val loadable = sources.filter {
+        it.status == ReviewStatus.READY && it.nextPage != null &&
+            !it.loadingMore && it.reviewsError == null
+    }
+    LaunchedEffect(mangaId, sources, nearEnd, loading) {
+        if (!loading && nearEnd && sources.none { it.loadingMore }) {
+            loadable.minWithOrNull(compareBy<ReviewSource> { it.reviews.size }
+                .thenBy { CommunityProviders.indexOf(it.id).let { n -> if (n < 0) 99 else n } })
+                ?.let { onMore(it.id) }
+        }
+    }
+    var showSources by rememberSaveable(mangaId) { mutableStateOf(false) }
     var selectedId by rememberSaveable(mangaId) { mutableStateOf("copy") }
     val selected = sources.firstOrNull { it.id == selectedId }
-    val listStates = rememberSaveableStateHolder()
+    var choosingMatch by rememberSaveable(mangaId, selectedId) { mutableStateOf(false) }
 
     Column(modifier.fillMaxSize()) {
-        ProviderStrip(sources, selectedId, loading, Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-            selectedId = it
-        }
-        HorizontalDivider(color = CommunityLine, thickness = 0.5.dp)
-        // Each provider keeps its scroll position when switching source or detail tabs.
-        listStates.SaveableStateProvider("$mangaId:$selectedId:${selected?.subjectId.orEmpty()}") {
-            val list = rememberLazyListState()
-            var chooseMatch by rememberSaveable {
-                mutableStateOf(selected?.status == ReviewStatus.NO_MATCH)
+        Row(Modifier.fillMaxWidth().height(40.dp).padding(start = 18.dp, end = 10.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(if (mixed.isEmpty()) "全部评论" else "已加载 " + mixed.size + " 条评论",
+                color = CommunityMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            val errors = sources.count { it.status != ReviewStatus.READY || it.reviewsError != null }
+            Row(Modifier.clip(RoundedCornerShape(9.dp))
+                .clickable(role = Role.Button, onClickLabel = "查看评论来源") { showSources = true }
+                .padding(horizontal = 8.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                Icon(Icons.Outlined.Tune, null, tint = CommunityMuted, modifier = Modifier.size(15.dp))
+                Text(if (errors > 0) "来源 · " + errors + " 待处理" else "来源",
+                    color = CommunityMuted, fontSize = 11.sp)
             }
-            LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
+        }
+        LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 12.dp)) {
+            items(mixed, key = {
+                it.source.id + ":" + it.source.subjectId + ":" + it.review.kind + ":" + it.review.id
+            }) { item ->
+                DiscussionComment(item.source, item.review, loadReplies)
+                HorizontalDivider(color = CommunityLine, thickness = .5.dp)
+            }
+            item("mixed-footer") {
+                when {
+                    loading && mixed.isEmpty() -> SmallLoading()
+                    sources.any { it.loadingMore } -> SmallLoading()
+                    mixed.isEmpty() -> Text("暂无公开评论，可在「来源」查看匹配与加载状态",
+                        color = CommunityMuted, fontSize = 12.sp,
+                        modifier = Modifier.padding(vertical = 18.dp))
+                    loadable.isEmpty() -> Text(
+                        if (sources.any { it.reviewsError != null }) "部分来源读取失败，可在「来源」重试"
+                        else "当前可获取的评论已加载完毕",
+                        color = CommunityMuted, fontSize = 11.sp,
+                        modifier = Modifier.padding(vertical = 16.dp))
+                    else -> Text("继续下滑加载更多评论", color = CommunityMuted, fontSize = 11.sp,
+                        modifier = Modifier.padding(vertical = 16.dp))
+                }
+            }
+        }
+    }
+    if (showSources) {
+        ModalBottomSheet(onDismissRequest = { showSources = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = DetailSurface, contentColor = CommunityWhite) {
+            Column(Modifier.fillMaxWidth().heightIn(max = 600.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
+                Text("评论来源", color = CommunityWhite, fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp, bottom = 8.dp))
+                ProviderStrip(sources, selectedId, loading) { selectedId = it }
                 if (selected == null) {
-                    item("pending") { PendingSource(selectedId, loading, onRetry) }
+                    PendingSource(selectedId, loading, onRetry)
                 } else {
-                    item("source") {
-                        SourceSummary(selected, showMatchedTitle = true)
-                        if (selected.status != ReviewStatus.READY) {
-                            SourceNotice(selected, onRetry, onChoose = { chooseMatch = !chooseMatch },
-                                chooseLabel = if (chooseMatch) "收起候选条目" else "选择对应漫画")
-                        } else if (selected.candidates.isNotEmpty()) {
-                            TextButton(onClick = { chooseMatch = !chooseMatch },
-                                contentPadding = PaddingValues(end = 10.dp)) {
-                                Text(if (chooseMatch) "收起候选条目" else "关联有误？", color = CommunityMuted, fontSize = 12.sp)
-                            }
+                    SourceSummary(selected, showMatchedTitle = true)
+                    if (selected.status != ReviewStatus.READY) {
+                        SourceNotice(selected, onRetry,
+                            onChoose = { choosingMatch = !choosingMatch },
+                            chooseLabel = if (choosingMatch) "收起候选条目" else "选择对应漫画")
+                    } else {
+                        if (selected.reviewsError != null) CommentFailure(
+                            selected.reviewsError, selected.loadingMore) { onRetry(selectedId) }
+                        if (selected.id != "copy") TextButton(onClick = { onRelink(selectedId) },
+                            enabled = !selected.loadingMore) {
+                            Text("更换关联漫画", color = CommunityMuted, fontSize = 12.sp)
                         }
-                        if (selected.id != "copy" && selected.status != ReviewStatus.NO_MATCH) {
-                            TextButton(onClick = { chooseMatch = false; onRelink(selected.id) },
-                                enabled = !selected.loadingMore, contentPadding = PaddingValues(end = 10.dp)) {
-                                Text("重新关联漫画", color = CommunityMuted, fontSize = 12.sp)
-                            }
+                        if (selected.candidates.isNotEmpty()) TextButton(onClick = {
+                            choosingMatch = !choosingMatch
+                        }, enabled = !selected.loadingMore) {
+                            Text(if (choosingMatch) "收起候选条目" else "关联有误？",
+                                color = CommunityMuted, fontSize = 12.sp)
                         }
                     }
-                    if (chooseMatch) {
-                        items(selected.candidates, key = { "candidate:${it.id}" }) { candidate ->
-                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                    if (choosingMatch) {
+                        selected.candidates.forEach { candidate ->
+                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
                                 .clickable(enabled = !selected.loadingMore, role = Role.Button) {
-                                    chooseMatch = false
+                                    choosingMatch = false
                                     onMatch(selected.id, candidate.id)
-                                }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                }.padding(horizontal = 8.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
-                                    Text(candidate.title, color = CommunityWhite, fontSize = 14.sp,
+                                    Text(candidate.title, color = CommunityWhite, fontSize = 12.sp,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    if (candidate.subtitle.isNotBlank()) Text(candidate.subtitle, color = CommunityMuted,
-                                        fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 4.dp))
+                                    if (candidate.subtitle.isNotBlank()) Text(candidate.subtitle,
+                                        color = CommunityMuted, fontSize = 10.sp,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 }
-                                Icon(Icons.Outlined.ChevronRight, "关联这本漫画", tint = CommunityMuted, modifier = Modifier.size(18.dp))
-                            }
-                            HorizontalDivider(color = CommunityLine, thickness = 0.5.dp)
-                        }
-                    }
-                    if (selected.status == ReviewStatus.READY && selected.reviews.isEmpty() &&
-                        selected.reviewsError == null && !selected.loadingMore) {
-                        item("empty") {
-                            Text(if (selected.nextPage == null) "这里还没有公开评论" else "这一页暂无可展示的评论",
-                                color = CommunityMuted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 22.dp))
-                        }
-                    }
-                    items(selected.reviews, key = { "${selected.id}:${selected.subjectId}:${it.kind}:${it.id}" }) { review ->
-                        DiscussionComment(selected, review, loadReplies)
-                        HorizontalDivider(color = CommunityLine, thickness = 0.5.dp)
-                    }
-                    item("pagination") {
-                        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                            if (selected.reviewsError != null) {
-                                CommentFailure(selected.reviewsError, selected.loadingMore) {
-                                    if (selected.reviews.isNotEmpty() && selected.nextPage != null) onMore(selected.id)
-                                    else onRetry(selected.id)
-                                }
-                            }
-                            if (selected.loadingMore) SmallLoading()
-                            else if (selected.nextPage != null && selected.reviewsError == null) {
-                                TextButton(onClick = { onMore(selected.id) }, modifier = Modifier.fillMaxWidth()) {
-                                    Text("加载更多评论", color = CommunityWhite, fontSize = 13.sp)
-                                }
-                            } else if (selected.reviews.isNotEmpty() && selected.reviewsError == null) {
-                                Text("已到末尾", color = CommunityMuted, fontSize = 11.sp,
-                                    modifier = Modifier.padding(vertical = 20.dp))
+                                Icon(Icons.Outlined.ChevronRight, null, tint = CommunityMuted,
+                                    modifier = Modifier.size(18.dp))
                             }
                         }
                     }
@@ -188,6 +244,24 @@ internal fun CommunityPanel(
             }
         }
     }
+}
+
+@Composable
+private fun CommentSourceBadge(sourceId: String) {
+    val accent = when (sourceId) {
+        "copy" -> Color(0xFFD5B7A0)
+        "bangumi" -> Color(0xFFB5C8E4)
+        "anilist" -> Color(0xFFC7B2DD)
+        else -> CommunityMuted
+    }
+    Text(when (sourceId) {
+        "copy" -> "拷贝"; "bangumi" -> "bgm"; "anilist" -> "AniList"
+        else -> providerName(sourceId)
+    }, modifier = Modifier.clip(RoundedCornerShape(5.dp))
+        .background(accent.copy(alpha = .12f)).padding(horizontal = 5.dp, vertical = 2.dp)
+        .semantics { contentDescription = "评论来自" + providerName(sourceId) },
+        color = accent, fontSize = 10.sp, lineHeight = 13.sp,
+        fontWeight = FontWeight.Medium, maxLines = 1)
 }
 
 @Composable
@@ -332,6 +406,7 @@ private fun CommentContent(
     foreground: Color,
     muted: Color,
     showReplyCount: Boolean,
+    sourceId: String? = null,
 ) {
     val text = review.body.ifBlank { review.summary }.trim()
     val conceal = review.spoiler || review.kind == ReviewKind.REVIEW
@@ -339,13 +414,19 @@ private fun CommentContent(
     var expanded by rememberSaveable(review.id, review.url) { mutableStateOf(false) }
     var overflows by remember(text) { mutableStateOf(false) }
     Row(modifier.fillMaxWidth().animateContentSize(animationSpec = tween(160)),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         CommentAvatar(review, foreground)
         Column(Modifier.weight(1f)) {
-            Row(Modifier.fillMaxWidth().heightIn(min = 34.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 28.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(review.author, color = foreground.copy(alpha = .84f), fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(review.author, color = foreground.copy(alpha = .87f), fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false))
+                        if (sourceId != null) CommentSourceBadge(sourceId)
+                    }
                     if (review.date.isNotBlank()) Text(review.date, color = muted, fontSize = 10.sp,
                         modifier = Modifier.padding(top = 2.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -354,7 +435,7 @@ private fun CommentContent(
                         modifier = Modifier.padding(start = 8.dp))
                 }
             }
-            Spacer(Modifier.height(7.dp))
+            Spacer(Modifier.height(3.dp))
             if (review.replyTo.isNotBlank()) {
                 Text("回复 ${review.replyTo}", color = muted, fontSize = 11.sp, maxLines = 1,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 5.dp))
@@ -376,7 +457,7 @@ private fun CommentContent(
                         fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(bottom = 5.dp))
                 }
-                Text(text, color = foreground.copy(alpha = .92f), fontSize = 14.sp, lineHeight = 23.sp,
+                Text(text, color = foreground.copy(alpha = .92f), fontSize = 13.sp, lineHeight = 20.sp,
                     maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
                     onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
             }
@@ -410,9 +491,9 @@ private fun CommentAvatar(review: MangaReview, foreground: Color) {
             ?.let { String(Character.toChars(it.codePointAt(0))).uppercase(Locale.ROOT) } ?: "·"
     }
     val request = remember(review.avatarUrl, context) {
-        ImageRequest.Builder(context).data(review.avatarUrl).size(96).crossfade(100).build()
+        ImageRequest.Builder(context).data(review.avatarUrl).size(88).crossfade(100).build()
     }
-    Box(Modifier.size(32.dp).clip(CircleShape).background(foreground.copy(alpha = .075f))
+    Box(Modifier.size(28.dp).clip(CircleShape).background(foreground.copy(alpha = .075f))
         .clearAndSetSemantics {}, contentAlignment = Alignment.Center) {
         Text(initial, color = foreground.copy(alpha = .55f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
         if (review.avatarUrl.isNotBlank() && !failed) {
@@ -428,8 +509,9 @@ private fun DiscussionComment(
     review: MangaReview,
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
 ) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
-        CommentContent(review, Modifier, CommunityWhite, CommunityMuted, showReplyCount = source.id != "copy")
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        CommentContent(review, Modifier, CommunityWhite, CommunityMuted,
+            showReplyCount = source.id != "copy", sourceId = source.id)
         if (source.id == "copy" && source.subjectId.isNotBlank() && (review.replyCount ?: 0) > 0) {
             CommentReplies(source, review, loadReplies)
         }
@@ -489,14 +571,14 @@ private fun CommentReplies(
             request?.cancel()
             busy = false
         }
-    }, modifier = Modifier.padding(start = 42.dp), contentPadding = PaddingValues(end = 10.dp)) {
+    }, modifier = Modifier.padding(start = 36.dp), contentPadding = PaddingValues(end = 10.dp)) {
         Text(if (expanded) "收起回复" else "${review.replyCount} 条回复", color = CommunityMuted, fontSize = 12.sp)
         Spacer(Modifier.width(4.dp))
         Icon(if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
             null, tint = CommunityMuted, modifier = Modifier.size(15.dp))
     }
     if (expanded) {
-        Column(Modifier.fillMaxWidth().padding(start = 42.dp)) {
+        Column(Modifier.fillMaxWidth().padding(start = 36.dp)) {
             rows.forEach { reply ->
                 key(source.subjectId, review.id, reply.id) {
                     CommunityComment(reply, Modifier.padding(bottom = 10.dp), CommunityWhite, CommunityMuted)
