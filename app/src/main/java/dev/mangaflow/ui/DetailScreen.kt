@@ -98,6 +98,7 @@ import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
+import dev.mangaflow.data.Page
 import dev.mangaflow.data.MangaReview
 import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.ReviewSource
@@ -135,6 +136,8 @@ fun DetailScreen(
     isFavorite: Boolean,
     progress: ReadingProgress?,
     downloadEntries: List<DownloadEntry>,
+    loadVolumeCover: suspend (Chapter, Boolean) -> Page,
+    volumeImageHeaders: (Chapter) -> Map<String, String>,
     onBack: () -> Unit,
     onRetry: () -> Unit,
     onToggleFavorite: () -> Unit,
@@ -342,6 +345,7 @@ fun DetailScreen(
                         reverseDirection = true, enabled = active)
                     .background(DetailBackground).padding(top = 8.dp),
             ) {
+                if (compactHero) DetailTags(current, Modifier.padding(horizontal = 16.dp).padding(bottom = 8.dp))
                 DetailSections(
                     selected = activeSection,
                     chapterCount = chapters.size, commentCount = commentCount,
@@ -356,6 +360,7 @@ fun DetailScreen(
                                 active = active && targetSection == activeSection,
                                 onScrollTarget = { catalogGrid = it },
                                 onRetry = onRetry, onRead = onRead, onDownload = onDownload,
+                                loadVolumeCover = loadVolumeCover, volumeImageHeaders = volumeImageHeaders,
                                 bottomPadding = readingInset,
                             )
                             else -> CommunityPanel(
@@ -474,9 +479,7 @@ private fun HeroBookInformation(
             fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.fillMaxWidth())
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            val metadata = listOfNotNull(manga.authors.take(2).joinToString(" / ").takeIf(String::isNotBlank),
-                manga.status.takeIf(String::isNotBlank), manga.latestChapter.takeIf(String::isNotBlank)?.let { "更新至 $it" })
-                .joinToString(" · ")
+            val metadata = manga.authors.take(2).joinToString(" / ")
             if (metadata.isNotBlank()) Text(metadata, color = Color.White.copy(alpha = .77f),
                 fontSize = 11.sp, lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row(Modifier.fillMaxWidth().heightIn(min = 30.dp)
@@ -488,26 +491,25 @@ private fun HeroBookInformation(
                     modifier = Modifier.weight(1f))
                 Text("展开", color = Color.White.copy(alpha = .7f), fontSize = 11.sp)
             }
-            if (manga.tags.isNotEmpty()) Text(manga.tags.filter(String::isNotBlank).distinct().take(3).joinToString("  ·  "),
-                color = Color.White.copy(alpha = .65f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            DetailTags(manga, onArtwork = true)
             DetailRatingStrip(manga, Color.White, enabled = infoVisible, onExpand = onRatings)
         }
     }
 }
 
 @Composable
-private fun DetailTags(manga: Manga) {
+private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: Boolean = false) {
     val tags = remember(manga.status, manga.tags, manga.latestChapter) {
         buildList {
             if (manga.status.isNotBlank()) add(manga.status.trim())
-            addAll(manga.tags.filter(String::isNotBlank).distinct().take(12))
+            addAll(manga.tags.map(String::trim).filter(String::isNotBlank).distinct())
             if (manga.latestChapter.isNotBlank()) add("更新 · " + manga.latestChapter)
         }.distinct()
     }
     if (tags.isNotEmpty()) Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 3.dp),
+        modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 3.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) { tags.forEachIndexed { index, tag -> DetailTag(tag, index) } }
+    ) { tags.forEachIndexed { index, tag -> DetailTag(tag, index, onArtwork) } }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -538,8 +540,8 @@ private fun DetailIntroduction(manga: Manga, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun DetailTag(label: String, index: Int) {
-    val onDark = DetailForeground.luminance() > .5f
+private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false) {
+    val onDark = onArtwork || DetailForeground.luminance() > .5f
     val accent = when (index % 4) {
         0 -> if (onDark) Color(0xFFD9B49E) else Color(0xFF805C43)
         1 -> if (onDark) Color(0xFFAFC4E2) else Color(0xFF486481)
@@ -549,7 +551,7 @@ private fun DetailTag(label: String, index: Int) {
     Text(
         label,
         modifier = Modifier.clip(RoundedCornerShape(7.dp))
-            .background(accent.copy(alpha = if (onDark) .12f else .085f))
+            .background(accent.copy(alpha = if (onArtwork) .18f else if (onDark) .12f else .085f))
             .padding(horizontal = 7.dp, vertical = 4.dp),
         color = accent, fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1,
     )

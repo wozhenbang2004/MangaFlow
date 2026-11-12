@@ -11,6 +11,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,11 +19,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.items
@@ -41,6 +44,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -48,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -62,11 +67,13 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.Page
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
@@ -74,8 +81,14 @@ import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * Group panes share one fixed toolbar. Changing download mode never inserts a row
@@ -95,6 +108,8 @@ internal fun DetailCatalog(
     onRetry: () -> Unit,
     onRead: (Chapter) -> Unit,
     onDownload: (Chapter) -> Unit,
+    loadVolumeCover: suspend (Chapter, Boolean) -> Page,
+    volumeImageHeaders: (Chapter) -> Map<String, String>,
     bottomPadding: Dp = 16.dp,
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
@@ -106,6 +121,8 @@ internal fun DetailCatalog(
     var shownError by remember { mutableStateOf<String?>(null) }
     var selectedChapterId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var closingChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
+    val volumeCovers = remember(mangaId) { mutableStateMapOf<String, VolumeCoverState>() }
+    val coverPermits = remember(mangaId) { Semaphore(2) }
 
     val showBusy = rememberDelayedBusy(loading)
     val shown = remember(chapters, group) {
@@ -114,7 +131,7 @@ internal fun DetailCatalog(
 
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier.fillMaxWidth().height(48.dp).padding(start = 16.dp, end = 8.dp),
+            Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 16.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (groups.size > 1) {
@@ -127,7 +144,8 @@ internal fun DetailCatalog(
                 )
             } else {
                 Text(
-                    if (downloadMode) "点选章节下载" else (shown.size.toString() + " 话"),
+                    if (downloadMode) "点选章节下载" else
+                        shown.size.toString() + if (shown.isNotEmpty() && shown.all { isVolumeGroup(it.group) }) " 卷" else " 话",
                     color = if (downloadMode) DetailForeground else DetailMuted,
                     fontSize = 12.sp, modifier = Modifier.weight(1f),
                 )
@@ -187,27 +205,85 @@ internal fun DetailCatalog(
             } else {
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val showGroup = targetGroup == null && groups.size > 1
-                val tileHeight = (if (showGroup) 58f else 47f).times(fontScale).dp
+                val volumesOnly = visibleChapters.all { isVolumeGroup(it.group) }
+                val tileHeight = (47f * fontScale).dp
+                // Source groups are consecutive. Keep that exact order and give each run
+                // its own grid row so a book cover never stretches a normal chapter row.
+                val runs = remember(visibleChapters) {
+                    buildList<MutableList<Chapter>> {
+                        visibleChapters.forEach { chapter ->
+                            if (lastOrNull()?.lastOrNull()?.group == chapter.group) last().add(chapter)
+                            else add(mutableListOf(chapter))
+                        }
+                    }
+                }
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = (74f * fontScale).dp),
+                    columns = GridCells.Adaptive(minSize = ((if (volumesOnly) 96f else 74f) * fontScale).dp),
                     state = grid, userScrollEnabled = paneActive,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    verticalArrangement = Arrangement.spacedBy(5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(if (volumesOnly) 12.dp else 5.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (volumesOnly) 14.dp else 5.dp),
                 ) {
-                    items(visibleChapters, key = Chapter::id) { chapter ->
-                        ChapterTile(
-                            chapter = chapter,
-                            entry = downloaded[chapter.id],
-                            progress = progress?.takeIf { it.chapterId == chapter.id },
-                            showGroup = showGroup,
-                            downloadMode = downloadMode,
-                            height = tileHeight,
-                            onRead = { onRead(chapter) },
-                            onDownload = { onDownload(chapter) },
-                            onActions = { selectedChapterId = chapter.id },
-                        )
+                    runs.forEachIndexed { runIndex, run ->
+                        if (showGroup) item(key = "group:$runIndex:${run.first().group}",
+                            span = { GridItemSpan(maxLineSpan) }, contentType = "group") {
+                            Text(run.first().group, color = DetailMuted, fontSize = 11.sp,
+                                modifier = Modifier.padding(top = if (runIndex == 0) 2.dp else 10.dp, bottom = 3.dp))
+                        }
+                        items(run, key = Chapter::id,
+                            contentType = { if (isVolumeGroup(it.group)) "volume" else "chapter" }) { chapter ->
+                            if (isVolumeGroup(chapter.group)) {
+                                val cover = volumeCovers[chapter.id] ?: VolumeCoverState()
+                                LaunchedEffect(chapter.id, paneActive, cover.attempt) {
+                                    if (!paneActive || cover.page != null || cover.error != null) return@LaunchedEffect
+                                    val pending = cover.copy(loading = true)
+                                    volumeCovers[chapter.id] = pending
+                                    try {
+                                        val page = coverPermits.withPermit {
+                                            loadVolumeCover(chapter, cover.attempt > 0)
+                                        }
+                                        currentCoroutineContext().ensureActive()
+                                        if (volumeCovers[chapter.id] === pending)
+                                            volumeCovers[chapter.id] = pending.copy(page = page, loading = false)
+                                    } catch (cancelled: CancellationException) { throw cancelled }
+                                    catch (failure: Exception) {
+                                        if (volumeCovers[chapter.id] === pending)
+                                            volumeCovers[chapter.id] = pending.copy(loading = false,
+                                                error = failure.message ?: "这一卷封面暂不可用")
+                                    } finally {
+                                        if (volumeCovers[chapter.id] === pending)
+                                            volumeCovers[chapter.id] = VolumeCoverState(attempt = pending.attempt)
+                                    }
+                                }
+                                VolumeBookTile(
+                                    mangaId = mangaId, chapter = chapter, cover = cover,
+                                    imageHeaders = { volumeImageHeaders(chapter) },
+                                    entry = downloaded[chapter.id],
+                                    progress = progress?.takeIf { it.chapterId == chapter.id },
+                                    downloadMode = downloadMode,
+                                    enabled = !downloadMode || canDownload(downloaded[chapter.id]),
+                                    onRead = { onRead(chapter) }, onDownload = { onDownload(chapter) },
+                                    onActions = { selectedChapterId = chapter.id },
+                                    onCoverError = {
+                                        if (paneActive && volumeCovers[chapter.id] === cover)
+                                            volumeCovers[chapter.id] = cover.copy(error = "封面图片暂不可用")
+                                    },
+                                    onRetryCover = {
+                                        volumeCovers[chapter.id] = VolumeCoverState(attempt = cover.attempt + 1)
+                                    },
+                                )
+                            } else ChapterTile(
+                                chapter = chapter,
+                                entry = downloaded[chapter.id],
+                                progress = progress?.takeIf { it.chapterId == chapter.id },
+                                downloadMode = downloadMode,
+                                height = tileHeight,
+                                onRead = { onRead(chapter) },
+                                onDownload = { onDownload(chapter) },
+                                onActions = { selectedChapterId = chapter.id },
+                            )
+                        }
                     }
                 }
             }
@@ -255,11 +331,12 @@ internal fun DetailCatalog(
                 )
                 TextButton(onClick = { dismissActions(); onRead(chapter) },
                     modifier = Modifier.fillMaxWidth()) {
-                    Text("阅读这一章", color = DetailForeground)
+                    Text(if (isVolumeGroup(chapter.group)) "阅读这一卷" else "阅读这一章", color = DetailForeground)
                 }
                 TextButton(onClick = { dismissActions(); onDownload(chapter) },
                     enabled = canDownload(entry), modifier = Modifier.fillMaxWidth()) {
-                    Text(if (entry?.status == DownloadStatus.COMPLETED) "已下载" else "下载这一章",
+                    Text(if (entry?.status == DownloadStatus.COMPLETED) "已下载" else
+                        if (isVolumeGroup(chapter.group)) "下载这一卷" else "下载这一章",
                         color = if (canDownload(entry)) DetailForeground else DetailMuted)
                 }
             }
@@ -282,25 +359,42 @@ private fun ChapterGroups(
         }
     }
     val labels = choices.map { (name, _) -> name?.ifBlank { "未分组" } ?: "全部" }
-    Box(modifier.horizontalScroll(rememberScrollState()), contentAlignment = Alignment.CenterStart) {
-        MotionTabs(
-            selected = choices.indexOfFirst { it.first == selected }, labels = labels,
-            onSelect = { onSelect(choices[it].first) },
-            foreground = DetailForeground, muted = DetailSecondary, indicator = DetailForeground,
-            underline = true, compact = true, fontSize = 12.sp,
-            itemContent = { index, _, color ->
-                val label = labels[index]
-                val count = choices[index].second
-                Row(Modifier.semantics { contentDescription = "$label，$count 话" },
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text(label, color = color, fontWeight = FontWeight.Medium, fontSize = 12.sp, maxLines = 1)
-                    Text(count.toString(), color = DetailMuted, fontSize = 10.sp, maxLines = 1)
-                }
-            },
-        )
+    val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val textStyle = LocalTextStyle.current
+    val minimumSlot = with(density) {
+        choices.indices.maxOf { index ->
+            measurer.measure(labels[index], textStyle.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold), maxLines = 1).size.width +
+                measurer.measure(choices[index].second.toString(), textStyle.copy(fontSize = 10.sp), maxLines = 1).size.width
+        }.toDp() + 32.dp
+    }
+    BoxWithConstraints(modifier) {
+        val tabsWidth = maxOf(maxWidth, minimumSlot * choices.size)
+        Box(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), contentAlignment = Alignment.CenterStart) {
+            MotionTabs(
+                modifier = Modifier.width(tabsWidth),
+                selected = choices.indexOfFirst { it.first == selected }, labels = labels,
+                onSelect = { onSelect(choices[it].first) },
+                foreground = DetailForeground, muted = DetailSecondary, indicator = DetailForeground.copy(alpha = .065f),
+                fullWidthIndicator = true, controlHeight = 40.dp, fontSize = 12.sp,
+                treatment = MotionTabTreatment.Soft,
+                itemContent = { index, chosen, color ->
+                    val label = labels[index]
+                    val count = choices[index].second
+                    Row(Modifier.semantics { contentDescription = "$label，$count " + if (isVolumeGroup(label)) "卷" else "话" },
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, color = color, fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium,
+                            fontSize = 12.sp, maxLines = 1)
+                        Text(count.toString(), color = DetailMuted, fontSize = 10.sp, maxLines = 1)
+                    }
+                },
+            )
+        }
     }
 }
+
+private fun isVolumeGroup(name: String): Boolean = name.contains("单行本") || name.contains("單行本")
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -308,7 +402,6 @@ private fun ChapterTile(
     chapter: Chapter,
     entry: DownloadEntry?,
     progress: ReadingProgress?,
-    showGroup: Boolean,
     downloadMode: Boolean,
     height: Dp,
     onRead: () -> Unit,
@@ -331,7 +424,7 @@ private fun ChapterTile(
             .clip(RoundedCornerShape(9.dp))
             .background(DetailForeground.copy(alpha = if (progress != null) .12f else .055f))
             .semantics {
-                contentDescription = chapter.title + if (showGroup) "，" + chapter.group else ""
+                contentDescription = chapter.title
                 stateDescription = chapterStatus(entry, progress)
             }
             .padding(horizontal = 7.dp, vertical = 5.dp),
@@ -340,39 +433,39 @@ private fun ChapterTile(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 chapter.title, color = if (progress != null) DetailForeground else if (enabled) DetailSecondary else DetailMuted,
-                fontSize = 11.sp, lineHeight = 15.sp, maxLines = if (showGroup) 1 else 2,
+                fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 fontWeight = if (progress != null) FontWeight.SemiBold else FontWeight.Normal,
                 modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(3.dp))
             // Reserve the icon's space even before download: no resizing when a job starts.
-            MotionSwap(entry?.status to (downloadMode && entry == null), Modifier.size(14.dp)) { (status, showDownload) ->
-                when (status) {
-                    DownloadStatus.RUNNING -> if (entry != null && entry.totalPages > 0) {
-                        CircularProgressIndicator(
-                            progress = { (entry.completedPages.toFloat() / entry.totalPages).coerceIn(0f, 1f) },
-                            modifier = Modifier.size(12.dp), color = DetailSecondary, strokeWidth = 1.dp)
-                    } else Icon(Icons.Outlined.Download, "正在准备下载",
-                        tint = DetailMuted, modifier = Modifier.size(14.dp))
-                    DownloadStatus.QUEUED -> Icon(Icons.Outlined.Schedule, "等待下载",
-                        tint = DetailMuted, modifier = Modifier.size(14.dp))
-                    DownloadStatus.COMPLETED -> Icon(Icons.Outlined.Check, "已下载",
-                        tint = DetailForeground, modifier = Modifier.size(14.dp))
-                    DownloadStatus.PAUSED, DownloadStatus.WAITING -> Icon(Icons.Outlined.Pause,
-                        "下载暂停", tint = DetailMuted, modifier = Modifier.size(14.dp))
-                    DownloadStatus.FAILED -> Icon(Icons.Outlined.Refresh, "下载失败",
-                        tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
-                    else -> if (showDownload) Icon(Icons.Outlined.Download, "下载",
-                        tint = DetailMuted, modifier = Modifier.size(14.dp))
-                }
-            }
+            ChapterDownloadMark(entry, downloadMode && entry == null)
         }
-        if (showGroup) Text(
-            chapter.group, color = DetailMuted, fontSize = 9.sp, lineHeight = 12.sp,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 2.dp),
-        )
+    }
+}
+
+@Composable
+internal fun ChapterDownloadMark(entry: DownloadEntry?, showDownload: Boolean) {
+    MotionSwap(entry?.status to showDownload, Modifier.size(14.dp)) { (status, showDownload) ->
+        when (status) {
+            DownloadStatus.RUNNING -> if (entry != null && entry.totalPages > 0) {
+                CircularProgressIndicator(
+                    progress = { (entry.completedPages.toFloat() / entry.totalPages).coerceIn(0f, 1f) },
+                    modifier = Modifier.size(12.dp), color = DetailSecondary, strokeWidth = 1.dp)
+            } else Icon(Icons.Outlined.Download, "正在准备下载",
+                tint = DetailMuted, modifier = Modifier.size(14.dp))
+            DownloadStatus.QUEUED -> Icon(Icons.Outlined.Schedule, "等待下载",
+                tint = DetailMuted, modifier = Modifier.size(14.dp))
+            DownloadStatus.COMPLETED -> Icon(Icons.Outlined.Check, "已下载",
+                tint = DetailForeground, modifier = Modifier.size(14.dp))
+            DownloadStatus.PAUSED, DownloadStatus.WAITING -> Icon(Icons.Outlined.Pause,
+                "下载暂停", tint = DetailMuted, modifier = Modifier.size(14.dp))
+            DownloadStatus.FAILED -> Icon(Icons.Outlined.Refresh, "下载失败",
+                tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
+            else -> if (showDownload) Icon(Icons.Outlined.Download, "下载",
+                tint = DetailMuted, modifier = Modifier.size(14.dp))
+        }
     }
 }
 
@@ -380,7 +473,7 @@ private fun canDownload(entry: DownloadEntry?): Boolean = entry?.status !in setO
     DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.COMPLETED,
 )
 
-private fun chapterStatus(entry: DownloadEntry?, progress: ReadingProgress?): String = listOfNotNull(
+internal fun chapterStatus(entry: DownloadEntry?, progress: ReadingProgress?): String = listOfNotNull(
     progress?.let { "上次读到第 " + (it.pageIndex + 1) + " 页" },
     when (entry?.status) {
         DownloadStatus.RUNNING -> "正在下载 " + entry.completedPages + "/" + entry.totalPages

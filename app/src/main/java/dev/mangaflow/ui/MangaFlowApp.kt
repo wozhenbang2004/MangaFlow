@@ -365,6 +365,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             isFavorite = favorites.any { it.id == current.state.manga.id },
                             progress = history.firstOrNull { it.manga.id == current.state.manga.id },
                             downloadEntries = downloads,
+                            loadVolumeCover = { chapter, refresh -> model.volumeCover(current.state.manga.id, chapter, refresh) },
+                            volumeImageHeaders = { chapter -> model.repository.imageHeaders(current.state.manga.id, chapter.id) },
                             onBack = model::closeDetail, onRetry = model::retryDetail,
                             onToggleFavorite = { model.toggleFavorite(current.state.manga) },
                             onRead = model::readChapter,

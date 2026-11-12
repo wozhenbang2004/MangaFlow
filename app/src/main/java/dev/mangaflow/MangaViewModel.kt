@@ -22,6 +22,7 @@ import dev.mangaflow.data.ReviewProviders
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.data.ReviewPage
+import dev.mangaflow.data.Page
 import dev.mangaflow.data.MangaReview
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.storage.DownloadEntry
@@ -934,6 +935,14 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    suspend fun volumeCover(mangaId: String, chapter: Chapter, forceRefresh: Boolean): Page {
+        // This accessor only reads saved metadata/files; it does not use resolveReaderPage(),
+        // whose job is to schedule a real reading transfer.
+        val stored = downloads.coverPage(mangaId, chapter.id, preferLocal = !forceRefresh)
+        if (stored != null && (!forceRefresh || stored.url.startsWith("file:"))) return stored
+        return repository.coverPage(mangaId, chapter.id, forceRefresh)
     }
 
     /** Only a visible chapter can request its immediate same-group successor. */

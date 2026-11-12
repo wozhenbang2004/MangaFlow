@@ -39,6 +39,7 @@ class CopyMangaRepository(
     private val pageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pageRequests = mutableMapOf<PageKey, SharedPages>()
     private val pageCache = LinkedHashMap<PageKey, CachedPages>()
+    private val coverCache = LinkedHashMap<PageKey, CachedCover>()
 
     init {
         require(imageDomains.isNotEmpty() && imageDomains.all { it.matches(Regex("[a-z0-9.-]+")) && '.' in it })
@@ -148,6 +149,30 @@ class CopyMangaRepository(
                 }
             }
         }
+    }
+
+    /** A volume preview retains one original page, without retaining every volume's manifest. */
+    suspend fun coverPage(mangaId: String, chapterId: String, forceRefresh: Boolean = false): Page {
+        currentCoroutineContext().ensureActive()
+        segment(mangaId)
+        val key = PageKey(mangaId, uuid(chapterId, "章节"))
+        synchronized(pageRequests) {
+            val now = System.nanoTime()
+            coverCache.entries.removeAll { now - it.value.fetchedAt >= PAGE_CACHE_NANOS }
+            if (forceRefresh) coverCache.remove(key)
+            else coverCache.remove(key)?.let { cached ->
+                coverCache[key] = cached
+                return cached.page
+            }
+        }
+        val page = pages(mangaId, chapterId, forceRefresh).firstOrNull()
+            ?: throw SourceException("这一卷暂未提供封面页。", comicUrl(mangaId))
+        currentCoroutineContext().ensureActive()
+        synchronized(pageRequests) {
+            coverCache[key] = CachedCover(page, System.nanoTime())
+            while (coverCache.size > 64) coverCache.remove(coverCache.keys.first())
+        }
+        return page
     }
 
     private suspend fun readPages(mangaId: String, id: String): List<Page> {
@@ -402,6 +427,7 @@ class CopyMangaRepository(
     private data class CachedCatalog(val detail: MangaDetail, val comicUuid: String?, val fetchedAt: Long)
     private data class PageKey(val mangaId: String, val chapterId: String)
     private data class CachedPages(val pages: List<Page>, val fetchedAt: Long)
+    private data class CachedCover(val page: Page, val fetchedAt: Long)
     private class SharedPages(val result: Deferred<List<Page>>, var readers: Int = 0)
 
     private companion object {

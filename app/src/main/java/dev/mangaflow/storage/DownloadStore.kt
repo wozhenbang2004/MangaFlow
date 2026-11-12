@@ -516,6 +516,15 @@ class DownloadStore private constructor(context: Context) {
         synchronized(lock) { records[chapterKey(mangaId, chapterId)]?.pages?.takeIf { it.isNotEmpty() } }
     }
 
+    /** Read-only preview: prefer a saved first image, never start a transfer or enqueue a job. */
+    suspend fun coverPage(mangaId: String, chapterId: String, preferLocal: Boolean = true): Page? = withContext(Dispatchers.IO) {
+        awaitReady()
+        val id = chapterKey(mangaId, chapterId)
+        val page = synchronized(lock) { records[id]?.pages?.firstOrNull() } ?: return@withContext null
+        val file = pageFile(id, 0)
+        if (preferLocal && file.isFile && file.length() > 0L) page.copy(url = file.toURI().toString()) else page
+    }
+
     /** Called for an image when it is needed, never on every download-progress publication. */
     suspend fun resolveReaderPage(mangaId: String, chapterId: String, page: Page): Page = withContext(Dispatchers.IO) {
         awaitReady()
