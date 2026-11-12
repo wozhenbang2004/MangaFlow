@@ -87,12 +87,14 @@ that review. Existing license notices below remain unchanged.
 
 ## MangaBaka data attribution
 
-Identity metadata is provided by MangaBaka and its contributors, `https://mangabaka.org`.
+Identity and public discovery metadata are provided by MangaBaka and its contributors, `https://mangabaka.org`.
 MangaBaka-original data is licensed under Creative Commons Attribution-NonCommercial-ShareAlike
 4.0 International (CC BY-NC-SA 4.0), `https://creativecommons.org/licenses/by-nc-sa/4.0/`.
 Data terms and the disclaimer of warranties: `https://mangabaka.org/about/data-license`.
-MangaFlow selects matching fields and converts identifier formats; it does not bundle or
-redistribute a database. Source content is supplied without warranties and no endorsement
+MangaFlow selects matching fields, thumbnails, summaries, recommendations, public stacks and
+directional series relationships, and converts identifier/display formats. Curator names and
+linked original provider names remain attributed. It does not bundle or redistribute a database;
+aggregate MangaBaka scores are not presented as an additional source score. Source content is supplied without warranties and no endorsement
 of MangaFlow is implied. This notice also appears visibly in the project README.
 
 Upstream AniList, MyAnimeList, Kitsu, MangaUpdates and Shikimori identifiers retain their

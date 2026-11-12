@@ -123,6 +123,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val updates = UpdateManager.get(application)
     val community = CopyCommunityRepository(repository)
     val reviews = ReviewRepository(application)
+    internal val mangaBaka = MangaBakaExplorer(application, repository, viewModelScope)
     private val readerCatalogs = ReaderCatalogStore(application)
     private val browseCache = BrowseCache(application)
     private val metricsRepository = MangaMetricsRepository(application, reviews, community)
@@ -405,7 +406,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    suspend fun metadataCacheSize(): Long = metricsRepository.cacheSizeBytes() + readerCatalogs.sizeBytes()
+    suspend fun metadataCacheSize(): Long = metricsRepository.cacheSizeBytes() + readerCatalogs.sizeBytes() + mangaBaka.sizeBytes()
 
     suspend fun clearMetadataCache(): Unit = withContext(Dispatchers.Main.immediate) {
         if (clearingMetadata) return@withContext
@@ -428,6 +429,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             jobs.joinAll()
             metricsRepository.clearCache()
             readerCatalogs.clear()
+            mangaBaka.clearCache()
         } finally {
             clearingMetadata = false
             reloadRetainedMetrics(forceRefresh = true)
@@ -1293,6 +1295,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private fun downloadedChapters(mangaId: String): List<Chapter> = downloads.entries.value
         .filter { it.manga.id == mangaId && it.status == DownloadStatus.COMPLETED }
         .map(DownloadEntry::chapter).distinctBy(Chapter::id).sortedBy(Chapter::index)
+
+    override fun onCleared() {
+        mangaBaka.release()
+        super.onCleared()
+    }
 
     private fun knownDownloadChapters(mangaId: String): List<Chapter> = downloads.entries.value
         .filter { it.manga.id == mangaId }

@@ -153,6 +153,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val savedState = rememberSaveableStateHolder()
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
     var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
+    var mangaBakaOpen by rememberSaveable { mutableStateOf(false) }
     val keyboard = LocalSoftwareKeyboardController.current
 
     LaunchedEffect(Unit) { model.events.collect { snackbar.showSnackbar(it) } }
@@ -190,6 +191,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             onContinue = { model.continueReading(it) },
             onRemoveHistory = model::removeHistory)
     }
+    if (mangaBakaOpen) MangaBakaSheet(model.mangaBaka, model.repository,
+        onDismiss = { model.mangaBaka.close(); mangaBakaOpen = false },
+        onOpen = { model.openManga(it) })
     val activity = LocalContext.current.activityOrNull()
     val darkSystem = isSystemInDarkTheme()
     SideEffect {
@@ -267,6 +271,22 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             ),
                             modifier = Modifier.padding(vertical = 3.dp),
                         )
+                        if (destination == Section.DISCOVER) {
+                            NavigationDrawerItem(
+                                label = { Text("找漫画") }, selected = false,
+                                onClick = { scope.launch {
+                                    drawer.close()
+                                    model.mangaBaka.openHome()
+                                    mangaBakaOpen = true
+                                } },
+                                icon = { Icon(Icons.Outlined.Explore, null, Modifier.size(21.dp)) },
+                                shape = RoundedCornerShape(14.dp),
+                                colors = NavigationDrawerItemDefaults.colors(unselectedContainerColor = Color.Transparent,
+                                    unselectedTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .88f),
+                                    unselectedIconColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .82f)),
+                                modifier = Modifier.padding(vertical = 3.dp),
+                            )
+                        }
                     }
                     Spacer(Modifier.weight(1f))
                     Text("MangaFlow ${BuildConfig.VERSION_NAME}", modifier = Modifier.padding(12.dp),
@@ -352,8 +372,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             onDownload = { onRequestNotifications(); model.downloadChapter(it) },
                             onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                             onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
+                            onFindRelated = {
+                                model.mangaBaka.openForManga(current.state.detail?.manga ?: current.state.manga, current.state.reviews)
+                                mangaBakaOpen = true
+                            },
                             loadReplies = model::reviewReplies,
-                            active = current.key == frame.key,
+                            active = current.key == frame.key && !mangaBakaOpen,
                         )
                     }
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
@@ -373,7 +397,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val chromePadding = with(chromeDensity) { chromeHeightPx.toDp() } + 4.dp
                         var searchPresent by remember { mutableStateOf(searchExpanded) }
                         val searchVisible = searchExpanded || searchPresent
-                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen
+                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen && !mangaBakaOpen
                         val closeSearch: () -> Unit = {
                             keyboard?.hide()
                             focus.clearFocus(force = true)

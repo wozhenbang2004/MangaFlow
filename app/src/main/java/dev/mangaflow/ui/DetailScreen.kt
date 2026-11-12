@@ -35,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
@@ -147,6 +148,7 @@ fun DetailScreen(
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage = { _, _, _ -> ReviewPage(emptyList()) },
     active: Boolean = true,
     onRestart: (Chapter) -> Unit = onRead,
+    onFindRelated: () -> Unit = {},
 ) {
     val current = detail?.manga ?: manga
     val downloaded = remember(downloadEntries, manga.id) {
@@ -285,7 +287,7 @@ fun DetailScreen(
                 header = header, compact = compactHero, title = current.title, backdrop = artworkBackdrop,
                 favorite = isFavorite, coverFailed = coverFailed, active = active, coverLight = coverLight,
                 comments = activeSection == 1, commentCount = commentCount,
-                onBack = onBack, onIntroduction = { fullIntroduction = true },
+                onBack = onBack, onIntroduction = { fullIntroduction = true }, onFindRelated = onFindRelated,
                 onToggleFavorite = onToggleFavorite, onRetryCover = {
                     coverFailed = false
                     coverRetry++
@@ -395,6 +397,7 @@ private fun ArtworkToolbar(
     onIntroduction: () -> Unit,
     onToggleFavorite: () -> Unit,
     onRetryCover: () -> Unit,
+    onFindRelated: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val progress = if (compact) 1f else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
@@ -433,6 +436,7 @@ private fun ArtworkToolbar(
                 modifier = Modifier.fillMaxWidth())
         }
         if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, 1f - progress, tint, glassTone, onRetryCover)
+        ArtworkAction(Icons.Outlined.AutoAwesome, "相似与系列作品", backdrop, 1f - progress, tint, glassTone, onFindRelated)
         ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
             if (favorite) "从书架移除" else "加入书架", backdrop, 1f - progress, tint, glassTone, onToggleFavorite)
     }
