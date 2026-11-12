@@ -49,7 +49,13 @@ data class DetailState(
     val reviewsLoading: Boolean = true,
 )
 
-data class ReadingSession(val manga: Manga, val chapters: List<Chapter>, val chapterId: String)
+data class ReadingSession(
+    val manga: Manga,
+    val chapters: List<Chapter>,
+    val chapterId: String,
+    val chaptersLoading: Boolean = false,
+    val chaptersError: String? = null,
+)
 
 data class AccountUiState(
     val profile: AccountProfile? = null,
@@ -91,6 +97,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private var browseJob: Job? = null
     private var detailJob: Job? = null
     private var reviewJob: Job? = null
+    private var readingCatalogJob: Job? = null
+    private var chapterPrefetchJob: Job? = null
+    private var chapterPrefetchKey: String? = null
+    private var readingRequestId = 0L
     private val preparingDownloads = mutableSetOf<String>()
     private var accountJob: Job? = null
     private var accountRequestId = 0L
@@ -187,7 +197,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         detail = if (offline.isEmpty()) null else MangaDetail(current.manga, offline))
                 }
                 if (continueChapterId != null && offline.any { it.id == continueChapterId }) {
-                    _reading.value = ReadingSession(manga, offline, continueChapterId)
+                    beginReading(ReadingSession(manga, offline, continueChapterId))
                 }
             }
         }
@@ -224,25 +234,117 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val current = _detail.value ?: return
         val chapters = current.detail?.chapters ?: downloadedChapters(current.manga.id)
         if (chapters.none { it.id == chapter.id }) return
-        visibleReading = null
-        _reading.value = ReadingSession(current.manga, chapters, chapter.id)
+        beginReading(ReadingSession(current.manga, chapters, chapter.id))
     }
 
     fun openDownload(entry: DownloadEntry) {
         if (entry.status != DownloadStatus.COMPLETED) return
         val chapters = downloadedChapters(entry.manga.id)
-        visibleReading = null
-        _reading.value = ReadingSession(entry.manga, chapters, entry.chapter.id)
+        beginReading(ReadingSession(entry.manga, chapters, entry.chapter.id))
     }
 
     fun continueReading(progress: ReadingProgress) {
-        viewModelScope.launch {
-            downloads.awaitReady()
-            val offline = downloads.entries.value.firstOrNull {
-                it.manga.id == progress.manga.id && it.chapter.id == progress.chapterId && it.status == DownloadStatus.COMPLETED
+        openSavedChapter(progress.manga, progress.chapterId, progress.chapterTitle)
+    }
+
+    private fun beginReading(session: ReadingSession) {
+        readingCatalogJob?.cancel()
+        chapterPrefetchJob?.cancel()
+        chapterPrefetchKey = null
+        readingRequestId++
+        visibleReading = null
+        _reading.value = session
+    }
+
+    private fun openSavedChapter(manga: Manga, chapterId: String, chapterTitle: String) {
+        val cached = repository.cachedDetail(manga.id)
+        val offline = downloadedChapters(manga.id)
+        val chapter = cached?.chapters?.firstOrNull { it.id == chapterId }
+            ?: offline.firstOrNull { it.id == chapterId }
+            ?: Chapter(chapterId, chapterTitle.ifBlank { "继续阅读" }, 0)
+        val chapters = (cached?.chapters.orEmpty() + offline + chapter).distinctBy(Chapter::id)
+            .sortedBy(Chapter::index)
+        val hasCurrentCatalog = cached?.chapters?.any { it.id == chapterId } == true
+        closeDetail()
+        // Reader restores the saved page/offset and checks local files itself.
+        // Neither download-store initialization nor a directory request blocks
+        // this navigation. A fresh catalog is useful only for adjacent chapters.
+        beginReading(ReadingSession(cached?.manga ?: manga, chapters, chapterId,
+            chaptersLoading = !hasCurrentCatalog))
+        if (!hasCurrentCatalog) loadReadingCatalog()
+    }
+
+    fun retryReadingChapters() {
+        if (_reading.value?.chaptersLoading != false) return
+        loadReadingCatalog(forceRefresh = true)
+    }
+
+    private fun loadReadingCatalog(forceRefresh: Boolean = false) {
+        val session = _reading.value ?: return
+        val requestId = readingRequestId
+        readingCatalogJob?.cancel()
+        _reading.update { it?.copy(chaptersLoading = true, chaptersError = null) }
+        readingCatalogJob = viewModelScope.launch {
+            try {
+                downloads.awaitReady()
+                val offline = downloadedChapters(session.manga.id)
+                if (requestId != readingRequestId) return@launch
+                _reading.update { current ->
+                    if (current?.manga?.id != session.manga.id) current
+                    else current.copy(chapters = (offline + current.chapters).distinctBy(Chapter::id)
+                        .sortedBy(Chapter::index))
+                }
+                val cached = if (forceRefresh) null else repository.cachedDetail(session.manga.id)
+                    ?.takeIf { it.chapters.any { chapter -> chapter.id == session.chapterId } }
+                // Downloaded chapters are immediately usable, but they are not
+                // a complete directory for continuing into the next chapter.
+                val loaded = cached ?: repository.detail(session.manga.id)
+                if (requestId != readingRequestId) return@launch
+                _reading.update { current ->
+                    if (current?.manga?.id != session.manga.id) current
+                    else current.copy(
+                        manga = loaded.manga,
+                        chapters = (loaded.chapters + current.chapters + offline).distinctBy(Chapter::id)
+                            .sortedBy(Chapter::index),
+                        chaptersLoading = false, chaptersError = null,
+                    )
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                if (requestId == readingRequestId) {
+                    _reading.update { current ->
+                        if (current?.manga?.id != session.manga.id) current
+                        else current.copy(chaptersLoading = false,
+                            chaptersError = failure.message ?: "目录暂时无法补全，可继续阅读当前章节。")
+                    }
+                }
             }
-            if (offline != null) openDownload(offline)
-            else openManga(progress.manga, progress.chapterId)
+        }
+    }
+
+    /** Only a visible chapter can request its immediate same-group successor. */
+    fun prefetchNextChapter(manga: Manga, chapter: Chapter) {
+        val session = _reading.value ?: return
+        val visible = visibleReading ?: return
+        if (session.manga.id != manga.id || visible.first.id != manga.id) return
+        val current = session.chapters.firstOrNull { it.id == visible.second.id } ?: return
+        val siblings = session.chapters.filter { it.group == current.group }.sortedBy(Chapter::index)
+        val next = siblings.getOrNull(siblings.indexOfFirst { it.id == current.id } + 1) ?: return
+        if (next.id != chapter.id || downloads.entryFor(manga.id, chapter.id)?.status == DownloadStatus.COMPLETED) return
+        val key = "${manga.id}/${chapter.id}"
+        if (chapterPrefetchKey == key && chapterPrefetchJob?.isActive == true) return
+        chapterPrefetchJob?.cancel()
+        chapterPrefetchKey = key
+        chapterPrefetchJob = viewModelScope.launch {
+            try {
+                repository.pages(manga.id, chapter.id)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                // Optional next-chapter work has no current-reader error state.
+                // SourceHttp still retains any source-wide rate-limit pause.
+            }
         }
     }
 
@@ -256,7 +358,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _refreshingDownloads.update { it + entry.id }
         viewModelScope.launch {
             try {
-                val pages = repository.pages(entry.manga.id, entry.chapter.id)
+                val pages = repository.pages(entry.manga.id, entry.chapter.id, forceRefresh = true)
                 val current = downloads.entryFor(entry.manga.id, entry.chapter.id)
                 if (current == null || current.createdAt != entry.createdAt || !current.needsSourceRefresh ||
                     current.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.COMPLETED)) return@launch
@@ -274,6 +376,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeReader() {
+        readingRequestId++
+        readingCatalogJob?.cancel()
+        chapterPrefetchJob?.cancel()
+        chapterPrefetchKey = null
         _reading.value = null
         visibleReading = null
         chapterSyncJob?.cancel()
@@ -414,14 +520,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun continueCloudHistory(entry: CloudHistoryEntry) {
-        viewModelScope.launch {
-            downloads.awaitReady()
-            val offline = downloads.entries.value.firstOrNull {
-                it.manga.id == entry.manga.id && it.chapter.id == entry.chapterId && it.status == DownloadStatus.COMPLETED
-            }
-            if (offline != null) openDownload(offline)
-            else openManga(entry.manga, entry.chapterId.takeIf(String::isNotBlank))
-        }
+        if (entry.chapterId.isBlank()) openManga(entry.manga)
+        else openSavedChapter(entry.manga, entry.chapterId, entry.chapterTitle)
     }
 
     fun toggleFavorite(manga: Manga) {

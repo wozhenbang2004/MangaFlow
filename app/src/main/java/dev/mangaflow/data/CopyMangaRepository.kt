@@ -1,6 +1,12 @@
 package dev.mangaflow.data
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -34,6 +40,9 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
     private val websiteClient = sourceClient()
     private val imageDomains = config.trustedImageDomains.map { it.lowercase().trim('.') }.toSet()
     private val catalogCache = LinkedHashMap<String, CachedCatalog>()
+    private val pageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val pageRequests = mutableMapOf<PageKey, SharedPages>()
+    private val pageCache = LinkedHashMap<PageKey, CachedPages>()
 
     init {
         require(imageDomains.isNotEmpty() && imageDomains.all { it.matches(Regex("[a-z0-9.-]+")) && '.' in it })
@@ -73,6 +82,15 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
         readCatalog(segment(mangaId), onMetadata).detail
     }
 
+    /** A reading session may reuse a recent directory without refreshing it. */
+    fun cachedDetail(mangaId: String): MangaDetail? {
+        segment(mangaId)
+        return synchronized(catalogCache) {
+            catalogCache[mangaId]?.takeIf { System.currentTimeMillis() - it.fetchedAt in 0L until 10 * 60_000L }
+                ?.detail
+        }
+    }
+
     /** Public metadata supplies the identifier needed by the separate account API. */
     suspend fun comicUuid(mangaId: String): String = withContext(Dispatchers.IO) {
         segment(mangaId)
@@ -90,26 +108,84 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
             ?: throw SourceException("官网详情缺少收藏所需的漫画标识，本地收藏已保留。", url.toString())
     }
 
-    override suspend fun pages(mangaId: String, chapterId: String): List<Page> = withContext(Dispatchers.IO) {
+    override suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
+        currentCoroutineContext().ensureActive()
         segment(mangaId)
         val id = uuid(chapterId, "章节")
-        val cached = synchronized(catalogCache) { catalogCache[mangaId] }
-        val catalog = if (cached != null && System.currentTimeMillis() - cached.fetchedAt < 10 * 60_000 &&
-            cached.detail.chapters.any { it.id == id }) cached else readCatalog(mangaId)
-        if (catalog.detail.chapters.none { it.id == id }) throw SourceException("所选章节不在当前漫画目录中。", comicUrl(mangaId))
+        val key = PageKey(mangaId, id)
+        val request = synchronized(pageRequests) {
+            val now = System.nanoTime()
+            pageCache.entries.removeAll { now - it.value.fetchedAt >= PAGE_CACHE_NANOS }
+            if (forceRefresh) pageCache.remove(key)
+            else pageCache.remove(key)?.let { cached ->
+                pageCache[key] = cached
+                return cached.pages
+            }
+            // Reader, download preparation and the one next-chapter prefetch
+            // share the same live request, including its failure. A refresh may
+            // join an unfinished network fetch, but never a completed result.
+            val shared = pageRequests[key]?.takeUnless { it.result.isCompleted } ?: SharedPages(
+                pageScope.async(start = CoroutineStart.LAZY) {
+                    val loaded = readPages(mangaId, id)
+                    val requestContext = currentCoroutineContext()
+                    synchronized(pageRequests) {
+                        requestContext.ensureActive()
+                        if (pageRequests[key]?.result === requestContext[Job]) {
+                            pageCache.remove(key)
+                            pageCache[key] = CachedPages(loaded, System.nanoTime())
+                            while (pageCache.size > 4) pageCache.remove(pageCache.keys.first())
+                        }
+                    }
+                    loaded
+                },
+            ).also { pageRequests[key] = it }
+            shared.readers++
+            shared
+        }
+        try {
+            request.result.start()
+            return request.result.await()
+        } finally {
+            synchronized(pageRequests) {
+                request.readers--
+                if (request.readers == 0) {
+                    if (pageRequests[key] === request) pageRequests.remove(key)
+                    // Leaving a screen cancels unused work. It must not cancel
+                    // a fetch that a reader or download is still awaiting.
+                    if (!request.result.isCompleted) request.result.cancel()
+                }
+            }
+        }
+    }
 
+    private suspend fun readPages(mangaId: String, id: String): List<Page> {
         val url = webOrigin.newBuilder().addPathSegment("comic").addPathSegment(mangaId)
             .addPathSegment("chapter").addPathSegment(id).build()
         val http = websiteSession()
         val response = http.request(webRequest(url).header("Referer", comicUrl(mangaId)).build(), "章节内容", url.toString())
         demandHtml(response, url, http, "章节内容")
         val document = Jsoup.parse(response.text, url.toString())
+        // The requested UUID stays in the fixed anonymous chapter URL (HTTP
+        // redirects are disabled). The real reader HTML binds its directory
+        // link to this comic, and every decrypted image must also belong to it.
+        // This keeps ownership checks without making a full catalog a reading
+        // prerequisite when resuming a saved chapter.
+        val directoryLinks = document.select(".comicContent-prev.list a[href]")
+            .mapNotNull { url.resolve(it.attr("href")) }.distinct()
+        val expectedDirectory = comicUrl(mangaId).toHttpUrl()
+        if (directoryLinks.isEmpty() || directoryLinks.any {
+                it.scheme != expectedDirectory.scheme || it.host != expectedDirectory.host ||
+                    it.port != expectedDirectory.port || it.encodedPath != expectedDirectory.encodedPath ||
+                    it.username.isNotEmpty() || it.password.isNotEmpty()
+            }) {
+            throw SourceException("正文页面与漫画归属不一致，请重新打开该章节。", url.toString())
+        }
         val payload = decodePayload(scriptVariable(document, "contentKey"), scriptVariable(document, "cct"), "章节内容")
         val contents = try { JSONArray(payload) } catch (error: JSONException) {
             throw SourceException("章节内容格式已变化，请查看原站提示。", url.toString(), cause = error)
         }
         if (contents.length() !in 1..2000) throw SourceException("来源没有返回有效的章节图片。", url.toString())
-        List(contents.length()) { index ->
+        return List(contents.length()) { index ->
             currentCoroutineContext().ensureActive()
             val item = contents.optJSONObject(index) ?: throw SourceException("章节图片清单不完整。", url.toString())
             val asset = imageUrl(item.requiredText("url"))
@@ -418,4 +494,11 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
         return url
     }
     private data class CachedCatalog(val detail: MangaDetail, val comicUuid: String?, val fetchedAt: Long)
+    private data class PageKey(val mangaId: String, val chapterId: String)
+    private data class CachedPages(val pages: List<Page>, val fetchedAt: Long)
+    private class SharedPages(val result: Deferred<List<Page>>, var readers: Int = 0)
+
+    private companion object {
+        const val PAGE_CACHE_NANOS = 3 * 60_000_000_000L
+    }
 }

@@ -17,7 +17,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.ceil
 
-internal data class SourceResponse(val text: String, val retryAfterSeconds: Long)
+internal data class SourceResponse(val text: String, val retryAfterSeconds: Long, val statusCode: Int = 200)
 
 /** Anonymous clients deliberately have no account interceptors or token store. */
 internal fun sourceClient(): OkHttpClient = OkHttpClient.Builder()
@@ -41,7 +41,7 @@ internal class SourceHttp(private val client: OkHttpClient = sourceClient()) {
         pauses.merge(url.origin(), until) { current, incoming -> maxOf(current, incoming) }
     }
 
-    suspend fun request(request: Request, operation: String, publicUrl: String = ""): SourceResponse {
+    suspend fun request(request: Request, operation: String, publicUrl: String = "", readAccountError210: Boolean = false): SourceResponse {
         val remaining = pauses[request.url.origin()]?.minus(System.currentTimeMillis()) ?: 0
         if (remaining > 0) {
             val seconds = ceil(remaining / 1000.0).toLong()
@@ -64,12 +64,17 @@ internal class SourceHttp(private val client: OkHttpClient = sourceClient()) {
                             when (current.code) {
                                 209, 210, 429 -> {
                                     rememberPause(request.url, retry)
-                                    throw SourceException(
-                                        "$operation 暂时被来源限制（${current.code}）" +
-                                            if (retry > 0) "，${retry} 秒后可重试。" else "，请稍后重试或查看原站提示。",
-                                        publicUrl,
-                                        retry,
-                                    )
+                                    // Account 210 responses can carry a business error.
+                                    // Preserve that message for the account parser;
+                                    // it must still reject the response as a login result.
+                                    if (current.code != 210 || !readAccountError210) {
+                                        throw SourceException(
+                                            "$operation 暂时被来源限制（${current.code}）" +
+                                                if (retry > 0) "，${retry} 秒后可重试。" else "，请稍后重试或查看原站提示。",
+                                            publicUrl,
+                                            retry,
+                                        )
+                                    }
                                 }
                                 401, 403 -> throw SourceException("$operation 被来源拒绝，请查看原站访问提示。", publicUrl)
                             }
@@ -88,7 +93,7 @@ internal class SourceHttp(private val client: OkHttpClient = sourceClient()) {
                             }
                             if (!continuation.isActive) return
                             if (output.size() == 0) throw SourceException("$operation 返回了空响应。", publicUrl)
-                            SourceResponse(output.toString(Charsets.UTF_8.name()), retry)
+                            SourceResponse(output.toString(Charsets.UTF_8.name()), retry, current.code)
                         }
                         if (continuation.isActive) continuation.resume(result)
                     } catch (error: Exception) {

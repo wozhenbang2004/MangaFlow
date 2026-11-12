@@ -88,6 +88,7 @@ fun AccountScreen(
     onContinue: (CloudHistoryEntry) -> Unit,
     onSetFavorite: (Manga, Boolean) -> Unit,
     onRetrySync: () -> Unit,
+    onWebsiteLogin: () -> Unit,
 ) {
     val profile = state.profile
     val colors = MaterialTheme.colorScheme
@@ -164,6 +165,17 @@ fun AccountScreen(
             item(span = { GridItemSpan(maxLineSpan) }, key = "login-form") {
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Text("连接账号，同步个人收藏与阅读记录。", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                    Button(
+                        onClick = { clearInputs(); onWebsiteLogin() },
+                        enabled = !state.busy,
+                        modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(16.dp), elevation = null,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = colors.primary, contentColor = colors.onPrimary,
+                            disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant,
+                        ),
+                    ) { Text("官网登录") }
+                    Text("在官网页面登录后，返回连接账号。", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    Text("手动连接", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.titleSmall)
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         FilterChip(selected = cookieMode, enabled = !state.busy, onClick = { clearInputs(); cookieMode = true },
                             label = { Text("Cookie / Token") }, shape = RoundedCornerShape(100))

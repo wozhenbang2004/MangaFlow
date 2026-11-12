@@ -83,6 +83,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -99,7 +100,14 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
+import coil3.annotation.ExperimentalCoilApi
+import coil3.decode.BlackholeDecoder
+import coil3.imageLoader
+import coil3.request.CachePolicy
+import coil3.request.Disposable
 import coil3.request.ImageRequest
+import coil3.request.crossfade
+import coil3.size.Scale
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
@@ -140,6 +148,10 @@ fun ReaderScreen(
     onBack: () -> Unit,
     onRequestNotificationPermission: () -> Unit = {},
     onChapterVisible: (Manga, Chapter) -> Unit = { _, _ -> },
+    onNearChapterEnd: (Manga, Chapter) -> Unit = { _, _ -> },
+    chaptersLoading: Boolean = false,
+    chaptersError: String? = null,
+    onRetryChapters: () -> Unit = {},
 ) {
     val preferences by libraryStore.preferences.collectAsState()
     val downloads by downloadStore.entries.collectAsState()
@@ -155,15 +167,19 @@ fun ReaderScreen(
     var error by remember(chapterId) { mutableStateOf<String?>(null) }
     var offline by remember(chapterId) { mutableStateOf(false) }
     var pageIndex by remember(chapterId) { mutableIntStateOf(0) }
-    var scrollOffset by remember(chapterId) { mutableIntStateOf(0) }
+    // Pixel offsets are a resume cursor, not UI state. Publishing every scroll delta
+    // here used to recompose ReaderScreen and ChapterPages for every animation frame.
+    val cursor = remember(chapterId) { ReaderCursor() }
     var targetPage by remember(chapterId) { mutableStateOf<Int?>(null) }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showChapters by rememberSaveable { mutableStateOf(false) }
     var downloadMessage by remember(chapterId) { mutableStateOf<String?>(null) }
     var chapterVisibilityReported by rememberSaveable(manga.id, chapterId) { mutableStateOf(false) }
+    var nextChapterPrefetched by remember(manga.id, chapterId) { mutableStateOf(false) }
     var leavingReader by remember { mutableStateOf(false) }
     val chapterVisible by rememberUpdatedState(onChapterVisible)
+    val nearChapterEnd by rememberUpdatedState(onNearChapterEnd)
     val scope = rememberCoroutineScope()
     val headers = remember(manga.id, chapterId, repository) { repository.imageHeaders(manga.id, chapterId) }
     val activeDownload = downloads.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
@@ -179,11 +195,11 @@ fun ReaderScreen(
         try {
             downloadStore.awaitReady()
             val local = withContext(Dispatchers.IO) { downloadStore.downloadedPages(manga.id, chapterId) }
-            val loaded = local ?: repository.pages(manga.id, chapterId)
+            val loaded = local ?: repository.pages(manga.id, chapterId, forceRefresh = retry > 0)
             if (loaded.isEmpty()) throw IllegalStateException("这一章还没有可读取的图片")
             val saved = libraryStore.progressFor(manga.id, chapterId)
             pageIndex = saved?.pageIndex?.coerceIn(0, loaded.lastIndex) ?: 0
-            scrollOffset = saved?.scrollOffset ?: 0
+            cursor.scrollOffset = saved?.scrollOffset ?: 0
             offline = local != null
             pages = loaded
         } catch (cancelled: CancellationException) {
@@ -221,10 +237,10 @@ fun ReaderScreen(
                     headers = headers,
                     preferences = preferences,
                     initialPage = pageIndex,
-                    initialOffset = scrollOffset,
+                    initialOffset = cursor.scrollOffset,
                     targetPage = targetPage,
                     onTargetConsumed = { targetPage = null },
-                    onLocation = { index, offset -> pageIndex = index; scrollOffset = offset },
+                    onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
                     onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, pages.size, offset) },
                     longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
                     onSaveLongImagePosition = { index, position -> libraryStore.saveLongImagePosition(manga.id, chapter.id, index, position) },
@@ -232,6 +248,13 @@ fun ReaderScreen(
                         if (!leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
                             chapterVisibilityReported = true
                             chapterVisible(manga, chapter)
+                        }
+                    },
+                    onNearEnd = {
+                        val next = siblings.getOrNull(chapterIndex + 1)
+                        if (!leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
+                            nextChapterPrefetched = true
+                            nearChapterEnd(manga, next)
                         }
                     },
                     onTap = { controlsVisible = !controlsVisible },
@@ -248,7 +271,7 @@ fun ReaderScreen(
                     .statusBarsPadding().padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 30.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回漫画", onClick = leaveReader)
+                ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回", onClick = leaveReader)
                 Column(Modifier.weight(1f).padding(start = 4.dp)) {
                     Text(manga.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
@@ -316,7 +339,12 @@ fun ReaderScreen(
         }
     }
     if (showSettings) ReaderSettingsDialog(preferences, libraryStore::updatePreferences) { showSettings = false }
-    if (showChapters) ReaderChaptersDialog(chapters, chapterId, onSelect = { chapterId = it; showChapters = false; controlsVisible = true }, onDismiss = { showChapters = false })
+    if (showChapters) ReaderChaptersDialog(
+        chapters, chapterId,
+        loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
+        onSelect = { chapterId = it; showChapters = false; controlsVisible = true },
+        onDismiss = { showChapters = false },
+    )
 }
 
 @OptIn(FlowPreview::class)
@@ -334,36 +362,47 @@ private fun ChapterPages(
     longImagePosition: (Int) -> Float?,
     onSaveLongImagePosition: (Int, Float) -> Unit,
     onVisibleImageLoaded: () -> Unit,
+    onNearEnd: () -> Unit,
     onTap: () -> Unit,
     onNext: (() -> Unit)?,
 ) {
     val save by rememberUpdatedState(onSave)
     val location by rememberUpdatedState(onLocation)
     val visibleImageLoaded by rememberUpdatedState(onVisibleImageLoaded)
+    val nearEnd by rememberUpdatedState(onNearEnd)
     val loadedPages = remember { mutableStateMapOf<Int, Boolean>() }
+    val composedPages = remember { mutableStateMapOf<Int, Boolean>() }
+    val prefetchRequests = remember { mutableStateMapOf<Int, Disposable>() }
     val startPage = remember { initialPage.coerceIn(0, pages.lastIndex) }
+    val startOffset = remember { initialOffset.coerceAtLeast(0) }
     if (preferences.mode == ReadingMode.VERTICAL) {
         val list = rememberLazyListState(initialFirstVisibleItemIndex = startPage)
-        var restoring by remember { mutableStateOf(initialOffset > 0) }
+        var restoring by remember { mutableStateOf(startOffset > 0) }
         var targetMeasured by remember { mutableStateOf(pages[startPage].width > 0 && pages[startPage].height > 0) }
         LaunchedEffect(restoring, targetMeasured) {
             if (restoring && targetMeasured) {
                 withFrameNanos { }
-                list.scrollToItem(startPage, initialOffset)
+                list.scrollToItem(startPage, startOffset)
                 restoring = false
             }
         }
         LaunchedEffect(list) {
             snapshotFlow { list.isScrollInProgress }.collect { moving -> if (moving && !targetMeasured) restoring = false }
         }
-        LaunchedEffect(list) {
+        LaunchedEffect(list, onNearEnd) {
             snapshotFlow {
-                !restoring && list.layoutInfo.visibleItemsInfo.any { item ->
+                val layout = list.layoutInfo
+                if (restoring) -1 else layout.visibleItemsInfo.lastOrNull { item ->
                     loadedPages[item.index] == true && item.size > 0 &&
-                        item.offset < list.layoutInfo.viewportEndOffset &&
-                        item.offset + item.size > list.layoutInfo.viewportStartOffset
+                        item.offset < layout.viewportEndOffset &&
+                        item.offset + item.size > layout.viewportStartOffset
+                }?.index ?: -1
+            }.distinctUntilChanged().collect { index ->
+                if (index >= 0) {
+                    visibleImageLoaded()
+                    if (index >= pages.lastIndex - 3) nearEnd()
                 }
-            }.distinctUntilChanged().collect { visible -> if (visible) visibleImageLoaded() }
+            }
         }
         LaunchedEffect(list) {
             snapshotFlow { list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex) to list.firstVisibleItemScrollOffset }
@@ -379,8 +418,13 @@ private fun ChapterPages(
         DisposableEffect(list) {
             onDispose { if (!restoring) save(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex), list.firstVisibleItemScrollOffset) }
         }
+        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests) {
+            val visible = list.layoutInfo.visibleItemsInfo.filter { it.index in pages.indices }
+            val anchor = list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex)
+            (visible.firstOrNull()?.index ?: anchor) to (visible.lastOrNull()?.index ?: anchor)
+        }
         LazyColumn(state = list, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
-            itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }) { index, page ->
+            itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                 ReaderPage(
                     page, headers, paged = false, onTap = onTap,
                     onMeasured = {
@@ -389,9 +433,11 @@ private fun ChapterPages(
                     },
                     longImagePosition = { longImagePosition(index) },
                     onSaveLongImagePosition = { onSaveLongImagePosition(index, it) },
+                    onComposed = { present -> if (present) composedPages[index] = true else composedPages.remove(index) },
+                    prefetch = prefetchRequests[index],
                 )
             }
-            item("chapter-end") {
+            item("chapter-end", contentType = "chapter-end") {
                 Column(Modifier.fillMaxWidth().padding(vertical = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("本章已读完", color = preferences.theme.foreground().copy(alpha = .45f), fontSize = 13.sp)
                     if (onNext != null) TextButton(onClick = onNext) { Text("继续下一章", color = preferences.theme.foreground()) }
@@ -403,21 +449,119 @@ private fun ChapterPages(
         LaunchedEffect(pager) {
             snapshotFlow { pager.currentPage }.distinctUntilChanged().collect { index -> location(index, 0); save(index, 0) }
         }
-        LaunchedEffect(pager) {
-            snapshotFlow { loadedPages[pager.currentPage] == true }
-                .distinctUntilChanged().collect { visible -> if (visible) visibleImageLoaded() }
+        LaunchedEffect(pager, onNearEnd) {
+            snapshotFlow { if (loadedPages[pager.currentPage] == true) pager.currentPage else -1 }
+                .distinctUntilChanged().collect { index ->
+                    if (index >= 0) {
+                        visibleImageLoaded()
+                        if (index >= pages.lastIndex - 3) nearEnd()
+                    }
+                }
         }
         LaunchedEffect(targetPage) { targetPage?.let { pager.scrollToPage(it.coerceIn(0, pages.lastIndex)); onTargetConsumed() } }
         DisposableEffect(pager) { onDispose { save(pager.currentPage, 0) } }
+        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests) { pager.currentPage to pager.currentPage }
         HorizontalPager(
             state = pager,
             modifier = Modifier.fillMaxSize(),
             reverseLayout = preferences.mode == ReadingMode.RIGHT_TO_LEFT,
             beyondViewportPageCount = 1,
             key = { it },
-        ) { index -> ReaderPage(pages[index], headers, paged = true, onTap = onTap, onMeasured = { loadedPages[index] = true }) }
+        ) { index ->
+            ReaderPage(
+                pages[index], headers, paged = true, onTap = onTap, onMeasured = { loadedPages[index] = true },
+                onComposed = { present -> if (present) composedPages[index] = true else composedPages.remove(index) },
+                prefetch = prefetchRequests[index],
+            )
+        }
     }
 }
+
+private class ReaderCursor(var scrollOffset: Int = 0)
+private class LongImageCursor(var position: Float? = null)
+
+private data class PrefetchWindow(val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>)
+
+/** Telephoto preloads tiles inside an image, not upcoming comic pages. */
+@OptIn(ExperimentalCoilApi::class)
+@Composable
+private fun AdjacentPagePrefetch(
+    pages: List<Page>,
+    headers: Map<String, String>,
+    mode: ReadingMode,
+    composedPages: Map<Int, Boolean>,
+    requests: MutableMap<Int, Disposable>,
+    visibleRange: () -> Pair<Int, Int>,
+) {
+    val context = LocalContext.current
+    val imageLoader = context.imageLoader
+    val visible by rememberUpdatedState(visibleRange)
+    LaunchedEffect(pages, headers, mode, imageLoader) {
+        val finished = mutableSetOf<Int>()
+        var previousFirst = -1
+        var direction = 1
+        try {
+            snapshotFlow {
+                val (first, last) = visible()
+                PrefetchWindow(first, last, composedPages.keys.toSet(), requests.keys.toSet())
+            }.distinctUntilChanged().collect { window ->
+                val active = window.composed + (window.first..window.last)
+                val nextDirection = when {
+                    previousFirst < 0 || window.first == previousFirst -> direction
+                    window.first > previousFirst -> 1
+                    else -> -1
+                }
+                if (nextDirection != direction) {
+                    // A request handed to a composed/visible page is now foreground work.
+                    // Do not cancel those bytes merely because the reader changes direction.
+                    requests.keys.filter { it !in active }.forEach { requests.remove(it)?.dispose() }
+                    finished.clear()
+                }
+                direction = nextDirection
+                previousFirst = window.first
+                val candidates = if (direction > 0) listOf(window.last + 1, window.last + 2, window.first - 1)
+                    else listOf(window.first - 1, window.first - 2, window.last + 1)
+                val desired = candidates.filter { index ->
+                    index in pages.indices && index !in window.composed && pages[index].url.startsWith("https:")
+                }.toSet()
+                val retained = desired + active
+                requests.keys.filter { it !in retained }.forEach { index -> requests.remove(index)?.dispose() }
+                finished.retainAll(retained)
+                for (index in desired) {
+                    if (index !in requests && index !in finished && requests.size < 3) {
+                        // Fetch original bytes into Coil's existing disk cache. Never cache the
+                        // empty decoder image in memory or report it as a visibly loaded page.
+                        val request = imageLoader.enqueue(
+                            readerImageRequest(context, pages[index], headers)
+                                .size(1)
+                                .memoryCachePolicy(CachePolicy.DISABLED)
+                                .diskCachePolicy(CachePolicy.ENABLED)
+                                .decoderFactory(BlackholeDecoder.Factory())
+                                .build(),
+                        )
+                        requests[index] = request
+                        launch {
+                            request.job.join()
+                            if (requests[index] === request) {
+                                finished += index
+                                requests.remove(index)
+                            }
+                        }
+                    }
+                }
+            }
+        } finally {
+            val pending = requests.values.toList()
+            requests.clear()
+            pending.forEach(Disposable::dispose)
+        }
+    }
+}
+
+private fun readerImageRequest(context: Context, page: Page, headers: Map<String, String>): ImageRequest.Builder =
+    ImageRequest.Builder(context)
+        .data(if (page.url.startsWith("file:")) File(URI(page.url)) else page.url)
+        .httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
 
 @OptIn(FlowPreview::class)
 @Composable
@@ -429,46 +573,65 @@ private fun ReaderPage(
     onMeasured: () -> Unit,
     longImagePosition: () -> Float? = { null },
     onSaveLongImagePosition: (Float) -> Unit = {},
+    onComposed: (Boolean) -> Unit = {},
+    prefetch: Disposable? = null,
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val screenHeight = LocalConfiguration.current.screenHeightDp.coerceAtLeast(320).dp
     val measured by rememberUpdatedState(onMeasured)
+    val composed by rememberUpdatedState(onComposed)
     val readLongImagePosition by rememberUpdatedState(longImagePosition)
     val saveLongImagePosition by rememberUpdatedState(onSaveLongImagePosition)
-    var aspect by remember(page.url) { mutableFloatStateOf(if (page.width > 0 && page.height > 0) page.width.toFloat() / page.height else 0.7f) }
+    // Lazy layout recycling must not collapse a measured page back to its placeholder height.
+    var aspect by rememberSaveable(page.url) { mutableFloatStateOf(if (page.width > 0 && page.height > 0) page.width.toFloat() / page.height else 0.7f) }
     var error by remember(page.url) { mutableStateOf<String?>(null) }
     var loading by remember(page.url) { mutableStateOf(true) }
     var reload by remember(page.url) { mutableIntStateOf(0) }
-    val request = remember(page.url, headers, reload) {
-        ImageRequest.Builder(context)
-            .data(if (page.url.startsWith("file:")) File(URI(page.url)) else page.url)
-            .httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
-            // This caps the thumbnail bitmap; Telephoto reads full-quality visible tiles from the original disk cache.
-            .size(1600, 4096)
-            .listener(
-                onStart = { loading = true; error = null },
-                onSuccess = { _, result ->
-                    val width = result.image.width
-                    val height = result.image.height
-                    if (width > 0 && height > 0) aspect = (width.toFloat() / height).coerceAtLeast(.005f)
-                    loading = false
-                    measured()
-                },
-                onError = { _, result -> loading = false; error = result.throwable.message ?: "图片暂时无法读取" },
-            )
-            .build()
+    var waitingForPrefetch by remember(page.url, prefetch) { mutableStateOf(prefetch != null && !prefetch.job.isCompleted) }
+    LaunchedEffect(prefetch) {
+        // Coil 3.2 does not deduplicate cache misses in flight. Join the same original
+        // fetch before Telephoto opens its completed disk entry, instead of starting over.
+        prefetch?.job?.join()
+        waitingForPrefetch = false
+    }
+    DisposableEffect(page.url) {
+        composed(true)
+        onDispose { composed(false) }
     }
     BoxWithConstraints(if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
+        val previewWidth = with(density) { maxWidth.roundToPx() }.coerceIn(1, 1600)
+        val previewHeight = with(density) { screenHeight.roundToPx() }.coerceIn(1, 4096)
+        val request = remember(page.url, headers, reload, previewWidth, previewHeight) {
+            readerImageRequest(context, page, headers)
+                // The preview need only fit this viewport. Telephoto keeps the original
+                // disk file for full-quality visible tiles and pinch zoom.
+                .size(previewWidth, previewHeight)
+                .scale(Scale.FIT)
+                .crossfade(false)
+                .listener(
+                    onStart = { loading = true; error = null },
+                    onSuccess = { _, result ->
+                        val width = result.image.width
+                        val height = result.image.height
+                        if (width > 0 && height > 0) aspect = (width.toFloat() / height).coerceAtLeast(.005f)
+                        loading = false
+                        measured()
+                    },
+                    onError = { _, result -> loading = false; error = result.throwable.message ?: "图片暂时无法读取" },
+                )
+                .build()
+        }
         val naturalHeight = maxWidth / aspect
         val longImage = !paged && naturalHeight > screenHeight * 3f
         // Sub-sampling operates within its own layout bounds. Keep exceptionally tall
         // images in a screen-sized viewport so off-screen tiles are actually unloaded.
         val pageModifier = if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(if (longImage) screenHeight else naturalHeight)
         Box(pageModifier.clipToBounds(), contentAlignment = Alignment.Center) {
-            key(reload) {
+            if (!waitingForPrefetch) key(reload) {
                 val imageState = rememberZoomableImageState()
                 var longImageRestored by rememberSaveable(page.url) { mutableStateOf(false) }
-                var latestLongImagePosition by remember { mutableStateOf<Float?>(null) }
+                val latestLongImagePosition = remember { LongImageCursor() }
                 if (longImage) {
                     LaunchedEffect(imageState) {
                         snapshotFlow {
@@ -486,12 +649,12 @@ private fun ReaderPage(
                                 imageState.zoomableState.longImagePosition()
                             } else null
                         }.filterNotNull().distinctUntilChanged()
-                            .onEach { latestLongImagePosition = it }
+                            .onEach { latestLongImagePosition.position = it }
                             .debounce(450).collect { saveLongImagePosition(it) }
                     }
                     DisposableEffect(imageState) {
                         onDispose {
-                            if (longImageRestored) latestLongImagePosition?.let(saveLongImagePosition)
+                            if (longImageRestored) latestLongImagePosition.position?.let(saveLongImagePosition)
                         }
                     }
                 }
@@ -643,7 +806,15 @@ private fun ReaderSettingsDialog(preferences: ReaderPreferences, update: (Reader
 }
 
 @Composable
-private fun ReaderChaptersDialog(chapters: List<Chapter>, currentId: String, onSelect: (String) -> Unit, onDismiss: () -> Unit) {
+private fun ReaderChaptersDialog(
+    chapters: List<Chapter>,
+    currentId: String,
+    loading: Boolean,
+    error: String?,
+    onRetry: () -> Unit,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
     val hasMultipleGroups = remember(chapters) { chapters.map(Chapter::group).distinct().size > 1 }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth().padding(20.dp), color = Color(0xFF202022), contentColor = Color.White, shape = RoundedCornerShape(24.dp)) {
@@ -651,6 +822,13 @@ private fun ReaderChaptersDialog(chapters: List<Chapter>, currentId: String, onS
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", Modifier.weight(1f), fontSize = 18.sp, fontWeight = FontWeight.Medium)
                     ReaderIcon(Icons.Rounded.Close, "关闭目录", onClick = onDismiss)
+                }
+                if (loading) Row(Modifier.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(14.dp), color = Color.White.copy(alpha = .6f), strokeWidth = 1.5.dp)
+                    Text("正在补全章节目录", Modifier.padding(start = 10.dp), color = Color.White.copy(alpha = .6f), fontSize = 12.sp)
+                } else if (error != null) {
+                    Text(error, Modifier.padding(top = 8.dp), color = Color.White.copy(alpha = .65f), fontSize = 12.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    TextButton(onClick = onRetry) { Text("重试目录", color = Color.White, fontSize = 12.sp) }
                 }
                 val state = rememberLazyListState(initialFirstVisibleItemIndex = chapters.indexOfFirst { it.id == currentId }.coerceAtLeast(0))
                 LazyColumn(state = state, modifier = Modifier.height(420.dp), contentPadding = PaddingValues(vertical = 8.dp)) {

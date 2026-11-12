@@ -216,10 +216,10 @@ class CopyAccountRepository(context: Context) {
             .header("sec-fetch-site", "same-origin").header("sec-fetch-mode", "cors").header("sec-fetch-dest", "empty")
             .header("Cookie", "webp=1").build()
         ensureVersion(expected)
-        val response = try { loginHttp.request(request, "账号网页登录", "https://copy4000.com/web/login/loginByAccount") }
+        val response = try { loginHttp.request(request, "账号网页登录", "https://copy4000.com/web/login/loginByAccount", readAccountError210 = true) }
             catch (error: Exception) { ensureVersion(expected); throw error }
         ensureVersion(expected)
-        val results = envelope(response, loginUrl, loginHttp, "账号网页登录", 256 * 1024) as? JSONObject
+        val results = envelope(response, loginUrl, loginHttp, "账号网页登录", 256 * 1024, listOf(password, encoded)) as? JSONObject
             ?: throw SourceException("网页登录没有返回有效的账号凭据。")
         return AccountTokenInput.validate(results.opt("token") as? String
             ?: throw SourceException("网页登录没有返回有效的账号凭据。"))
@@ -240,30 +240,58 @@ class CopyAccountRepository(context: Context) {
             .header("Accept", "application/json").header("source", "copyApp").header("platform", "3")
             .header("version", "3.0.9").header("webp", "1").header("Authorization", "Token ${lease.token}")
         if (body != null) builder.post(body)
-        val response = try { accountHttp.request(builder.build(), operation, "https://copy4000.com/person/home") }
+        val response = try { accountHttp.request(builder.build(), operation, "https://copy4000.com/person/home", readAccountError210 = true) }
             catch (error: Exception) { ensureLease(lease); throw error }
         ensureLease(lease)
-        val result = envelope(response, url, accountHttp, operation, maxChars)
+        val result = envelope(response, url, accountHttp, operation, maxChars, listOf(lease.token))
         ensureLease(lease)
         return result
     }
 
-    private fun envelope(response: SourceResponse, url: HttpUrl, http: SourceHttp, operation: String, maxChars: Int): Any? {
+    private fun envelope(response: SourceResponse, url: HttpUrl, http: SourceHttp, operation: String, maxChars: Int,
+        secrets: List<String> = emptyList()): Any? {
         if (response.text.length > maxChars) throw SourceException("$operation 返回的数据过大。")
-        val root = try { JSONObject(response.text) } catch (_: Exception) { throw SourceException("$operation 返回的数据无法识别。") }
-        val code = root.integer("code") ?: throw SourceException("$operation 缺少有效状态。")
+        val root = try { JSONObject(response.text) } catch (_: Exception) {
+            throw SourceException(if (response.statusCode == 210) "$operation 未成功（210），请在官网登录页查看具体提示。"
+                else "$operation 返回的数据无法识别。")
+        }
+        val code = if (response.statusCode == 210) 210
+            else root.integer("code") ?: throw SourceException("$operation 缺少有效状态。")
         when (code) {
             401, 403 -> throw SourceException("$operation 的登录状态无效或已过期，请重新登录。")
-            209, 210, 429 -> {
+            209, 429 -> {
                 val retry = response.retryAfterSeconds
                 http.rememberPause(url, retry)
                 throw SourceException("$operation 暂时被来源限制（$code）" +
                     if (retry > 0) "，请在 $retry 秒后重试。" else "，请稍后重试或查看原站提示。",
                     retryAfterSeconds = retry)
             }
+            210 -> {
+                val retry = response.retryAfterSeconds
+                http.rememberPause(url, retry)
+                val message = accountSourceMessage(root, secrets)
+                val detail = if (message.isNotBlank()) "：$message" else "，请在官网登录页查看具体提示。"
+                val retryHint = if (retry > 0) "（$retry 秒后可重试）" else ""
+                throw SourceException("$operation 未成功（210）$detail$retryHint", retryAfterSeconds = retry)
+            }
         }
-        if (code != 200) throw SourceException("$operation 失败（业务码 $code），请核对账号信息或稍后重试。")
+        if (code != 200) {
+            val message = accountSourceMessage(root, secrets)
+            throw SourceException("$operation 失败（$code）" + if (message.isNotBlank()) "：$message" else "，请核对账号信息或稍后重试。")
+        }
         return root.opt("results").takeUnless { it == JSONObject.NULL }
+    }
+
+    private fun accountSourceMessage(root: JSONObject, secrets: List<String>): String {
+        var message = (root.opt("message") as? String).orEmpty()
+        // Only the short, human-readable message is displayed, never the raw
+        // response. Redact submitted secrets before truncating a message.
+        for (secret in secrets.filter(String::isNotEmpty).sortedByDescending(String::length)) {
+            message = message.replace(secret, "[已隐藏]")
+        }
+        return message.take(512).replace(Regex("[\\p{Cc}\\p{Cf}]"), " ")
+            .replace(Regex("(?i)(token|authorization|cookie)\\s*[:=]\\s*(?:(?:Token|Bearer)\\s+)?[^\\s;,]+"), "$1=[已隐藏]")
+            .trim().take(240)
     }
 
     private fun apiUrl(route: String, vararg parameters: Pair<String, String>): HttpUrl =

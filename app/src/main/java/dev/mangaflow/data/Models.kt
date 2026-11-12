@@ -30,7 +30,7 @@ interface MangaRepository {
     suspend fun discover(page: Int = 0): MangaPage
     suspend fun search(query: String, page: Int = 0): MangaPage
     suspend fun detail(mangaId: String): MangaDetail
-    suspend fun pages(mangaId: String, chapterId: String): List<Page>
+    suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean = false): List<Page>
     fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> = emptyMap()
 }
 

@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -73,6 +74,9 @@ import dev.mangaflow.BuildConfig
 import dev.mangaflow.DetailState
 import dev.mangaflow.MangaViewModel
 import dev.mangaflow.ReadingSession
+import dev.mangaflow.account.WebsiteLoginContract
+import dev.mangaflow.account.WebsiteLoginResult
+import dev.mangaflow.account.WebsiteLoginSession
 import dev.mangaflow.reader.ReaderScreen
 import dev.mangaflow.update.UpdatePhase
 import kotlinx.coroutines.launch
@@ -106,6 +110,23 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val savedState = rememberSaveableStateHolder()
+    val websiteLogin = rememberLauncherForActivityResult(remember { WebsiteLoginContract() }) { result ->
+        when (result) {
+            is WebsiteLoginResult.Completed -> {
+                val token = WebsiteLoginSession.takeToken(result.handoffId)
+                if (token == null) {
+                    scope.launch { snackbar.showSnackbar("登录会话已结束，请重新打开官网登录") }
+                } else {
+                    model.closeReader()
+                    model.closeDetail()
+                    sectionName = Section.ACCOUNT.name
+                    model.loginWithCookie(token)
+                }
+            }
+            is WebsiteLoginResult.Failed -> scope.launch { snackbar.showSnackbar(result.message) }
+            WebsiteLoginResult.Cancelled -> Unit
+        }
+    }
 
     LaunchedEffect(Unit) { model.events.collect { snackbar.showSnackbar(it) } }
     LaunchedEffect(openUpdatesRequest) {
@@ -205,6 +226,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         repository = model.repository, libraryStore = model.library, downloadStore = model.downloads,
                         onBack = model::closeReader, onRequestNotificationPermission = onRequestNotifications,
                         onChapterVisible = model::onChapterVisible,
+                        onNearChapterEnd = model::prefetchNextChapter,
+                        chaptersLoading = current.session.chaptersLoading,
+                        chaptersError = current.session.chaptersError,
+                        onRetryChapters = model::retryReadingChapters,
                     )
                     is Frame.Detail -> DetailScreen(
                         manga = current.state.manga, detail = current.state.detail,
@@ -249,11 +274,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
                                         onLoginWithCookie = model::loginWithCookie, onLogin = model::login,
-                                        onLogout = model::logout, onRefresh = model::refreshAccount,
+                                        onLogout = { WebsiteLoginSession.invalidate(); model.logout() },
+                                        onRefresh = model::refreshAccount,
                                         onMoreFavorites = model::moreCloudFavorites, onMoreHistory = model::moreCloudHistory,
                                         onOpen = { model.openManga(it) }, onContinue = model::continueCloudHistory,
                                         onSetFavorite = model::setCloudFavorite,
                                         onRetrySync = model::retryAccountSync,
+                                        onWebsiteLogin = { websiteLogin.launch(Unit) },
                                     )
                                     Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications)
                                 }
