@@ -8,7 +8,7 @@ commit `81a1bcb6737356038163728b3b2a657c9dcffa32`.
 The image is decorative beside its author's name, keeps the fallback on failure, and is loaded only with the visible comment.
 The remaining comment layout belongs to MangaFlow.
 
-The detail section selector is also adapted from the same fixed Ovio version:
+The detail section selector and compact discovery/shelf tabs are also adapted from the same fixed Ovio version:
 `components/ovio/liquid-tabs/use-liquid.ts` and `worlds/minimal.tsx`.
 The Compose port preserves independently animated indicator edges and stationary labels,
 uses Android's animation clock and system duration scale, and omits the web deployment demo.

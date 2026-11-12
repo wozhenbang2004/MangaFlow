@@ -166,10 +166,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectDiscovery(mode: DiscoveryMode, period: RankPeriod = _browse.value.period,
-        audience: RankAudience = _browse.value.audience) {
+        audience: RankAudience = _browse.value.audience, clearQuery: Boolean = false) {
         val previous = _browse.value
-        if (previous.mode == mode && previous.period == period && previous.audience == audience) return
-        showBrowse(BrowseState(query = previous.query, mode = mode, period = period, audience = audience))
+        val query = if (clearQuery) "" else previous.query
+        if (previous.mode == mode && previous.period == period && previous.audience == audience && previous.query == query) return
+        showBrowse(BrowseState(query = query, mode = mode, period = period, audience = audience))
     }
 
     private fun showBrowse(selection: BrowseState, debounce: Boolean = false) {

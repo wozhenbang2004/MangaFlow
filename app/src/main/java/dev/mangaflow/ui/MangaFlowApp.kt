@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountCircle
@@ -78,6 +79,7 @@ import dev.mangaflow.BuildConfig
 import dev.mangaflow.DetailState
 import dev.mangaflow.MangaViewModel
 import dev.mangaflow.ReadingSession
+import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.reader.ReaderScreen
 import dev.mangaflow.update.UpdatePhase
 import kotlinx.coroutines.launch
@@ -246,13 +248,35 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     }
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
                         Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                            Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp),
+                            val compactHeader = current.section == Section.DISCOVER || current.section == Section.LIBRARY
+                            Row(Modifier.fillMaxWidth().height(if (compactHeader) 52.dp else 60.dp)
+                                .padding(horizontal = if (compactHeader) 8.dp else 12.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = { scope.launch { drawer.open() } }) { Icon(Icons.Outlined.Menu, "打开导航", Modifier.size(22.dp)) }
-                                Text("漫流", modifier = Modifier.padding(start = 4.dp), fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-                                Spacer(Modifier.weight(1f))
-                                if (update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)) {
+                                val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
+                                Box {
+                                    IconButton(onClick = { scope.launch { drawer.open() } }) {
+                                        Icon(Icons.Outlined.Menu, if (hasUpdate) "打开导航，有新版本" else "打开导航", Modifier.size(22.dp))
+                                    }
+                                    if (hasUpdate && current.section == Section.DISCOVER) Box(
+                                        Modifier.align(Alignment.TopEnd).padding(8.dp).size(5.dp)
+                                            .background(MaterialTheme.colorScheme.onSurface, CircleShape))
+                                }
+                                if (current.section == Section.DISCOVER) {
+                                    BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label }, Modifier.weight(1f)) { index ->
+                                        keyboard?.hide()
+                                        searchExpanded = false
+                                        model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
+                                    }
+                                } else {
+                                    Text(if (current.section == Section.LIBRARY) "书架" else "漫流",
+                                        modifier = Modifier.padding(start = 4.dp), fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                                    Spacer(Modifier.weight(1f))
+                                }
+                                if (hasUpdate && current.section != Section.DISCOVER) {
                                     TextButton(onClick = { sectionName = Section.SETTINGS.name }) { Text("有新版本", style = MaterialTheme.typography.labelMedium) }
+                                }
+                                if (current.section == Section.LIBRARY) {
+                                    TextButton(onClick = { sectionName = Section.ACCOUNT.name }) { Text("云端书架") }
                                 }
                                 if (current.section == Section.DISCOVER) {
                                     if (history.isNotEmpty()) IconButton(onClick = { keyboard?.hide(); recentReadingOpen = true }) {
@@ -277,7 +301,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onQuery = model::setQuery, onRefresh = model::refresh,
                                         onRetry = model::retryBrowse, onMore = model::loadMore,
                                         onOpen = { model.openManga(it) },
-                                        onMode = { model.selectDiscovery(it) },
                                         onPeriod = { model.selectDiscovery(browse.mode, period = it) },
                                         onAudience = { model.selectDiscovery(browse.mode, audience = it) },
                                     )
@@ -285,7 +308,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         favorites = favorites, history = history, repository = model.repository,
                                         onOpen = { model.openManga(it) }, onContinue = model::continueReading,
                                         onDiscover = { sectionName = Section.DISCOVER.name },
-                                        onAccount = { sectionName = Section.ACCOUNT.name },
                                     )
                                     Section.DOWNLOADS -> DownloadsScreen(model.downloads, model::openDownload,
                                         model::retryDownload, refreshingDownloads)
