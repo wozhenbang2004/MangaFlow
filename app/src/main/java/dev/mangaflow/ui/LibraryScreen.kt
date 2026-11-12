@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -16,12 +17,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
@@ -31,6 +34,7 @@ import dev.mangaflow.storage.ReadingProgress
 fun LibraryScreen(
     favorites: List<Manga>, history: List<ReadingProgress>, repository: MangaRepository,
     onOpen: (Manga) -> Unit, onContinue: (ReadingProgress) -> Unit, onDiscover: () -> Unit,
+    onAccount: () -> Unit,
 ) {
     var showHistory by rememberSaveable { mutableStateOf(false) }
     LazyVerticalGrid(
@@ -40,7 +44,11 @@ fun LibraryScreen(
     ) {
         item(span = { GridItemSpan(maxLineSpan) }, key = "title") {
             Column {
-                Text("书架", style = MaterialTheme.typography.headlineLarge)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("书架", style = MaterialTheme.typography.headlineLarge)
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onAccount) { Text("云端书架") }
+                }
                 Row(Modifier.padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     FilterChip(selected = !showHistory, onClick = { showHistory = false },
                         label = { Text("收藏 ${favorites.size}") }, shape = RoundedCornerShape(100))

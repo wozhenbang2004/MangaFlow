@@ -1,0 +1,398 @@
+package dev.mangaflow.ui
+
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.view.WindowManager
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.PersonOutline
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import dev.mangaflow.AccountUiState
+import dev.mangaflow.account.CloudHistoryEntry
+import dev.mangaflow.data.Manga
+import dev.mangaflow.data.MangaRepository
+
+@Composable
+fun AccountScreen(
+    state: AccountUiState,
+    repository: MangaRepository,
+    onLoginWithCookie: (String) -> Unit,
+    onLogin: (String, String) -> Unit,
+    onLogout: () -> Unit,
+    onRefresh: () -> Unit,
+    onMoreFavorites: () -> Unit,
+    onMoreHistory: () -> Unit,
+    onOpen: (Manga) -> Unit,
+    onContinue: (CloudHistoryEntry) -> Unit,
+    onSetFavorite: (Manga, Boolean) -> Unit,
+    onRetrySync: () -> Unit,
+) {
+    val profile = state.profile
+    val colors = MaterialTheme.colorScheme
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focus = LocalFocusManager.current
+    val activity = LocalContext.current.accountActivity()
+    val passwordFocus = remember { FocusRequester() }
+    var cookieMode by remember { mutableStateOf(true) }
+    var cookie by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var showSecret by remember { mutableStateOf(false) }
+    var showHistory by remember(profile?.username) { mutableStateOf(false) }
+    var removeFavorite by remember(profile?.username) { mutableStateOf<Manga?>(null) }
+    if (profile == null) {
+        DisposableEffect(activity) {
+            val window = activity?.window
+            val wasSecure = window != null && (window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE) != 0
+            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            onDispose {
+                if (wasSecure) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                else window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+        }
+    }
+    val clearInputs = {
+        cookie = ""
+        username = ""
+        password = ""
+        showSecret = false
+        keyboard?.hide()
+        focus.clearFocus()
+    }
+    val submit = {
+        if (!state.busy) {
+            if (cookieMode) {
+                val credential = cookie.trim()
+                if (credential.isNotEmpty()) {
+                    clearInputs()
+                    onLoginWithCookie(credential)
+                }
+            } else {
+                val name = username.trim()
+                val secret = password
+                if (name.isNotEmpty() && secret.isNotEmpty()) {
+                    clearInputs()
+                    onLogin(name, secret)
+                }
+            }
+        }
+    }
+
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(102.dp),
+        modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding(),
+        contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        item(span = { GridItemSpan(maxLineSpan) }, key = "account-heading") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("拷贝账号", style = MaterialTheme.typography.headlineLarge)
+                    if (profile == null) Text("匿名阅读已启用", Modifier.padding(top = 4.dp),
+                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                }
+                if (profile != null) IconButton(onClick = onRefresh, enabled = !state.busy) {
+                    Icon(Icons.Outlined.Refresh, "刷新账号", Modifier.size(21.dp))
+                }
+            }
+        }
+
+        if (profile == null) {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "login-form") {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Text("连接账号，同步个人收藏与阅读记录。", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        FilterChip(selected = cookieMode, enabled = !state.busy, onClick = { clearInputs(); cookieMode = true },
+                            label = { Text("Cookie / Token") }, shape = RoundedCornerShape(100))
+                        FilterChip(selected = !cookieMode, enabled = !state.busy, onClick = { clearInputs(); cookieMode = false },
+                            label = { Text("账号密码") }, shape = RoundedCornerShape(100))
+                    }
+                    if (cookieMode) {
+                        OutlinedTextField(
+                            value = cookie,
+                            onValueChange = { cookie = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !state.busy, singleLine = true,
+                            label = { Text("Cookie 或 Token") },
+                            visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = { SecretVisibility(showSecret, !state.busy) { showSecret = !showSecret } },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { submit() }),
+                            shape = RoundedCornerShape(18.dp),
+                            colors = accountInputColors(),
+                        )
+                    } else {
+                        OutlinedTextField(
+                            value = username, onValueChange = { username = it },
+                            modifier = Modifier.fillMaxWidth(), enabled = !state.busy, singleLine = true,
+                            label = { Text("用户名") },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                            keyboardActions = KeyboardActions(onNext = { passwordFocus.requestFocus() }),
+                            shape = RoundedCornerShape(18.dp), colors = accountInputColors(),
+                        )
+                        OutlinedTextField(
+                            value = password, onValueChange = { password = it },
+                            modifier = Modifier.fillMaxWidth().focusRequester(passwordFocus), enabled = !state.busy, singleLine = true,
+                            label = { Text("密码") },
+                            visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = { SecretVisibility(showSecret, !state.busy) { showSecret = !showSecret } },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { submit() }),
+                            shape = RoundedCornerShape(18.dp), colors = accountInputColors(),
+                        )
+                    }
+                    Button(
+                        onClick = submit,
+                        enabled = !state.busy && if (cookieMode) cookie.isNotBlank() else username.isNotBlank() && password.isNotEmpty(),
+                        modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(16.dp), elevation = null,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = colors.primary, contentColor = colors.onPrimary,
+                            disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant,
+                        ),
+                    ) { Text("连接账号") }
+                    if (state.busy) AccountBusyRow("正在连接账号…") { clearInputs(); onLogout() }
+                    state.error?.let {
+                        if (state.canRetryConnection) AccountError(it, state.busy, onRefresh)
+                        else Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error)
+                    }
+                }
+            }
+        } else {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "profile") {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(42.dp).clip(CircleShape).background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.PersonOutline, null, Modifier.size(22.dp), tint = colors.onSurfaceVariant)
+                        }
+                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                            Text(profile.nickname.ifBlank { profile.username }, style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (profile.nickname.isNotBlank() && profile.nickname != profile.username) {
+                                Text(profile.username, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        TextButton(onClick = { clearInputs(); removeFavorite = null; onLogout() }) { Text("退出") }
+                    }
+                    if (state.busy) AccountBusyRow("正在刷新账号…") { clearInputs(); onLogout() }
+                    state.error?.let { AccountError(it, state.busy, onRefresh) }
+                    state.syncMessage?.takeIf(String::isNotBlank)?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    }
+                    if (state.canRetrySync && !state.busy) {
+                        TextButton(onClick = onRetrySync, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                            Text("重试同步", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        FilterChip(selected = !showHistory, onClick = { showHistory = false }, label = { Text("云端收藏") }, shape = RoundedCornerShape(100))
+                        FilterChip(selected = showHistory, onClick = { showHistory = true }, label = { Text("云端记录") }, shape = RoundedCornerShape(100))
+                    }
+                }
+            }
+
+            if (showHistory) {
+                if (state.history.isEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "history-status") {
+                        when {
+                            state.historyLoading -> QuietLoading("正在读取云端记录…")
+                            state.historyError != null -> AccountError(state.historyError, false, onRefresh)
+                            else -> EmptyMessage("还没有云端记录", "账号中的阅读章节会显示在这里。", "刷新", onRefresh)
+                        }
+                    }
+                } else {
+                    itemsIndexed(state.history, key = { index, entry -> "cloud-history-${entry.manga.id}-${entry.chapterId}-$index" },
+                        span = { _, _ -> GridItemSpan(maxLineSpan) }) { _, entry ->
+                        CloudContinueRow(entry, repository) { onContinue(entry) }
+                    }
+                    if (state.historyLoading || state.historyError != null || state.historyHasMore) {
+                        item(span = { GridItemSpan(maxLineSpan) }, key = "history-more") {
+                            AccountListFooter(state.historyLoading, state.historyError, onMoreHistory)
+                        }
+                    }
+                }
+            } else {
+                if (state.favorites.isEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "favorites-status") {
+                        when {
+                            state.favoritesLoading -> QuietLoading("正在读取云端收藏…")
+                            state.favoritesError != null -> AccountError(state.favoritesError, false, onRefresh)
+                            else -> EmptyMessage("云端书架还是空的", "账号收藏的漫画会显示在这里。", "刷新", onRefresh)
+                        }
+                    }
+                } else {
+                    items(state.favorites.distinctBy(Manga::id), key = { "cloud-favorite-${it.id}" }) { manga ->
+                        val syncing = manga.id in state.syncingFavorites
+                        Column {
+                            CoverTile(manga, repository) { onOpen(manga) }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                TextButton(onClick = { removeFavorite = manga }, enabled = !syncing,
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp)) {
+                                    if (syncing) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp, color = colors.onSurfaceVariant)
+                                    else Icon(Icons.Outlined.Close, null, Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(if (syncing) "同步中" else "移除", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
+                    if (state.favoritesLoading || state.favoritesError != null || state.favoritesHasMore) {
+                        item(span = { GridItemSpan(maxLineSpan) }, key = "favorites-more") {
+                            AccountListFooter(state.favoritesLoading, state.favoritesError, onMoreFavorites)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    removeFavorite?.let { manga ->
+        AlertDialog(
+            onDismissRequest = { removeFavorite = null },
+            shape = RoundedCornerShape(24.dp), containerColor = colors.surface,
+            title = { Text("移除云端收藏？", style = MaterialTheme.typography.titleLarge) },
+            text = { Text(manga.title, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant) },
+            confirmButton = {
+                TextButton(enabled = manga.id !in state.syncingFavorites, onClick = {
+                    removeFavorite = null
+                    onSetFavorite(manga, false)
+                }) { Text("移除", color = colors.error) }
+            },
+            dismissButton = { TextButton(onClick = { removeFavorite = null }) { Text("取消") } },
+        )
+    }
+}
+
+@Composable
+private fun SecretVisibility(visible: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    IconButton(onClick = onClick, enabled = enabled) {
+        Icon(if (visible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+            contentDescription = if (visible) "隐藏输入" else "显示输入", modifier = Modifier.size(20.dp))
+    }
+}
+
+@Composable
+private fun accountInputColors() = OutlinedTextFieldDefaults.colors(
+    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+    disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+    disabledTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    focusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
+    unfocusedBorderColor = Color.Transparent,
+    disabledBorderColor = Color.Transparent,
+)
+
+@Composable
+private fun AccountBusyRow(message: String, onCancel: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 1.6.dp)
+        Text(message, Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TextButton(onClick = onCancel) { Text("取消") }
+    }
+}
+
+@Composable
+private fun AccountError(message: String, busy: Boolean, onRetry: () -> Unit) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        TextButton(onClick = onRetry, enabled = !busy, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) { Text("重试") }
+    }
+}
+
+@Composable
+private fun AccountListFooter(loading: Boolean, error: String?, onMore: () -> Unit) {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        when {
+            loading -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+            error != null -> AccountError(error, false, onMore)
+            else -> TextButton(onClick = onMore) { Text("加载更多") }
+        }
+    }
+}
+
+@Composable
+private fun CloudContinueRow(entry: CloudHistoryEntry, repository: MangaRepository, onContinue: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
+        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)).clickable(onClick = onContinue).padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        MangaCover(entry.manga, repository, Modifier.width(45.dp).height(62.dp).clip(RoundedCornerShape(8.dp)))
+        Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(if (entry.chapterId.isBlank()) "查看漫画" else "继续阅读", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(entry.manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (entry.chapterTitle.isNotBlank()) Text(entry.chapterTitle, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Icon(Icons.Outlined.PlayArrow, "打开阅读记录", Modifier.size(23.dp))
+    }
+}
+
+private tailrec fun Context.accountActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.accountActivity()
+    else -> null
+}

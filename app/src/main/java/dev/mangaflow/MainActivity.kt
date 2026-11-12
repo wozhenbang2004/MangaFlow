@@ -18,15 +18,16 @@ import dev.mangaflow.ui.MangaFlowTheme
 
 class MainActivity : ComponentActivity() {
     private var openUpdatesRequest by mutableIntStateOf(0)
+    private var openDownloadsRequest by mutableIntStateOf(0)
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        if (intent.getBooleanExtra("open_updates", false)) openUpdatesRequest++
+        consumeNavigationIntent(intent)
         setContent {
             MangaFlowTheme {
-                MangaFlowApp(openUpdatesRequest, ::requestNotificationPermission)
+                MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
             }
         }
     }
@@ -34,7 +35,14 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        consumeNavigationIntent(intent)
+    }
+
+    private fun consumeNavigationIntent(intent: Intent) {
         if (intent.getBooleanExtra("open_updates", false)) openUpdatesRequest++
+        else if (intent.getBooleanExtra("open_downloads", false)) openDownloadsRequest++
+        intent.removeExtra("open_updates")
+        intent.removeExtra("open_downloads")
     }
 
     private fun requestNotificationPermission() {

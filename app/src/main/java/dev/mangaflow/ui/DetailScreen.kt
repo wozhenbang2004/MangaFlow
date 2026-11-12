@@ -67,6 +67,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -85,6 +86,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -161,6 +163,7 @@ fun DetailScreen(
     }
     LaunchedEffect(groups) { if (group !in groups) group = "" }
     val list = rememberLazyListState()
+    var topBarHeightPx by remember { mutableIntStateOf(0) }
     val collapseOffset = with(LocalDensity.current) { 360.dp.toPx() }
     val collapsed by remember(list, collapseOffset) {
         derivedStateOf { list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > collapseOffset }
@@ -252,7 +255,9 @@ fun DetailScreen(
         }
 
         Row(
-            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(horizontal = 20.dp, vertical = 10.dp),
+            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                .onSizeChanged { topBarHeightPx = it.height }
+                .statusBarsPadding().padding(horizontal = 20.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             DetailGlassButton(Icons.AutoMirrored.Outlined.ArrowBack, "返回", haze, onBack)
@@ -300,7 +305,7 @@ fun DetailScreen(
             }
             Row(Modifier.height(56.dp).clip(RoundedCornerShape(18.dp)).hazeEffect(haze, thinGlass())
                 .border(0.5.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
-                .clickable(role = Role.Button) { scope.launch { list.animateScrollToItem(3) } }
+                .clickable(role = Role.Button) { scope.launch { list.animateScrollToItem(3, scrollOffset = -topBarHeightPx) } }
                 .padding(horizontal = 17.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                 Icon(Icons.Outlined.FormatListNumbered, null, tint = DetailWhite, modifier = Modifier.size(19.dp))
@@ -410,8 +415,16 @@ private fun DetailReviews(sources: List<ReviewSource>, loading: Boolean, openLin
             Text("暂无评价", color = DetailMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp))
         }
         sources.forEachIndexed { index, source ->
-            if (index > 0) HorizontalDivider(color = DetailLine)
-            ReviewSourceRow(source, openLink)
+            key(source.id) {
+                if (index > 0) HorizontalDivider(color = DetailLine)
+                ReviewSourceRow(source, openLink)
+            }
+        }
+        if (loading && sources.isNotEmpty()) {
+            val pending = listOf("bangumi" to "Bangumi", "anilist" to "AniList")
+                .filterNot { (id, _) -> sources.any { it.id == id } }.map { it.second }
+            Text(if (pending.isEmpty()) "正在补全评价" else "${pending.joinToString("、")} · 正在加载",
+                color = DetailMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
         }
     }
 }

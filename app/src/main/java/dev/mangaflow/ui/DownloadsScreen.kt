@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -60,8 +61,14 @@ import kotlinx.coroutines.launch
 private enum class DownloadFilter(val label: String) { ALL("全部"), ACTIVE("未完成"), SAVED("已下载") }
 
 @Composable
-fun DownloadsScreen(store: DownloadStore, onRead: (DownloadEntry) -> Unit) {
+fun DownloadsScreen(
+    store: DownloadStore,
+    onRead: (DownloadEntry) -> Unit,
+    onRetry: (DownloadEntry) -> Unit,
+    refreshingIds: Set<String> = emptySet(),
+) {
     val entries by store.entries.collectAsStateWithLifecycle()
+    val loading by store.loading.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var filter by remember { mutableStateOf(DownloadFilter.ALL) }
@@ -102,7 +109,15 @@ fun DownloadsScreen(store: DownloadStore, onRead: (DownloadEntry) -> Unit) {
                 }
                 Spacer(Modifier.height(12.dp))
             }
-            if (visible.isEmpty()) {
+            if (loading) {
+                item {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 48.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = foreground)
+                        Spacer(Modifier.width(10.dp))
+                        Text("正在恢复下载", style = MaterialTheme.typography.bodyMedium, color = secondary)
+                    }
+                }
+            } else if (visible.isEmpty()) {
                 item {
                     Column(Modifier.fillMaxWidth().padding(top = 72.dp, bottom = 64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Box(Modifier.size(64.dp).clip(RoundedCornerShape(22.dp)).background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
@@ -123,7 +138,7 @@ fun DownloadsScreen(store: DownloadStore, onRead: (DownloadEntry) -> Unit) {
                 }
             } else {
                 items(visible, key = DownloadEntry::id) { entry ->
-                    DownloadRow(entry, onRead = { onRead(entry) }, onPause = { store.pause(entry.id) }, onRetry = { store.retry(entry.id) }, onRemove = { remove = entry })
+                    DownloadRow(entry, refreshing = entry.id in refreshingIds, onRead = { onRead(entry) }, onPause = { store.pause(entry.id) }, onRetry = { onRetry(entry) }, onRemove = { remove = entry })
                     HorizontalDivider(Modifier.padding(vertical = 18.dp), color = colors.outlineVariant)
                 }
             }
@@ -162,7 +177,7 @@ fun DownloadsScreen(store: DownloadStore, onRead: (DownloadEntry) -> Unit) {
 }
 
 @Composable
-private fun DownloadRow(entry: DownloadEntry, onRead: () -> Unit, onPause: () -> Unit, onRetry: () -> Unit, onRemove: () -> Unit) {
+private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () -> Unit, onPause: () -> Unit, onRetry: () -> Unit, onRemove: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -201,7 +216,7 @@ private fun DownloadRow(entry: DownloadEntry, onRead: () -> Unit, onPause: () ->
                     )
                 }
             }
-            IconButton(onClick = onRemove, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onRemove, enabled = !refreshing, modifier = Modifier.size(36.dp)) {
                 Icon(Icons.Outlined.DeleteOutline, contentDescription = "删除 ${entry.chapter.title}", tint = secondary, modifier = Modifier.size(20.dp))
             }
         }
@@ -219,13 +234,21 @@ private fun DownloadRow(entry: DownloadEntry, onRead: () -> Unit, onPause: () ->
         }
         Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("${entry.completedPages} / ${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = secondary)
-            TextButton(onClick = if (finished) onRead else if (inProgress) onPause else onRetry, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
-                Icon(
-                    if (inProgress) Icons.Outlined.Pause else if (entry.status == DownloadStatus.FAILED) Icons.Outlined.Refresh else Icons.Outlined.PlayArrow,
+            TextButton(onClick = if (finished) onRead else if (inProgress && !entry.needsSourceRefresh) onPause else onRetry, enabled = !refreshing, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
+                if (refreshing) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.6.dp, color = secondary)
+                else Icon(
+                    if (entry.needsSourceRefresh || entry.status == DownloadStatus.FAILED) Icons.Outlined.Refresh else if (inProgress) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
                     contentDescription = null, modifier = Modifier.size(17.dp), tint = foreground,
                 )
                 Spacer(Modifier.width(4.dp))
-                Text(if (finished) "离线阅读" else if (inProgress) "暂停" else if (entry.status == DownloadStatus.FAILED) "重试" else "继续", style = MaterialTheme.typography.labelLarge, color = foreground)
+                Text(when {
+                    refreshing -> "正在刷新"
+                    finished -> "离线阅读"
+                    entry.needsSourceRefresh -> "刷新并重试"
+                    inProgress -> "暂停"
+                    entry.status == DownloadStatus.FAILED -> "重试"
+                    else -> "继续"
+                }, style = MaterialTheme.typography.labelLarge, color = if (refreshing) secondary else foreground)
             }
         }
     }

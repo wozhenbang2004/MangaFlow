@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -51,7 +52,10 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -83,18 +87,25 @@ fun DiscoverScreen(
     repository: MangaRepository,
     onQuery: (String) -> Unit,
     onRefresh: () -> Unit,
+    onRetry: () -> Unit,
     onMore: () -> Unit,
     onOpen: (Manga) -> Unit,
     onContinue: (ReadingProgress) -> Unit,
 ) {
     val grid = rememberLazyGridState()
     val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(state.query) { grid.scrollToItem(0) }
+    var previousQuery by rememberSaveable { mutableStateOf(state.query) }
+    LaunchedEffect(state.query) {
+        if (previousQuery != state.query) {
+            grid.scrollToItem(0)
+            previousQuery = state.query
+        }
+    }
     LazyVerticalGrid(
         columns = GridCells.Adaptive(102.dp), state = grid,
         contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(24.dp),
-        modifier = Modifier.fillMaxSize().navigationBarsPadding(),
+        modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding(),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }, key = "heading") {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -139,7 +150,7 @@ fun DiscoverScreen(
             item(span = { GridItemSpan(maxLineSpan) }, key = "loading") { QuietLoading("正在翻开书页…") }
         } else if (state.items.isEmpty() && state.error != null) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "error") {
-                EmptyMessage("暂时没能加载", state.error, "重试", onRefresh)
+                EmptyMessage("暂时没能加载", state.error, "重试", onRetry)
             }
         } else if (state.items.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
@@ -164,7 +175,7 @@ fun DiscoverScreen(
                 item(span = { GridItemSpan(maxLineSpan) }, key = "more-error") {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(state.error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                        TextButton(onClick = if (state.page == 0 && !state.hasMore) onRefresh else onMore) { Text("重试") }
+                        TextButton(onClick = onRetry) { Text("重试") }
                     }
                 }
             } else if (state.hasMore) {

@@ -21,21 +21,25 @@ class ReviewRepository {
     private val http = SourceHttp()
     private val cache = LinkedHashMap<String, CachedReviews>()
 
-    suspend fun lookup(manga: Manga): List<ReviewSource> = withContext(Dispatchers.IO) {
+    /** Source callbacks run on IO workers and can arrive concurrently. */
+    suspend fun lookup(manga: Manga, onSource: (ReviewSource) -> Unit = {}): List<ReviewSource> = withContext(Dispatchers.IO) {
         val key = manga.id + "|" + manga.title
         synchronized(cache) { cache[key] }?.takeIf { System.currentTimeMillis() - it.time < 60 * 60_000 }
-            ?.let { return@withContext it.sources }
+            ?.let { cached ->
+                cached.sources.forEach(onSource)
+                return@withContext cached.sources
+            }
 
         val sources = coroutineScope {
-            val bgm = async { bangumi(manga) }
-            val ani = async { aniList(manga, listOf(manga.title)) }
+            val bgm = async { bangumi(manga).also { onSource(it.source) } }
+            val ani = async { aniList(manga, listOf(manga.title)).also(onSource) }
             val bangumi = bgm.await()
             var anilist = ani.await()
             // A matched Bangumi title can supply the native name for a second, bounded lookup.
             // An unrelated first search result is never used as an automatic identity bridge.
             if (anilist.status == ReviewStatus.NO_MATCH && bangumi.source.status == ReviewStatus.READY &&
                 bangumi.names.any { normalize(it) != normalize(manga.title) }) {
-                anilist = aniList(manga, bangumi.names + manga.title)
+                anilist = aniList(manga, bangumi.names + manga.title).also(onSource)
             }
             listOf(bangumi.source, anilist)
         }

@@ -20,6 +20,12 @@ data class ReadingProgress(
     val updatedAt: Long = System.currentTimeMillis(),
 )
 
+data class ChapterProgress(
+    val pageIndex: Int,
+    val pageCount: Int,
+    val scrollOffset: Int = 0,
+)
+
 /** Device-local reading state. Neither favorites nor reading history require a source account. */
 class LibraryStore(context: Context) {
     private val disk = context.applicationContext.getSharedPreferences("mangaflow_library", Context.MODE_PRIVATE)
@@ -43,6 +49,33 @@ class LibraryStore(context: Context) {
 
     fun progressFor(mangaId: String): ReadingProgress? = _history.value.firstOrNull { it.manga.id == mangaId }
 
+    fun progressFor(mangaId: String, chapterId: String): ChapterProgress? = synchronized(lock) {
+        val stored = disk.getString(chapterProgressKey(mangaId, chapterId), null)?.let { encoded ->
+            runCatching {
+                val json = JSONObject(encoded)
+                ChapterProgress(
+                    pageIndex = json.getInt("pageIndex").coerceAtLeast(0),
+                    pageCount = json.getInt("pageCount").coerceAtLeast(0),
+                    scrollOffset = json.optInt("scrollOffset").coerceAtLeast(0),
+                )
+            }.getOrNull()
+        }
+        stored ?: progressFor(mangaId)?.takeIf { it.chapterId == chapterId }?.chapterProgress()
+    }
+
+    fun longImagePositionFor(mangaId: String, chapterId: String, pageIndex: Int): Float? = synchronized(lock) {
+        val key = longImagePositionKey(mangaId, chapterId, pageIndex)
+        if (!disk.contains(key)) return@synchronized null
+        runCatching { disk.getFloat(key, 0f) }.getOrNull()?.takeIf(Float::isFinite)?.coerceIn(0f, 1f)
+    }
+
+    fun saveLongImagePosition(mangaId: String, chapterId: String, pageIndex: Int, position: Float) {
+        if (pageIndex < 0 || !position.isFinite()) return
+        synchronized(lock) {
+            disk.edit().putFloat(longImagePositionKey(mangaId, chapterId, pageIndex), position.coerceIn(0f, 1f)).apply()
+        }
+    }
+
     fun saveProgress(manga: Manga, chapter: Chapter, pageIndex: Int, pageCount: Int, scrollOffset: Int = 0) {
         if (pageCount <= 0) return
         synchronized(lock) {
@@ -55,14 +88,28 @@ class LibraryStore(context: Context) {
                 scrollOffset = scrollOffset.coerceAtLeast(0),
             )
             val next = (listOf(progress) + _history.value.filterNot { it.manga.id == manga.id }).take(500)
+            val editor = disk.edit()
+            // Retain the 0.1.2 resume point before another chapter replaces it in recent history.
+            progressFor(manga.id)?.let { previous ->
+                val previousKey = chapterProgressKey(manga.id, previous.chapterId)
+                if (!disk.contains(previousKey)) {
+                    editor.putString(previousKey, previous.chapterProgress().toJson().toString())
+                }
+            }
+            editor.putString(chapterProgressKey(manga.id, chapter.id), progress.chapterProgress().toJson().toString())
             _history.value = next
-            disk.edit().putString("history", JSONArray(next.map { it.toJson() }).toString()).apply()
+            editor.putString("history", JSONArray(next.map { it.toJson() }).toString()).apply()
         }
     }
 
     fun clearHistory() = synchronized(lock) {
         _history.value = emptyList()
-        disk.edit().remove("history").apply()
+        disk.edit().apply {
+            remove("history")
+            disk.all.keys.filter {
+                it.startsWith(CHAPTER_PROGRESS_PREFIX) || it.startsWith(LONG_IMAGE_POSITION_PREFIX)
+            }.forEach { remove(it) }
+        }.apply()
     }
 
     fun updatePreferences(preferences: ReaderPreferences) = synchronized(lock) {
@@ -94,6 +141,25 @@ class LibraryStore(context: Context) {
             runCatching { read(array.getJSONObject(index)) }.getOrNull()
         }
     }.getOrDefault(emptyList())
+
+    private fun chapterProgressKey(mangaId: String, chapterId: String) =
+        "$CHAPTER_PROGRESS_PREFIX${mangaId.length}:$mangaId$chapterId"
+
+    private fun longImagePositionKey(mangaId: String, chapterId: String, pageIndex: Int) =
+        "$LONG_IMAGE_POSITION_PREFIX${mangaId.length}:$mangaId${chapterId.length}:$chapterId:$pageIndex"
+
+    private companion object {
+        const val CHAPTER_PROGRESS_PREFIX = "chapter_progress:"
+        const val LONG_IMAGE_POSITION_PREFIX = "long_image_position:"
+    }
+}
+
+private fun ReadingProgress.chapterProgress() = ChapterProgress(pageIndex, pageCount, scrollOffset)
+
+private fun ChapterProgress.toJson(): JSONObject = JSONObject().apply {
+    put("pageIndex", pageIndex)
+    put("pageCount", pageCount)
+    put("scrollOffset", scrollOffset)
 }
 
 internal fun Manga.toJson(): JSONObject = JSONObject().apply {

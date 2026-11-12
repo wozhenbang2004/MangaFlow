@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -16,6 +17,9 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.withLock
@@ -28,36 +32,44 @@ class ChapterDownloadWorker(context: Context, parameters: WorkerParameters) : Co
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val id = inputData.getString(KEY_CHAPTER) ?: return@withContext Result.failure()
         val store = DownloadStore.get(applicationContext)
+        store.awaitReady()
         val initial = store.record(id) ?: return@withContext Result.success()
         val workerId = this@ChapterDownloadWorker.id.toString()
         if (initial.workId != workerId) return@withContext Result.success()
         if (initial.entry.status == DownloadStatus.PAUSED || initial.entry.status == DownloadStatus.COMPLETED) return@withContext Result.success()
+        if (initial.entry.needsSourceRefresh) {
+            runCatching { store.update(id, workerId) { it.copy(status = DownloadStatus.FAILED, error = "图片地址需要刷新，请刷新并重试") } }
+            return@withContext Result.failure()
+        }
 
         try {
             DownloadStore.transferGate.withLock {
                 currentCoroutineContext().ensureActive()
-                val record = store.record(id) ?: return@withLock
-                if (record.workId != workerId || record.entry.status == DownloadStatus.PAUSED) return@withLock
-                setForeground(foreground(record.entry))
-                store.directory(id).mkdirs()
-                store.update(id, workerId) { it.copy(status = DownloadStatus.RUNNING, error = "") }
-                var completed = 0
-                var bytes = 0L
-                for ((index, page) in record.pages.withIndex()) {
+                val record = store.beginTransfer(id, workerId) ?: return@withLock
+                try {
+                    setForeground(foreground(record.entry))
+                    store.directory(id).mkdirs()
+                    store.update(id, workerId) { it.copy(status = DownloadStatus.RUNNING, error = "") }
+                    var completed = 0
+                    var bytes = 0L
+                    for ((index, page) in record.pages.withIndex()) {
+                        currentCoroutineContext().ensureActive()
+                        val current = store.record(id) ?: return@withLock
+                        if (current.workId != workerId || current.entry.status == DownloadStatus.PAUSED) return@withLock
+                        val destination = store.pageFile(id, index)
+                        if (!isImage(destination)) download(page.url, record.headers, destination)
+                        completed++
+                        bytes += destination.length()
+                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeFile(destination.absolutePath, bounds)
+                        store.finishPage(id, workerId, index, bounds.outWidth, bounds.outHeight, completed, bytes)
+                        store.record(id)?.entry?.let { setForeground(foreground(it)) }
+                    }
                     currentCoroutineContext().ensureActive()
-                    val current = store.record(id) ?: return@withLock
-                    if (current.workId != workerId || current.entry.status == DownloadStatus.PAUSED) return@withLock
-                    val destination = store.pageFile(id, index)
-                    if (!isImage(destination)) download(page.url, record.headers, destination)
-                    completed++
-                    bytes += destination.length()
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeFile(destination.absolutePath, bounds)
-                    store.finishPage(id, workerId, index, bounds.outWidth, bounds.outHeight, completed, bytes)
-                    store.record(id)?.entry?.let { setForeground(foreground(it)) }
+                    store.update(id, workerId) { it.copy(status = DownloadStatus.COMPLETED, completedPages = record.pages.size, error = "") }
+                } finally {
+                    store.endTransfer(id, workerId)
                 }
-                currentCoroutineContext().ensureActive()
-                store.update(id, workerId) { it.copy(status = DownloadStatus.COMPLETED, completedPages = record.pages.size, error = "") }
             }
             Result.success()
         } catch (cancelled: CancellationException) {
@@ -65,58 +77,78 @@ class ChapterDownloadWorker(context: Context, parameters: WorkerParameters) : Co
             throw cancelled
         } catch (error: Exception) {
             val retryable = error is IOException && error !is PermanentDownloadException && runAttemptCount < 3
-            runCatching { store.update(id, workerId) { it.copy(status = if (retryable) DownloadStatus.WAITING else DownloadStatus.FAILED, error = error.message ?: "下载未完成") } }
+            runCatching { store.update(id, workerId) { it.copy(
+                status = if (retryable) DownloadStatus.WAITING else DownloadStatus.FAILED,
+                error = error.message ?: "下载未完成",
+                needsSourceRefresh = (error as? PermanentDownloadException)?.needsSourceRefresh == true,
+            ) } }
             if (retryable) Result.retry() else Result.failure()
         }
     }
 
-    private suspend fun download(url: String, headers: Map<String, String>, destination: File) {
+    private suspend fun download(url: String, headers: Map<String, String>, destination: File) = coroutineScope {
         if (!url.startsWith("https://")) throw PermanentDownloadException("图片地址不是 HTTPS，已停止下载")
         val request = Request.Builder().url(url).apply {
             headers.filterKeys { it.equals("Referer", true) || it.equals("User-Agent", true) || it.equals("Accept", true) }
                 .forEach { (name, value) -> header(name, value) }
         }.build()
         val partial = File(destination.parentFile, "${destination.name}.part")
-        try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    val message = when (response.code) {
-                        401, 403, 404 -> "图片地址已失效（${response.code}），请重新打开章节后下载"
-                        429 -> "来源暂时限流，请稍后重试"
-                        else -> "图片下载失败（${response.code}）"
-                    }
-                    if (response.code in listOf(401, 403, 404)) throw PermanentDownloadException(message)
-                    throw IOException(message)
-                }
-                val body = response.body ?: throw IOException("图片响应为空")
-                if (body.contentLength() > MAX_PAGE_BYTES) throw PermanentDownloadException("单页超过下载大小上限")
-                body.byteStream().use { input ->
-                    partial.outputStream().use { output ->
-                        val buffer = ByteArray(64 * 1024)
-                        var total = 0L
-                        while (true) {
-                            currentCoroutineContext().ensureActive()
-                            val count = input.read(buffer)
-                            if (count == -1) break
-                            total += count
-                            if (total > MAX_PAGE_BYTES) throw PermanentDownloadException("单页超过下载大小上限")
-                            output.write(buffer, 0, count)
+        val call = client.newCall(request)
+        // The parent suspends in await(), so cancellation can immediately cancel blocked socket I/O.
+        val transfer = async(Dispatchers.IO) {
+            try {
+                call.execute().use { response ->
+                    if (!response.isSuccessful) {
+                        val message = when (response.code) {
+                            401, 403, 404 -> "图片地址已失效（${response.code}），请刷新并重试"
+                            429 -> "来源暂时限流，请稍后重试"
+                            else -> "图片下载失败（${response.code}）"
                         }
-                        output.fd.sync()
+                        if (response.code in listOf(401, 403, 404)) throw PermanentDownloadException(message, needsSourceRefresh = true)
+                        throw IOException(message)
                     }
+                    val body = response.body ?: throw IOException("图片响应为空")
+                    if (body.contentLength() > MAX_PAGE_BYTES) throw PermanentDownloadException("单页超过下载大小上限")
+                    body.byteStream().use { input ->
+                        partial.outputStream().use { output ->
+                            val buffer = ByteArray(64 * 1024)
+                            var total = 0L
+                            while (true) {
+                                currentCoroutineContext().ensureActive()
+                                val count = input.read(buffer)
+                                if (count == -1) break
+                                total += count
+                                if (total > MAX_PAGE_BYTES) throw PermanentDownloadException("单页超过下载大小上限")
+                                output.write(buffer, 0, count)
+                            }
+                            output.fd.sync()
+                        }
+                    }
+                    currentCoroutineContext().ensureActive()
+                    if (!isImage(partial)) throw IOException("来源返回的内容不是可读取的图片")
+                    if (destination.exists() && !destination.delete()) throw IOException("无法替换本地图片")
+                    if (!partial.renameTo(destination)) throw IOException("无法保存本地图片")
                 }
-                currentCoroutineContext().ensureActive()
-                if (!isImage(partial)) throw IOException("来源返回的内容不是可读取的图片")
-                if (destination.exists() && !destination.delete()) throw IOException("无法替换本地图片")
-                if (!partial.renameTo(destination)) throw IOException("无法保存本地图片")
+            } finally {
+                partial.delete()
             }
-        } finally { partial.delete() }
+        }
+        try {
+            transfer.await()
+        } finally {
+            call.cancel()
+            // Keep transferGate held until the old writer closed its response and removed its .part.
+            // A resumed worker must never race a still-unwinding copy of the same chapter.
+            withContext(NonCancellable) { transfer.join() }
+        }
     }
 
     private fun foreground(entry: DownloadEntry): ForegroundInfo {
         val manager = applicationContext.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "漫画下载", NotificationManager.IMPORTANCE_LOW))
         val launch = applicationContext.packageManager.getLaunchIntentForPackage(applicationContext.packageName)
+            ?.putExtra("open_downloads", true)
+            ?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(entry.manga.title)
@@ -126,7 +158,7 @@ class ChapterDownloadWorker(context: Context, parameters: WorkerParameters) : Co
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .apply {
-                launch?.let { setContentIntent(PendingIntent.getActivity(applicationContext, 0, it, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)) }
+                launch?.let { setContentIntent(PendingIntent.getActivity(applicationContext, DOWNLOAD_REQUEST_CODE, it, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)) }
             }
             .build()
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -144,6 +176,7 @@ class ChapterDownloadWorker(context: Context, parameters: WorkerParameters) : Co
     companion object {
         const val KEY_CHAPTER = "chapter_download_id"
         private const val CHANNEL_ID = "mangaflow-downloads"
+        private const val DOWNLOAD_REQUEST_CODE = 84218
         private const val MAX_PAGE_BYTES = 96L * 1024L * 1024L
         private val client = OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
@@ -154,4 +187,4 @@ class ChapterDownloadWorker(context: Context, parameters: WorkerParameters) : Co
     }
 }
 
-private class PermanentDownloadException(message: String) : IOException(message)
+private class PermanentDownloadException(message: String, val needsSourceRefresh: Boolean = false) : IOException(message)

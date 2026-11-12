@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FileDownload
@@ -78,7 +79,8 @@ import kotlinx.coroutines.launch
 
 private enum class Section(val title: String, val icon: ImageVector) {
     DISCOVER("发现", Icons.Outlined.Explore), LIBRARY("书架", Icons.Outlined.Bookmarks),
-    DOWNLOADS("下载", Icons.Outlined.FileDownload), SETTINGS("设置", Icons.Outlined.Settings),
+    DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号与云端", Icons.Outlined.AccountCircle),
+    SETTINGS("设置", Icons.Outlined.Settings),
 }
 private sealed interface Frame {
     val key: String
@@ -88,13 +90,15 @@ private sealed interface Frame {
 }
 
 @Composable
-fun MangaFlowApp(openUpdatesRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = viewModel()) {
+fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = viewModel()) {
     val browse by model.browse.collectAsStateWithLifecycle()
     val detail by model.detail.collectAsStateWithLifecycle()
     val reading by model.reading.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
     val history by model.library.history.collectAsStateWithLifecycle()
     val downloads by model.downloads.entries.collectAsStateWithLifecycle()
+    val refreshingDownloads by model.refreshingDownloads.collectAsStateWithLifecycle()
+    val account by model.account.collectAsStateWithLifecycle()
     val update by model.updates.state.collectAsStateWithLifecycle()
     var sectionName by rememberSaveable { mutableStateOf(Section.DISCOVER.name) }
     val section = Section.valueOf(sectionName)
@@ -109,6 +113,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, onRequestNotifications: () -> Unit, mo
             model.closeReader()
             model.closeDetail()
             sectionName = Section.SETTINGS.name
+            drawer.close()
+        }
+    }
+    LaunchedEffect(openDownloadsRequest) {
+        if (openDownloadsRequest > 0) {
+            model.closeReader()
+            model.closeDetail()
+            sectionName = Section.DOWNLOADS.name
+            drawer.close()
         }
     }
     BackHandler(reading != null || detail != null || drawer.isOpen || section != Section.DISCOVER) {
@@ -191,6 +204,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, onRequestNotifications: () -> Unit, mo
                         initialChapterId = current.session.chapterId,
                         repository = model.repository, libraryStore = model.library, downloadStore = model.downloads,
                         onBack = model::closeReader, onRequestNotificationPermission = onRequestNotifications,
+                        onChapterVisible = model::onChapterVisible,
                     )
                     is Frame.Detail -> DetailScreen(
                         manga = current.state.manga, detail = current.state.detail,
@@ -200,7 +214,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, onRequestNotifications: () -> Unit, mo
                         progress = history.firstOrNull { it.manga.id == current.state.manga.id },
                         downloadEntries = downloads,
                         onBack = model::closeDetail, onRetry = model::retryDetail,
-                        onToggleFavorite = { model.library.toggleFavorite(current.state.manga) },
+                        onToggleFavorite = { model.toggleFavorite(current.state.manga) },
                         onRead = model::readChapter,
                         onDownload = { onRequestNotifications(); model.downloadChapter(it) },
                     )
@@ -219,16 +233,28 @@ fun MangaFlowApp(openUpdatesRequest: Int, onRequestNotifications: () -> Unit, mo
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, history = history, repository = model.repository,
-                                        onQuery = model::setQuery, onRefresh = model::refresh, onMore = model::loadMore,
+                                        onQuery = model::setQuery, onRefresh = model::refresh,
+                                        onRetry = model::retryBrowse, onMore = model::loadMore,
                                         onOpen = { model.openManga(it) },
-                                        onContinue = { model.openManga(it.manga, it.chapterId) },
+                                        onContinue = model::continueReading,
                                     )
                                     Section.LIBRARY -> LibraryScreen(
                                         favorites = favorites, history = history, repository = model.repository,
-                                        onOpen = { model.openManga(it) }, onContinue = { model.openManga(it.manga, it.chapterId) },
+                                        onOpen = { model.openManga(it) }, onContinue = model::continueReading,
                                         onDiscover = { sectionName = Section.DISCOVER.name },
+                                        onAccount = { sectionName = Section.ACCOUNT.name },
                                     )
-                                    Section.DOWNLOADS -> DownloadsScreen(model.downloads, model::openDownload)
+                                    Section.DOWNLOADS -> DownloadsScreen(model.downloads, model::openDownload,
+                                        model::retryDownload, refreshingDownloads)
+                                    Section.ACCOUNT -> AccountScreen(
+                                        state = account, repository = model.repository,
+                                        onLoginWithCookie = model::loginWithCookie, onLogin = model::login,
+                                        onLogout = model::logout, onRefresh = model::refreshAccount,
+                                        onMoreFavorites = model::moreCloudFavorites, onMoreHistory = model::moreCloudHistory,
+                                        onOpen = { model.openManga(it) }, onContinue = model::continueCloudHistory,
+                                        onSetFavorite = model::setCloudFavorite,
+                                        onRetrySync = model::retryAccountSync,
+                                    )
                                     Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications)
                                 }
                             }
