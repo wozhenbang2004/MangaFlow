@@ -19,7 +19,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,16 +35,10 @@ import dev.mangaflow.data.MangaMetric
 import dev.mangaflow.data.ReviewProviders
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import java.util.Locale
-import kotlinx.coroutines.awaitCancellation
 
 @Composable
 internal fun observedDetailMetrics(manga: Manga): List<MangaMetric> {
-    val state = LocalMangaMetrics.current
-    LaunchedEffect(manga.id) {
-        state.request(manga)
-        try { awaitCancellation() } finally { state.release(manga.id) }
-    }
-    return state.values[manga.id].orEmpty()
+    return observedMangaMetrics(manga, requestDelay = 0L)
         .filter { it.score?.let { score -> score.isFinite() && score > 0 } == true }
         .sortedBy { ReviewProviders.order(it.sourceId) }
 }

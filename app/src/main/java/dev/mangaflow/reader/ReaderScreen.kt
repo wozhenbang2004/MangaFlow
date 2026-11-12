@@ -83,7 +83,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -128,6 +127,10 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.currentStateAsState
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
@@ -185,6 +188,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -217,8 +221,8 @@ fun ReaderScreen(
     var collectionPresentation by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(initialCollection != null) }
     var collectionPositionApplied by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(false) }
     val presentedCollection = initialCollection?.takeIf { collectionPresentation && it.chapter.id == chapterId }
-    val globalPreferences by libraryStore.preferences.collectAsState()
-    val mangaPreferences by libraryStore.mangaPreferences.collectAsState()
+    val globalPreferences by libraryStore.preferences.collectAsStateWithLifecycle()
+    val mangaPreferences by libraryStore.mangaPreferences.collectAsStateWithLifecycle()
     val savedPreferences = remember(globalPreferences, mangaPreferences, manga.id) {
         (mangaPreferences[manga.id] ?: globalPreferences).copy(glassSkin = globalPreferences.glassSkin)
     }
@@ -230,8 +234,10 @@ fun ReaderScreen(
                 coverAlone = collectionLayout?.coverAlone ?: it.coverAlone)
         } ?: savedPreferences
     }
-    val pageCollections by libraryStore.pageCollections.collectAsState()
-    val downloads by downloadStore.entries.collectAsState()
+    val pageCollections by libraryStore.pageCollections.collectAsStateWithLifecycle()
+    val downloads by downloadStore.entries.collectAsStateWithLifecycle()
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    val readerForeground = active && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
     var restartPending by rememberSaveable(manga.id, initialChapterId, initialCollection?.key) {
         mutableStateOf(startAtBeginning && initialCollection == null)
     }
@@ -358,10 +364,13 @@ fun ReaderScreen(
             previewUrls = (first..last).map { pages[it].url }, mode = preferences.mode,
             coverAlone = preferences.coverAlone, singlePages = manualSingles)
     }
-    val currentSpread = remember(pages, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles, pageIndex) {
+    val spreadGroups = remember(pages, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) {
+        if (preferences.mode != ReadingMode.VERTICAL && preferences.doublePage)
+            pageSpreads(pages, preferences.coverAlone, manualSingles) else emptyList()
+    }
+    val currentSpread = remember(pages, spreadGroups, pageIndex) {
         if (pages.isEmpty()) null
-        else if (preferences.mode != ReadingMode.VERTICAL && preferences.doublePage)
-            pageSpreads(pages, preferences.coverAlone, manualSingles).firstOrNull { it.contains(pageIndex) }
+        else if (spreadGroups.isNotEmpty()) spreadGroups.firstOrNull { it.contains(pageIndex) }
         else PageSpread(pageIndex.coerceIn(pages.indices))
     }
     val currentPicture = currentSpread?.let { picture(it.first, it.last) }
@@ -435,8 +444,8 @@ fun ReaderScreen(
     }
     LaunchedEffect(preferences.dimAmount) { dimPreview.value = null }
     LaunchedEffect(touchExploration) { if (touchExploration) controlsVisible = true }
-    LaunchedEffect(discussionState, pageIndex, pages.size, active, leavingReader, localImport) {
-        if (!localImport && active && !leavingReader && pages.isNotEmpty() && pageIndex >= pages.lastIndex - 3) {
+    LaunchedEffect(discussionState, pageIndex, pages.size, readerForeground, leavingReader, localImport) {
+        if (!localImport && readerForeground && !leavingReader && pages.isNotEmpty() && pageIndex >= pages.lastIndex - 3) {
             discussionState.ensureLoaded()
         }
     }
@@ -483,20 +492,20 @@ fun ReaderScreen(
                         longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
                         onVisibleImageChanged = { visible ->
                             imageVisible = visible
-                            if (visible && active && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
+                            if (visible && readerForeground && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
                                 chapterVisibilityReported = true
                                 chapterVisible(manga, chapter)
                             }
                         },
                         onNearEnd = {
                             val next = nextChapter
-                            if (active && !leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
+                            if (readerForeground && !leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
                                 nextChapterPrefetched = true
                                 nearChapterEnd(manga, next)
                             }
                         },
                         onTap = { controlsVisible = !controlsVisible },
-                        active = active && !leavingReader && !showSettings && !showChapters &&
+                        active = readerForeground && !leavingReader && !showSettings && !showChapters &&
                             !showSpreadAdjustment && !showComments && !nextRequested,
                         onAtEndChanged = { atChapterEnd = it },
                         onNext = openNextChapter,
@@ -898,7 +907,7 @@ private fun ChapterPages(
             }
         }
         LaunchedEffect(dragging) { if (dragging) { restoring = false; readingNavigation() } }
-        LaunchedEffect(list) {
+        LaunchedEffect(list, active) {
             snapshotFlow {
                 val layout = list.layoutInfo
                 if (restoring) -1 else layout.visibleItemsInfo.lastOrNull { item ->
@@ -939,6 +948,7 @@ private fun ChapterPages(
             }
         }
         AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests, resolvePage,
+            enabled = active,
             onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size }) {
             val visible = list.layoutInfo.visibleItemsInfo.filter { it.index in pages.indices }
             val anchor = list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex)
@@ -956,6 +966,7 @@ private fun ChapterPages(
                         prefetch = prefetchRequests[index],
                         knownDimensions = pageDimensions[page.url],
                         onDimensionsKnown = { pageDimensions[page.url] = it },
+                        deferResize = { list.isScrollInProgress },
                         onLayoutReady = { pageLayoutReady[index] = it },
                     )
                 }
@@ -1003,7 +1014,7 @@ private fun ChapterPages(
             snapshotFlow { groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex }
                 .distinctUntilChanged().collect { index -> save(index, 0) }
         }
-        LaunchedEffect(pager, groups) {
+        LaunchedEffect(pager, groups, active) {
             snapshotFlow {
                 groups.getOrNull(pager.currentPage)?.let { group ->
                     if (loadedPages[group.first] == true || (group.second != null && loadedPages[group.second] == true)) group.last
@@ -1030,7 +1041,8 @@ private fun ChapterPages(
                 save(groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex, 0)
             }
         }
-        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests, resolvePage) {
+        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests, resolvePage,
+            enabled = active) {
             val shown = groups.getOrNull(pager.currentPage)
             (shown?.first ?: pages.lastIndex) to (shown?.last ?: pages.lastIndex)
         }
@@ -1092,7 +1104,9 @@ private fun ChapterPages(
 
 private class ReaderCursor(var scrollOffset: Int = 0)
 
-private data class PrefetchWindow(val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>)
+private data class PrefetchWindow(
+    val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>, val enabled: Boolean,
+)
 
 private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize)
 
@@ -1108,6 +1122,7 @@ private fun AdjacentPagePrefetch(
     composedPages: Map<Int, Boolean>,
     requests: MutableMap<Int, Disposable>,
     resolvePage: suspend (Page) -> Page,
+    enabled: Boolean,
     onPageDimensions: (Int, IntSize) -> Unit = { _, _ -> },
     visibleRange: () -> Pair<Int, Int>,
 ) {
@@ -1115,6 +1130,7 @@ private fun AdjacentPagePrefetch(
     val imageLoader = context.imageLoader
     val visible by rememberUpdatedState(visibleRange)
     val dimensionsKnown by rememberUpdatedState(onPageDimensions)
+    val prefetchEnabled by rememberUpdatedState(enabled)
     LaunchedEffect(pages, headers, mode, imageLoader, resolvePage) {
         val finished = mutableSetOf<Int>()
         var previousFirst = -1
@@ -1122,8 +1138,8 @@ private fun AdjacentPagePrefetch(
         try {
             snapshotFlow {
                 val (first, last) = visible()
-                PrefetchWindow(first, last, composedPages.keys.toSet(), requests.keys.toSet())
-            }.distinctUntilChanged().collect { window ->
+                PrefetchWindow(first, last, composedPages.keys.toSet(), requests.keys.toSet(), prefetchEnabled)
+            }.distinctUntilChanged().collectLatest { window ->
                 val active = window.composed + (window.first..window.last)
                 val nextDirection = when {
                     previousFirst < 0 || window.first == previousFirst -> direction
@@ -1141,7 +1157,7 @@ private fun AdjacentPagePrefetch(
                 val candidates = if (direction > 0) listOf(window.last + 1, window.last + 2, window.last + 3, window.first - 1)
                     else listOf(window.first - 1, window.first - 2, window.first - 3, window.last + 1)
                 val desired = candidates.filter { index ->
-                    index in pages.indices && index !in window.composed && pages[index].url.startsWith("https:")
+                    window.enabled && index in pages.indices && index !in window.composed && pages[index].url.startsWith("https:")
                 }.toSet()
                 val retained = desired + active
                 requests.keys.filter { it !in retained }.forEach { index -> requests.remove(index)?.dispose() }
@@ -1215,6 +1231,7 @@ private fun ReaderPage(
     prefetch: Disposable? = null,
     knownDimensions: IntSize? = null,
     onDimensionsKnown: (IntSize) -> Unit = {},
+    deferResize: () -> Boolean = { false },
     onLayoutReady: (Boolean) -> Unit = {},
     onChapterSwipeReadyChanged: (Boolean) -> Unit = {},
 ) {
@@ -1227,6 +1244,7 @@ private fun ReaderPage(
     val composed by rememberUpdatedState(onComposed)
     val heightMeasured by rememberUpdatedState(onHeightMeasured)
     val dimensionsMeasured by rememberUpdatedState(onDimensionsKnown)
+    val resizeDeferred by rememberUpdatedState(deferResize)
     val layoutReady by rememberUpdatedState(onLayoutReady)
     val chapterSwipeReadyChanged by rememberUpdatedState(onChapterSwipeReadyChanged)
     // Lazy layout recycling must not collapse a measured page back to its placeholder height.
@@ -1264,6 +1282,10 @@ private fun ReaderPage(
     LaunchedEffect(knownDimensions, observedDimensions) {
         val size = knownDimensions ?: observedDimensions ?: return@LaunchedEffect
         val measuredAspect = size.readerAspectRatio()
+        if (!paged && measuredAspect != aspect) {
+            // Do not move the scroll anchor when original dimensions arrive during a drag/fling.
+            snapshotFlow { resizeDeferred() }.first { deferred -> !deferred }
+        }
         aspect = measuredAspect
         hasDimensions = true
     }

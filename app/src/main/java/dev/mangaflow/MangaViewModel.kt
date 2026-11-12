@@ -430,6 +430,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun publishMetrics(mangaId: String, values: List<MangaMetric>) {
         _metrics.update { current ->
+            if (current[mangaId] == values) return@update current
             LinkedHashMap(current).apply {
                 remove(mangaId)
                 put(mangaId, values)
@@ -523,7 +524,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun openManga(manga: Manga, continueChapterId: String? = null) {
+    fun openManga(manga: Manga, continueChapterId: String? = null, forceRefresh: Boolean = false) {
         closeAuthor()
         if (manga.sourceUrl == LOCAL_SOURCE_URL) {
             val chapters = downloadedChapters(manga.id)
@@ -541,19 +542,42 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         reviewOverrides.clear()
         val requestId = ++detailRequestId
         val previous = _detail.value?.takeIf { it.manga.id == manga.id }
+        val cached = repository.cachedDetail(manga.id)
         val retained = previous?.detail?.takeIf { it.chapters.isNotEmpty() }
-            ?: repository.cachedDetail(manga.id)
+            ?: cached
         val initialManga = (retained?.manga ?: previous?.manga ?: manga).let {
             val totalHeat = it.totalHeat() ?: manga.totalHeat()
             it.copy(popularity = totalHeat, totalPopularity = totalHeat, rank = null)
         }
         val initialChapters = (retained?.chapters.orEmpty() + downloadedChapters(manga.id))
             .distinctBy(Chapter::id).sortedBy(Chapter::index)
+        val reuseCatalog = cached != null && !forceRefresh &&
+            (manga.latestChapter.isBlank() || manga.latestChapter == cached.manga.latestChapter) &&
+            (continueChapterId == null || initialChapters.any { it.id == continueChapterId })
         _detail.value = DetailState(initialManga,
-            detail = initialChapters.takeIf { it.isNotEmpty() }?.let { MangaDetail(initialManga, it) })
+            detail = initialChapters.takeIf { it.isNotEmpty() }?.let { MangaDetail(initialManga, it) },
+            loading = !reuseCatalog)
         loadReviews(initialManga, requestId)
+        if (reuseCatalog) {
+            if (continueChapterId != null) {
+                val chapter = initialChapters.firstOrNull { it.id == continueChapterId }
+                if (chapter != null) readChapter(chapter)
+            }
+            return
+        }
         detailJob = viewModelScope.launch {
             try {
+                if (retained == null) {
+                    // A cold open can show the last complete catalog while the source refreshes.
+                    val stored = readerCatalogs.read(manga.id)
+                    if (requestId != detailRequestId) return@launch
+                    if (stored != null) _detail.update { current ->
+                        if (current?.manga?.id != manga.id || requestId != detailRequestId) current
+                        else current.copy(detail = MangaDetail(current.manga,
+                            (stored.chapters + downloadedChapters(manga.id))
+                                .distinctBy(Chapter::id).sortedBy(Chapter::index)))
+                    }
+                }
                 val loaded = repository.detail(manga.id) { metadata ->
                     _detail.update { current ->
                         if (current?.manga?.id != manga.id || requestId != detailRequestId) current
@@ -782,7 +806,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             else reviews.replies(manga, source, review, page)
     }
 
-    fun retryDetail() { _detail.value?.manga?.let { openManga(it) } }
+    fun retryDetail() { _detail.value?.manga?.let { openManga(it, forceRefresh = true) } }
 
     fun closeDetail() {
         closeAuthor()
@@ -956,6 +980,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         _reading.update { it?.copy(chaptersLoading = true, chaptersError = null) }
+        val pendingDetail = detailJob?.takeIf {
+            !forceRefresh && it.isActive && _detail.value?.manga?.id == session.manga.id
+        }
         readingCatalogJob = viewModelScope.launch {
             try {
                 downloads.awaitReady()
@@ -970,6 +997,15 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         chapters = (saved?.chapters.orEmpty() + offline + current.chapters).distinctBy(Chapter::id)
                             .sortedBy(Chapter::index),
                     )
+                }
+                // Entering the reader while detail refreshes shares that catalog work.
+                // Only the background directory waits; current chapter images load independently.
+                pendingDetail?.join()
+                if (requestId != readingRequestId) return@launch
+                if (pendingDetail != null && detailJob === pendingDetail) {
+                    _detail.value?.takeIf { it.manga.id == session.manga.id }?.error?.let { failure ->
+                        throw IllegalStateException(failure)
+                    }
                 }
                 val cached = if (forceRefresh) null else repository.cachedDetail(session.manga.id)
                     ?.takeIf { it.chapters.any { chapter -> chapter.id == session.chapterId } }

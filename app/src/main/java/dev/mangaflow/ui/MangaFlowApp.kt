@@ -134,7 +134,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val wallpaperStore = remember(wallpaperContext) { WallpaperStore.get(wallpaperContext) }
     val wallpaper by wallpaperStore.state.collectAsStateWithLifecycle()
     val browse by model.browse.collectAsStateWithLifecycle()
-    val metrics by model.metrics.collectAsStateWithLifecycle()
+    val metricState = remember(model) { MangaMetricState(model.metrics, model::retainMetrics, model::releaseMetrics) }
     val detail by model.detail.collectAsStateWithLifecycle()
     val authorWorks by model.authorWorks.collectAsStateWithLifecycle()
     val reading by model.reading.collectAsStateWithLifecycle()
@@ -228,7 +228,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val routeTravel = with(density) { 24.dp.roundToPx() }
     CompositionLocalProvider(
-        LocalMangaMetrics provides MangaMetricState(metrics, model::retainMetrics, model::releaseMetrics),
+        LocalMangaMetrics provides metricState,
         LocalGlassSkin provides preferences.glassSkin,
         LocalWallpaperActive provides (frame is Frame.Root && wallpaper.mediaPath != null),
     ) {

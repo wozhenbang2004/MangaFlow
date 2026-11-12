@@ -17,7 +17,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.luminance
@@ -32,19 +31,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Manga
-import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.delay
 
 /** Period heat and native scores have their own baselines; the whole group opens all sources. */
 @Composable
 internal fun RankingMetrics(manga: Manga, heatLabel: String, onExpand: () -> Unit) {
-    val state = LocalMangaMetrics.current
-    LaunchedEffect(manga.id) {
-        delay(180)
-        state.request(manga)
-        try { awaitCancellation() } finally { state.release(manga.id) }
-    }
-    val scores = state.values[manga.id].orEmpty()
+    val scores = observedMangaMetrics(manga)
         .filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
         .sortedBy { dev.mangaflow.data.ReviewProviders.order(it.sourceId) }
     val foreground = MaterialTheme.colorScheme.onSurface

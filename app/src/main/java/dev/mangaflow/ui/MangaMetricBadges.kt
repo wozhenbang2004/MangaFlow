@@ -13,6 +13,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -27,21 +29,48 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaMetric
 import dev.mangaflow.data.ReviewProviders
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import java.util.Locale
 
 /** A single metadata stream feeds every representation of the same manga. */
 internal data class MangaMetricState(
-    val values: Map<String, List<MangaMetric>> = emptyMap(),
+    val values: StateFlow<Map<String, List<MangaMetric>>> = MutableStateFlow(emptyMap()),
     val request: (Manga) -> Unit = {},
     val release: (String) -> Unit = {},
 )
 
 internal val LocalMangaMetrics = compositionLocalOf { MangaMetricState() }
+
+/** Subscribe at the score's own scope; another book's response must not redraw the app. */
+@Composable
+internal fun observedMangaMetrics(manga: Manga, requestDelay: Long = 180L): List<MangaMetric> {
+    val state = LocalMangaMetrics.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(manga, state, lifecycle, requestDelay) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            delay(requestDelay)
+            state.request(manga)
+            try { awaitCancellation() } finally { state.release(manga.id) }
+        }
+    }
+    val updates = remember(state, manga.id) {
+        state.values.map { it[manga.id].orEmpty() }.distinctUntilChanged()
+    }
+    val metrics by updates.collectAsStateWithLifecycle(initialValue = state.values.value[manga.id].orEmpty())
+    return metrics
+}
 
 private data class MetricToken(
     val mark: String,
@@ -62,14 +91,7 @@ internal fun MangaMetricBadges(
     showMore: Boolean = !compact,
     plain: Boolean = false,
 ) {
-    val state = LocalMangaMetrics.current
-    // Lazy containers may briefly compose a passing item; don't start work for every fling.
-    LaunchedEffect(manga.id) {
-        delay(180)
-        state.request(manga)
-        try { awaitCancellation() } finally { state.release(manga.id) }
-    }
-    val metrics = state.values[manga.id].orEmpty()
+    val metrics = observedMangaMetrics(manga)
     val heat = if (manga.rank != null) manga.popularity
         else manga.totalPopularity ?: metrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: manga.popularity
     val heatToken = heat?.let { MetricToken(if (compact) "热" else heatLabel,

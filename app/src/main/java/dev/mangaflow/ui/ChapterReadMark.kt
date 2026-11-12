@@ -42,7 +42,7 @@ internal fun rememberChapterPositions(
     active: Boolean = true,
 ): Map<String, ReadingProgress>? {
     val revision by library.chapterHistoryRevision.collectAsStateWithLifecycle()
-    var positions by remember(manga.id, library, revision) {
+    var positions by remember(manga.id, library) {
         mutableStateOf<Map<String, ReadingProgress>?>(null)
     }
     LaunchedEffect(manga.id, library, revision, active) {
