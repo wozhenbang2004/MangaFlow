@@ -62,6 +62,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -249,10 +250,11 @@ internal fun CommunityPanel(
 
 @Composable
 private fun CommentSourceBadge(sourceId: String) {
+    val onLight = MaterialTheme.colorScheme.background.luminance() > .5f
     val accent = when (sourceId) {
-        "copy" -> Color(0xFFD5B7A0)
-        "bangumi" -> Color(0xFFB5C8E4)
-        "anilist" -> Color(0xFFC7B2DD)
+        "copy" -> if (onLight) Color(0xFF815941) else Color(0xFFD5B7A0)
+        "bangumi" -> if (onLight) Color(0xFF506B92) else Color(0xFFB5C8E4)
+        "anilist" -> if (onLight) Color(0xFF725B8C) else Color(0xFFC7B2DD)
         else -> CommunityMuted
     }
     Text(when (sourceId) {
