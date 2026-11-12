@@ -1,9 +1,11 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
@@ -20,6 +22,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -56,7 +59,7 @@ internal fun MangaMetricBadges(
     heatLabel: String = "热",
     compact: Boolean = false,
     maxScores: Int = if (compact) 1 else 2,
-    showMore: Boolean = true,
+    showMore: Boolean = !compact,
     plain: Boolean = false,
 ) {
     val state = LocalMangaMetrics.current
@@ -76,14 +79,16 @@ internal fun MangaMetricBadges(
             val score = requireNotNull(metric.score)
             val provider = ReviewProviders.find(metric.sourceId)
             val nativeScore = metricScore(score) +
-                (if (metric.scoreScale > 0) "/${metric.scoreScale}" else "")
+                (if (metric.scoreScale > 0 && (!compact || metric.scoreScale != 10)) "/${metric.scoreScale}" else "")
             MetricToken(provider?.mark ?: metric.sourceId, nativeScore,
                 "${metric.name}，${metric.scoreLabel}${metricScore(score)} 分" +
                     (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "，原站满分未知") +
                     (metric.ratingCount?.let { "，$it 人评分" } ?: ""), metric.sourceId)
         }
     val textStyle = MaterialTheme.typography.labelSmall.copy(
-        fontSize = 11.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
+        fontFamily = FontFamily.SansSerif, fontSize = 11.sp, lineHeight = 16.sp,
+        letterSpacing = 0.sp, fontFeatureSettings = "tnum",
+        fontWeight = if (compact) FontWeight.Normal else FontWeight.Medium)
     val markStyle = textStyle.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
@@ -121,14 +126,17 @@ internal fun MangaMetricBadges(
             hidden.joinToString("；") { it.description } else ""
 
         if (compact) {
-            // Reserve only these two text lines, without drawing fake source placeholders.
-            Column(Modifier.heightIn(min = with(density) { 16.sp.toDp() * 2f } + 2.dp),
+            // Independent slots keep the score on the same baseline even when heat is absent.
+            val lineHeight = maxOf(16.dp, with(density) { 16.sp.toDp() })
+            Column(Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                heatToken?.let { MetricBadge(it, foreground, textStyle, plain) }
-                if (visible.isNotEmpty() || more > 0) {
+                Box(Modifier.fillMaxWidth().heightIn(min = lineHeight)) {
+                    heatToken?.let { MetricBadge(it, foreground.copy(alpha = .76f), textStyle, plain) }
+                }
+                Box(Modifier.fillMaxWidth().heightIn(min = lineHeight)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(7.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        visible.forEach { MetricBadge(it, foreground, textStyle, plain) }
+                        visible.forEach { MetricBadge(it, foreground.copy(alpha = .76f), textStyle, plain) }
                         if (more > 0) MoreMetricCount(more, moreDescription, foreground, textStyle)
                     }
                 }
@@ -160,7 +168,7 @@ private fun MetricBadge(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(3.dp)) {
         ReviewSourceMark(token.sourceId, size = 15.dp, onDark = onDark, heat = token.sourceId == "copy")
-        Text(token.value, color = foreground.copy(alpha = .86f), style = textStyle,
+        Text(token.value, color = foreground.copy(alpha = foreground.alpha * .86f), style = textStyle,
             modifier = Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }

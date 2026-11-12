@@ -13,6 +13,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -31,6 +33,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -58,6 +61,8 @@ import androidx.compose.material.icons.outlined.Male
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -83,14 +88,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
@@ -102,6 +110,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
@@ -154,11 +163,20 @@ fun DiscoverScreen(
     onRetry: () -> Unit,
     onMore: () -> Unit,
     onOpen: (Manga) -> Unit,
+    isFavorite: (Manga) -> Boolean,
+    onToggleFavorite: (Manga) -> Unit,
     active: Boolean = true,
 ) {
     val motion = LocalMotionEnabled.current
     val browse = if (state.query.isBlank()) state else backgroundState
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
+    var actionsManga by remember { mutableStateOf<Manga?>(null) }
+    var ratingsManga by remember { mutableStateOf<Manga?>(null) }
+    val coverTransition = LocalMangaCoverTransition.current
+    LaunchedEffect(active, searchExpanded) {
+        if (!active || searchExpanded) { actionsManga = null; ratingsManga = null }
+    }
+    val unobscured = active && !searchExpanded && actionsManga == null && ratingsManga == null
     var retainedBrowse by remember { mutableStateOf(browse) }
     // Wait on data, never on an animation clock. A slow uncached selection keeps the previous
     // real list visible instead of replacing it with loading and then entering a second time.
@@ -181,9 +199,10 @@ fun DiscoverScreen(
                 soft = true,
             ) { pane ->
                 DiscoveryPane(pane, positions, repository,
-                    active = active && !searchExpanded && !holdingContent && pane.cacheKey == browse.cacheKey,
+                    active = unobscured && !holdingContent && pane.cacheKey == browse.cacheKey,
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
+                    onManage = { actionsManga = it },
                     topPadding = contentTopPadding)
             }
             if (holdingContent) {
@@ -203,6 +222,42 @@ fun DiscoverScreen(
                 }
             }
         }
+    }
+    actionsManga?.let { manga ->
+        MotionBottomSheet(onDismissRequest = { actionsManga = null }) { dismiss ->
+            Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 16.dp)) {
+                Row(Modifier.padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    MangaCover(manga, repository, Modifier.width(48.dp).height(72.dp).mangaCoverCard(8.dp))
+                    Text(manga.title, style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                MangaQuickAction(Icons.AutoMirrored.Outlined.ArrowForward, "查看详情") {
+                    coverTransition?.select?.invoke(null)
+                    onOpen(manga); dismiss()
+                }
+                MangaQuickAction(Icons.Outlined.BookmarkBorder, if (isFavorite(manga)) "移出书架" else "加入书架") {
+                    onToggleFavorite(manga); dismiss()
+                }
+                MangaQuickAction(Icons.Outlined.StarOutline, "各站评分") {
+                    actionsManga = null
+                    ratingsManga = manga
+                }
+            }
+        }
+    }
+    ratingsManga?.let { DetailRatingSheet(it, onDismiss = { ratingsManga = null }) }
+}
+
+@Composable
+private fun MangaQuickAction(icon: ImageVector, label: String, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+        .motionPress(interaction, pressedScale = .985f).padding(horizontal = 4.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 
@@ -403,8 +458,10 @@ private fun DiscoveryPane(
     onRetry: () -> Unit,
     onMore: () -> Unit,
     onOpen: (Manga) -> Unit,
+    onManage: (Manga) -> Unit,
     topPadding: Dp,
 ) {
+    val coverTransition = LocalMangaCoverTransition.current
     val retainedGrid = remember(state.cacheKey) {
         val saved = positions.remove(state.cacheKey) ?: LazyGridState()
         positions[state.cacheKey] = saved
@@ -430,7 +487,7 @@ private fun DiscoveryPane(
         columns = GridCells.Fixed(3), state = grid,
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = topPadding, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(if (ranking) 8.dp else 16.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
         modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
     ) {
         if (state.loading && state.items.isEmpty()) {
@@ -452,18 +509,27 @@ private fun DiscoveryPane(
             }
             if (!ranking) item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "发现好故事",
-                        style = MaterialTheme.typography.titleMedium)
+                    Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现",
+                        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
                     Spacer(Modifier.weight(1f))
                     DiscoveryRefresh(state, onRefresh)
                 }
             }
             if (ranking) {
                 items(state.items, key = Manga::id, span = { GridItemSpan(maxLineSpan) }) { manga ->
-                    RankRow(manga, repository, state.period) { onOpen(manga) }
+                    Box(Modifier.padding(bottom = 8.dp)) {
+                        RankRow(manga, repository, state.period) {
+                            coverTransition?.select?.invoke(null)
+                            onOpen(manga)
+                        }
+                    }
                 }
             } else {
-                items(state.items, key = Manga::id) { manga -> CoverTile(manga, repository, dense = true) { onOpen(manga) } }
+                items(state.items, key = Manga::id) { manga ->
+                    CoverTile(manga, repository, dense = true, modifier = Modifier.padding(bottom = 16.dp),
+                        showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
+                        onLongClick = { onManage(manga) }) { onOpen(manga) }
+                }
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "more") {
                 if (state.error != null) {
@@ -502,26 +568,32 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, onOpen: (
             if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            MangaMetricBadges(manga)
+            MangaMetricBadges(manga, showMore = false)
         }
     }
 }
 
 @Composable
 private fun DiscoveryRefresh(state: BrowseState, onRefresh: () -> Unit) {
-    val busy = rememberDelayedBusy(state.refreshing)
     val motion = LocalMotionEnabled.current
-    MotionIconButton(onClick = onRefresh, modifier = Modifier.size(44.dp), enabled = !state.loading && !state.refreshing) {
-        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
-            if (busy) {
-                if (motion) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else CircularProgressIndicator(progress = { 1f }, modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else Icon(Icons.Outlined.Refresh,
-                if (state.updatedAt > 0) "刷新漫画，${browseUpdatedAt(state.updatedAt)}" else "刷新漫画",
-                Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    val rotation = remember { Animatable(0f) }
+    LaunchedEffect(state.refreshing, motion) {
+        if (!motion) rotation.snapTo(0f)
+        else if (state.refreshing) {
+            while (true) {
+                rotation.animateTo(360f, tween(1400, easing = LinearEasing))
+                rotation.snapTo(0f)
+            }
+        } else if (rotation.value > 0f) {
+            rotation.animateTo(360f, tween(380, easing = MangaMotion.EnterEasing))
+            rotation.snapTo(0f)
         }
+    }
+    MotionIconButton(onClick = onRefresh, modifier = Modifier.size(44.dp), enabled = !state.loading && !state.refreshing) {
+        Icon(Icons.Outlined.Refresh,
+            if (state.refreshing) "正在刷新漫画" else if (state.updatedAt > 0) "刷新漫画，${browseUpdatedAt(state.updatedAt)}" else "刷新漫画",
+            Modifier.size(19.dp).graphicsLayer { rotationZ = rotation.value },
+            tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -535,6 +607,20 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
     val items = remember { mutableStateMapOf<Int, CarouselItemInfo>() }
     val focused by remember(items, manga.size) {
         derivedStateOf { items.entries.filter { it.key in manga.indices }.maxByOrNull { it.value.size }?.key ?: 0 }
+    }
+    val position by remember(items, manga.size) {
+        derivedStateOf {
+            var total = 0f
+            var weighted = 0f
+            items.forEach { (index, info) ->
+                if (index in manga.indices) {
+                    val weight = ((info.size / info.maxSize.coerceAtLeast(1f) - .35f) / .65f).coerceIn(0f, 1f)
+                    total += weight
+                    weighted += index * weight
+                }
+            }
+            if (total > 0f) weighted / total else focused.toFloat()
+        }
     }
     var touched by remember { mutableStateOf(false) }
     var direction by remember { mutableIntStateOf(1) }
@@ -556,14 +642,14 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
             }
         }
     }
-    val indicator by animateFloatAsState(focused.toFloat(),
-        if (motion) tween(240, easing = MangaMotion.EnterEasing) else snap(), label = "featured-position")
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val itemHeight = (224f * LocalDensity.current.fontScale.coerceIn(1f, 1.3f)).dp
+            val itemHeight = (224f * LocalDensity.current.fontScale.coerceAtLeast(1f)).dp
+            val peekWidth = (maxWidth * .15f).coerceIn(44.dp, 80.dp)
             HorizontalMultiBrowseCarousel(state = state,
-                preferredItemWidth = if (manga.size == 1) maxWidth else (maxWidth - 42.dp).coerceAtLeast(180.dp),
-                itemSpacing = 8.dp, minSmallItemWidth = 28.dp, maxSmallItemWidth = 36.dp,
+                preferredItemWidth = if (manga.size == 1) maxWidth else (maxWidth - peekWidth - 8.dp).coerceAtLeast(180.dp),
+                itemSpacing = 8.dp, minSmallItemWidth = peekWidth, maxSmallItemWidth = peekWidth,
                 contentPadding = PaddingValues(0.dp), flingBehavior = fling,
                 modifier = Modifier.fillMaxWidth().height(itemHeight)
                     .semantics { stateDescription = "推荐 ${focused + 1} / ${manga.size}" }
@@ -585,21 +671,22 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
                     onDispose { if (items[index] === info) items.remove(index) }
                 }
                 FeaturedManga(manga[index], repository,
-                    modifier = Modifier.fillMaxWidth().height(itemHeight).mangaCoverCard(24.dp).maskClip(RoundedCornerShape(24.dp)),
+                    modifier = Modifier.fillMaxWidth().height(itemHeight).mangaCoverCard(20.dp).maskClip(RoundedCornerShape(20.dp)),
                     emphasis = { ((info.size / info.maxSize.coerceAtLeast(1f) - .35f) / .65f).coerceIn(0f, 1f) },
+                    offset = { if (motion) (index - position).coerceIn(-1f, 1f) * (if (rtl) -1f else 1f) else 0f },
                     onOpen = onOpen)
             }
         }
         if (manga.size > 1) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             val color = MaterialTheme.colorScheme.onSurface
-            Canvas(Modifier.size(width = (manga.size * 16).dp, height = 4.dp)) {
-                repeat(manga.size) { index ->
-                    val weight = (1f - kotlin.math.abs(indicator - index)).coerceIn(0f, 1f)
-                    val width = (4f + 10f * weight).dp.toPx()
-                    drawRoundRect(color.copy(alpha = .13f + .45f * weight),
-                        topLeft = Offset((index * 16 + 8).dp.toPx() - width / 2f, 0f),
-                        size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
-                }
+            Canvas(Modifier.size(width = 64.dp, height = 3.dp).clearAndSetSemantics { }) {
+                val fraction = (position / manga.lastIndex).coerceIn(0f, 1f)
+                val thumbWidth = 16.dp.toPx().coerceAtMost(size.width)
+                val x = (size.width - thumbWidth) * (if (rtl) 1f - fraction else fraction)
+                val radius = CornerRadius(size.height / 2f)
+                drawRoundRect(color.copy(alpha = .10f), cornerRadius = radius)
+                drawRoundRect(color.copy(alpha = .42f), topLeft = Offset(x, 0f),
+                    size = Size(thumbWidth, size.height), cornerRadius = radius)
             }
         }
     }
@@ -611,23 +698,35 @@ private fun FeaturedManga(
     repository: MangaRepository,
     modifier: Modifier,
     emphasis: () -> Float,
+    offset: () -> Float,
     onOpen: (Manga) -> Unit,
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val metrics = observedDetailMetrics(manga)
     val heat = manga.totalPopularity ?: manga.popularity
+    val transition = LocalMangaCoverTransition.current
     Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
-        onClickLabel = "查看${manga.title}") { onOpen(manga) }.motionPress(interaction, pressedScale = .988f)
+        onClickLabel = "查看${manga.title}") {
+            transition?.select?.invoke(MangaCoverKey(manga.id, "discovery-featured"))
+            onOpen(manga)
+        }.motionPress(interaction, pressedScale = .988f)
         .background(MaterialTheme.colorScheme.surfaceVariant)) {
         MangaCover(manga, repository, Modifier.matchParentSize().blur(22.dp).graphicsLayer { alpha = .38f }
             .clearAndSetSemantics { }, ContentScale.Crop)
-        MangaCover(manga, repository, Modifier.matchParentSize().clearAndSetSemantics { }, ContentScale.Fit)
-        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().graphicsLayer { alpha = emphasis() }
-            .background(Brush.verticalGradient(0f to Color.Transparent, .48f to Color.Black.copy(alpha = .68f),
-                1f to Color.Black.copy(alpha = .84f)))
-            .padding(horizontal = 15.dp).padding(top = 30.dp, bottom = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(manga.title, color = Color.White, fontSize = 17.sp, lineHeight = 23.sp,
+        MangaCover(manga, repository, Modifier.matchParentSize()
+            .then(if (emphasis() >= .98f) Modifier.mangaSharedCover(manga.id, "discovery-featured") else Modifier)
+            .graphicsLayer { translationX = offset() * 4.dp.toPx() }.clearAndSetSemantics { }, ContentScale.Fit)
+        Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().fillMaxHeight(.42f)
+            .background(Brush.verticalGradient(0f to Color.Transparent, .28f to Color.Black.copy(alpha = .32f),
+                .7f to Color.Black.copy(alpha = .58f), 1f to Color.Black.copy(alpha = .72f))))
+        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().graphicsLayer {
+                alpha = emphasis()
+                translationX = offset() * 8.dp.toPx()
+            }.padding(horizontal = 15.dp).padding(top = 8.dp, bottom = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(manga.title, color = Color.White, style = MaterialTheme.typography.titleSmall.copy(
+                shadow = Shadow(Color.Black.copy(alpha = .55f), Offset(0f, 1f), 5f)),
+                fontSize = 17.sp, lineHeight = 23.sp,
                 fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Row(horizontalArrangement = Arrangement.spacedBy(13.dp), verticalAlignment = Alignment.CenterVertically) {
                 heat?.let { Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -662,7 +761,7 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
             Text(manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            MangaMetricBadges(manga, heatLabel = when (period) {
+            MangaMetricBadges(manga, showMore = false, heatLabel = when (period) {
                 RankPeriod.DAY -> "日热"
                 RankPeriod.WEEK -> "周热"
                 RankPeriod.MONTH -> "月热"
@@ -754,21 +853,38 @@ internal fun RecentReadingSheet(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun CoverTile(manga: Manga, repository: MangaRepository, dense: Boolean = false, onClick: () -> Unit) {
+internal fun CoverTile(
+    manga: Manga,
+    repository: MangaRepository,
+    dense: Boolean = false,
+    modifier: Modifier = Modifier,
+    showChapter: Boolean = false,
+    placement: String? = null,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     val interaction = remember { MutableInteractionSource() }
-    Column(Modifier
-        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+    val transition = LocalMangaCoverTransition.current
+    Column(modifier
+        .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = "查看${manga.title}", onLongClickLabel = if (onLongClick != null) "漫画操作" else null,
+            onLongClick = onLongClick, onClick = {
+                if (placement != null) transition?.select?.invoke(MangaCoverKey(manga.id, placement))
+                onClick()
+            })
         .motionPress(interaction)) {
-        MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(0.7f).mangaCoverCard())
-        Text(manga.title, modifier = Modifier.padding(top = 9.dp, start = 2.dp, end = 2.dp),
+        MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(2f / 3f)
+            .then(if (placement != null) Modifier.mangaSharedCover(manga.id, placement) else Modifier).mangaCoverCard(12.dp))
+        Text(manga.title, modifier = Modifier.padding(top = 7.dp, start = 2.dp, end = 2.dp),
             style = if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 6.dp, start = 2.dp, end = 2.dp), compact = true)
-        val secondary = manga.latestChapter.ifBlank { if (dense) "" else manga.authors.firstOrNull().orEmpty() }
-        if (secondary.isNotBlank()) Text(secondary, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
+        MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp),
+            compact = true, showMore = false, plain = true)
+        if (showChapter) Text(manga.latestChapter, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+            minLines = 1, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

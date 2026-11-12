@@ -275,7 +275,8 @@ fun DetailScreen(
             Icon(Icons.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
                 modifier = Modifier.align(Alignment.Center).size(48.dp))
             if (current.coverUrl.isNotBlank()) AsyncImage(
-                model = coverRequest, contentDescription = null, modifier = Modifier.fillMaxSize(),
+                model = coverRequest, contentDescription = null,
+                modifier = Modifier.fillMaxSize().mangaSharedCover(current.id),
                 contentScale = if (landscape) ContentScale.Fit else ContentScale.Crop,
                 alignment = Alignment.TopCenter,
                 onError = { coverFailed = true }, onSuccess = { result ->

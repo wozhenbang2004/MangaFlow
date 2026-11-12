@@ -75,6 +75,7 @@ internal class BackdropGlassOptics {
             lens.setFloatUniform("refractionAmount", -rim * (depth + (if (softCard) .06f else .16f) * engagement))
             lens.setFloatUniform("depthEffect", 0f)
             lens.setColorUniform("surfaceColor", surface.copy(alpha = 1f).toArgb())
+            lens.setFloatUniform("navigationContrast", if (softCard && role == GlassSurfaceRole.NAVIGATION) 1f else 0f)
             lens.setFloatUniform("tintOpacity", if (softCard && role != GlassSurfaceRole.DRAWER) { if (light) .78f else .82f } else when (role) {
                 GlassSurfaceRole.CONTROL -> if (light) .60f else .72f
                 GlassSurfaceRole.ARTWORK -> if (light) .60f else .70f
@@ -131,10 +132,15 @@ internal class BackdropGlassOptics {
         ) + """
         layout(color) uniform half4 surfaceColor;
         uniform float tintOpacity;
+        uniform float navigationContrast;
 
         half4 main(float2 coord) {
             half4 sampled = refractBackdrop(coord);
             half opacity = half(tintOpacity);
+            // Protect navigation against a contrasting cover without CPU sampling or a new plate.
+            half3 backdrop = sampled.rgb / max(sampled.a, half(0.001));
+            half contrast = abs(dot(backdrop - surfaceColor.rgb, half3(0.2126, 0.7152, 0.0722)));
+            opacity += (1.0 - opacity) * smoothstep(0.18, 0.70, contrast) * half(navigationContrast * 0.35);
             half4 wash = half4(surfaceColor.rgb * opacity, opacity);
             return wash + sampled * (1.0 - opacity);
         }

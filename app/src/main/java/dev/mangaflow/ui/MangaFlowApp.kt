@@ -6,6 +6,8 @@ import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.snap
@@ -125,6 +127,7 @@ private val Frame.depth: Int get() = when (this) {
     is Frame.Reader -> 2
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = viewModel()) {
     val wallpaperContext = LocalContext.current.applicationContext
@@ -156,6 +159,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val savedState = rememberSaveableStateHolder()
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
     var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
+    var selectedCover by remember { mutableStateOf<MangaCoverKey?>(null) }
     val keyboard = LocalSoftwareKeyboardController.current
 
     LaunchedEffect(Unit) { model.events.collect { snackbar.showSnackbar(it) } }
@@ -309,6 +313,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             if (frame is Frame.Root && wallpaper.mediaPath != null) {
                 AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = !drawerVisible && !recentReadingOpen)
             }
+            SharedTransitionLayout {
+            val coverScope = this
             AnimatedContent(
                 targetState = frame,
                 contentKey = { it.key },
@@ -328,6 +334,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 label = "page",
                 modifier = Modifier.fillMaxSize(),
             ) { current ->
+                CompositionLocalProvider(LocalMangaCoverTransition provides
+                    MangaCoverTransition(coverScope, this, selectedCover) { selectedCover = it }) {
                 Box(Modifier.fillMaxSize().motionInputGate(current.key == frame.key)) {
                 when (current) {
                     is Frame.Reader -> ReaderScreen(
@@ -473,6 +481,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onRefresh = model::refresh,
                                         onRetry = model::retryBrowse, onMore = model::loadMore,
                                         onOpen = { model.openManga(it) },
+                                        isFavorite = { manga -> favorites.any { it.id == manga.id } },
+                                        onToggleFavorite = model::toggleFavorite,
                                     )
                                     Section.LIBRARY -> LibraryScreen(
                                         favorites = favorites, history = history,
@@ -554,13 +564,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 state = browse, expanded = searchExpanded, active = searchActive,
                                 maxHeight = maxHeight, repository = model.repository,
                                 onRetry = model::retryBrowse, onMore = model::loadMore,
-                                onOpen = { manga -> closeSearch(); model.openManga(manga) },
+                                onOpen = { manga -> selectedCover = null; closeSearch(); model.openManga(manga) },
                             )
                         }
                         }
                     }
                 }
                 }
+                }
+            }
             }
         }
     }
