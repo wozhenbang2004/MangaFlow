@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -23,36 +24,86 @@ import java.util.Locale
 class ReviewRepository(context: Context) {
     private val http = SourceHttp()
     private val associations = context.applicationContext.getSharedPreferences("review_associations", Context.MODE_PRIVATE)
-    private val cache = LinkedHashMap<String, CachedReviews>()
+    private val cache = LinkedHashMap<String, CachedSource>()
+    private val confirmedNames = LinkedHashMap<String, List<String>>()
+    @Volatile private var cacheGeneration = 0L
 
     /** Source callbacks run on IO workers and can arrive concurrently. */
-    suspend fun lookup(manga: Manga, onSource: (ReviewSource) -> Unit = {}): List<ReviewSource> = withContext(Dispatchers.IO) {
-        val key = listOf(manga.id, manga.title, manga.authors.joinToString("|"),
-            savedId(manga, "bangumi"), savedId(manga, "anilist")).joinToString("\u0000")
-        synchronized(cache) { cache[key] }?.takeIf { System.currentTimeMillis() - it.time < 60 * 60_000 }
-            ?.let { cached ->
-                cached.sources.forEach(onSource)
-                return@withContext cached.sources
+    suspend fun lookup(manga: Manga, forceRefresh: Boolean = false, onSource: (ReviewSource) -> Unit = {}): List<ReviewSource> = withContext(Dispatchers.IO) {
+        val key = identityKey(manga)
+        val epoch = cacheGeneration
+        val savedBangumi = if (forceRefresh) null else cachedSource(key, "bangumi")
+        val savedAniList = if (forceRefresh) null else cachedSource(key, "anilist")
+        coroutineScope {
+            val bgm = async {
+                (savedBangumi?.let { BangumiMatch(it.source, it.names) } ?: bangumi(manga)
+                    .let { match -> match.copy(source = rememberSource(key, match.source, match.names, epoch)) })
+                    .also { onSource(it.source) }
             }
-
-        val sources = coroutineScope {
-            val bgm = async { bangumi(manga).also { onSource(it.source) } }
-            val ani = async { aniList(manga, listOf(manga.title)).also(onSource) }
+            val ani = async {
+                (savedAniList?.source ?: rememberSource(key, aniList(manga, listOf(manga.title)), epoch = epoch)).also(onSource)
+            }
             val bangumi = bgm.await()
             var anilist = ani.await()
             // Only a confirmed manga may supply aliases for a second, bounded search.
-            if (anilist.status == ReviewStatus.NO_MATCH && bangumi.source.status == ReviewStatus.READY &&
+            if (savedAniList == null && anilist.status == ReviewStatus.NO_MATCH && bangumi.source.status == ReviewStatus.READY &&
                 bangumi.names.any { normalize(it) != normalize(manga.title) }) {
-                anilist = aniList(manga, bangumi.names + manga.title).also(onSource)
+                anilist = rememberSource(key, aniList(manga, bangumi.names + manga.title), epoch = epoch).also(onSource)
             }
             listOf(bangumi.source, anilist)
         }
-        if (sources.none { it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null }) synchronized(cache) {
-            cache.remove(key)
-            cache[key] = CachedReviews(System.currentTimeMillis(), sources)
-            while (cache.size > 48) cache.remove(cache.keys.first())
+    }
+
+    /** Only identity and native metrics are fetched; card badges never load comment pages. */
+    suspend fun lookupMetrics(manga: Manga, sourceIds: Set<String>, onSource: (ReviewSource) -> Unit): Unit =
+        withContext(Dispatchers.IO) {
+            var names = synchronized(confirmedNames) { confirmedNames[identityKey(manga)] }.orEmpty()
+            if ("bangumi" in sourceIds) {
+                val matched = bangumi(manga, includeComments = false)
+                if (matched.source.status == ReviewStatus.READY) names = matched.names
+                onSource(matched.source)
+            }
+            if ("anilist" in sourceIds) {
+                var source = aniList(manga, listOf(manga.title), includeComments = false)
+                if (source.status == ReviewStatus.NO_MATCH && names.any { normalize(it) != normalize(manga.title) }) {
+                    source = aniList(manga, names + manga.title, includeComments = false)
+                }
+                onSource(source)
+            }
         }
-        sources
+
+    internal fun identityKey(manga: Manga): String = listOf(manga.id, manga.title, manga.authors.joinToString("|"),
+        savedId(manga, "bangumi"), savedId(manga, "anilist")).joinToString("\u0000")
+
+    internal fun metricIdentityKey(manga: Manga): String = listOf(manga.id,
+        savedId(manga, "bangumi"), savedId(manga, "anilist")).joinToString("\u0000")
+
+    fun clearCache() {
+        synchronized(cache) { cacheGeneration++; cache.clear() }
+        synchronized(confirmedNames) { confirmedNames.clear() }
+    }
+
+    private fun cachedSource(key: String, sourceId: String): CachedSource? = synchronized(cache) {
+        cache["$key\u0000$sourceId"]?.takeIf {
+            val ttl = if (it.source.status == ReviewStatus.UNAVAILABLE || it.source.reviewsError != null) 5 * 60_000L else 60 * 60_000L
+            System.currentTimeMillis() - it.time in 0L until ttl
+        }
+    }
+
+    private fun rememberSource(key: String, source: ReviewSource, names: List<String> = emptyList(), epoch: Long = cacheGeneration): ReviewSource = synchronized(cache) {
+        if (epoch != cacheGeneration) return@synchronized source
+        val sourceKey = "$key\u0000${source.id}"
+        val previous = cache[sourceKey]?.source?.takeIf { it.status == ReviewStatus.READY }
+        val retained = when {
+            source.status == ReviewStatus.UNAVAILABLE && previous != null -> previous.copy(reviewsError = source.message)
+            source.reviewsError != null && previous != null && source.subjectId == previous.subjectId && previous.reviews.isNotEmpty() ->
+                source.copy(reviews = previous.reviews, nextPage = previous.nextPage)
+            else -> source
+        }
+        cache.remove(sourceKey)
+        cache[sourceKey] = CachedSource(System.currentTimeMillis(), retained, names)
+        while (cache.size > 96) cache.remove(cache.keys.first())
+        retained
     }
 
     /** Pages are zero-based in the app, regardless of the provider's pagination scheme. */
@@ -85,7 +136,7 @@ class ReviewRepository(context: Context) {
         if (!associations.edit().putString(associationKey(manga, sourceId), id.toString()).commit()) {
             throw SourceException("作品已确认，但关联未能保存，请重试。", source.url)
         }
-        synchronized(cache) { cache.clear() }
+        clearCache()
         source
     }
 
@@ -95,7 +146,7 @@ class ReviewRepository(context: Context) {
         if (!associations.edit().remove(associationKey(manga, sourceId)).commit()) {
             throw SourceException("已保存的作品关联未能清除，请重试。")
         }
-        synchronized(cache) { cache.clear() }
+        clearCache()
         when (sourceId) {
             "bangumi" -> bangumi(manga).source
             "anilist" -> {
@@ -111,11 +162,15 @@ class ReviewRepository(context: Context) {
         }
     }
 
-    private suspend fun bangumi(manga: Manga): BangumiMatch {
+    private suspend fun bangumi(manga: Manga, includeComments: Boolean = true): BangumiMatch {
+        val key = identityKey(manga)
+        val epoch = cacheGeneration
         val searchUrl = "https://bgm.tv".toHttpUrl().newBuilder().addPathSegment("subject_search")
             .addPathSegment(manga.title).addQueryParameter("cat", "1").build().toString()
         try {
-            savedId(manga, "bangumi").takeIf(String::isNotBlank)?.let { return bangumiSubject(requireSubjectId(it)) }
+            savedId(manga, "bangumi").takeIf(String::isNotBlank)?.let {
+                return bangumiSubject(requireSubjectId(it), includeComments).also { rememberNames(manga, key, epoch, it.names) }
+            }
             val body = JSONObject().put("keyword", manga.title).put("sort", "match")
                 .put("filter", JSONObject().put("type", JSONArray().put(1)))
             val result = jsonRequest("https://api.bgm.tv/v0/search/subjects?limit=20&offset=0", "Bangumi 作品", searchUrl, body)
@@ -125,7 +180,8 @@ class ReviewRepository(context: Context) {
             val target = normalize(manga.title)
             val matches = comics.filter { item -> target.isNotBlank() && bangumiNames(item).any { normalize(it) == target } }
             val candidate = resolveBangumiMatch(matches, manga.authors)
-            if (candidate != null) return bangumiSubject(candidate.optInt("id"))
+            if (candidate != null) return bangumiSubject(candidate.optInt("id"), includeComments)
+                .also { rememberNames(manga, key, epoch, it.names) }
             val choices = (matches.ifEmpty { comics }).take(8).map(::bangumiCandidate)
             return BangumiMatch(ReviewSource("bangumi", "Bangumi", ReviewStatus.NO_MATCH, searchUrl,
                 message = if (choices.isEmpty()) "尚未找到对应漫画，可到原站查找" else "请确认对应的漫画条目，选择后会记住关联",
@@ -137,7 +193,7 @@ class ReviewRepository(context: Context) {
         }
     }
 
-    private suspend fun bangumiSubject(id: Int): BangumiMatch {
+    private suspend fun bangumiSubject(id: Int, includeComments: Boolean = true): BangumiMatch {
         val url = "https://bgm.tv/subject/$id"
         val subject = jsonRequest("https://api.bgm.tv/v0/subjects/$id", "Bangumi 评分", url)
         if (subject.optInt("id") != id || !subject.isBangumiComic()) {
@@ -149,7 +205,7 @@ class ReviewRepository(context: Context) {
             matchedTitle = subject.text("name_cn").ifBlank { subject.text("name") },
             score = rating?.nullableScore("score", 10)?.takeIf { total != 0 }, scoreScale = 10,
             ratingCount = total, subjectId = id.toString(), message = "中文短评 · 最新动态")
-        return BangumiMatch(withFirstPage(base) { bangumiComments(id, 0) }, bangumiNames(subject))
+        return BangumiMatch(if (includeComments) withFirstPage(base) { bangumiComments(id, 0) } else base, bangumiNames(subject))
     }
 
     private suspend fun bangumiComments(id: Int, page: Int): ReviewPage {
@@ -175,17 +231,18 @@ class ReviewRepository(context: Context) {
             MangaReview(id = reviewId.toString(), author = author, summary = content.take(360), url = publicUrl,
                 score = row.nullableScore("rate", 10), scoreScale = 10, body = content,
                 date = date(row.optLong("updatedAt", 0)), spoiler = hasSpoilerMarkup(raw), kind = ReviewKind.COMMENT,
-                authorUrl = username.takeIf(String::isNotBlank)?.let { profileUrl("https://bgm.tv", it) }.orEmpty())
+                authorUrl = username.takeIf(String::isNotBlank)?.let { profileUrl("https://bgm.tv", it) }.orEmpty(),
+                avatarUrl = avatar(user?.optJSONObject("avatar"), setOf("lain.bgm.tv")))
         }
         val more = if (total != null) offset.toLong() + rows.length() < total else rows.length() == PAGE_SIZE
         return ReviewPage(reviews, total, if (more && rows.length() > 0) page + 1 else null)
     }
 
-    private suspend fun aniList(manga: Manga, aliases: List<String>): ReviewSource {
+    private suspend fun aniList(manga: Manga, aliases: List<String>, includeComments: Boolean = true): ReviewSource {
         val searchUrl = "https://anilist.co/search/manga".toHttpUrl().newBuilder()
             .addQueryParameter("search", manga.title).build().toString()
         try {
-            savedId(manga, "anilist").takeIf(String::isNotBlank)?.let { return aniListSubject(requireSubjectId(it)) }
+            savedId(manga, "anilist").takeIf(String::isNotBlank)?.let { return aniListSubject(requireSubjectId(it), includeComments) }
             val knownNames = aliases.map(::normalize).filter(String::isNotBlank).toSet()
             val queryName = aliases.firstOrNull(String::isNotBlank) ?: manga.title
             val query = """
@@ -203,7 +260,7 @@ class ReviewRepository(context: Context) {
             val comics = rows.objects().filter { it.optInt("id") > 0 && it.isAniListComic() }.distinctBy { it.optInt("id") }
             val matches = comics.filter { item -> mediaNames(item).any { normalize(it) in knownNames } }
             val candidate = matches.singleOrNull()
-            if (candidate != null) return aniListSubject(candidate.optInt("id"))
+            if (candidate != null) return aniListSubject(candidate.optInt("id"), includeComments)
             val choices = matches.ifEmpty { comics }.take(8).map { item ->
                 val id = item.optInt("id")
                 val year = item.optJSONObject("startDate")?.nonNegativeInt("year")?.takeIf { it > 0 }?.toString().orEmpty()
@@ -221,7 +278,7 @@ class ReviewRepository(context: Context) {
         }
     }
 
-    private suspend fun aniListSubject(id: Int): ReviewSource {
+    private suspend fun aniListSubject(id: Int, includeComments: Boolean = true): ReviewSource {
         val url = "https://anilist.co/manga/$id"
         // Keep metadata independent: unavailable comments must not erase a valid rating.
         val query = """
@@ -245,7 +302,7 @@ class ReviewRepository(context: Context) {
             matchedTitle = mediaNames(media).firstOrNull().orEmpty(),
             score = media.nullableScore("averageScore", 100), scoreScale = 100,
             ratingCount = total, subjectId = id.toString(), message = "作品长评 · 按读者认可排序 · 可能涉及后续剧情")
-        return withFirstPage(base) { aniListReviews(id, 0) }
+        return if (includeComments) withFirstPage(base) { aniListReviews(id, 0) } else base
     }
 
     private suspend fun aniListReviews(id: Int, page: Int): ReviewPage {
@@ -256,7 +313,7 @@ class ReviewRepository(context: Context) {
                 id
                 reviews(page: ${'$'}page, perPage: ${'$'}perPage, sort: [RATING_DESC]) {
                   pageInfo { hasNextPage }
-                  nodes { id summary body(asHtml: false) score private createdAt user { name } }
+                  nodes { id summary body(asHtml: false) score private createdAt user { name avatar { large medium } } }
                 }
               }
             }
@@ -284,7 +341,8 @@ class ReviewRepository(context: Context) {
                 url = "https://anilist.co/review/$reviewId", score = review.nullableScore("score", 100, allowZero = true),
                 scoreScale = 100, body = listOf(heading, content).filter(String::isNotBlank).distinct().joinToString("\n\n"),
                 date = date(review.optLong("createdAt", 0)), spoiler = true, kind = ReviewKind.REVIEW,
-                authorUrl = profileUrl("https://anilist.co", author))
+                authorUrl = profileUrl("https://anilist.co", author),
+                avatarUrl = avatar(review.optJSONObject("user")?.optJSONObject("avatar"), setOf("anilist.co")))
         }
         // AniList documents PageInfo.total as inaccurate; do not present it as a review count.
         return ReviewPage(reviews, total = null, nextPage = if (more) page + 1 else null)
@@ -371,6 +429,17 @@ class ReviewRepository(context: Context) {
             .filter(String::isNotBlank).distinct()
     }
 
+    private fun rememberNames(manga: Manga, key: String, epoch: Long, names: List<String>) = synchronized(confirmedNames) {
+        if (epoch != cacheGeneration || key != identityKey(manga)) return@synchronized
+        confirmedNames[key] = names
+        while (confirmedNames.size > 96) confirmedNames.remove(confirmedNames.keys.first())
+    }
+
+    private fun avatar(value: JSONObject?, domains: Set<String>): String = sequenceOf("medium", "large", "small")
+        .mapNotNull { size -> value?.text(size)?.toHttpUrlOrNull() }
+        .firstOrNull { url -> url.isHttps && url.port == 443 && url.username.isEmpty() && url.password.isEmpty() &&
+            domains.any { url.host == it || url.host.endsWith(".$it") } }?.toString().orEmpty()
+
     private fun plainText(raw: String, markdown: Boolean = false): String {
         var text = raw.replace(Regex("(?is)\\[img(?:=[^]]*)?].*?\\[/img]"), "")
             .replace(Regex("(?i)\\[/?(?:b|i|u|s|quote|spoiler|url|size|color|align)(?:=[^]]*)?]"), "")
@@ -412,7 +481,7 @@ class ReviewRepository(context: Context) {
         (opt(key) as? Number)?.toDouble()?.takeIf { it.isFinite() && (it > 0 || (allowZero && it == 0.0)) && it <= scale }
     private fun Exception.userMessage(fallback: String) = if (this is SourceException) message.orEmpty().ifBlank { fallback } else fallback
     private data class BangumiMatch(val source: ReviewSource, val names: List<String> = emptyList())
-    private data class CachedReviews(val time: Long, val sources: List<ReviewSource>)
+    private data class CachedSource(val time: Long, val source: ReviewSource, val names: List<String> = emptyList())
 
     private companion object { const val PAGE_SIZE = 20 }
 }

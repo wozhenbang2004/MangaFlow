@@ -14,6 +14,8 @@ import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
+import dev.mangaflow.data.MangaMetric
+import dev.mangaflow.data.MangaMetricsRepository
 import dev.mangaflow.data.ReviewRepository
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
@@ -25,6 +27,8 @@ import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.storage.BrowseCache
+import dev.mangaflow.storage.BrowseSnapshot
 import dev.mangaflow.update.UpdateManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -50,7 +54,15 @@ data class BrowseState(
     val error: String? = null,
     val failedPage: Int? = null,
     val page: Int = 0,
-)
+    val refreshing: Boolean = false,
+    val updatedAt: Long = 0,
+) {
+    val cacheKey: String get() = when {
+        query.isNotBlank() -> "search:${query.trim()}"
+        mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
+        else -> "discover:${mode.name}"
+    }
+}
 
 data class DetailState(
     val manga: Manga,
@@ -94,6 +106,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val updates = UpdateManager.get(application)
     val community = CopyCommunityRepository(repository)
     private val reviews = ReviewRepository(application)
+    private val browseCache = BrowseCache(application)
+    private val metricsRepository = MangaMetricsRepository(application, reviews, community)
+    private val _metrics = MutableStateFlow<Map<String, List<MangaMetric>>>(emptyMap())
+    val metrics = _metrics.asStateFlow()
     private val accountRepository = CopyAccountRepository(application)
     private val _account = MutableStateFlow(AccountUiState())
     val account = _account.asStateFlow()
@@ -108,6 +124,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val messages = Channel<String>(Channel.BUFFERED)
     val events = messages.receiveAsFlow()
     private var browseJob: Job? = null
+    private val metricJobs = mutableMapOf<String, Job>()
+    private val metricReferences = mutableMapOf<String, Int>()
+    private val metricWrites = mutableSetOf<Job>()
+    @Volatile private var metricsRequestId = 0L
     private var detailJob: Job? = null
     private var reviewJob: Job? = null
     private var readingCatalogJob: Job? = null
@@ -135,72 +155,207 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private var lastChapterSync: String? = null
     private var visibleReading: Pair<Manga, Chapter>? = null
 
-    init { refresh(); restoreAccount() }
+    init { showBrowse(_browse.value); restoreAccount() }
 
     fun setQuery(query: String) {
         if (query == _browse.value.query) return
-        browseJob?.cancel()
         val previous = _browse.value
-        _browse.value = BrowseState(query = query, mode = previous.mode, period = previous.period, audience = previous.audience)
-        val requestId = ++browseRequestId
-        browseJob = viewModelScope.launch {
-            if (query.isNotBlank()) delay(450)
-            loadBrowse(_browse.value, 0, requestId)
-        }
+        showBrowse(BrowseState(query = query, mode = previous.mode, period = previous.period,
+            audience = previous.audience), debounce = query.isNotBlank())
     }
 
     fun selectDiscovery(mode: DiscoveryMode, period: RankPeriod = _browse.value.period,
         audience: RankAudience = _browse.value.audience) {
         val previous = _browse.value
         if (previous.mode == mode && previous.period == period && previous.audience == audience) return
+        showBrowse(BrowseState(query = previous.query, mode = mode, period = period, audience = audience))
+    }
+
+    private fun showBrowse(selection: BrowseState, debounce: Boolean = false) {
         browseJob?.cancel()
-        _browse.value = BrowseState(query = previous.query, mode = mode, period = period, audience = audience)
         val requestId = ++browseRequestId
-        browseJob = viewModelScope.launch { loadBrowse(_browse.value, 0, requestId) }
+        val generation = browseCache.generation
+        val memory = browseCache.cached(selection.cacheKey)
+        _browse.value = memory?.restore(selection) ?: selection
+        browseJob = viewModelScope.launch {
+            val snapshot = memory ?: browseCache.read(selection.cacheKey, generation)
+            if (requestId != browseRequestId) return@launch
+            if (snapshot != null) {
+                _browse.value = snapshot.restore(selection)
+                // Revalidating page zero must not truncate a restored multi-page list or
+                // mix a newly ordered ranking with older pages. Refresh stays explicit there.
+                if (snapshot.page > 0 || isFresh(snapshot.updatedAt, selection)) return@launch
+            }
+            if (debounce) delay(450)
+            if (requestId != browseRequestId) return@launch
+            _browse.update { it.copy(loading = snapshot == null, refreshing = snapshot != null) }
+            loadBrowse(_browse.value, 0, requestId, generation)
+        }
     }
 
     fun refresh() {
+        if (browseJob?.isActive == true && (_browse.value.loading || _browse.value.refreshing)) return
         browseJob?.cancel()
-        _browse.update { it.copy(loading = true, error = null, failedPage = null, loadingMore = false) }
         val requestId = ++browseRequestId
         val state = _browse.value
-        browseJob = viewModelScope.launch { loadBrowse(state, 0, requestId) }
+        val generation = browseCache.generation
+        _browse.value = state.copy(loading = state.items.isEmpty(), refreshing = state.items.isNotEmpty(),
+            error = null, failedPage = null, loadingMore = false)
+        browseJob = viewModelScope.launch { loadBrowse(state, 0, requestId, generation) }
     }
 
     fun loadMore() {
         val state = _browse.value
-        if (state.loading || state.loadingMore || !state.hasMore) return
+        if (state.loading || state.refreshing || state.loadingMore || !state.hasMore || state.error != null) return
         _browse.update { it.copy(loadingMore = true, error = null, failedPage = null) }
         val requestId = ++browseRequestId
-        browseJob = viewModelScope.launch { loadBrowse(state, state.page + 1, requestId) }
+        val generation = browseCache.generation
+        browseJob = viewModelScope.launch { loadBrowse(state, state.page + 1, requestId, generation) }
     }
 
     fun retryBrowse() {
         val state = _browse.value
-        if (state.loading || state.loadingMore) return
+        if (state.loading || state.refreshing || state.loadingMore) return
         val page = state.failedPage ?: return
-        _browse.update { it.copy(loading = page == 0, loadingMore = page > 0, error = null, failedPage = null) }
+        _browse.update { it.copy(loading = page == 0 && it.items.isEmpty(),
+            refreshing = page == 0 && it.items.isNotEmpty(), loadingMore = page > 0, error = null, failedPage = null) }
         val requestId = ++browseRequestId
-        browseJob = viewModelScope.launch { loadBrowse(state, page, requestId) }
+        val generation = browseCache.generation
+        browseJob = viewModelScope.launch { loadBrowse(state, page, requestId, generation) }
     }
 
-    private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long) {
+    private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long) {
         try {
             val query = state.query.trim()
             val result = if (query.isBlank()) community.browse(state.mode, state.period, state.audience, page)
                 else repository.search(query, page)
+            if (requestId != browseRequestId || generation != browseCache.generation) return
             _browse.update { current ->
                 if (requestId != browseRequestId) current else current.copy(
                     items = (if (page == 0) result.items else current.items + result.items).distinctBy(Manga::id),
-                    loading = false, loadingMore = false, error = null, failedPage = null,
+                    loading = false, refreshing = false, loadingMore = false, error = null, failedPage = null,
                     hasMore = result.hasMore, page = page,
+                    updatedAt = if (page == 0 || current.updatedAt <= 0) System.currentTimeMillis() else current.updatedAt,
                 )
+            }
+            val current = _browse.value
+            if (requestId == browseRequestId && current.cacheKey == state.cacheKey) {
+                val snapshot = BrowseSnapshot(current.cacheKey, current.items, current.page, current.hasMore, current.updatedAt)
+                browseCache.remember(snapshot, generation)
+                browseCache.write(snapshot, generation)
             }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (failure: Exception) {
-            _browse.update { if (requestId != browseRequestId) it else it.copy(loading = false, loadingMore = false,
+            _browse.update { if (requestId != browseRequestId) it else it.copy(loading = false, refreshing = false, loadingMore = false,
                 error = failure.message ?: "暂时无法读取漫画", failedPage = page) }
+        }
+    }
+
+    private fun BrowseSnapshot.restore(selection: BrowseState) = selection.copy(
+        items = items, page = page, hasMore = hasMore, updatedAt = updatedAt,
+        loading = false, loadingMore = false, refreshing = false, error = null, failedPage = null,
+    )
+
+    private fun isFresh(updatedAt: Long, state: BrowseState): Boolean {
+        val ttl = when {
+            state.query.isNotBlank() || state.mode != DiscoveryMode.RANKING -> 15 * 60_000L
+            state.period == RankPeriod.DAY || state.period == RankPeriod.WEEK -> 30 * 60_000L
+            else -> 60 * 60_000L
+        }
+        return System.currentTimeMillis() - updatedAt in 0 until ttl
+    }
+
+    suspend fun browseCacheSize(): Long = browseCache.sizeBytes()
+
+    suspend fun clearBrowseCache() {
+        browseJob?.cancel()
+        browseRequestId++
+        _browse.update { it.copy(loading = false, refreshing = false, loadingMore = false,
+            error = null, failedPage = null, updatedAt = 0) }
+        browseCache.clear()
+    }
+
+    /** Called for visible manga only; source matching never blocks a list or its images. */
+    fun loadMetrics(manga: Manga) {
+        metricsRepository.cached(manga.id).takeIf { it.isNotEmpty() }?.let { cached ->
+            publishMetrics(manga.id, cached)
+        }
+        if (metricJobs[manga.id]?.isActive == true) return
+        val requestId = metricsRequestId
+        metricJobs[manga.id] = viewModelScope.launch {
+            val job = coroutineContext[Job] ?: return@launch
+            try {
+                val result = metricsRepository.lookup(manga) { sources ->
+                    if (requestId == metricsRequestId && job.isActive) publishMetrics(manga.id, sources)
+                }
+                if (requestId == metricsRequestId && job.isActive) publishMetrics(manga.id, result)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                // Missing metrics do not hide a manga; the detail page retains source errors.
+            } finally {
+                if (metricJobs[manga.id] === job) metricJobs.remove(manga.id)
+            }
+        }
+    }
+
+    fun retainMetrics(manga: Manga) {
+        metricReferences[manga.id] = (metricReferences[manga.id] ?: 0) + 1
+        loadMetrics(manga)
+    }
+
+    fun releaseMetrics(mangaId: String) {
+        val count = metricReferences[mangaId] ?: return
+        if (count > 1) metricReferences[mangaId] = count - 1
+        else {
+            metricReferences.remove(mangaId)
+            metricJobs.remove(mangaId)?.cancel()
+        }
+    }
+
+    private fun publishMetrics(mangaId: String, values: List<MangaMetric>) {
+        _metrics.update { current ->
+            LinkedHashMap(current).apply {
+                remove(mangaId)
+                put(mangaId, values)
+                while (size > 240) remove(keys.first())
+            }
+        }
+    }
+
+    suspend fun metadataCacheSize(): Long = metricsRepository.cacheSizeBytes()
+
+    suspend fun clearMetadataCache() {
+        metricsRequestId++
+        metricJobs.values.forEach { it.cancel() }
+        metricJobs.clear()
+        metricWrites.toList().forEach { it.cancel() }
+        metricWrites.clear()
+        _metrics.value = emptyMap()
+        metricsRepository.clearCache()
+    }
+
+    private fun recordDetailMetrics(mangaId: String, detailId: Long) {
+        val requestId = metricsRequestId
+        viewModelScope.launch {
+            if (requestId != metricsRequestId) return@launch
+            val current = _detail.value?.takeIf { it.manga.id == mangaId && detailId == detailRequestId }
+                ?: return@launch
+            val job = coroutineContext[Job] ?: return@launch
+            metricWrites.add(job)
+            try {
+                metricsRepository.recordSources(current.manga, current.reviews)
+                if (requestId == metricsRequestId) {
+                    publishMetrics(mangaId, metricsRepository.cached(mangaId))
+                }
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                // Review content remains available even if optional metadata cannot be cached.
+            } finally {
+                metricWrites.remove(job)
+            }
         }
     }
 
@@ -211,19 +366,23 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         reviewPageJobs.clear()
         reviewOverrides.clear()
         val requestId = ++detailRequestId
-        _detail.value = DetailState(manga)
-        loadReviews(manga, requestId)
+        val detailManga = manga.copy(popularity = manga.totalHeat(), totalPopularity = manga.totalHeat(), rank = null)
+        _detail.value = DetailState(detailManga)
+        loadReviews(detailManga, requestId)
         detailJob = viewModelScope.launch {
             try {
                 val loaded = repository.detail(manga.id) { metadata ->
                     _detail.update { if (it?.manga?.id == manga.id && requestId == detailRequestId)
-                        it.copy(manga = metadata.copy(popularity = metadata.popularity ?: it.manga.popularity),
+                        it.copy(manga = metadata.copy(popularity = metadata.totalHeat() ?: it.manga.totalHeat(),
+                            totalPopularity = metadata.totalHeat() ?: it.manga.totalHeat()),
                             reviews = it.reviews.map { source -> if (source.id == "copy")
-                                source.copy(popularity = metadata.popularity ?: source.popularity) else source }) else it }
+                                source.copy(popularity = metadata.totalHeat() ?: source.popularity) else source }) else it }
                 }
                 _detail.update { if (requestId != detailRequestId || it?.manga?.id != manga.id) it else
-                    it.copy(manga = loaded.manga.copy(popularity = loaded.manga.popularity ?: it.manga.popularity), detail = loaded, loading = false) }
+                    it.copy(manga = loaded.manga.copy(popularity = loaded.manga.totalHeat() ?: it.manga.totalHeat(),
+                        totalPopularity = loaded.manga.totalHeat() ?: it.manga.totalHeat()), detail = loaded, loading = false) }
                 if (requestId != detailRequestId) return@launch
+                recordDetailMetrics(manga.id, requestId)
                 if (continueChapterId != null) {
                     val chapter = loaded.chapters.firstOrNull { it.id == continueChapterId }
                     if (chapter != null) readChapter(chapter)
@@ -287,10 +446,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _detail.update { current ->
             if (current?.manga?.id != mangaId || requestId != detailRequestId) current
             else current.copy(reviews = (current.reviews.filterNot { it.id == source.id } +
-                if (source.id == "copy") source.copy(popularity = current.manga.popularity ?: source.popularity) else source)
+                if (source.id == "copy") source.copy(popularity = current.manga.totalHeat() ?: source.popularity) else source)
                 .sortedBy { when (it.id) { "copy" -> 0; "bangumi" -> 1; else -> 2 } })
         }
+        recordDetailMetrics(mangaId, requestId)
     }
+
+    private fun Manga.totalHeat(): Long? = totalPopularity ?: popularity.takeIf { rank == null }
 
     fun moreReviews(sourceId: String) {
         val state = _detail.value ?: return
@@ -341,7 +503,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         reviewPageJobs[sourceId] = viewModelScope.launch {
             try {
                 val result = when {
-                    sourceId == "copy" -> community.overview(state.manga)
+                    sourceId == "copy" -> community.overview(state.manga, forceRefresh = true)
                     relink -> reviews.relink(state.manga, sourceId)
                     subjectId != null -> reviews.choose(state.manga, sourceId, subjectId)
                     source.subjectId.isNotBlank() && source.status == ReviewStatus.READY -> {
@@ -349,7 +511,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         source.copy(reviews = page.items, reviewCount = page.total, nextPage = page.nextPage,
                             loadingMore = false, reviewsError = null)
                     }
-                    else -> reviews.lookup(state.manga).first { it.id == sourceId }
+                    else -> reviews.lookup(state.manga, forceRefresh = true).first { it.id == sourceId }
                 }
                 publishReview(state.manga.id, requestId, result)
             } catch (cancel: CancellationException) { throw cancel }

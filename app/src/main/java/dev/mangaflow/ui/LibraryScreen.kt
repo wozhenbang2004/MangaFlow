@@ -38,7 +38,7 @@ fun LibraryScreen(
 ) {
     var showHistory by rememberSaveable { mutableStateOf(false) }
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(102.dp), modifier = Modifier.fillMaxSize().navigationBarsPadding(),
+        columns = GridCells.Adaptive(144.dp), modifier = Modifier.fillMaxSize().navigationBarsPadding(),
         contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(24.dp),
     ) {

@@ -32,7 +32,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -61,9 +60,7 @@ internal fun ChapterDiscussion(
     var loading by remember(chapter.id) { mutableStateOf(true) }
     var error by remember(chapter.id) { mutableStateOf<String?>(null) }
     var expanded by rememberSaveable(chapter.id) { mutableStateOf(false) }
-    var linkError by remember(chapter.id) { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    val uri = LocalUriHandler.current
     val muted = foreground.copy(alpha = .54f)
 
     suspend fun load(page: Int) {
@@ -83,9 +80,6 @@ internal fun ChapterDiscussion(
     val loadMore = {
         if (!loading) nextPage?.let { page -> scope.launch { load(page) } }
         Unit
-    }
-    val openLink: (String) -> Unit = { url ->
-        runCatching { uri.openUri(url) }.onFailure { linkError = "暂时无法打开原站" }
     }
 
     Column(Modifier.fillMaxWidth().background(background).padding(horizontal = 24.dp)
@@ -109,7 +103,7 @@ internal fun ChapterDiscussion(
             CircularProgressIndicator(Modifier.padding(vertical = 18.dp).size(18.dp), color = muted, strokeWidth = 1.5.dp)
         }
         comments.take(3).forEach { comment ->
-            CommunityComment(comment, openLink, foreground = foreground, muted = muted,
+            CommunityComment(comment, foreground = foreground, muted = muted,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp))
         }
         if (!loading && error == null && comments.isEmpty()) {
@@ -122,7 +116,6 @@ internal fun ChapterDiscussion(
         if (comments.isNotEmpty()) TextButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
             Text(total?.let { "查看全部 $it 条讨论" } ?: "查看全部讨论", color = foreground, fontSize = 13.sp)
         }
-        linkError?.let { Text(it, color = muted, fontSize = 12.sp) }
     }
 
     if (expanded) {
@@ -140,7 +133,7 @@ internal fun ChapterDiscussion(
                 LazyColumn(modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     items(comments, key = MangaReview::id) { comment ->
-                        CommunityComment(comment, openLink, foreground = foreground, muted = muted)
+                        CommunityComment(comment, foreground = foreground, muted = muted)
                         HorizontalDivider(Modifier.padding(top = 14.dp), color = foreground.copy(alpha = .055f))
                     }
                     item("discussion-more") {
@@ -156,7 +149,6 @@ internal fun ChapterDiscussion(
                             else -> Text("已读完全部讨论", color = muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp))
                         }
                     }
-                    linkError?.let { message -> item("discussion-link-error") { Text(message, color = muted, fontSize = 12.sp) } }
                 }
             }
         }

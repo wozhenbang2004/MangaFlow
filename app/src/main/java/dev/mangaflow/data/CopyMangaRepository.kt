@@ -239,6 +239,7 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
                     authors = authors,
                     latestChapter = comic.optJSONObject("last_chapter")?.text("name").orEmpty(),
                     sourceUrl = comicUrl(id),
+                    totalPopularity = comic.opt("popular")?.toString()?.toLongOrNull()?.takeIf { it >= 0 },
                 )
             } catch (_: IllegalArgumentException) { malformed++ }
               catch (_: SourceException) { malformed++ }
@@ -296,6 +297,7 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
             sourceUrl = url.toString(),
             sourceUuid = comicUuid.orEmpty(),
             popularity = popularity,
+            totalPopularity = popularity,
         )
         currentCoroutineContext().ensureActive()
         onMetadata?.invoke(manga)
