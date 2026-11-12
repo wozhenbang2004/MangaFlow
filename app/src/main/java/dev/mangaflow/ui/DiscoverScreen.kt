@@ -4,8 +4,6 @@ import android.view.accessibility.AccessibilityManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
@@ -17,6 +15,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -61,6 +60,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
@@ -160,38 +160,17 @@ fun DiscoverScreen(
         derivedStateOf { grid.layoutInfo.visibleItemsInfo.any { it.key == "hero" } }
     }
     val ranking = state.query.isBlank() && state.mode == DiscoveryMode.RANKING
-    Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
-        AnimatedVisibility(searchExpanded,
-            enter = expandVertically(tween(if (motion) MangaMotion.Enter else 0, easing = MangaMotion.EnterEasing)) + fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
-            exit = shrinkVertically(tween(if (motion) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) + fadeOut(tween(if (motion) 90 else 0)),
-        ) {
-            LaunchedEffect(searchExpanded, active) {
-                if (searchExpanded && active) { searchFocus.requestFocus(); keyboard?.show() }
-                else focus.clearFocus(force = true)
-            }
-            OutlinedTextField(
-                value = state.query, onValueChange = { if (searchExpanded && active) onQuery(it) }, singleLine = true,
-                readOnly = !searchExpanded || !active,
-                placeholder = { Text("搜索漫画、作者", style = MaterialTheme.typography.bodyMedium) },
-                leadingIcon = { Icon(Icons.Outlined.Search, null, Modifier.size(21.dp)) },
-                trailingIcon = {
-                    if (state.query.isNotEmpty()) MotionIconButton(onClick = { onQuery(""); keyboard?.hide() }) {
-                        Icon(Icons.Outlined.Close, "清空搜索", Modifier.size(19.dp))
-                    }
-                },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { keyboard?.hide(); onRefresh() }),
-                shape = RoundedCornerShape(18.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    focusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
-                    unfocusedBorderColor = Color.Transparent,
-                ),
-                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
-                    .motionInputGate(searchExpanded && active).focusRequester(searchFocus),
-            )
+    // Search is a floating layer: opening it must never insert a row above the carousel.
+    LaunchedEffect(searchExpanded, active) {
+        if (searchExpanded && active) {
+            searchFocus.requestFocus()
+            keyboard?.show()
+        } else {
+            focus.clearFocus(force = true)
         }
+    }
+    Box(Modifier.fillMaxSize().navigationBarsPadding()) {
+        Column(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxWidth().height(1.dp)) {
             if (refreshing) LinearProgressIndicator(
                 modifier = Modifier.fillMaxSize(),
@@ -290,6 +269,131 @@ fun DiscoverScreen(
             }
         }
     }
+        }
+        // Only this overlay receives IME insets; the browse list retains its position and height.
+        AnimatedVisibility(
+            visible = searchExpanded,
+            modifier = Modifier.fillMaxSize().imePadding().motionInputGate(searchExpanded && active),
+            enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)),
+            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)),
+        ) {
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                Box(
+                    Modifier.fillMaxSize()
+                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = .16f))
+                        .clickable { keyboard?.hide(); onCloseSearch() },
+                )
+                Surface(
+                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                        .padding(start = 14.dp, end = 14.dp, top = 8.dp),
+                    shape = RoundedCornerShape(22.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 0.dp,
+                    shadowElevation = 8.dp,
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        OutlinedTextField(
+                            value = state.query,
+                            onValueChange = { if (searchExpanded && active) onQuery(it) },
+                            singleLine = true,
+                            readOnly = !searchExpanded || !active,
+                            placeholder = { Text("搜索漫画、作者", style = MaterialTheme.typography.bodyMedium) },
+                            leadingIcon = { Icon(Icons.Outlined.Search, null, Modifier.size(20.dp)) },
+                            trailingIcon = {
+                                if (state.query.isNotEmpty()) MotionIconButton(onClick = { onQuery("") }) {
+                                    Icon(Icons.Outlined.Close, "清空搜索", Modifier.size(18.dp))
+                                }
+                            },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = { keyboard?.hide(); onRefresh() }),
+                            shape = RoundedCornerShape(15.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .7f),
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .7f),
+                                focusedBorderColor = Color.Transparent,
+                                unfocusedBorderColor = Color.Transparent,
+                            ),
+                            modifier = Modifier.fillMaxWidth().focusRequester(searchFocus),
+                        )
+                        if (state.query.isNotBlank()) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 12.dp, bottom = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("搜索结果", style = MaterialTheme.typography.titleSmall)
+                                Spacer(Modifier.weight(1f))
+                                if (state.loading && state.items.isEmpty()) {
+                                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                } else if (state.items.isNotEmpty()) {
+                                    Text("${state.items.size} 条", style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            when {
+                                state.loading && state.items.isEmpty() -> Box(
+                                    Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
+                                ) { Text("正在查找…", style = MaterialTheme.typography.bodySmall) }
+                                state.items.isEmpty() -> Column(
+                                    Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 16.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Text(if (state.error != null) "搜索暂时不可用" else "没有找到相关漫画",
+                                        style = MaterialTheme.typography.bodyMedium)
+                                    if (state.error != null) TextButton(onClick = onRetry) { Text("重试") }
+                                }
+                                else -> LazyColumn(
+                                    modifier = Modifier.fillMaxWidth().heightIn(max = maxHeight * .58f),
+                                    contentPadding = PaddingValues(bottom = 4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    items(state.items, key = Manga::id) { manga ->
+                                        SearchResultRow(manga, repository) {
+                                            keyboard?.hide()
+                                            onCloseSearch()
+                                            onOpen(manga)
+                                        }
+                                    }
+                                    if (state.hasMore || state.loadingMore) {
+                                        item(key = "search-more") {
+                                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                                if (state.loadingMore) {
+                                                    CircularProgressIndicator(Modifier.padding(12.dp).size(19.dp), strokeWidth = 2.dp)
+                                                } else TextButton(onClick = onMore) { Text("更多结果") }
+                                            }
+                                        }
+                                    }
+                                    if (state.error != null) item(key = "search-error") {
+                                        TextButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("加载失败 · 重试") }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchResultRow(manga: Manga, repository: MangaRepository, onOpen: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .clickable(interactionSource = interaction, indication = null, onClick = onOpen)
+            .motionPress(interaction, pressedScale = .985f)
+            .padding(horizontal = 6.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).clip(RoundedCornerShape(7.dp)))
+        Column(Modifier.weight(1f).padding(start = 11.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(manga.title, style = MaterialTheme.typography.titleSmall,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            MangaMetricBadges(manga)
+        }
     }
 }
 
@@ -324,8 +428,9 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
     }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         HorizontalPager(state = pager, key = { manga[it].id },
-            contentPadding = PaddingValues(end = if (manga.size > 1) 26.dp else 0.dp),
-            pageSpacing = 10.dp, beyondViewportPageCount = 1,
+            // A page occupies the entire viewport; the next recommendation never peeks in half-cut.
+            contentPadding = PaddingValues(0.dp),
+            pageSpacing = 0.dp, beyondViewportPageCount = 1,
             modifier = Modifier.fillMaxWidth().semantics { stateDescription = "推荐 ${pager.currentPage + 1} / ${manga.size}" },
         ) { page -> FeaturedManga(manga[page], repository, interaction, onOpen) }
         if (manga.size > 1) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
