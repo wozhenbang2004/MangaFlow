@@ -127,8 +127,15 @@ internal fun DetailCatalog(
     }
     val savedChapter = chapters.firstOrNull { it.id == progress?.chapterId }
 
-    LaunchedEffect(mangaId, group, descending, query) {
-        grid.scrollToItem(0)
+    // Restore the same grid position after visiting Comments or the reader.
+    // Only an actual filter/order change returns to the start of the directory.
+    val filterSignature = group + "\u001f" + descending + "\u001f" + query
+    var appliedFilter by rememberSaveable(mangaId) { mutableStateOf(filterSignature) }
+    LaunchedEffect(filterSignature) {
+        if (appliedFilter != filterSignature) {
+            grid.scrollToItem(0)
+            appliedFilter = filterSignature
+        }
     }
     LaunchedEffect(anchorId, shown) {
         val target = anchorId
