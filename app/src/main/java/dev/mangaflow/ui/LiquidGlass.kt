@@ -47,6 +47,7 @@ import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.ui.glass.BackdropGlassOptics
+import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlin.math.PI
@@ -145,10 +146,12 @@ internal fun LiquidGlassSurface(
     } else Modifier
 
     CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
-        // Native ambient spread supplies separation; the rounded surface clips only its contents.
-        Box(modifier.shadow(elevation ?: if (softCard) 16.dp else if (liquid) 4.dp else 2.dp, shape, clip = false,
-            ambientColor = Color.Black.copy(alpha = if (softCard) { if (light) .14f else .32f } else .04f),
-            spotColor = Color.Black.copy(alpha = if (softCard) { if (light) .055f else .22f } else .065f))
+        // Backdrop's explicit blurred shadow stays outside the optical/content clipping layer.
+        val shadow = if (softCard) Modifier.softSurfaceShadow(shape, light,
+            strength = elevation?.let { (it.value / 16f).coerceIn(0f, 1f) } ?: 1f)
+        else Modifier.shadow(elevation ?: if (liquid) 4.dp else 2.dp, shape, clip = false,
+            ambientColor = Color.Black.copy(alpha = .04f), spotColor = Color.Black.copy(alpha = .065f))
+        Box(modifier.then(shadow)
             .clip(shape).then(pointerTracking)) {
             Box(Modifier.matchParentSize()
                 .drawWithContent {

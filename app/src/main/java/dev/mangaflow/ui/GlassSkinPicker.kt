@@ -10,6 +10,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 
 private val glassSkinChoices = listOf(GlassSkin.FROSTED to "毛玻璃", GlassSkin.LIQUID to "液态玻璃")
 
@@ -32,6 +33,7 @@ internal fun GlassSkinPicker(
         track = colors.onSurface.copy(alpha = .045f),
         indicator = colors.surface,
         fullWidthIndicator = true,
+        treatment = MotionTabTreatment.Soft,
         controlHeight = 52.dp,
         fontSize = MaterialTheme.typography.bodyMedium.fontSize,
         selectedFontWeight = FontWeight.SemiBold,

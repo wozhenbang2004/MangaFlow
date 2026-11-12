@@ -383,6 +383,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             })
                         }
                         val chromePadding = with(chromeDensity) { chromeHeightPx.toDp() } + 4.dp
+                        val discoveryControlWidth = with(chromeDensity) {
+                            val labelSlot = maxOf(52.dp, 14.sp.toDp() * 2 + 24.dp)
+                            val mainWidth = labelSlot * DiscoveryMode.entries.size +
+                                (if (history.isEmpty()) 44.dp else 88.dp) + 16.dp
+                            if (rankingPresence.currentState || rankingPresence.targetState)
+                                maxOf(mainWidth, maxOf(44.dp, 12.sp.toDp() * 2 + 16.dp) * 4 + 116.dp)
+                            else mainWidth
+                        }
                         var searchPresent by remember { mutableStateOf(searchExpanded) }
                         val searchVisible = searchExpanded || searchPresent
                         var searchForeground by remember { mutableStateOf<State<Float>?>(null) }
@@ -506,6 +514,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             }
                             if (current.section !in setOf(Section.DOWNLOADS, Section.LIBRARY)) {
                                 SegmentedGlassHeader(searchBackdrop, navigation,
+                                    controlsWidth = if (current.section == Section.DISCOVER) discoveryControlWidth else null,
                                     modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
                                         .onSizeChanged { chromeHeightPx = it.height },
                                     controlsAlpha = {

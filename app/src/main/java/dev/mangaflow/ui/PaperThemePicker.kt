@@ -2,6 +2,11 @@ package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,6 +30,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 
 private val paperThemes = listOf(
     Triple(ReaderTheme.PAPER, "纸白", Color(0xFFF7F6F2)),
@@ -40,7 +46,7 @@ internal fun PaperThemePicker(
     onSelected: (ReaderTheme) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val previewHeight = (56.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)).coerceAtLeast(72.dp)
+    val previewHeight = (76.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)).coerceAtLeast(84.dp)
     MotionTabs(
         selected = paperThemes.indexOfFirst { it.first == selected },
         labels = paperThemes.map { it.second },
@@ -50,20 +56,33 @@ internal fun PaperThemePicker(
         },
         modifier = modifier.semantics { contentDescription = "阅读底色" },
         role = Role.RadioButton,
-        track = colors.onSurface.copy(alpha = .04f),
-        indicator = colors.onSurface.copy(alpha = .11f),
+        track = Color.Transparent,
+        indicator = colors.onSurface.copy(alpha = .065f),
         fullWidthIndicator = true,
+        treatment = MotionTabTreatment.Soft,
         controlHeight = previewHeight,
         fontSize = MaterialTheme.typography.bodyMedium.fontSize,
         itemContent = { index, chosen, _ ->
             val (theme, label, paper) = paperThemes[index]
             val ink = if (theme == ReaderTheme.INK) Color(0xFFF7F6F2) else Color(0xFF242426)
-            Box(Modifier.fillMaxSize().padding(7.dp).clip(RoundedCornerShape(10.dp)).background(paper)) {
-                Text(label, modifier = Modifier.align(Alignment.Center).padding(horizontal = 6.dp),
-                    style = MaterialTheme.typography.bodyMedium, color = ink, textAlign = TextAlign.Center,
-                    fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal)
-                if (chosen) Icon(Icons.Outlined.Check, contentDescription = null,
-                    tint = ink.copy(alpha = .8f), modifier = Modifier.align(Alignment.TopEnd).padding(5.dp).size(14.dp))
+            Column(Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 9.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Box(Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(8.dp)).background(paper)) {
+                    Column(Modifier.align(Alignment.Center).padding(horizontal = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Box(Modifier.fillMaxWidth(.8f).height(2.dp).background(ink.copy(alpha = .12f)))
+                        Box(Modifier.fillMaxWidth().height(2.dp).background(ink.copy(alpha = .08f)))
+                        Box(Modifier.fillMaxWidth(.6f).height(2.dp).background(ink.copy(alpha = .08f)))
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center) {
+                    Text(label, style = MaterialTheme.typography.bodySmall, color = colors.onSurface,
+                        textAlign = TextAlign.Center,
+                        fontWeight = if (chosen) FontWeight.Medium else FontWeight.Normal)
+                    if (chosen) Icon(Icons.Outlined.Check, contentDescription = null,
+                        tint = colors.onSurface, modifier = Modifier.padding(start = 4.dp).size(13.dp))
+                }
             }
         },
     )

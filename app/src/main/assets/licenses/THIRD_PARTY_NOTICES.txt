@@ -87,13 +87,12 @@ that review. Existing license notices below remain unchanged.
 
 ## MangaBaka data attribution
 
-Identity and public discovery metadata are provided by MangaBaka and its contributors, `https://mangabaka.org`.
+Identity metadata is provided by MangaBaka and its contributors, `https://mangabaka.org`.
 MangaBaka-original data is licensed under Creative Commons Attribution-NonCommercial-ShareAlike
 4.0 International (CC BY-NC-SA 4.0), `https://creativecommons.org/licenses/by-nc-sa/4.0/`.
 Data terms and the disclaimer of warranties: `https://mangabaka.org/about/data-license`.
-MangaFlow selects matching fields, thumbnails, summaries, recommendations, public stacks and
-directional series relationships, and converts identifier/display formats. Curator names and
-linked original provider names remain attributed. It does not bundle or redistribute a database;
+MangaFlow selects identity and matching fields and converts identifier/display formats.
+Linked original provider names remain attributed. It does not bundle or redistribute a database;
 aggregate MangaBaka scores are not presented as an additional source score. Source content is supplied without warranties and no endorsement
 of MangaFlow is implied. This notice also appears visibly in the project README.
 
@@ -275,6 +274,9 @@ Upstream source files:
 - `backdrop/src/commonMain/kotlin/com/kyant/backdrop/internal/Shaders.kt`
 - `backdrop/src/commonMain/kotlin/com/kyant/backdrop/effects/Lens.kt`
 - `backdrop/src/commonMain/kotlin/com/kyant/backdrop/highlight/HighlightStyle.kt`
+- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/shadow/ShadowModifier.kt`
+- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/shadow/Shadow.kt`
+- `backdrop/src/androidMain/kotlin/com/kyant/backdrop/internal/Paint.kt`
 
 Copyright 2025 Kyant
 
@@ -289,6 +291,12 @@ The adaptation uses uniform corners and bounded reader presets, adds interaction
 lighting, and applies an independent uniform readability tint after refraction.
 Labels and icons remain outside the optical layer. This is a source adaptation;
 the complete Backdrop framework and its sample applications are not included.
+`ui/glass/BackdropSoftShadow.kt` additionally adapts the upstream blurred outline
+and clear-center mask for the app's current Compose version. It replaces the
+upstream graphics layer with a bounded, cached software A8 image so Android's
+hardware Canvas cannot ignore BlurMaskFilter. It replaces ShapeProvider with the
+supplied Compose Shape and uses two explicit quiet shadow presets. Only shadows
+use this software mask; background capture, glass and artwork remain accelerated.
 
 ## Source marks
 

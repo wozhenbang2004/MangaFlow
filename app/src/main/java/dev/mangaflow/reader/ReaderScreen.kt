@@ -157,6 +157,7 @@ import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.GlassSkinPicker
 import dev.mangaflow.ui.motion.BottomPullLoadState
 import dev.mangaflow.ui.motion.bottomPullLoad
@@ -522,6 +523,7 @@ fun ReaderScreen(
         ) {
             LiquidGlassSurface(
                 state = readerBackdrop,
+                role = GlassSurfaceRole.NAVIGATION,
                 trackPointer = true,
                 softCard = true,
                 modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
@@ -557,10 +559,13 @@ fun ReaderScreen(
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
                 slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
         ) {
-            ReaderSurface(
+            LiquidGlassSurface(
+                state = readerBackdrop,
+                role = GlassSurfaceRole.NAVIGATION,
+                trackPointer = true,
                 modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
                     .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 8.dp),
-                shape = RoundedCornerShape(20.dp),
+                cornerRadius = 20.dp,
             ) {
                 Column(Modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 8.dp, vertical = 2.dp)) {
                     if (pages.isNotEmpty()) key(chapterId) {

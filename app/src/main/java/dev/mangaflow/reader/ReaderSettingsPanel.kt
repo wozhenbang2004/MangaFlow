@@ -41,6 +41,7 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 import kotlin.math.roundToInt
 
 /** Keep related choices together; each filled segment represents its complete hit region. */
@@ -76,7 +77,8 @@ internal fun ReaderSettingsDialog(
                             foreground = colors.onSurface,
                             muted = colors.onSurfaceVariant,
                             track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
-                            fullWidthIndicator = true, controlHeight = 52.dp, fontSize = 14.sp, role = Role.RadioButton,
+                            fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+                            controlHeight = 52.dp, fontSize = 14.sp, role = Role.RadioButton,
                             selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
                         )
                         Column(Modifier.fillMaxWidth().animateContentSize(

@@ -94,7 +94,7 @@ internal fun MotionTabs(
     val textMeasurer = rememberTextMeasurer()
     val textStyle = LocalTextStyle.current.copy(fontSize = fontSize)
     val density = LocalDensity.current
-    val wrapLabels = controlHeight != null && treatment == MotionTabTreatment.Capsule &&
+    val wrapLabels = controlHeight != null && treatment != MotionTabTreatment.Underline &&
         itemContent == null && density.fontScale > 1.3f
     val height = maxOf(controlHeight ?: if (compact) 38.dp else 48.dp,
         with(density) { fontSize.toDp() * (if (wrapLabels) 2.6f else 1.3f) + 16.dp })

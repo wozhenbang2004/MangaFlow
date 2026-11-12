@@ -10,9 +10,14 @@ import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -32,6 +37,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +45,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.CloudSync
+import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.SwapVert
+import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material3.Button
@@ -51,8 +63,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -63,12 +73,25 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -84,12 +107,19 @@ import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingMode
+import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.WebDavBackupConfig
 import dev.mangaflow.storage.WebDavBackupStore
+import dev.mangaflow.storage.WallpaperStore
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import dev.mangaflow.update.UpdateManager
 import dev.mangaflow.update.UpdatePhase
@@ -132,8 +162,12 @@ fun SettingsScreen(
     var pendingRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
     val webDavStore = remember(context.applicationContext) { WebDavBackupStore(context.applicationContext) }
     val webDavConfig by webDavStore.config.collectAsStateWithLifecycle()
+    val wallpaperStore = remember(context.applicationContext) { WallpaperStore.get(context.applicationContext) }
+    val wallpaper by wallpaperStore.state.collectAsStateWithLifecycle()
     var showWebDav by remember { mutableStateOf(false) }
     var webDavNotice by remember { mutableStateOf<String?>(null) }
+    var expandedSetting by rememberSaveable { mutableStateOf<String?>(null) }
+    val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
 
     val exportBackup = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json"),
@@ -285,19 +319,28 @@ fun SettingsScreen(
     ) {
         item {
             // Keep the import controls composed while scrolling; their in-progress copy owns this lifetime.
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(26.dp)) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(22.dp)) {
                 SettingsSection("阅读") {
-                    Text("翻页方式", style = MaterialTheme.typography.bodyLarge, color = foreground)
-                    SettingsChoices(
-                        choices = listOf(ReadingMode.VERTICAL to "纵向",
-                            ReadingMode.LEFT_TO_RIGHT to "左至右", ReadingMode.RIGHT_TO_LEFT to "右至左"),
-                        selected = preferences.mode,
-                        onSelected = { libraryStore.updatePreferences(preferences.copy(mode = it)) },
-                    )
-                    Text("阅读底色", style = MaterialTheme.typography.bodyLarge, color = foreground,
-                        modifier = Modifier.padding(top = 4.dp))
-                    PaperThemePicker(preferences.theme) { theme ->
-                        libraryStore.updatePreferences(preferences.copy(theme = theme))
+                    SettingsDisclosure("翻页方式", when (preferences.mode) {
+                        ReadingMode.VERTICAL -> "纵向滚动"
+                        ReadingMode.LEFT_TO_RIGHT -> "从左至右"
+                        ReadingMode.RIGHT_TO_LEFT -> "从右至左"
+                    }, Icons.Outlined.SwapVert, expandedSetting == "mode", { toggleSetting("mode") }) {
+                        SettingsChoices(
+                            choices = listOf(ReadingMode.VERTICAL to "纵向",
+                                ReadingMode.LEFT_TO_RIGHT to "左至右", ReadingMode.RIGHT_TO_LEFT to "右至左"),
+                            selected = preferences.mode,
+                            onSelected = { libraryStore.updatePreferences(preferences.copy(mode = it)) },
+                        )
+                    }
+                    SettingsDisclosure("阅读底色", when (preferences.theme) {
+                        ReaderTheme.PAPER -> "纸白"
+                        ReaderTheme.SEPIA -> "暖纸"
+                        ReaderTheme.INK -> "墨黑"
+                    }, Icons.Outlined.Palette, expandedSetting == "paper", { toggleSetting("paper") }) {
+                        PaperThemePicker(preferences.theme) { theme ->
+                            libraryStore.updatePreferences(preferences.copy(theme = theme))
+                        }
                     }
                     Column {
                         SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn) {
@@ -309,70 +352,79 @@ fun SettingsScreen(
                     }
                 }
                 SettingsSection("外观") {
-                    Text("玻璃材质", style = MaterialTheme.typography.bodyLarge, color = foreground)
-                    GlassSkinPicker(
-                        selected = preferences.glassSkin,
-                        onSelected = { skin ->
-                            val current = libraryStore.preferences.value
-                            if (skin != current.glassSkin) libraryStore.updatePreferences(current.copy(glassSkin = skin))
-                        },
-                    )
-                    Text(
-                        when {
-                            preferences.glassSkin == GlassSkin.FROSTED -> "柔和扩散，背景更安静"
-                            Build.VERSION.SDK_INT < 33 -> "此设备使用毛玻璃效果"
-                            else -> "边缘折射，轻盈通透"
-                        },
-                        style = MaterialTheme.typography.bodySmall, color = secondary,
-                    )
-                    WallpaperSettings(modifier = Modifier.padding(top = 6.dp))
+                    SettingsDisclosure("玻璃材质", if (preferences.glassSkin == GlassSkin.FROSTED) "毛玻璃" else "液态玻璃",
+                        Icons.Outlined.Layers, expandedSetting == "glass", { toggleSetting("glass") }) {
+                        GlassSkinPicker(
+                            selected = preferences.glassSkin,
+                            onSelected = { skin ->
+                                val current = libraryStore.preferences.value
+                                if (skin != current.glassSkin) libraryStore.updatePreferences(current.copy(glassSkin = skin))
+                            },
+                        )
+                        if (Build.VERSION.SDK_INT < 33 && preferences.glassSkin == GlassSkin.LIQUID)
+                            Text("此设备使用毛玻璃效果", style = MaterialTheme.typography.bodySmall, color = secondary)
+                    }
+                    SettingsDisclosure("壁纸", if (wallpaper.mediaPath == null) "默认" else wallpaper.name.ifBlank { "本地壁纸" }, Icons.Outlined.Image,
+                        expandedSetting == "wallpaper", { toggleSetting("wallpaper") }) {
+                        WallpaperSettings(store = wallpaperStore)
+                    }
                 }
                 SettingsSection("数据") {
-                    Column {
-                        SettingsLinkRow("导出阅读备份",
-                            if (backupBusy == "export") "正在导出…" else "书架、进度、画面收藏与阅读统计") {
-                            if (backupBusy == null) exportBackup.launch("MangaFlow-backup.json")
+                    SettingsDisclosure("备份与同步", if (backupBusy != null) "正在处理…" else "本地文件 · WebDAV",
+                        Icons.Outlined.CloudSync, expandedSetting == "backup", { toggleSetting("backup") }) {
+                        Column {
+                            SettingsLinkRow("导出阅读备份",
+                                if (backupBusy == "export") "正在导出…" else "书架、进度、画面收藏与阅读统计") {
+                                if (backupBusy == null) exportBackup.launch("MangaFlow-backup.json")
+                            }
+                            SettingsLinkRow("恢复阅读备份",
+                                if (backupBusy == "inspect" || backupBusy == "restore") "正在处理…" else "从备份文件恢复本机阅读数据") {
+                                if (backupBusy == null) importBackup.launch(arrayOf("application/json", "text/plain"))
+                            }
+                            SettingsLinkRow("WebDAV 阅读备份", webDavStatusDetail(webDavConfig, backupBusy)) {
+                                if (backupBusy == null) { webDavNotice = null; showWebDav = true }
+                            }
                         }
-                        SettingsLinkRow("恢复阅读备份",
-                            if (backupBusy == "inspect" || backupBusy == "restore") "正在处理…" else "从备份文件恢复本机阅读数据") {
-                            if (backupBusy == null) importBackup.launch(arrayOf("application/json", "text/plain"))
-                        }
-                        SettingsLinkRow("WebDAV 阅读备份", webDavStatusDetail(webDavConfig, backupBusy)) {
-                            if (backupBusy == null) { webDavNotice = null; showWebDav = true }
-                        }
+                        Text("备份不包含账号、密码、缓存与漫画文件；恢复前会再次确认。",
+                            style = MaterialTheme.typography.bodySmall, color = secondary)
                     }
-                    Text("备份不包含账号、密码、缓存与漫画文件；恢复前会再次确认。",
-                        style = MaterialTheme.typography.bodySmall, color = secondary)
-                    backupNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
-                    webDavNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
-                }
-                SettingsSection("缓存") {
-                    Column {
-                        listOf("browse" to "推荐与热榜", "metadata" to "目录、评分与评论", "images" to "图片与头像").forEach { (key, label) ->
-                            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                    Text(label, style = MaterialTheme.typography.bodyLarge, color = foreground)
-                                    Text(cacheSizes[key]?.let(::settingsBytes) ?: "正在统计…",
-                                        style = MaterialTheme.typography.bodySmall, color = secondary)
-                                }
-                                val showBusy = rememberDelayedBusy(clearingCache == key)
-                                SettingsTextAction(enabled = clearingCache == null && cacheSizes[key] != null,
-                                    onClick = { clearCache(key, label) }) {
-                                    MotionSwap(showBusy, Modifier.size(16.dp)) { busy ->
-                                        if (busy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                    SettingsDisclosure("缓存管理", when {
+                        cacheSizes.size == 3 -> settingsBytes(cacheSizes.values.sum())
+                        cacheNotice != null -> "暂时无法读取"
+                        else -> "正在统计…"
+                    },
+                        Icons.Outlined.Storage, expandedSetting == "cache", { toggleSetting("cache") }) {
+                        Column {
+                            listOf("browse" to "推荐与热榜", "metadata" to "目录、评分与评论", "images" to "图片与头像").forEach { (key, label) ->
+                                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        Text(label, style = MaterialTheme.typography.bodyLarge, color = foreground)
+                                        Text(cacheSizes[key]?.let(::settingsBytes) ?: "正在统计…",
+                                            style = MaterialTheme.typography.bodySmall, color = secondary)
                                     }
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("清理", color = secondary)
+                                    val showBusy = rememberDelayedBusy(clearingCache == key)
+                                    SettingsTextAction(enabled = clearingCache == null && cacheSizes[key] != null,
+                                        onClick = { clearCache(key, label) }) {
+                                        MotionSwap(showBusy, Modifier.size(16.dp)) { busy ->
+                                            if (busy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                                        }
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("清理", color = secondary)
+                                    }
                                 }
                             }
                         }
+                        Text("图片缓存最多 256 MB。书架、阅读记录与下载章节独立保存。",
+                            style = MaterialTheme.typography.bodySmall, color = secondary)
+                        cacheNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
                     }
-                    Text("图片缓存最多 256 MB。书架、阅读记录与下载章节独立保存。",
-                        style = MaterialTheme.typography.bodySmall, color = secondary)
-                    cacheNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
+                    backupNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
+                        modifier = Modifier.padding(vertical = 6.dp)) }
+                    webDavNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
+                        modifier = Modifier.padding(vertical = 6.dp)) }
                 }
-                SettingsSection("更新") {
+                SettingsSection("应用") {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text("当前版本", style = MaterialTheme.typography.bodyLarge, color = foreground,
                             modifier = Modifier.weight(1f))
@@ -447,8 +499,6 @@ fun SettingsScreen(
                             } else onRequestNotifications()
                         },
                     )
-                }
-                SettingsSection("关于") {
                     SettingsLinkRow("项目主页", "MangaFlow", external = true) { context.openProjectPage() }
                 }
             }
@@ -738,11 +788,60 @@ private fun settingsInputColors() = OutlinedTextFieldDefaults.colors(
 
 @Composable
 private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(20.dp)
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(title, style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .8f),
-            fontWeight = FontWeight.Medium, modifier = Modifier.padding(bottom = 2.dp))
-        content()
+            fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 4.dp))
+        Surface(Modifier.fillMaxWidth().softSurfaceShadow(shape, colors.surface.luminance() > .5f, strength = .48f),
+            shape = shape, color = lerp(colors.background, colors.surface, .85f), tonalElevation = 0.dp) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp), content = content)
+        }
+    }
+}
+
+/** Retain the actual controls while collapsed, including an in-progress wallpaper import. */
+@Composable
+private fun SettingsDisclosure(
+    title: String,
+    value: String,
+    icon: ImageVector,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val motion = LocalMotionEnabled.current
+    val interaction = remember { MutableInteractionSource() }
+    val reveal = animateFloatAsState(if (expanded) 1f else 0f,
+        if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(), label = "setting-disclosure")
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .semantics { stateDescription = "$value，${if (expanded) "已展开" else "已收起"}" }
+            .clickable(interactionSource = interaction, indication = null, onClick = onToggle)
+            .motionPress(interaction, pressedScale = .99f)
+            .heightIn(min = 52.dp).padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Icon(icon, null, Modifier.size(21.dp), tint = colors.onSurfaceVariant)
+            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurface)
+            Text(value, Modifier.widthIn(max = 132.dp), style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp)
+                .graphicsLayer { rotationZ = 90f * reveal.value }, tint = colors.onSurfaceVariant.copy(alpha = .65f))
+        }
+        Column(Modifier.fillMaxWidth().clipToBounds().motionInputGate(expanded)
+            .layout { measurable, constraints ->
+                val body = measurable.measure(constraints.copy(minHeight = 0))
+                layout(body.width, (body.height * reveal.value).toInt().coerceAtLeast(0)) {
+                    if (reveal.value > 0f) body.placeRelative(0, 0)
+                }
+            }.graphicsLayer { alpha = reveal.value }
+            .padding(top = 4.dp, bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
     }
 }
 
@@ -753,7 +852,7 @@ private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onS
         selected = choices.indexOfFirst { it.first == selected }, labels = choices.map { it.second },
         onSelect = { onSelected(choices[it].first) }, role = Role.RadioButton,
         track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface,
-        fullWidthIndicator = true, controlHeight = 52.dp,
+        fullWidthIndicator = true, controlHeight = 52.dp, treatment = MotionTabTreatment.Soft,
         fontSize = MaterialTheme.typography.bodyMedium.fontSize,
         selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
     )
@@ -763,22 +862,34 @@ private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onS
 private fun SettingsToggle(title: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val motion = LocalMotionEnabled.current
+    // Saved 17:03 press-stretch switch: position and width retain the same moving anchor.
+    val position = animateFloatAsState(if (checked) 1f else 0f,
+        if (motion) spring(dampingRatio = .72f, stiffness = 300f) else snap(), label = "setting-switch-position")
+    val thumbWidth = animateFloatAsState(if (pressed) 21f else 18f,
+        if (motion) spring(dampingRatio = .72f, stiffness = 300f) else snap(), label = "setting-switch-press")
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .toggleable(checked, interactionSource = interaction, indication = null,
                 role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 54.dp).padding(vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-        Switch(
-            checked = checked, onCheckedChange = null,
-            modifier = Modifier.motionPress(interaction, pressedScale = .94f),
-            interactionSource = interaction,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = colors.onPrimary, checkedTrackColor = colors.primary,
-                uncheckedThumbColor = colors.onSurfaceVariant, uncheckedTrackColor = colors.surfaceContainerHigh, uncheckedBorderColor = colors.outlineVariant,
-            ),
-        )
+        Text(title, Modifier.weight(1f).padding(start = 31.dp, end = 12.dp),
+            style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+        Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.width(36.dp).height(22.dp).drawBehind {
+                val p = position.value.coerceIn(0f, 1f)
+                drawRoundRect(lerp(colors.surfaceContainerHigh, colors.primary, p),
+                    cornerRadius = CornerRadius(size.height / 2f))
+                val w = thumbWidth.value.dp.toPx()
+                val x = 2.dp.toPx() + (size.width - 4.dp.toPx() - w) *
+                    if (layoutDirection == androidx.compose.ui.unit.LayoutDirection.Rtl) 1f - p else p
+                drawRoundRect(lerp(colors.surface, colors.onPrimary, p),
+                    topLeft = Offset(x, 2.dp.toPx()), size = Size(w, 18.dp.toPx()),
+                    cornerRadius = CornerRadius(9.dp.toPx()))
+            })
+        }
     }
 }
 
@@ -808,7 +919,7 @@ private fun SettingsAction(enabled: Boolean = true, onClick: () -> Unit, content
         onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
         interactionSource = interaction,
         shape = RoundedCornerShape(15.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = colors.primary, contentColor = colors.onPrimary,
+        colors = ButtonDefaults.buttonColors(containerColor = colors.onSurface.copy(alpha = .065f), contentColor = colors.onSurface,
             disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant),
         elevation = null,
     ) {

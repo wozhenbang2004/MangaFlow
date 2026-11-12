@@ -4,7 +4,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -37,11 +36,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -59,6 +59,7 @@ import androidx.compose.ui.window.DialogWindowProvider
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlin.math.roundToInt
@@ -72,18 +73,12 @@ internal fun ReaderSurface(
 ) {
     val colors = MaterialTheme.colorScheme
     Surface(
-        modifier = modifier,
+        modifier = modifier.softSurfaceShadow(shape, colors.surface.luminance() > .5f),
         shape = shape,
-        color = colors.surface.copy(alpha = .97f),
+        color = lerp(colors.background, colors.surface, .8f),
         contentColor = colors.onSurface,
-        border = BorderStroke(.5.dp, colors.outlineVariant.copy(alpha = .45f)),
-        shadowElevation = 2.dp,
         tonalElevation = 0.dp,
-    ) {
-        Box(Modifier.background(Brush.verticalGradient(listOf(
-            colors.surface.copy(alpha = .35f), Color.Transparent,
-        )))) { content() }
-    }
+    ) { content() }
 }
 
 @Composable
@@ -94,7 +89,7 @@ internal fun ReaderDialogSurface(
 ) {
     val window = (LocalView.current.parent as? DialogWindowProvider)?.window
     SideEffect { window?.setDimAmount(.12f) }
-    LiquidGlassSurface(backdrop, modifier, role = GlassSurfaceRole.PANEL) { content() }
+    LiquidGlassSurface(backdrop, modifier, role = GlassSurfaceRole.PANEL, softCard = true) { content() }
 }
 
 /** Keeps Material's seek, keyboard and accessibility behavior, with a quiet track and stable thumb slot. */
