@@ -823,7 +823,7 @@ fun ReaderScreen(
         visible = showChapters, chapters = chapters, currentId = chapterId,
         manga = manga, library = libraryStore,
         backdrop = readerBackdrop,
-        downloads = downloads.filter { it.manga.id == manga.id },
+        downloadStore = downloadStore,
         loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
         onSelect = { chapterId = it; showChapters = false; controlsVisible = true },
         onDismiss = { showChapters = false },
@@ -1678,7 +1678,7 @@ private fun ReaderChaptersDialog(
     chapters: List<Chapter>,
     currentId: String,
     backdrop: HazeState,
-    downloads: List<DownloadEntry>,
+    downloadStore: DownloadStore,
     loading: Boolean,
     error: String?,
     onRetry: () -> Unit,
@@ -1692,6 +1692,15 @@ private fun ReaderChaptersDialog(
     var selectedGroup by rememberSaveable { mutableStateOf(currentGroup) }
     val group = selectedGroup.takeIf { it in groups } ?: currentGroup
     val visibleChapters = remember(chapters, group) { chapters.filter { it.group == group }.sortedBy(Chapter::index) }
+    // The full manga download list is relevant only while the chapter dialog is open.
+    // The main reader observes the active chapter alone, so other jobs cannot invalidate it.
+    val downloads by remember(downloadStore, manga.id, visible) {
+        downloadStore.entries.map { entries ->
+            if (visible) entries.filter { it.manga.id == manga.id } else emptyList()
+        }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = if (visible) {
+        downloadStore.entries.value.filter { it.manga.id == manga.id }
+    } else emptyList())
     val saved = remember(downloads) { downloads.associateBy { it.chapter.id } }
     val catalogBusy = rememberDelayedBusy(visible && loading)
     val availableHeight = (LocalConfiguration.current.screenHeightDp - 210).coerceAtLeast(112).dp
