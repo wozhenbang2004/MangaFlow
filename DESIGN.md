@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## Chapter-body identity diagnostics · 2026-11-12 (current)
+
+User screenshot `1000121441.jpg`: 咒術迴戰 / 默認 · 第1話 fails with “正文与所选漫画或章节不匹配。” User: “啥 bug”. The screenshot establishes the compound body-identity rejection only; it does not reveal which response field failed. Source review found no proven cross-book cache collision or wrong navigation parameter.
+
+| ID | Current decision | Evidence and boundary |
+| --- | --- | --- |
+| READER-IDENTITY-01 | Keep three hard checks: returned `comic.path_word` equals the requested manga path, returned `chapter.uuid` equals the requested normalized chapter UUID, and `chapter.comic_id` equals returned `comic.uuid`. When a fresh checked catalog exists, require its manga UUID to match as well. Once these checks agree, do not let the redundant `chapter.comic_path_word` alone reject the body. | This is a bounded compatibility correction for duplicate path text, not evidence that this screenshot contains an old alias. Do not relax the returned comic path, image CDN/path, access flags, image ordering/completeness or actual chapter UUID checks; no authenticated retry or alternative endpoint is introduced. |
+| READER-IDENTITY-02 | Replace the one compound failure with distinct messages for manga path, selected chapter UUID, chapter-owner UUID and checked catalog UUID. Give a relevant refresh/retry action in the message. | Preserve real errors instead of treating a rejected body as empty/success. Only fully checked pages enter the existing `(mangaId, chapterUUID)` shared cache. No stored progress, downloads or source identity is changed to conceal this error. |
+
+Protocol-field meanings were compared with the already pinned CopyManga Neo `36ec484` ChapterDto/TrialContentDto and Venera `a04e055` public source configuration. Independent read-only review confirmed the existing catalog/navigation/cache ownership and the narrower identity rule. No response from this phone, no API probe, no tests, no local build or UI automation; exact screenshot root cause and on-device recovery remain unverified. Preserve current main's account, glass/settings and MangaBaka-entry removal work.
+
 ## Compact navigation, reader surfaces and settings correction · 2026-11-12 (current)
 
 User: “没效果啊你好好研究下我们审美库的啊”; “读漫画的那两个块没弄啊兄弟”; “而且这个顶栏右边那栏有点长了”; “找漫画功能怎么还没删干净啊以及设置里面的 uiux 重新设计下啊”. These supersede the native-elevation-only HEADER-SHADOW-01 and the always-expanded SETTINGS-05 layout. Exact message IDs unavailable. Main `30684fc` already removes the discovery route, explorer, sheet and catalog; preserve its account and bookshelf changes.

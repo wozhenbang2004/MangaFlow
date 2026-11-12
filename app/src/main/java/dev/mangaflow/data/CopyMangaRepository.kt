@@ -209,11 +209,23 @@ class CopyMangaRepository(
         val chapter = data.optJSONObject("chapter") ?: throw SourceException("来源未返回章节正文。", comicUrl(mangaId))
         demandPublic(comic)
         demandPublic(chapter)
-        if (comic.requiredText("path_word") != mangaId || chapter.requiredText("comic_path_word") != mangaId ||
-            uuid(chapter.requiredText("uuid"), "章节") != id ||
-            uuid(comic.requiredText("uuid"), "漫画") != uuid(chapter.requiredText("comic_id"), "漫画")) {
-            throw SourceException("正文与所选漫画或章节不匹配。", comicUrl(mangaId))
+        if (comic.requiredText("path_word") != mangaId) {
+            throw SourceException("正文返回的漫画代号与当前漫画不一致，请刷新详情后重试。", comicUrl(mangaId))
         }
+        if (uuid(chapter.requiredText("uuid"), "章节") != id) {
+            throw SourceException("正文返回的章节编号与所选章节不一致，请刷新目录后重试。", comicUrl(mangaId))
+        }
+        val comicUuid = uuid(comic.requiredText("uuid"), "漫画")
+        if (uuid(chapter.requiredText("comic_id"), "漫画") != comicUuid) {
+            throw SourceException("正文的章节归属与返回的漫画编号不一致，请稍后重试。", comicUrl(mangaId))
+        }
+        val catalogUuid = cachedDetail(mangaId)?.manga?.sourceUuid?.takeIf(String::isNotBlank)
+        if (catalogUuid != null && catalogUuid != comicUuid) {
+            throw SourceException("正文的漫画编号与已加载目录不一致，请刷新详情后重试。", comicUrl(mangaId))
+        }
+        // The returned comic path and both UUID relationships establish ownership.
+        // chapter.comic_path_word repeats a mutable path; it is not another identity.
+        // Do not reject an otherwise verified chapter solely for that duplicate text.
         val contents = chapter.optJSONArray("contents") ?: throw SourceException("来源未返回章节图片。", comicUrl(mangaId))
         val words = chapter.optJSONArray("words") ?: throw SourceException("来源未返回图片页序。", comicUrl(mangaId))
         if (contents.length() !in 1..2000 || words.length() != contents.length() ||
