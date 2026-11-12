@@ -4,9 +4,9 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
@@ -26,6 +26,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,7 +42,10 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -72,7 +77,6 @@ import dev.mangaflow.ui.motion.MangaMotion
  * press/opening feedback inside a fixed touch slot. No cropped spine title or tint
  * obscures the artwork.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun BookshelfBook(
     manga: Manga,
@@ -80,12 +84,25 @@ internal fun BookshelfBook(
     progress: ReadingProgress?,
     opening: Boolean,
     onOpen: () -> Unit,
-    onManage: () -> Unit,
+    dragging: Boolean,
+    deleteArmed: Boolean,
+    onDragStart: (Offset) -> Unit,
+    onDragMove: (Offset) -> Unit,
+    onDragEnd: (Offset) -> Unit,
+    onDragCancel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val motion = LocalMotionEnabled.current
+    var rootOrigin by remember(manga.id) { mutableStateOf(Offset.Zero) }
+    var dragOffset by remember(manga.id) { mutableStateOf(Offset.Zero) }
+    var dragPoint by remember(manga.id) { mutableStateOf(Offset.Zero) }
+    val dragScale = animateFloatAsState(
+        targetValue = if (!motion || !dragging) 1f else if (deleteArmed) .84f else 1.04f,
+        animationSpec = if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
+        label = "bookshelf-drag-scale",
+    )
     val lift = animateFloatAsState(
         targetValue = if (!motion) 0f else if (opening) 1f else if (pressed) .45f else 0f,
         animationSpec = if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
@@ -108,18 +125,48 @@ internal fun BookshelfBook(
 
     BoxWithConstraints(
         modifier.widthIn(min = 48.dp).heightIn(min = 64.dp)
-            .zIndex(if (pressed || opening) 1f else 0f)
+            .onGloballyPositioned { rootOrigin = it.positionInRoot() }
+            .pointerInput(manga.id) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { local ->
+                        dragOffset = Offset.Zero
+                        dragPoint = rootOrigin + local
+                        onDragStart(dragPoint)
+                    },
+                    onDrag = { change, amount ->
+                        change.consume()
+                        dragOffset += amount
+                        dragPoint += amount
+                        onDragMove(dragPoint)
+                    },
+                    onDragEnd = {
+                        onDragEnd(dragPoint)
+                        dragOffset = Offset.Zero
+                    },
+                    onDragCancel = {
+                        onDragCancel()
+                        dragOffset = Offset.Zero
+                    },
+                )
+            }
+            .graphicsLayer {
+                translationX = dragOffset.x
+                translationY = dragOffset.y
+                scaleX = dragScale.value
+                scaleY = dragScale.value
+                alpha = if (dragging && deleteArmed) .82f else 1f
+            }
+            .zIndex(if (dragging) 8f else if (pressed || opening) 1f else 0f)
             .semantics(mergeDescendants = true) {
                 contentDescription = manga.title
                 stateDescription = if (opening) "正在打开，$readingState" else readingState
             }
-            .combinedClickable(
+            .clickable(
                 interactionSource = interaction,
                 indication = null,
+                enabled = !dragging,
                 role = Role.Button,
                 onClickLabel = if (progress == null) "开始阅读" else "继续阅读",
-                onLongClickLabel = "管理收藏",
-                onLongClick = onManage,
                 onClick = onOpen,
             ),
         contentAlignment = Alignment.BottomCenter,

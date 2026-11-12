@@ -4,7 +4,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.ui.motion.MotionTabs
 
@@ -16,8 +15,10 @@ internal fun BrowseTabs(selected: Int, labels: List<String>, modifier: Modifier 
         labels = labels,
         onSelect = onSelect,
         modifier = modifier,
-        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .065f),
-        indicatorHeight = 32.dp,
+        foreground = MaterialTheme.colorScheme.onSurface,
+        muted = MaterialTheme.colorScheme.onSurface.copy(alpha = .56f),
+        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .82f),
+        underline = true,
         fontSize = 14.sp,
         selectedFontWeight = FontWeight.SemiBold,
         unselectedFontWeight = FontWeight.Normal,

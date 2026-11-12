@@ -300,7 +300,8 @@ private fun RankingControls(
 private fun RankingPeriods(period: RankPeriod, onPeriod: (RankPeriod) -> Unit, modifier: Modifier, concise: Boolean = false) {
     MotionTabs(selected = period.ordinal, labels = RankPeriod.entries.map { it.label },
         onSelect = { onPeriod(RankPeriod.entries[it]) }, role = Role.RadioButton,
-        modifier = modifier, fontSize = 12.sp, indicatorHeight = 30.dp,
+        modifier = modifier, fontSize = 12.sp, underline = true,
+        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .78f),
         selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
         itemContent = { index, selected, color ->
             val label = RankPeriod.entries[index].label
@@ -330,9 +331,7 @@ private fun RankingAudienceToggle(audience: RankAudience, onAudience: (RankAudie
             contentDescription = "榜单分类"
             stateDescription = audience.label
         }, contentAlignment = Alignment.Center) {
-        Box(Modifier.size(34.dp).motionPress(interaction, pressedScale = .90f)
-            .clip(RoundedCornerShape(12.dp))
-            .background(colors.onSurface.copy(alpha = .035f)),
+        Box(Modifier.size(38.dp).motionPress(interaction, pressedScale = .90f),
             contentAlignment = Alignment.Center) {
             // Both faces retain their identity. The rear face travels around the front one,
             // so rapid taps reverse the same depth motion without replacing either icon.
@@ -357,8 +356,7 @@ private fun RankingAudienceToggle(audience: RankAudience, onAudience: (RankAudie
                         alpha = .38f + .62f * front
                         rotationY = (if (female) -1f else 1f) * 18f * arc
                         cameraDistance = 16.dp.toPx()
-                    }
-                    .background(colors.surface, CircleShape), contentAlignment = Alignment.Center) {
+                    }, contentAlignment = Alignment.Center) {
                     Icon(if (female) Icons.Outlined.Female else Icons.Outlined.Male,
                         contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
                 }

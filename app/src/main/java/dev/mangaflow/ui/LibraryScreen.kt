@@ -1,5 +1,10 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -16,11 +21,16 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -35,6 +45,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -42,6 +55,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.LibraryOpenState
@@ -51,6 +65,7 @@ import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.ShelfState
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.rememberDelayedBusy
+import kotlin.math.abs
 
 @Composable
 fun LibraryScreen(
@@ -67,15 +82,33 @@ fun LibraryScreen(
     val shelfFilters = listOf<ShelfState?>(null, ShelfState.FOLLOWING, ShelfState.HOARDING, ShelfState.PAUSED)
     val shelfFilter = shelfFilters.firstOrNull { it?.name.orEmpty() == shelfFilterName }
     var managedId by remember { mutableStateOf<String?>(null) }
-    var removal by remember { mutableStateOf<LibraryRemoval?>(null) }
+    var historyRemoval by remember { mutableStateOf<Manga?>(null) }
+    var draggedFavorite by remember { mutableStateOf<Manga?>(null) }
+    var dragPoint by remember { mutableStateOf(Offset.Unspecified) }
+    var rootOrigin by remember { mutableStateOf(Offset.Zero) }
+    var rootSize by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
+    val trashBottomBandPx = with(density) { 132.dp.toPx() }
+    val trashHalfWidthPx = with(density) { 96.dp.toPx() }
+    fun isTrashDrop(point: Offset): Boolean =
+        point != Offset.Unspecified && rootSize != IntSize.Zero &&
+            point.y >= rootOrigin.y + rootSize.height - trashBottomBandPx &&
+            abs(point.x - (rootOrigin.x + rootSize.width / 2f)) <= trashHalfWidthPx
+    val trashArmed = draggedFavorite != null && isTrashDrop(dragPoint)
     val favoritesPosition = rememberLazyListState()
     val historyPosition = rememberLazyListState()
     val progressById = remember(history) { history.associateBy { it.manga.id } }
     LaunchedEffect(active, showHistory) {
         managedId = null
-        removal = null
+        historyRemoval = null
+        draggedFavorite = null
+        dragPoint = Offset.Unspecified
         if (!active || showHistory) onCancelOpen()
     }
+    Box(Modifier.fillMaxSize().onGloballyPositioned {
+        rootOrigin = it.positionInRoot()
+        rootSize = it.size
+    }) {
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         BrowseTabs(if (showHistory) 1 else 0, listOf("收藏 ${favorites.size}", "最近阅读"),
             Modifier.fillMaxWidth().padding(horizontal = 16.dp)) { index ->
@@ -100,7 +133,7 @@ fun LibraryScreen(
                                     onManage = { onCancelOpen(); managedId = progress.manga.id })
                                 RecordActionsMenu(managedId == progress.manga.id,
                                     onDismiss = { managedId = null }, removeLabel = "删除阅读记录",
-                                    onRemove = { removal = LibraryRemoval(progress.manga, history = true) },
+                                    onRemove = { historyRemoval = progress.manga },
                                     onDetails = { onDetails(progress.manga) })
                             }
                         }
@@ -147,12 +180,33 @@ fun LibraryScreen(
                                     else EmptyShelfGroup(shelfFilter)
                                 }
                                 items(rows, key = { "shelf-${it.first().id}" }) { books ->
-                                    BookshelfRow(books, repository, progressById, shelfStates, opening,
+                                    BookshelfRow(
+                                        books, repository, progressById, shelfStates, opening,
                                         bookWidth, bookHeight, managedId,
-                                        onOpen = onOpen, onDetails = onDetails,
+                                        draggedId = draggedFavorite?.id,
+                                        deleteArmed = trashArmed,
+                                        onOpen = onOpen,
+                                        onDetails = onDetails,
                                         onManage = { if (it != null) onCancelOpen(); managedId = it },
                                         onShelfState = onShelfState,
-                                        onRemove = { removal = LibraryRemoval(it, history = false) })
+                                        onDragStart = { manga, point ->
+                                            onCancelOpen()
+                                            managedId = null
+                                            draggedFavorite = manga
+                                            dragPoint = point
+                                        },
+                                        onDragMove = { dragPoint = it },
+                                        onDragEnd = { manga, point ->
+                                            val remove = draggedFavorite?.id == manga.id && isTrashDrop(point)
+                                            draggedFavorite = null
+                                            dragPoint = Offset.Unspecified
+                                            if (remove) onRemoveFavorite(manga)
+                                        },
+                                        onDragCancel = {
+                                            draggedFavorite = null
+                                            dragPoint = Offset.Unspecified
+                                        },
+                                    )
                                 }
                             }
                         }
@@ -163,24 +217,47 @@ fun LibraryScreen(
                 Modifier.align(Alignment.BottomCenter).padding(16.dp))
         }
     }
-    RecordRemovalDialog(
-        prompt = removal?.let {
-            RecordRemovalPrompt(if (it.history) "删除阅读记录？" else "删除收藏？", it.manga.title,
-                if (it.history) "这本漫画的本机阅读进度会一并清除，收藏和下载保留。"
-                else "已登录时也会同步取消云端收藏；阅读记录和下载保留。")
-        },
-        onDismiss = { removal = null },
-        onConfirm = {
-            removal?.let {
-                onCancelOpen()
-                if (it.history) onRemoveHistory(it.manga.id) else onRemoveFavorite(it.manga)
+        AnimatedVisibility(
+            visible = draggedFavorite != null,
+            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 18.dp),
+            enter = fadeIn() + scaleIn(initialScale = .82f),
+            exit = fadeOut() + scaleOut(targetScale = .9f),
+        ) {
+            Surface(
+                modifier = Modifier.size(72.dp),
+                shape = CircleShape,
+                color = if (trashArmed) MaterialTheme.colorScheme.errorContainer
+                    else MaterialTheme.colorScheme.surfaceContainerHigh,
+                tonalElevation = 0.dp,
+                shadowElevation = if (trashArmed) 10.dp else 5.dp,
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Outlined.DeleteOutline,
+                        contentDescription = if (trashArmed) "松手删除收藏" else "拖到这里删除",
+                        modifier = Modifier.size(27.dp),
+                        tint = if (trashArmed) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
-            removal = null
+        }
+    }
+    RecordRemovalDialog(
+        prompt = historyRemoval?.let {
+            RecordRemovalPrompt(
+                "删除阅读记录？",
+                it.title,
+                "这本漫画的本机阅读进度会一并清除，收藏和下载保留。",
+            )
+        },
+        onDismiss = { historyRemoval = null },
+        onConfirm = {
+            historyRemoval?.let { onRemoveHistory(it.id) }
+            historyRemoval = null
         },
     )
 }
-
-private data class LibraryRemoval(val manga: Manga, val history: Boolean)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -188,9 +265,11 @@ private fun BookshelfRow(
     books: List<Manga>, repository: MangaRepository, progress: Map<String, ReadingProgress>,
     shelfStates: Map<String, ShelfState>, opening: LibraryOpenState?,
     bookWidth: Dp, bookHeight: Dp, managedId: String?,
+    draggedId: String?, deleteArmed: Boolean,
     onOpen: (Manga) -> Unit, onDetails: (Manga) -> Unit,
     onManage: (String?) -> Unit, onShelfState: (Manga, ShelfState) -> Unit,
-    onRemove: (Manga) -> Unit,
+    onDragStart: (Manga, Offset) -> Unit, onDragMove: (Offset) -> Unit,
+    onDragEnd: (Manga, Offset) -> Unit, onDragCancel: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
@@ -198,15 +277,25 @@ private fun BookshelfRow(
             books.forEach { manga ->
                 key(manga.id) {
                     Box(Modifier.width(bookWidth)) {
-                        BookshelfBook(manga, repository, progress[manga.id],
+                        BookshelfBook(
+                            manga, repository, progress[manga.id],
                             opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
-                            onOpen = { onOpen(manga) }, onManage = { onManage(manga.id) },
-                            modifier = Modifier.fillMaxWidth().height(bookHeight))
-                        RecordActionsMenu(managedId == manga.id, onDismiss = { onManage(null) },
-                            removeLabel = "删除收藏", onRemove = { onRemove(manga) },
+                            onOpen = { onOpen(manga) },
+                            dragging = draggedId == manga.id,
+                            deleteArmed = draggedId == manga.id && deleteArmed,
+                            onDragStart = { onDragStart(manga, it) },
+                            onDragMove = onDragMove,
+                            onDragEnd = { onDragEnd(manga, it) },
+                            onDragCancel = onDragCancel,
+                            modifier = Modifier.fillMaxWidth().height(bookHeight),
+                        )
+                        RecordActionsMenu(
+                            managedId == manga.id,
+                            onDismiss = { onManage(null) },
                             onDetails = { onDetails(manga) },
                             shelfState = shelfStates[manga.id] ?: ShelfState.NORMAL,
-                            onShelfState = { onShelfState(manga, it) })
+                            onShelfState = { onShelfState(manga, it) },
+                        )
                     }
                 }
             }
@@ -273,7 +362,7 @@ private fun EmptyShelfGroup(filter: ShelfState?) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 32.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("${label}分组还是空的", style = MaterialTheme.typography.titleSmall)
-        Text("长按书本即可调整分组。", style = MaterialTheme.typography.bodySmall,
+        Text("长按书名即可调整分组。", style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

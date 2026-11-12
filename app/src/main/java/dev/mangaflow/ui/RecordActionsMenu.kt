@@ -35,8 +35,8 @@ import dev.mangaflow.ui.motion.MotionDialog
 internal fun RecordActionsMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
-    removeLabel: String,
-    onRemove: () -> Unit,
+    removeLabel: String? = null,
+    onRemove: (() -> Unit)? = null,
     onDetails: (() -> Unit)? = null,
     shelfState: ShelfState? = null,
     onShelfState: ((ShelfState) -> Unit)? = null,
@@ -69,7 +69,7 @@ internal fun RecordActionsMenu(
                 )
             }
         }
-        DropdownMenuItem(
+        if (removeLabel != null && onRemove != null) DropdownMenuItem(
             text = { Text(removeLabel, color = MaterialTheme.colorScheme.error) },
             leadingIcon = {
                 Icon(Icons.Outlined.DeleteOutline, null, Modifier.size(19.dp),

@@ -1,8 +1,7 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,6 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
@@ -31,6 +31,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +39,9 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -86,8 +90,7 @@ fun DownloadsScreen(
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var filter by rememberSaveable { mutableStateOf(DownloadFilter.ALL) }
-    var remove by remember { mutableStateOf<DownloadEntry?>(null) }
-    var removing by remember { mutableStateOf(false) }
+    var removingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var clearCompleted by remember { mutableStateOf(false) }
     var bulkBusy by remember { mutableStateOf(false) }
     val allScroll = rememberLazyListState()
@@ -191,7 +194,29 @@ fun DownloadsScreen(
                         }
                     } else {
                         items(visible, key = DownloadEntry::id) { entry ->
-                            DownloadRow(entry, refreshing = entry.id in refreshingIds, onRead = { onRead(entry) }, onPause = { store.pause(entry.id) }, onRetry = { onRetry(entry) }, onRemove = { remove = entry })
+                            DownloadSwipeRow(
+                                entry = entry,
+                                refreshing = entry.id in refreshingIds,
+                                onRead = { onRead(entry) },
+                                onPause = { store.pause(entry.id) },
+                                onRetry = { onRetry(entry) },
+                                onRemove = {
+                                    if (entry.id !in removingIds) {
+                                        removingIds = removingIds + entry.id
+                                        scope.launch {
+                                            try {
+                                                store.remove(entry.id)
+                                            } catch (cancelled: CancellationException) {
+                                                throw cancelled
+                                            } catch (failure: Exception) {
+                                                snackbar.showSnackbar(failure.message ?: "删除未完成，请重试")
+                                            } finally {
+                                                removingIds = removingIds - entry.id
+                                            }
+                                        }
+                                    }
+                                },
+                            )
                             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = colors.outlineVariant.copy(alpha = .45f))
                         }
                     }
@@ -241,47 +266,73 @@ fun DownloadsScreen(
         )
     }
 
-    remove?.let { requested ->
-        val entry = entries.firstOrNull { it.id == requested.id } ?: requested
-        AlertDialog(
-            onDismissRequest = { if (!removing) remove = null },
-            shape = RoundedCornerShape(24.dp),
-            containerColor = MaterialTheme.colorScheme.surface,
-            title = { Text(if (entry.completedPages > 0) "删除本地章节？" else "移除下载任务？", style = MaterialTheme.typography.titleLarge) },
-            text = { Text("${entry.manga.title}\n${entry.chapter.title}", style = MaterialTheme.typography.bodyMedium, color = secondary) },
-            confirmButton = {
-                DownloadTextAction(enabled = !removing, onClick = {
-                    removing = true
-                    scope.launch {
-                        try {
-                            store.remove(entry.id)
-                            remove = null
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (failure: Exception) {
-                            remove = null
-                            snackbar.showSnackbar(failure.message ?: "删除未完成，请重试")
-                        } finally {
-                            removing = false
-                        }
+}
+
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DownloadSwipeRow(
+    entry: DownloadEntry,
+    refreshing: Boolean,
+    onRead: () -> Unit,
+    onPause: () -> Unit,
+    onRetry: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val state = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value != SwipeToDismissBoxValue.Settled) onRemove()
+            false
+        },
+        positionalThreshold = { distance -> distance * .58f },
+    )
+    val direction = state.dismissDirection
+    val progress = state.progress.coerceIn(0f, 1f)
+    SwipeToDismissBox(
+        state = state,
+        enableDismissFromStartToEnd = true,
+        enableDismissFromEndToStart = true,
+        backgroundContent = {
+            if (direction != SwipeToDismissBoxValue.Settled) {
+                val armed = progress >= .58f
+                Box(
+                    Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp))
+                        .background(colors.errorContainer.copy(alpha = .18f + .42f * progress)),
+                ) {
+                    Row(
+                        Modifier.align(
+                            if (direction == SwipeToDismissBoxValue.StartToEnd) Alignment.CenterStart
+                            else Alignment.CenterEnd
+                        ).padding(horizontal = 18.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    ) {
+                        Icon(Icons.Outlined.DeleteOutline, contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = if (armed) colors.error else colors.onErrorContainer.copy(alpha = .72f))
+                        Text(if (armed) "松手删除" else "滑动删除",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (armed) colors.error else colors.onErrorContainer.copy(alpha = .72f))
                     }
-                }) { Text(if (removing) "正在删除" else "删除", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { DownloadTextAction(enabled = !removing, onClick = { remove = null }) { Text("取消", color = foreground) } },
-        )
+                }
+            }
+        },
+    ) {
+        Box(Modifier.fillMaxWidth().background(colors.background)) {
+            DownloadRow(entry, refreshing, onRead, onPause, onRetry)
+        }
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () -> Unit, onPause: () -> Unit, onRetry: () -> Unit, onRemove: () -> Unit) {
+private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () -> Unit, onPause: () -> Unit, onRetry: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
     val finished = entry.status == DownloadStatus.COMPLETED
     val inProgress = entry.status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING)
     val interaction = remember { MutableInteractionSource() }
-    var actionsVisible by remember(entry.id) { mutableStateOf(false) }
     val stateLabel = when (entry.status) {
         DownloadStatus.QUEUED -> "排队中"
         DownloadStatus.RUNNING -> "下载中"
@@ -291,10 +342,9 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
         DownloadStatus.FAILED -> "未完成"
     }
     Box {
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).combinedClickable(
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(
             interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "阅读 ${entry.chapter.title}", onClick = onRead,
-            onLongClickLabel = "管理下载", onLongClick = { actionsVisible = true },
         )) {
             Row(Modifier.fillMaxWidth().motionPress(interaction, pressedScale = .99f).padding(vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically) {
@@ -356,9 +406,6 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
                     color = if (entry.status == DownloadStatus.FAILED) colors.error else secondary)
             }
         }
-        RecordActionsMenu(actionsVisible, onDismiss = { actionsVisible = false },
-            removeLabel = if (entry.completedPages > 0) "删除本地章节" else "移除下载任务",
-            onRemove = onRemove)
     }
 }
 
