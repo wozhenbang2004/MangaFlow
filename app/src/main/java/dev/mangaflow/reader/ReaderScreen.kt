@@ -206,6 +206,7 @@ fun ReaderScreen(
     chaptersError: String? = null,
     onRetryChapters: () -> Unit = {},
     active: Boolean = true,
+    startAtBeginning: Boolean = false,
 ) {
     var chapterId by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(initialChapterId) }
     var collectionPresentation by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(initialCollection != null) }
@@ -226,6 +227,9 @@ fun ReaderScreen(
     }
     val pageCollections by libraryStore.pageCollections.collectAsState()
     val downloads by downloadStore.entries.collectAsState()
+    var restartPending by rememberSaveable(manga.id, initialChapterId, initialCollection?.key) {
+        mutableStateOf(startAtBeginning && initialCollection == null)
+    }
     LaunchedEffect(chapterId) {
         if (initialCollection?.chapter?.id != chapterId) collectionPresentation = false
     }
@@ -373,7 +377,8 @@ fun ReaderScreen(
                 throw IllegalStateException("本地章节不存在，请重新导入")
             } else repository.pages(manga.id, chapterId, forceRefresh = retry > 0)
             if (loaded.isEmpty()) throw IllegalStateException("这一章还没有可读取的图片")
-            val saved = libraryStore.progressFor(manga.id, chapterId)
+            val restarting = restartPending && chapterId == initialChapterId && initialCollection == null
+            val saved = if (restarting) null else libraryStore.progressFor(manga.id, chapterId)
             val collection = initialCollection?.takeIf { collectionPresentation && !collectionPositionApplied && it.chapter.id == chapterId }
             pageIndex = (collection?.firstPage ?: saved?.pageIndex ?: 0).coerceIn(0, loaded.lastIndex)
             cursor.scrollOffset = if (collection != null) 0 else saved?.scrollOffset ?: 0
@@ -381,6 +386,9 @@ fun ReaderScreen(
             libraryStore.migratePageBookmarks(manga, chapter, loaded)
             downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
             pages = loaded
+            if (restarting) libraryStore.saveProgress(manga, chapter, 0, loaded.size,
+                clearLegacyLongImagePosition = true)
+            restartPending = false
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {

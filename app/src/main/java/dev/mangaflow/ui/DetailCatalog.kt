@@ -95,6 +95,7 @@ internal fun DetailCatalog(
     onRetry: () -> Unit,
     onRead: (Chapter) -> Unit,
     onDownload: (Chapter) -> Unit,
+    bottomPadding: Dp = 16.dp,
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
@@ -191,7 +192,7 @@ internal fun DetailCatalog(
                     columns = GridCells.Adaptive(minSize = (74f * fontScale).dp),
                     state = grid, userScrollEnabled = paneActive,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = 16.dp),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {

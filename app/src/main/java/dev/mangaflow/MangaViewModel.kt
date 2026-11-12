@@ -89,6 +89,7 @@ data class ReadingSession(
     val chaptersLoading: Boolean = false,
     val chaptersError: String? = null,
     val collection: PageCollection? = null,
+    val startAtBeginning: Boolean = false,
 )
 
 data class LibraryOpenState(
@@ -732,6 +733,16 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         if (chapters.none { it.id == chapter.id }) return
         val needsCatalog = current.loading || current.error != null || current.detail == null
         beginReading(ReadingSession(current.manga, chapters, chapter.id, chaptersLoading = needsCatalog))
+        if (needsCatalog) loadReadingCatalog()
+    }
+
+    fun restartChapter(chapter: Chapter) {
+        val current = _detail.value ?: return
+        val chapters = current.detail?.chapters ?: downloadedChapters(current.manga.id)
+        if (chapters.none { it.id == chapter.id }) return
+        val needsCatalog = current.loading || current.error != null || current.detail == null
+        beginReading(ReadingSession(current.manga, chapters, chapter.id,
+            chaptersLoading = needsCatalog, startAtBeginning = true))
         if (needsCatalog) loadReadingCatalog()
     }
 

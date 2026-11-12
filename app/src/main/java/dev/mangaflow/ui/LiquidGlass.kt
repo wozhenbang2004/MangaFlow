@@ -67,9 +67,12 @@ internal fun LiquidGlassSurface(
     interactionSource: MutableInteractionSource? = null,
     trackPointer: Boolean = false,
     elevation: Dp? = null,
+    surfaceColor: Color? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val colors = MaterialTheme.colorScheme
+    val baseColors = MaterialTheme.colorScheme
+    val colors = if (surfaceColor == null) baseColors else baseColors.copy(surface = surfaceColor,
+        onSurface = if (surfaceColor.luminance() > .5f) Color(0xFF242426) else Color.White)
     val light = colors.surface.luminance() > .5f
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
     val optics = remember(skin) {

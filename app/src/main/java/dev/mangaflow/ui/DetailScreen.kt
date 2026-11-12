@@ -5,6 +5,7 @@ import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
@@ -14,9 +15,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,7 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,14 +37,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -74,12 +69,16 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -93,6 +92,7 @@ import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import coil3.request.allowHardware
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
@@ -112,9 +112,7 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabContent
-import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
-import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -150,6 +148,7 @@ fun DetailScreen(
     onReviewRelink: (String) -> Unit = {},
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage = { _, _, _ -> ReviewPage(emptyList()) },
     active: Boolean = true,
+    onRestart: (Chapter) -> Unit = onRead,
 ) {
     val current = detail?.manga ?: manga
     val downloaded = remember(downloadEntries, manga.id) {
@@ -165,12 +164,22 @@ fun DetailScreen(
     val activeSection = section.coerceIn(0, 1)
 
     var fullIntroduction by rememberSaveable(manga.id) { mutableStateOf(false) }
+    var fullRatings by rememberSaveable(manga.id) { mutableStateOf(false) }
+    var dockHidden by remember(manga.id) { mutableStateOf(false) }
+    val dockTravel = remember(manga.id) { floatArrayOf(0f) }
+    var commentsList by remember(manga.id) { mutableStateOf<LazyListState?>(null) }
+    var expandedTitle by remember(manga.id) { mutableStateOf<DetailTitleAnchor?>(null) }
+    var collapsedTitle by remember(manga.id) { mutableStateOf<DetailTitleAnchor?>(null) }
+    var titleOrigin by remember { mutableStateOf(Offset.Zero) }
+    val commentCount = detailCommentCount(reviews)
     var coverFailed by remember(current.coverUrl) { mutableStateOf(false) }
+    var coverLight by remember(current.coverUrl) { mutableStateOf(false) }
     var coverRetry by remember(current.coverUrl) { mutableIntStateOf(0) }
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
     val coverRequest = remember(context, current.coverUrl, current.sourceUrl, current.id, coverRetry, motion) {
         ImageRequest.Builder(context).data(current.coverUrl)
+            .allowHardware(false)
             .httpHeaders(NetworkHeaders.Builder().set("User-Agent", "Mozilla/5.0")
                 .set("Referer", current.sourceUrl.ifBlank { "https://www.copy3000.com/comic/" + current.id }).build())
             .crossfade(if (motion) MangaMotion.Quick else 0)
@@ -180,12 +189,16 @@ fun DetailScreen(
     var contentsJump by remember { mutableStateOf<Job?>(null) }
     var catalogGrid by remember(current.id) { mutableStateOf<LazyGridState?>(null) }
     val artworkBackdrop = rememberHazeState()
+    val readingBackdrop = rememberHazeState()
+    val commentsBackdrop = rememberHazeState()
 
     BoxWithConstraints(
         Modifier.fillMaxSize().background(DetailBackground)
-            .navigationBarsPadding().imePadding(),
+            .navigationBarsPadding().imePadding()
+            .onGloballyPositioned { titleOrigin = it.positionInRoot() },
     ) {
         val density = LocalDensity.current
+        val readingInset = (60f * density.fontScale.coerceAtLeast(1f) + 28f).dp
         val statusInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
         val landscape = maxWidth > availableHeight
@@ -193,7 +206,8 @@ fun DetailScreen(
         val heroHeight = if (compactHero) {
             (availableHeight * .32f).coerceAtMost((availableHeight - 250.dp).coerceAtLeast(0.dp))
         } else {
-            (availableHeight * .60f).coerceAtMost(560.dp).coerceAtMost(availableHeight - 280.dp)
+            (availableHeight * .56f - 56.dp).coerceAtLeast(0.dp)
+                .coerceAtMost(560.dp).coerceAtMost((availableHeight - 280.dp).coerceAtLeast(0.dp))
         }
         val heroPixels = with(density) { heroHeight.toPx() }
         val header = rememberTopAppBarState(initialHeightOffsetLimit = -heroPixels)
@@ -208,10 +222,19 @@ fun DetailScreen(
                 header.heightOffset = -heroPixels * collapsed
             }
         }
-        val scrolling = remember(behavior) {
+        val scrolling = remember(behavior, activeSection) {
             object : NestedScrollConnection by behavior.nestedScrollConnection {
                 override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                    if (source == NestedScrollSource.UserInput && available.y != 0f) contentsJump?.cancel()
+                    if (source == NestedScrollSource.UserInput && available.y != 0f) {
+                        contentsJump?.cancel()
+                        if (available.y < 0f && activeSection == 1 && header.collapsedFraction > .8f) {
+                            dockTravel[0] += -available.y
+                            if (dockTravel[0] > with(density) { 72.dp.toPx() }) dockHidden = true
+                        } else if (available.y > 0f) {
+                            dockTravel[0] = 0f
+                            dockHidden = false
+                        }
+                    }
                     return behavior.nestedScrollConnection.onPreScroll(available, source)
                 }
             }
@@ -219,12 +242,14 @@ fun DetailScreen(
         val emptyCatalogScroll = rememberScrollableState { 0f }
         // Artwork and chapter surfaces share one scroll mutex and nested header decay.
         // Remaining fling velocity flows into the grid after the artwork has collapsed.
-        val artworkScroll = catalogGrid?.takeIf { activeSection == 0 } ?: emptyCatalogScroll
+        val artworkScroll: ScrollableState = if (activeSection == 0) catalogGrid ?: emptyCatalogScroll
+            else commentsList ?: emptyCatalogScroll
         val openContents: () -> Unit = {
             section = 0
+            dockHidden = false
             contentsJump?.cancel()
             contentsJump = scope.launch {
-                animate(header.heightOffset, header.heightOffsetLimit, animationSpec = tween(360)) { value, _ ->
+                animate(header.heightOffset, header.heightOffsetLimit, animationSpec = tween(if (motion) 320 else 0, easing = MangaMotion.EnterEasing)) { value, _ ->
                     header.heightOffset = value
                 }
             }
@@ -232,7 +257,7 @@ fun DetailScreen(
         // Sakurairo's fixed-background relationship: only the foreground moves.
         // Keep this image's bounds independent of heightOffset to avoid recropping each frame.
         Box(
-            Modifier.fillMaxWidth().height(heroHeight + 48.dp + statusInset)
+            Modifier.fillMaxWidth().height(heroHeight + 56.dp + statusInset)
                 .hazeSource(artworkBackdrop).background(DetailSurface),
             contentAlignment = Alignment.TopCenter,
         ) {
@@ -242,15 +267,26 @@ fun DetailScreen(
                 model = coverRequest, contentDescription = null, modifier = Modifier.fillMaxSize(),
                 contentScale = if (landscape) ContentScale.Fit else ContentScale.Crop,
                 alignment = Alignment.TopCenter,
-                onError = { coverFailed = true }, onSuccess = { coverFailed = false },
+                onError = { coverFailed = true }, onSuccess = { result ->
+                    coverFailed = false
+                    val bitmap = (result.result.image as? coil3.BitmapImage)?.bitmap
+                    if (bitmap != null) runCatching {
+                        listOf(.15f, .85f).flatMap { x -> listOf(.06f, .14f).map { y ->
+                            Color(bitmap.getPixel((bitmap.width * x).toInt().coerceIn(0, bitmap.width - 1),
+                                (bitmap.height * y).toInt().coerceIn(0, bitmap.height - 1))).luminance()
+                        } }.average() > .45
+                    }.getOrNull()?.let { coverLight = it }
+                },
             )
             Box(Modifier.fillMaxWidth().height(statusInset + 96.dp)
                 .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .46f), Color.Transparent))))
         }
-        Column(Modifier.fillMaxSize().nestedScroll(scrolling)) {
+        Column(Modifier.fillMaxSize().hazeSource(readingBackdrop).nestedScroll(scrolling)) {
             ArtworkToolbar(
                 header = header, compact = compactHero, title = current.title, backdrop = artworkBackdrop,
-                favorite = isFavorite, coverFailed = coverFailed, active = active,
+                favorite = isFavorite, coverFailed = coverFailed, active = active, coverLight = coverLight,
+                comments = activeSection == 1, commentCount = commentCount,
+                onTitleAnchor = { collapsedTitle = it },
                 onBack = onBack, onIntroduction = { fullIntroduction = true },
                 onToggleFavorite = onToggleFavorite, onRetryCover = {
                     coverFailed = false
@@ -274,13 +310,17 @@ fun DetailScreen(
                 Box(Modifier.fillMaxSize().scrollable(artworkScroll, Orientation.Vertical,
                     reverseDirection = true, enabled = active))
                 Column(
-                    Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+                    Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.Bottom,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     if (!compactHero) {
-                        HeroBookInformation(current, artworkBackdrop, onIntroduction = { fullIntroduction = true },
-                            onContents = openContents,
+                        HeroBookInformation(current, onIntroduction = { fullIntroduction = true },
+                            onRatings = { fullRatings = true },
+                            collapse = { header.collapsedFraction },
+                            onTitleAnchor = { coordinates ->
+                                expandedTitle = coordinates.copy(position = coordinates.position - Offset(0f, header.heightOffset))
+                            },
                             modifier = Modifier.scrollable(artworkScroll, Orientation.Vertical,
                                 reverseDirection = true, enabled = active))
                     } else {
@@ -297,18 +337,18 @@ fun DetailScreen(
             }
             Column(
                 Modifier.weight(1f).fillMaxWidth()
-                    .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+                    .clip(RoundedCornerShape(topStart = (24f * (1f - header.collapsedFraction)).dp,
+                        topEnd = (24f * (1f - header.collapsedFraction)).dp))
                     // Share the grid's scroll mutex as well as its position: a new drag
                     // on the surrounding surface must cancel an existing grid fling.
-                    .scrollable(catalogGrid ?: emptyCatalogScroll, Orientation.Vertical,
-                        reverseDirection = true,
-                        enabled = active && activeSection == 0)
+                    .scrollable(artworkScroll, Orientation.Vertical,
+                        reverseDirection = true, enabled = active)
                     .background(DetailBackground).padding(top = 8.dp),
             ) {
                 DetailSections(
                     selected = activeSection,
-                    labels = listOf(if (chapters.isEmpty()) "章节" else "章节 " + chapters.size, "评论"),
-                    onSelect = { section = it },
+                    chapterCount = chapters.size, commentCount = commentCount,
+                    onSelect = { section = it; dockHidden = false; dockTravel[0] = 0f },
                 )
                 MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth()) { targetSection ->
                     sections.SaveableStateProvider(targetSection) {
@@ -319,23 +359,33 @@ fun DetailScreen(
                                 active = active && targetSection == activeSection,
                                 onScrollTarget = { catalogGrid = it },
                                 onRetry = onRetry, onRead = onRead, onDownload = onDownload,
+                                bottomPadding = readingInset,
                             )
                             else -> CommunityPanel(
                                 mangaId = current.id, sources = reviews, loading = reviewsLoading,
                                 onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
                                 onRelink = onReviewRelink, loadReplies = loadReplies,
+                                onScrollTarget = { commentsList = it }, backdrop = commentsBackdrop,
+                                active = active && targetSection == activeSection, bottomPadding = readingInset,
                             )
                         }
                     }
                 }
-                DetailReadAction(
-                    resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
-                    onContinue = onContinue, onRead = onRead,
-                )
             }
         }
+        CollapsingDetailTitle(current.title, expandedTitle, collapsedTitle, titleOrigin,
+            header.collapsedFraction, compactHero, activeSection == 1,
+            modifier = Modifier.nestedScroll(scrolling)
+                .scrollable(artworkScroll, Orientation.Vertical, reverseDirection = true, enabled = active),
+            onClick = { fullIntroduction = true })
+        DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
+            resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
+            hidden = dockHidden, active = active,
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents)
     }
     if (fullIntroduction) DetailIntroduction(current) { fullIntroduction = false }
+    if (fullRatings) DetailRatingSheet(current) { fullRatings = false }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -348,19 +398,24 @@ private fun ArtworkToolbar(
     favorite: Boolean,
     coverFailed: Boolean,
     active: Boolean,
+    coverLight: Boolean,
+    comments: Boolean,
+    commentCount: String?,
+    onTitleAnchor: (DetailTitleAnchor) -> Unit,
     onBack: () -> Unit,
     onIntroduction: () -> Unit,
     onToggleFavorite: () -> Unit,
     onRetryCover: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val progress = header.collapsedFraction.coerceIn(0f, 1f)
-    val titleAlpha = if (compact) 1f else ((progress - .35f) / .65f).coerceIn(0f, 1f)
-    val titleInteraction = remember { MutableInteractionSource() }
+    val progress = if (compact) 1f else header.collapsedFraction.coerceIn(0f, 1f)
+    val artworkTint = if (coverLight) Color(0xFF242426) else Color.White
+    val tint = lerp(artworkTint, DetailForeground, progress)
+    val glassTone = if (coverLight) Color(0xFFFCFCFA) else Color(0xFF202023)
     val activity = LocalContext.current.activityOrNull()
     val lightSurface = colors.surface.luminance() > .5f
-    val lightStatusBars by remember(header, lightSurface) {
-        derivedStateOf { lightSurface && header.collapsedFraction > .7f }
+    val lightStatusBars by remember(header, lightSurface, compact) {
+        derivedStateOf { lightSurface && (compact || header.collapsedFraction > .7f) }
     }
     LaunchedEffect(active, activity, lightStatusBars, lightSurface) {
         if (active) activity?.let {
@@ -370,38 +425,39 @@ private fun ArtworkToolbar(
             }
         }
     }
-    Row(Modifier.fillMaxWidth().background(colors.surface.copy(alpha = progress))
-        .statusBarsPadding().height(48.dp).padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, 1f - progress, onBack)
-        Box(Modifier.weight(1f).padding(horizontal = 4.dp).graphicsLayer { alpha = titleAlpha }
-            .motionInputGate(titleAlpha > .1f)
-            .clickable(interactionSource = titleInteraction, indication = null, role = Role.Button,
-                onClickLabel = "漫画信息与完整简介", onClick = onIntroduction)
-            .clip(RoundedCornerShape(12.dp))) {
-            LiquidGlassSurface(backdrop,
-                Modifier.matchParentSize().graphicsLayer { alpha = 1f - progress }, cornerRadius = 12.dp,
-                interactionSource = titleInteraction) {}
-            Text(title, modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
-                .motionPress(titleInteraction, pressedScale = .985f),
-                color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Row(Modifier.fillMaxWidth().background(colors.background.copy(alpha = progress))
+        .statusBarsPadding().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, 1f - progress, tint, glassTone, onBack)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)
+            .clickable(enabled = progress > .7f, role = Role.Button, onClickLabel = "查看作品信息", onClick = onIntroduction),
+            verticalArrangement = Arrangement.Center) {
+            if (comments) Row(Modifier.graphicsLayer { alpha = ((progress - .55f) / .45f).coerceIn(0f, 1f) },
+                horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("评论", color = DetailForeground, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                commentCount?.let { Text(it, color = DetailSecondary, fontSize = 11.sp) }
+            }
+            Text(title, color = Color.Transparent,
+                fontSize = if (comments) 11.sp else 15.sp, lineHeight = if (comments) 15.sp else 20.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().clearAndSetSemantics { }
+                    .onGloballyPositioned { onTitleAnchor(DetailTitleAnchor(it.positionInRoot(), it.size.width.toFloat())) })
         }
-        if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, 1f - progress, onRetryCover)
+        if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, 1f - progress, tint, glassTone, onRetryCover)
         ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-            if (favorite) "从书架移除" else "加入书架", backdrop, 1f - progress, onToggleFavorite)
+            if (favorite) "从书架移除" else "加入书架", backdrop, 1f - progress, tint, glassTone, onToggleFavorite)
     }
 }
 
 @Composable
-private fun ArtworkAction(icon: ImageVector, description: String, backdrop: HazeState, glassAlpha: Float, onClick: () -> Unit) {
+private fun ArtworkAction(icon: ImageVector, description: String, backdrop: HazeState, glassAlpha: Float,
+    tint: Color, glassTone: Color, onClick: () -> Unit) {
     MotionIconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
-        Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
             LiquidGlassSurface(backdrop,
-                Modifier.matchParentSize().graphicsLayer { alpha = glassAlpha }, cornerRadius = 14.dp,
-                trackPointer = true) {}
+                Modifier.matchParentSize().graphicsLayer { alpha = glassAlpha }, cornerRadius = 16.dp,
+                trackPointer = true, surfaceColor = glassTone) {}
             MotionSwap(icon, Modifier.size(21.dp)) { shown ->
-                Icon(shown, description, tint = DetailForeground, modifier = Modifier.size(21.dp))
+                Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp))
             }
         }
     }
@@ -410,40 +466,40 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
 @Composable
 private fun HeroBookInformation(
     manga: Manga,
-    backdrop: HazeState,
     onIntroduction: () -> Unit,
-    onContents: () -> Unit,
+    onRatings: () -> Unit,
+    collapse: () -> Float,
+    onTitleAnchor: (DetailTitleAnchor) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    LiquidGlassSurface(backdrop, modifier.fillMaxWidth(), cornerRadius = 18.dp,
-        role = GlassSurfaceRole.ARTWORK, trackPointer = true) {
-        Column(
-            Modifier.fillMaxWidth()
-                .padding(horizontal = 14.dp).padding(top = 13.dp, bottom = 5.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            Text(
-                manga.title, color = DetailForeground, fontSize = 22.sp, lineHeight = 28.sp,
-                fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
-            )
-            if (manga.authors.isNotEmpty()) Text(
-                manga.authors.joinToString(" / "), color = DetailForeground.copy(alpha = .94f), fontSize = 11.sp,
-                lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                "简介 · " + manga.description.ifBlank { "暂无简介" },
-                modifier = Modifier.clip(RoundedCornerShape(4.dp))
-                    .clickable(role = Role.Button, onClickLabel = "查看完整简介", onClick = onIntroduction),
-                color = DetailForeground.copy(alpha = .94f), fontSize = 12.sp, lineHeight = 18.sp,
-                maxLines = 2, overflow = TextOverflow.Ellipsis,
-            )
-            DetailTags(manga)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                MangaMetricBadges(manga, Modifier.weight(1f), foreground = DetailForeground)
-                MotionIconButton(onClick = onContents, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Outlined.KeyboardArrowDown, "滑到章节", tint = DetailForeground)
-                }
+    val infoVisible = collapse() < .28f
+    Column(modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .74f), Color.Black.copy(alpha = .87f))))
+        .padding(horizontal = 22.dp).padding(top = 32.dp, bottom = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(manga.title, color = Color.Transparent, fontSize = 22.sp, lineHeight = 28.6.sp,
+            fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().clearAndSetSemantics { }
+                .onGloballyPositioned { onTitleAnchor(DetailTitleAnchor(it.positionInRoot(), it.size.width.toFloat())) })
+        Column(Modifier.graphicsLayer { alpha = (1f - collapse() / .28f).coerceIn(0f, 1f) }
+            .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { }),
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            val metadata = listOfNotNull(manga.authors.take(2).joinToString(" / ").takeIf(String::isNotBlank),
+                manga.status.takeIf(String::isNotBlank), manga.latestChapter.takeIf(String::isNotBlank)?.let { "更新至 $it" })
+                .joinToString(" · ")
+            if (metadata.isNotBlank()) Text(metadata, color = Color.White.copy(alpha = .77f),
+                fontSize = 11.sp, lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(Modifier.fillMaxWidth().heightIn(min = 30.dp)
+                .clickable(enabled = infoVisible, role = Role.Button,
+                    onClickLabel = "展开简介与作品信息", onClick = onIntroduction),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(manga.description.ifBlank { "暂无简介" }, color = Color.White.copy(alpha = .88f),
+                    fontSize = 13.sp, lineHeight = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f))
+                Text("展开", color = Color.White.copy(alpha = .7f), fontSize = 11.sp)
             }
+            if (manga.tags.isNotEmpty()) Text(manga.tags.filter(String::isNotBlank).distinct().take(3).joinToString("  ·  "),
+                color = Color.White.copy(alpha = .65f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            DetailRatingStrip(manga, Color.White, enabled = infoVisible, onExpand = onRatings)
         }
     }
 }
@@ -508,65 +564,21 @@ private fun DetailTag(label: String, index: Int) {
     )
 }
 
-/** Quiet text tabs: the synopsis belongs to the header, not another route. */
+/** Equal hit regions and a shared Ovio two-edge plate, with secondary real counts. */
 @Composable
-private fun DetailSections(selected: Int, labels: List<String>, onSelect: (Int) -> Unit) {
-    MotionTabs(selected, labels, onSelect,
-        modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 2.dp),
-        foreground = DetailForeground, muted = DetailMuted,
-        indicator = DetailForeground, underline = true, compact = true,
-        selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal)
-}
-
-@Composable
-private fun DetailReadAction(
-    resume: ReadingProgress?,
-    firstChapter: Chapter?,
-    loading: Boolean,
-    onContinue: (ReadingProgress) -> Unit,
-    onRead: (Chapter) -> Unit,
-) {
-    val canRead = resume != null || firstChapter != null
-    val interaction = remember { MutableInteractionSource() }
-    val busy = rememberDelayedBusy(loading && !canRead)
-    val label = when {
-        resume != null -> "继续阅读 · " + resume.chapterTitle
-        firstChapter != null -> "开始阅读 · " + firstChapter.title
-        loading -> "加载章节"
-        else -> "暂无可读章节"
-    }
-    Button(
-        onClick = { if (resume != null) onContinue(resume) else firstChapter?.let(onRead) },
-        enabled = canRead,
-        interactionSource = interaction,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-            .heightIn(min = 50.dp),
-        shape = RoundedCornerShape(14.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh, contentColor = DetailForeground,
-            disabledContainerColor = DetailSurface, disabledContentColor = DetailMuted,
-        ),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-    ) {
-        Row(Modifier.fillMaxWidth().motionPress(interaction, enabled = canRead, pressedScale = .985f),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-            Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
-                if (loading && !canRead) {
-                    if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = DetailMuted, strokeWidth = 1.5.dp)
-                } else Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(22.dp))
+private fun DetailSections(selected: Int, chapterCount: Int, commentCount: String?, onSelect: (Int) -> Unit) {
+    val labels = listOf("章节", "评论")
+    MotionTabs(selected, labels, onSelect, modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 4.dp),
+        foreground = DetailForeground, muted = DetailSecondary, indicator = DetailForeground.copy(alpha = .065f),
+        compact = false, fullWidthIndicator = true, indicatorHeight = 36.dp, fontSize = 15.sp,
+        itemContent = { index, chosen, color ->
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(labels[index], color = color, fontSize = 15.sp,
+                    fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium)
+                val count = if (index == 0) chapterCount.takeIf { it > 0 }?.toString() else commentCount
+                count?.let { Text(it, color = color.copy(alpha = .65f), fontSize = 11.sp) }
             }
-            Spacer(Modifier.width(8.dp))
-            Text(
-                label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
-            )
-            if (resume != null) Text(
-                "第 " + (resume.pageIndex + 1) + " 页",
-                color = DetailSecondary, fontSize = 11.sp,
-                maxLines = 1,
-            )
-        }
-    }
+        })
 }
 
 @Composable
