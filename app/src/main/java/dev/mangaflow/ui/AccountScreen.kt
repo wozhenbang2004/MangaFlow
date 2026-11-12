@@ -1,9 +1,5 @@
 package dev.mangaflow.ui
 
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
-import android.view.WindowManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -29,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.PersonOutline
@@ -49,7 +46,6 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,8 +57,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -70,6 +67,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.AccountUiState
+import dev.mangaflow.BuildConfig
 import dev.mangaflow.account.CloudHistoryEntry
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
@@ -88,32 +86,19 @@ fun AccountScreen(
     onContinue: (CloudHistoryEntry) -> Unit,
     onSetFavorite: (Manga, Boolean) -> Unit,
     onRetrySync: () -> Unit,
-    onWebsiteLogin: () -> Unit,
 ) {
     val profile = state.profile
     val colors = MaterialTheme.colorScheme
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
-    val activity = LocalContext.current.accountActivity()
     val passwordFocus = remember { FocusRequester() }
-    var cookieMode by remember { mutableStateOf(true) }
+    var cookieMode by remember { mutableStateOf(false) }
     var cookie by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var showSecret by remember { mutableStateOf(false) }
     var showHistory by remember(profile?.username) { mutableStateOf(false) }
     var removeFavorite by remember(profile?.username) { mutableStateOf<Manga?>(null) }
-    if (profile == null) {
-        DisposableEffect(activity) {
-            val window = activity?.window
-            val wasSecure = window != null && (window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE) != 0
-            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            onDispose {
-                if (wasSecure) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                else window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            }
-        }
-    }
     val clearInputs = {
         cookie = ""
         username = ""
@@ -134,7 +119,10 @@ fun AccountScreen(
                 val name = username.trim()
                 val secret = password
                 if (name.isNotEmpty() && secret.isNotEmpty()) {
-                    clearInputs()
+                    password = ""
+                    showSecret = false
+                    keyboard?.hide()
+                    focus.clearFocus()
                     onLogin(name, secret)
                 }
             }
@@ -165,23 +153,6 @@ fun AccountScreen(
             item(span = { GridItemSpan(maxLineSpan) }, key = "login-form") {
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Text("连接账号，同步个人收藏与阅读记录。", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
-                    Button(
-                        onClick = { clearInputs(); onWebsiteLogin() },
-                        enabled = !state.busy,
-                        modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(16.dp), elevation = null,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = colors.primary, contentColor = colors.onPrimary,
-                            disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant,
-                        ),
-                    ) { Text("官网登录") }
-                    Text("在官网页面登录后，返回连接账号。", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                    Text("手动连接", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.titleSmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        FilterChip(selected = cookieMode, enabled = !state.busy, onClick = { clearInputs(); cookieMode = true },
-                            label = { Text("Cookie / Token") }, shape = RoundedCornerShape(100))
-                        FilterChip(selected = !cookieMode, enabled = !state.busy, onClick = { clearInputs(); cookieMode = false },
-                            label = { Text("账号密码") }, shape = RoundedCornerShape(100))
-                    }
                     if (cookieMode) {
                         OutlinedTextField(
                             value = cookie,
@@ -224,11 +195,14 @@ fun AccountScreen(
                             containerColor = colors.primary, contentColor = colors.onPrimary,
                             disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant,
                         ),
-                    ) { Text("连接账号") }
+                    ) { Text(if (cookieMode) "导入登录状态" else "登录") }
+                    TextButton(
+                        onClick = { clearInputs(); cookieMode = !cookieMode }, enabled = !state.busy,
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
+                    ) { Text(if (cookieMode) "使用账号密码" else "导入 Cookie / Token", style = MaterialTheme.typography.bodySmall) }
                     if (state.busy) AccountBusyRow("正在连接账号…") { clearInputs(); onLogout() }
                     state.error?.let {
-                        if (state.canRetryConnection) AccountError(it, state.busy, onRefresh)
-                        else Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error)
+                        AccountError(it, state.busy, onRetry = if (state.canRetryConnection) onRefresh else null)
                     }
                 }
             }
@@ -368,10 +342,21 @@ private fun AccountBusyRow(message: String, onCancel: () -> Unit) {
 }
 
 @Composable
-private fun AccountError(message: String, busy: Boolean, onRetry: () -> Unit) {
+private fun AccountError(message: String, busy: Boolean, onRetry: (() -> Unit)? = null) {
+    val clipboard = LocalClipboardManager.current
+    var copied by remember(message) { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-        TextButton(onClick = onRetry, enabled = !busy, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) { Text("重试") }
+        SelectionContainer {
+            Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            TextButton(onClick = {
+                clipboard.setText(AnnotatedString("MangaFlow ${BuildConfig.VERSION_NAME}\n$message"))
+                copied = true
+            }, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) { Text(if (copied) "已复制" else "复制错误") }
+            if (onRetry != null) TextButton(onClick = onRetry, enabled = !busy,
+                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) { Text("重试") }
+        }
     }
 }
 
@@ -403,8 +388,3 @@ private fun CloudContinueRow(entry: CloudHistoryEntry, repository: MangaReposito
     }
 }
 
-private tailrec fun Context.accountActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.accountActivity()
-    else -> null
-}

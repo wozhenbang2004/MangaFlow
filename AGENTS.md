@@ -19,11 +19,19 @@ Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 ## Current feedback and scope · 2026-11-12
 
 - The user confirmed "其实我现在用的 0.13 这版已经能稳定看漫画了". Keep v0.1.3's working anonymous source protocol as the baseline; do not resume the abandoned header experiment.
-- Current fixes: "账号网页登录展示被来源限制 210"; "上下滑动特别特别不流畅会卡一下"; "从历史记录点看某个漫画还得再先进那个漫画详情页 loading 再进实际的漫画"; "翻页看漫画过程中也有不少 loading". Provide official website login with verified credential handoff and meaningful source errors, direct history resume, background directory loading, less work on the scrolling thread, and bounded page/chapter prefetch.
+- Current fixes: "账号网页登录展示被来源限制 210"; "上下滑动特别特别不流畅会卡一下"; "从历史记录点看某个漫画还得再先进那个漫画详情页 loading 再进实际的漫画"; "翻页看漫画过程中也有不少 loading". The later login feedback below supersedes the website-login UI. Preserve direct history resume, background directory loading, less work on the scrolling thread, and bounded page/chapter prefetch.
 - Preserve each chapter's exact page, scroll offset, and long-image position. Continue reading must not require loading the detail screen first. Background directory/prefetch failures must not interrupt the current chapter.
 - Double-page/spread support and better page-turn motion remain follow-up work; do not describe them as implemented.
 - Android device smoothness and successful login to the user's own account require real device feedback. An API response, source review, or successful APK build does not establish either result.
 - Source evidence from this batch: the current official login bundle still calls `/api/kb/web/login` and displays the returned `message`; the existing app discarded that detail for 210. A real production-Kotlin direct chapter request at 05:35 UTC made one anonymous GET and passed the HTML comic-ownership check, but this cloud connection received an empty `contentKey`. No image-read success or successful account login was established by that call; do not turn it into a claim that the user's working v0.1.3 reader is broken.
+
+## Login repair · 2026-11-12
+
+- User request: "我们的漫画软件登录界面不允许截图我怎么拍给你报错啊服了而且还是登录不了实在不行你看看人家 relay 桌面端的漫画部分怎么实现的呢我吐了也别弄个官网登录的按钮纯多余".
+- The login screen must allow screenshots. Remove the website-login entry and activity; default to the existing username/password form and disclose manual Cookie / Token import as a secondary action. Keep secrets masked by default, clear them on submit, and make sanitized errors selectable/copyable.
+- Relay-Desktop `0079af7` already uses the same `/api/kb/web/login` form. Its code is a reference, not evidence of a successful account login. Preserve the matching form protocol; verify its candidate token through the same website's `/api/v2/web/user/info`, as used by the current official bundle and EasyCopy `72bd3c9`, instead of requiring the old App profile endpoint to succeed.
+- Keep authentication submission and profile-verification failures distinct. HTTP 210 can represent a form error; preserve the source's sanitized message/detail and any Retry-After. Never automatically replay credentials through alternate login endpoints or promote an unverified token.
+- Evidence at 05:58 UTC: one request with empty login fields returned HTTP 210 and `用戶名不能為空`; an unauthenticated read of `/api/v2/web/user/info` returned HTTP 401. This establishes reachable endpoints and error semantics, not a successful account login. Actual account success and device screenshot behavior remain pending user feedback.
 
 ## Discovery and discussion batch · 2026-11-12
 

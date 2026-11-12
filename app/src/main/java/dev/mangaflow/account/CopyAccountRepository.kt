@@ -41,7 +41,9 @@ class CopyAccountRepository(context: Context) {
     val sessionVersion: Long get() = version
     private var sessionToken: String? = null
     private val apiOrigin = "https://api.copy202601.com".toHttpUrl()
+    private val websiteOrigin = "https://copy4000.com".toHttpUrl()
     private val loginUrl = "https://copy4000.com/api/kb/web/login".toHttpUrl()
+    private val profileUrl = "https://copy4000.com/api/v2/web/user/info".toHttpUrl()
     private val publicConfig = CopyMangaConfig()
 
     suspend fun restore(): AccountProfile? {
@@ -91,7 +93,11 @@ class CopyAccountRepository(context: Context) {
                 ensureVersion(expected)
                 val token = webLogin(name, password, expected)
                 val lease = SessionLease(expected, token, committed = false)
-                commit(lease, verify(lease), persist = true)
+                val account = try { verify(lease) } catch (error: SourceException) {
+                    throw SourceException("已收到登录凭据，但账号资料验证未完成。\n${error.message}",
+                        retryAfterSeconds = error.retryAfterSeconds, cause = error)
+                }
+                commit(lease, account, persist = true)
             }
         }
     }
@@ -188,9 +194,11 @@ class CopyAccountRepository(context: Context) {
     }
 
     private suspend fun verify(lease: SessionLease): AccountProfile {
-        val data = accountObject(lease, apiUrl("member/info"), "账号验证")
-        val username = data.text("username")
-        val nickname = data.text("nickname").ifBlank { username }
+        // The official web login and EasyCopy verify web credentials on this
+        // same-origin endpoint; a legacy App request must not gate web login.
+        val data = accountObject(lease, profileUrl, "登录状态验证")
+        val username = data.text("username").ifBlank { data.text("mobile") }.ifBlank { data.text("email") }
+        val nickname = data.text("nickname").ifBlank { data.text("name") }.ifBlank { username }
         if (username.length !in 1..160 || nickname.length > 160 ||
             username.any(Char::isISOControl) || nickname.any(Char::isISOControl)) {
             throw SourceException("来源没有返回有效的账号资料。")
@@ -204,7 +212,18 @@ class CopyAccountRepository(context: Context) {
         val encoded = try { Base64.encodeToString(salted, Base64.NO_WRAP) } finally { salted.fill(0) }
         val body = FormBody.Builder().add("username", username).add("password", encoded).add("salt", salt)
             .add("platform", "2").add("version", "2025.12.10").add("source", "freeSite").build()
-        val request = Request.Builder().url(loginUrl).post(body)
+        val request = websiteRequest(loginUrl).post(body).build()
+        ensureVersion(expected)
+        val response = try { loginHttp.request(request, "账号密码登录", readAccountErrors = true) }
+            catch (error: Exception) { ensureVersion(expected); throw error }
+        ensureVersion(expected)
+        val results = envelope(response, loginUrl, loginHttp, "账号密码登录", 256 * 1024, listOf(password, encoded)) as? JSONObject
+            ?: throw SourceException("账号密码登录没有返回有效的账号凭据。")
+        return AccountTokenInput.validate(results.opt("token") as? String
+            ?: throw SourceException("账号密码登录没有返回有效的账号凭据。"))
+    }
+
+    private fun websiteRequest(url: HttpUrl): Request.Builder = Request.Builder().url(url)
             .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0")
             .header("Accept", "application/json, text/plain, */*")
@@ -214,16 +233,7 @@ class CopyAccountRepository(context: Context) {
             .header("sec-ch-ua", "\"Microsoft Edge\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
             .header("sec-ch-ua-mobile", "?0").header("sec-ch-ua-platform", "\"Windows\"")
             .header("sec-fetch-site", "same-origin").header("sec-fetch-mode", "cors").header("sec-fetch-dest", "empty")
-            .header("Cookie", "webp=1").build()
-        ensureVersion(expected)
-        val response = try { loginHttp.request(request, "账号网页登录", "https://copy4000.com/web/login/loginByAccount", readAccountError210 = true) }
-            catch (error: Exception) { ensureVersion(expected); throw error }
-        ensureVersion(expected)
-        val results = envelope(response, loginUrl, loginHttp, "账号网页登录", 256 * 1024, listOf(password, encoded)) as? JSONObject
-            ?: throw SourceException("网页登录没有返回有效的账号凭据。")
-        return AccountTokenInput.validate(results.opt("token") as? String
-            ?: throw SourceException("网页登录没有返回有效的账号凭据。"))
-    }
+            .header("Cookie", "webp=1")
 
     private suspend fun accountObject(lease: SessionLease, url: HttpUrl, operation: String, maxChars: Int = 256 * 1024): JSONObject =
         accountRequest(lease, url, operation, maxChars = maxChars) as? JSONObject
@@ -233,14 +243,15 @@ class CopyAccountRepository(context: Context) {
         body: FormBody? = null, maxChars: Int = 256 * 1024): Any? {
         ensureLease(lease)
         val method = if (body == null) "GET" else "POST"
-        if (!allowed(url, method) || (!lease.committed && url.encodedPath != "/api/v3/member/info")) {
+        if (!allowed(url, method) || (!lease.committed && url != profileUrl)) {
             throw SourceException("该操作不属于个人账号接口，未发送登录凭据。")
         }
-        val builder = Request.Builder().url(url).header("User-Agent", "COPY/3.0.9")
+        val builder = if (url == profileUrl) websiteRequest(url).header("Authorization", "Token ${lease.token}")
+        else Request.Builder().url(url).header("User-Agent", "COPY/3.0.9")
             .header("Accept", "application/json").header("source", "copyApp").header("platform", "3")
             .header("version", "3.0.9").header("webp", "1").header("Authorization", "Token ${lease.token}")
         if (body != null) builder.post(body)
-        val response = try { accountHttp.request(builder.build(), operation, "https://copy4000.com/person/home", readAccountError210 = true) }
+        val response = try { accountHttp.request(builder.build(), operation, readAccountErrors = true) }
             catch (error: Exception) { ensureLease(lease); throw error }
         ensureLease(lease)
         val result = envelope(response, url, accountHttp, operation, maxChars, listOf(lease.token))
@@ -252,38 +263,40 @@ class CopyAccountRepository(context: Context) {
         secrets: List<String> = emptyList()): Any? {
         if (response.text.length > maxChars) throw SourceException("$operation 返回的数据过大。")
         val root = try { JSONObject(response.text) } catch (_: Exception) {
-            throw SourceException(if (response.statusCode == 210) "$operation 未成功（210），请在官网登录页查看具体提示。"
-                else "$operation 返回的数据无法识别。")
+            throw SourceException("$operation 返回的数据无法识别（HTTP ${response.statusCode}），请稍后重试。")
         }
-        val code = if (response.statusCode == 210) 210
+        val code = if (response.statusCode in setOf(209, 210) || response.statusCode >= 400) response.statusCode
             else root.integer("code") ?: throw SourceException("$operation 缺少有效状态。")
+        val message = accountSourceMessage(root, secrets)
         when (code) {
-            401, 403 -> throw SourceException("$operation 的登录状态无效或已过期，请重新登录。")
+            401, 403 -> throw SourceException("$operation 未通过（$code）" +
+                if (message.isNotBlank()) "：$message" else "，登录状态无效或已过期，请重新登录。")
             209, 429 -> {
                 val retry = response.retryAfterSeconds
                 http.rememberPause(url, retry)
                 throw SourceException("$operation 暂时被来源限制（$code）" +
-                    if (retry > 0) "，请在 $retry 秒后重试。" else "，请稍后重试或查看原站提示。",
+                    (if (message.isNotBlank()) "：$message" else "，请稍后重试。") +
+                    (if (retry > 0) "（$retry 秒后可重试）" else ""),
                     retryAfterSeconds = retry)
             }
             210 -> {
                 val retry = response.retryAfterSeconds
                 http.rememberPause(url, retry)
-                val message = accountSourceMessage(root, secrets)
-                val detail = if (message.isNotBlank()) "：$message" else "，请在官网登录页查看具体提示。"
+                val detail = if (message.isNotBlank()) "：$message" else "，来源未提供具体原因，请稍后重试。"
                 val retryHint = if (retry > 0) "（$retry 秒后可重试）" else ""
                 throw SourceException("$operation 未成功（210）$detail$retryHint", retryAfterSeconds = retry)
             }
         }
         if (code != 200) {
-            val message = accountSourceMessage(root, secrets)
             throw SourceException("$operation 失败（$code）" + if (message.isNotBlank()) "：$message" else "，请核对账号信息或稍后重试。")
         }
         return root.opt("results").takeUnless { it == JSONObject.NULL }
     }
 
     private fun accountSourceMessage(root: JSONObject, secrets: List<String>): String {
-        var message = (root.opt("message") as? String).orEmpty()
+        val results = root.optJSONObject("results")
+        var message = listOf(root.opt("message"), root.opt("detail"), results?.opt("message"), results?.opt("detail"))
+            .filterIsInstance<String>().filter(String::isNotBlank).distinct().joinToString("；")
         // Only the short, human-readable message is displayed, never the raw
         // response. Redact submitted secrets before truncating a message.
         for (secret in secrets.filter(String::isNotEmpty).sortedByDescending(String::length)) {
@@ -300,12 +313,14 @@ class CopyAccountRepository(context: Context) {
         }.build()
 
     private fun allowed(url: HttpUrl, method: String): Boolean {
-        if (url.scheme != "https" || url.host != apiOrigin.host || url.port != 443 ||
+        if (url.scheme != "https" || url.port != 443 ||
             url.username.isNotEmpty() || url.password.isNotEmpty() || url.fragment != null) return false
+        if (url.host == websiteOrigin.host) return method == "GET" && url == profileUrl
+        if (url.host != apiOrigin.host) return false
         val path = url.encodedPath
         if (method == "POST") return path == "/api/v3/member/collect/comic"
         if (method != "GET") return false
-        if (path in setOf("/api/v3/member/info", "/api/v3/member/collect/comics", "/api/v3/member/browse/comics")) return true
+        if (path in setOf("/api/v3/member/collect/comics", "/api/v3/member/browse/comics")) return true
         return QUERY_PATH.matches(path) || CHAPTER_PATH.matches(path)
     }
 
