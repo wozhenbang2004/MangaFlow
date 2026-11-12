@@ -213,6 +213,13 @@ fun DetailScreen(
                 }
             }
         }
+        val artworkScroll = rememberScrollableState { delta ->
+            contentsJump?.cancel()
+            val previous = header.heightOffset
+            header.heightOffset = (previous + delta).coerceIn(header.heightOffsetLimit, 0f)
+            // Consume exactly the header's movement, including reversal and fling frames.
+            header.heightOffset - previous
+        }
         val openContents: () -> Unit = {
             section = 0
             contentsJump?.cancel()
@@ -251,8 +258,7 @@ fun DetailScreen(
                 },
             )
             Box(
-                Modifier.fillMaxWidth().clipToBounds().nestedScroll(scrolling)
-                    .scrollable(rememberScrollableState { 0f }, Orientation.Vertical)
+                Modifier.fillMaxWidth().clipToBounds()
                     .layout { measurable, constraints ->
                         // Read the moving offset during layout, without recomposing the whole detail.
                         val expanded = heroPixels.roundToInt().coerceAtMost(constraints.maxHeight)
@@ -265,6 +271,9 @@ fun DetailScreen(
                         }
                     },
             ) {
+                // The empty artwork area and the card are sibling gesture targets. Each
+                // owns one scroll chain; the header must not also consume it in pre-scroll.
+                Box(Modifier.fillMaxSize().scrollable(artworkScroll, Orientation.Vertical))
                 Column(
                     Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.Bottom,
@@ -272,9 +281,11 @@ fun DetailScreen(
                 ) {
                     if (!compactHero) {
                         HeroBookInformation(current, artworkBackdrop, onIntroduction = { fullIntroduction = true },
-                            onContents = openContents)
+                            onContents = openContents,
+                            modifier = Modifier.scrollable(artworkScroll, Orientation.Vertical))
                     } else {
-                        LiquidGlassSurface(artworkBackdrop, Modifier.size(48.dp), cornerRadius = 16.dp) {
+                        LiquidGlassSurface(artworkBackdrop,
+                            Modifier.size(48.dp).scrollable(artworkScroll, Orientation.Vertical), cornerRadius = 16.dp) {
                             MotionIconButton(onClick = openContents, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Outlined.KeyboardArrowDown, "滑到章节", tint = DetailForeground)
                             }
@@ -387,8 +398,14 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
 }
 
 @Composable
-private fun HeroBookInformation(manga: Manga, backdrop: HazeState, onIntroduction: () -> Unit, onContents: () -> Unit) {
-    LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 18.dp) {
+private fun HeroBookInformation(
+    manga: Manga,
+    backdrop: HazeState,
+    onIntroduction: () -> Unit,
+    onContents: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LiquidGlassSurface(backdrop, modifier.fillMaxWidth(), cornerRadius = 18.dp) {
         Column(
             Modifier.fillMaxWidth()
                 .padding(horizontal = 14.dp).padding(top = 13.dp, bottom = 5.dp),

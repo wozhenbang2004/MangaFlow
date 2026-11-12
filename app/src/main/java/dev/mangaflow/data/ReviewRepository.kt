@@ -218,12 +218,12 @@ class ReviewRepository(context: Context) {
                 .also { rememberNames(manga, key, epoch, it.names) }
             val choices = (matches.ifEmpty { comics }).take(8).map(::bangumiCandidate)
             return BangumiMatch(ReviewSource("bangumi", "Bangumi", ReviewStatus.NO_MATCH, searchUrl,
-                message = if (choices.isEmpty()) "尚未找到对应漫画，可到原站查找" else "请确认对应的漫画条目，选择后会记住关联",
+                message = if (choices.isEmpty()) "尚未找到对应漫画" else "请确认对应的漫画条目，选择后会记住关联",
                 candidates = choices))
         } catch (error: CancellationException) { throw error }
           catch (error: Exception) {
             return BangumiMatch(ReviewSource("bangumi", "Bangumi", ReviewStatus.UNAVAILABLE, searchUrl,
-                message = error.userMessage("Bangumi 暂时无法连接，可到原站查看")))
+                message = error.userMessage("Bangumi 暂时无法连接，请稍后重试")))
         }
     }
 
@@ -303,12 +303,12 @@ class ReviewRepository(context: Context) {
                     "https://anilist.co/manga/$id")
             }
             return ReviewSource("anilist", "AniList", ReviewStatus.NO_MATCH, searchUrl,
-                message = if (choices.isEmpty()) "尚未找到对应漫画，可到原站查找" else "请确认对应的漫画条目，选择后会记住关联",
+                message = if (choices.isEmpty()) "尚未找到对应漫画" else "请确认对应的漫画条目，选择后会记住关联",
                 candidates = choices)
         } catch (error: CancellationException) { throw error }
           catch (error: Exception) {
             return ReviewSource("anilist", "AniList", ReviewStatus.UNAVAILABLE, searchUrl,
-                message = error.userMessage("AniList 暂时无法连接，可到原站查看"))
+                message = error.userMessage("AniList 暂时无法连接，请稍后重试"))
         }
     }
 
@@ -387,7 +387,7 @@ class ReviewRepository(context: Context) {
         source.copy(reviews = page.items, reviewCount = page.total, nextPage = page.nextPage)
     } catch (error: CancellationException) { throw error }
       catch (error: Exception) {
-        source.copy(reviewsError = error.userMessage("评论暂时无法载入，请重试或查看原站。"), nextPage = 0)
+        source.copy(reviewsError = error.userMessage("评论暂时无法载入，请稍后重试。"), nextPage = 0)
     }
 
     private fun resolveBangumiMatch(matches: List<JSONObject>, authors: List<String>): JSONObject? {

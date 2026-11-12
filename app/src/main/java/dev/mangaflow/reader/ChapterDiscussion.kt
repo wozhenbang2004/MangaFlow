@@ -46,11 +46,27 @@ import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.ReviewRepository
 import dev.mangaflow.data.ReviewStatus
-import dev.mangaflow.ui.CommunityComment
+import dev.mangaflow.ui.CommunityDiscussionComment
+import dev.mangaflow.ui.CommentMatchChoice
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.launch
+
+@Composable
+internal fun rememberChapterDiscussionState(
+    manga: Manga,
+    chapter: Chapter,
+    repository: CopyCommunityRepository,
+    reviewRepository: ReviewRepository,
+): ChapterDiscussionState {
+    val scope = rememberCoroutineScope()
+    val state = remember(manga.id, manga.title, manga.sourceUuid, chapter.id, repository, reviewRepository) {
+        ChapterDiscussionState(manga, chapter, repository, reviewRepository, scope)
+    }
+    DisposableEffect(state) { onDispose { state.dispose() } }
+    return state
+}
 
 /** Local images and online discussion share this same chapter end; comments never count as pages. */
 @Composable
@@ -64,13 +80,10 @@ internal fun ChapterDiscussion(
     reviewRepository: ReviewRepository,
     previewVisible: Boolean = true,
     onClose: (() -> Unit)? = null,
+    state: ChapterDiscussionState,
 ) {
     val scope = rememberCoroutineScope()
-    val state = remember(manga.id, chapter.id, repository, reviewRepository) {
-        ChapterDiscussionState(manga, chapter, repository, reviewRepository, scope)
-    }
-    DisposableEffect(state) { onDispose { state.dispose() } }
-    LaunchedEffect(state) { state.refresh() }
+    LaunchedEffect(state) { state.ensureLoaded() }
     var expanded by rememberSaveable(manga.id, chapter.id, previewVisible) { mutableStateOf(!previewVisible) }
     val mixed = remember(state.sources) { mixedDiscussionRows(state.sources) }
     val chapterCount = state.sources.firstOrNull { it.isChapter }?.source?.reviewCount
@@ -91,15 +104,15 @@ internal fun ChapterDiscussion(
         if (expanded && nearEnd && !busy) state.loadNext()
     }
 
-    if (previewVisible) Column(Modifier.fillMaxWidth().background(background).padding(horizontal = 20.dp)
-        .padding(top = 20.dp, bottom = 96.dp)) {
+    if (previewVisible) Column(Modifier.fillMaxWidth().background(background).padding(horizontal = 16.dp)
+        .padding(top = 12.dp, bottom = 96.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("本话读完了", color = muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
             if (onNext != null) TextButton(onClick = onNext) {
                 Text("下一话 →", color = foreground, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             }
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(4.dp))
         DiscussionHeading(chapter, chapterCount, mixed.size, busy, foreground,
             onRefresh = { state.refresh(forceRefresh = true) })
         if (mixed.isEmpty()) {
@@ -107,16 +120,16 @@ internal fun ChapterDiscussion(
             else if (!busy && notices.isEmpty() && !state.hasMore) Text("暂时还没有公开讨论", color = muted,
                 fontSize = 13.sp, modifier = Modifier.padding(vertical = 18.dp))
         }
-        mixed.take(4).forEach { row ->
-            key(row.key) { DiscussionRow(row, foreground) }
+        mixed.take(6).forEach { row ->
+            key(row.key) { DiscussionRow(row, state) }
             HorizontalDivider(color = foreground.copy(alpha = .06f), thickness = .5.dp)
         }
         if (mixed.isEmpty()) {
             notices.forEach { source ->
-                DiscussionNotice(source, foreground, busy) { state.retry(source.source.id) }
+                key(source.key) { DiscussionSourceActions(source, state, foreground, busy) }
             }
         } else if (notices.isNotEmpty()) {
-            Text(notices.joinToString(" · ") { it.source.name } + " 暂未更新",
+            Text(notices.map { it.source.name }.distinct().joinToString(" · ") + " 暂未更新",
                 color = muted, fontSize = 11.sp, modifier = Modifier.padding(top = 10.dp))
         }
         if (mixed.isNotEmpty() || notices.isNotEmpty() || state.hasMore) TextButton(
@@ -130,7 +143,7 @@ internal fun ChapterDiscussion(
         MotionBottomSheet(onDismissRequest = { expanded = false; onClose?.invoke() },
             containerColor = background, contentColor = foreground) { dismiss ->
             Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).navigationBarsPadding()) {
-                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     DiscussionHeading(chapter, chapterCount, mixed.size, busy, foreground,
                         modifier = Modifier.weight(1f), onRefresh = {
@@ -142,13 +155,13 @@ internal fun ChapterDiscussion(
                     }
                 }
                 LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp)) {
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp)) {
                     items(mixed, key = ReaderDiscussionRow::key) { row ->
-                        DiscussionRow(row, foreground)
+                        DiscussionRow(row, state)
                         HorizontalDivider(color = foreground.copy(alpha = .06f), thickness = .5.dp)
                     }
-                    items(notices, key = { "notice:${it.source.id}" }) { source ->
-                        DiscussionNotice(source, foreground, busy) { state.retry(source.source.id) }
+                    items(notices, key = { "notice:${it.key}" }) { source ->
+                        DiscussionSourceActions(source, state, foreground, busy)
                     }
                     item("discussion-footer") {
                         when {
@@ -200,10 +213,26 @@ private fun DiscussionHeading(
 }
 
 @Composable
-private fun DiscussionRow(row: ReaderDiscussionRow, foreground: Color) {
-    CommunityComment(row.review, foreground = foreground, muted = foreground.copy(alpha = .56f),
-        sourceId = row.source.source.id, scopeLabel = if (row.source.isChapter) "本话" else "作品",
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+private fun DiscussionRow(row: ReaderDiscussionRow, state: ChapterDiscussionState) {
+    CommunityDiscussionComment(row.source.source, row.review, loadReplies = state::loadReplies,
+        scopeLabel = if (row.source.isChapter) "本话" else "作品")
+}
+
+@Composable
+private fun DiscussionSourceActions(
+    source: ReaderDiscussionSource,
+    state: ChapterDiscussionState,
+    foreground: Color,
+    busy: Boolean,
+) {
+    if (source.source.status == ReviewStatus.NO_MATCH && source.source.candidates.isNotEmpty()) {
+        CommentMatchChoice(source.source.copy(loadingMore = busy), onMatch = state::choose)
+        if (source.source.reviewsError != null) {
+            DiscussionNotice(source, foreground, busy) { state.retry(source.key) }
+        }
+    } else {
+        DiscussionNotice(source, foreground, busy) { state.retry(source.key) }
+    }
 }
 
 @Composable

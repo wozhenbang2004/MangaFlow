@@ -196,6 +196,7 @@ fun ReaderScreen(
     var chapterId by rememberSaveable(manga.id) { mutableStateOf(initialChapterId) }
     val chapter = chapters.firstOrNull { it.id == chapterId }
         ?: Chapter(chapterId, libraryStore.progressFor(manga.id)?.takeIf { it.chapterId == chapterId }?.chapterTitle ?: "正在阅读", 0)
+    val discussionState = rememberChapterDiscussionState(manga, chapter, communityRepository, reviewRepository)
     val siblings = remember(chapters, chapter.group) { chapters.filter { it.group == chapter.group }.sortedBy(Chapter::index) }
     val hasMultipleGroups = remember(chapters) { chapters.map(Chapter::group).distinct().size > 1 }
     val chapterIndex = siblings.indexOfFirst { it.id == chapterId }
@@ -368,7 +369,7 @@ fun ReaderScreen(
                         ChapterDiscussion(manga, chapter, communityRepository, colors.background, colors.onSurface,
                             onNext = siblings.getOrNull(chapterIndex + 1)?.let { next ->
                                 { chapterId = next.id; controlsVisible = true }
-                            }, reviewRepository = reviewRepository)
+                            }, reviewRepository = reviewRepository, state = discussionState)
                     },
                 )
             }
@@ -589,7 +590,7 @@ fun ReaderScreen(
     if (showComments) ChapterDiscussion(
         manga, chapter, communityRepository, colors.background, colors.onSurface,
         onNext = null, reviewRepository = reviewRepository,
-        previewVisible = false, onClose = { showComments = false },
+        previewVisible = false, onClose = { showComments = false }, state = discussionState,
     )
 }
 
@@ -1109,7 +1110,7 @@ private fun ReaderProgressSlider(
     var preview by remember { mutableStateOf<Float?>(null) }
     val lastPage = (pageCount - 1).coerceAtLeast(0)
     val shown = (preview ?: pendingPage?.toFloat() ?: pageIndex.toFloat()).coerceIn(0f, lastPage.toFloat())
-    val numberWidth = with(LocalDensity.current) { 12.sp.toDp() * (pageCount.toString().length + 1) * .65f }
+    val numberWidth = with(LocalDensity.current) { 12.sp.toDp() * (pageCount.toString().length * 2 + 3) * .65f }
 
     LaunchedEffect(pressed, dragged, enabled) {
         interactionChanged(enabled && (pressed || dragged))
@@ -1124,7 +1125,6 @@ private fun ReaderProgressSlider(
 
     val colors = MaterialTheme.colorScheme
     Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("${shown.roundToInt() + 1}", Modifier.width(numberWidth), color = colors.onSurface, fontSize = 12.sp)
         ReaderSeekBar(
             value = shown,
             onValueChange = { preview = it },
@@ -1133,12 +1133,15 @@ private fun ReaderProgressSlider(
                 preview = null
             },
             valueRange = 0f..lastPage.coerceAtLeast(1).toFloat(),
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            modifier = Modifier.weight(1f).padding(end = 10.dp),
             enabled = enabled && pageCount > 1,
             interactions = interactions,
             label = "阅读进度，第 ${shown.roundToInt() + 1} 页，共 $pageCount 页",
         )
-        Text("$pageCount", Modifier.width(numberWidth), color = colors.onSurfaceVariant, fontSize = 12.sp)
+        Row(Modifier.width(numberWidth), horizontalArrangement = Arrangement.Center) {
+            Text("${shown.roundToInt() + 1}", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text(" / $pageCount", color = colors.onSurfaceVariant, fontSize = 12.sp)
+        }
     }
 }
 
@@ -1212,60 +1215,59 @@ private fun ReaderSettingsDialog(
     LaunchedEffect(visible, preferences.dimAmount) { if (visible) dimAmount = preferences.dimAmount }
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth()) {
-            Column(Modifier.heightIn(max = availableHeight).verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("阅读设置", fontSize = 17.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-                    ReaderIcon(Icons.Rounded.Close, "关闭设置", onClick = onDismiss)
-                }
-                Text("阅读方式", color = colors.onSurfaceVariant, fontSize = 12.sp)
-                MotionTabs(
-                    selected = modes.indexOfFirst { it.first == preferences.mode },
-                    labels = modes.map { it.second },
-                    onSelect = { update(preferences.copy(mode = modes[it].first)) },
-                    foreground = colors.onSurface, muted = colors.onSurfaceVariant,
-                    track = colors.onSurface.copy(alpha = .035f), indicator = colors.onSurface.copy(alpha = .08f),
-                    fontSize = 12.sp, role = Role.RadioButton,
-                )
-                Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("纸面", Modifier.weight(1f), fontSize = 14.sp)
+            Column(Modifier.heightIn(max = availableHeight).padding(horizontal = 18.dp)) {
+                ReaderPanelHeading("阅读设置", "关闭设置", onDismiss)
+                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
+                    .padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("阅读方式", color = colors.onSurfaceVariant, fontSize = 12.sp)
                     MotionTabs(
-                        selected = themes.indexOf(preferences.theme), labels = listOf("纸白", "暖纸", "墨黑"),
-                        onSelect = { update(preferences.copy(theme = themes[it])) },
-                        modifier = Modifier.width(188.dp), foreground = colors.onSurface,
-                        muted = colors.onSurfaceVariant, indicator = colors.onSurface.copy(alpha = .08f), fontSize = 12.sp,
-                        role = Role.RadioButton,
+                        selected = modes.indexOfFirst { it.first == preferences.mode },
+                        labels = modes.map { it.second },
+                        onSelect = { update(preferences.copy(mode = modes[it].first)) },
+                        foreground = colors.onSurface, muted = colors.onSurfaceVariant,
+                        track = colors.onSurface.copy(alpha = .035f), indicator = colors.onSurface.copy(alpha = .08f),
+                        fontSize = 12.sp, role = Role.RadioButton,
                     )
-                }
-                ReaderToggle("保持屏幕常亮", preferences.keepScreenOn) { update(preferences.copy(keepScreenOn = it)) }
-                ReaderToggle("边看边下", preferences.downloadWhileReading, "只保存正在阅读的章节") {
-                    update(preferences.copy(downloadWhileReading = it))
-                }
-                Column(Modifier.fillMaxWidth().animateContentSize(
-                    animationSpec = tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
-                )) {
-                    if (preferences.mode == ReadingMode.VERTICAL) ReaderToggle("页间留白", preferences.pageGap) {
-                        update(preferences.copy(pageGap = it))
+                    Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("纸面", Modifier.weight(1f), fontSize = 14.sp)
+                        MotionTabs(
+                            selected = themes.indexOf(preferences.theme), labels = listOf("纸白", "暖纸", "墨黑"),
+                            onSelect = { update(preferences.copy(theme = themes[it])) },
+                            modifier = Modifier.width(188.dp), foreground = colors.onSurface,
+                            muted = colors.onSurfaceVariant, indicator = colors.onSurface.copy(alpha = .08f), fontSize = 12.sp,
+                            role = Role.RadioButton,
+                        )
                     }
-                    if (preferences.mode == ReadingMode.WEBTOON) Text("长图连续显示，无页间空隙",
-                        color = colors.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
-                    if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
-                        ReaderToggle("双页跨页", preferences.doublePage) { update(preferences.copy(doublePage = it)) }
-                        if (preferences.doublePage) ReaderToggle("封面独页", preferences.coverAlone) {
-                            update(preferences.copy(coverAlone = it))
+                    ReaderToggle("保持屏幕常亮", preferences.keepScreenOn) { update(preferences.copy(keepScreenOn = it)) }
+                    ReaderToggle("边看边下", preferences.downloadWhileReading, "只保存正在阅读的章节") {
+                        update(preferences.copy(downloadWhileReading = it))
+                    }
+                    Column(Modifier.fillMaxWidth().animateContentSize(
+                        animationSpec = tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
+                    )) {
+                        if (preferences.mode == ReadingMode.VERTICAL) ReaderToggle("页间留白", preferences.pageGap) {
+                            update(preferences.copy(pageGap = it))
+                        }
+                        if (preferences.mode == ReadingMode.WEBTOON) Text("长图连续显示，无页间空隙",
+                            color = colors.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
+                        if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
+                            ReaderToggle("双页跨页", preferences.doublePage) { update(preferences.copy(doublePage = it)) }
+                            if (preferences.doublePage) ReaderToggle("封面独页", preferences.coverAlone) {
+                                update(preferences.copy(coverAlone = it))
+                            }
                         }
                     }
-                }
-                Column(Modifier.padding(top = 2.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("降低亮度", fontSize = 14.sp)
-                        Text("${(dimAmount * 100).roundToInt()}%", color = colors.onSurfaceVariant, fontSize = 12.sp)
+                    Column(Modifier.padding(top = 2.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("降低亮度", fontSize = 14.sp)
+                            Text("${(dimAmount * 100).roundToInt()}%", color = colors.onSurfaceVariant, fontSize = 12.sp)
+                        }
+                        ReaderSeekBar(
+                            value = dimAmount, onValueChange = { dimAmount = it; onDimPreview(it) },
+                            onValueChangeFinished = { update(preferences.copy(dimAmount = dimAmount)) },
+                            valueRange = 0f..0.65f, modifier = Modifier.fillMaxWidth(), label = "降低阅读亮度",
+                        )
                     }
-                    ReaderSeekBar(
-                        value = dimAmount, onValueChange = { dimAmount = it; onDimPreview(it) },
-                        onValueChangeFinished = { update(preferences.copy(dimAmount = dimAmount)) },
-                        valueRange = 0f..0.65f, modifier = Modifier.fillMaxWidth(), label = "降低阅读亮度",
-                    )
                 }
             }
         }
@@ -1291,31 +1293,30 @@ private fun ReaderSpreadDialog(
     val availableHeight = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(160).dp
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth()) {
-            Column(Modifier.heightIn(max = availableHeight).verticalScroll(rememberScrollState()).padding(18.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("错页校正", fontSize = 17.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-                    ReaderIcon(Icons.Rounded.Close, "关闭校正", onClick = onDismiss)
-                }
-                Text("当前从第 ${first + 1} 页开始", color = colors.onSurface, fontSize = 13.sp)
-                Text("把这一页设为独页，后续两页重新配对。原始图片顺序保持不变。",
-                    color = colors.onSurfaceVariant, fontSize = 12.sp)
-                ReaderToggle("封面独页", preferences.coverAlone) { onCoverChange(it); onDismiss() }
-                if (first == 0 && preferences.coverAlone) {
-                    Text("封面已经独立。关闭上方开关可让第一页参与拼页。", color = colors.onSurfaceVariant, fontSize = 12.sp)
-                } else if (wide) {
-                    Text("这一页是宽幅原图，保持整页显示。", color = colors.onSurfaceVariant, fontSize = 12.sp)
-                } else {
-                    TextButton(onClick = {
-                        onCorrection(if (first in manualSingles) manualSingles - first else manualSingles + first)
-                        onDismiss()
-                    }) {
-                        Text(if (first in manualSingles) "恢复第 ${first + 1} 页的自动拼接"
-                            else "第 ${first + 1} 页独立，后续重新配对", color = colors.onSurface, fontSize = 13.sp)
+            Column(Modifier.heightIn(max = availableHeight).padding(horizontal = 18.dp)) {
+                ReaderPanelHeading("错页校正", "关闭校正", onDismiss)
+                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
+                    .padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("当前从第 ${first + 1} 页开始", color = colors.onSurface, fontSize = 13.sp)
+                    Text("把这一页设为独页，后续两页重新配对。原始图片顺序保持不变。",
+                        color = colors.onSurfaceVariant, fontSize = 12.sp)
+                    ReaderToggle("封面独页", preferences.coverAlone) { onCoverChange(it); onDismiss() }
+                    if (first == 0 && preferences.coverAlone) {
+                        Text("封面已经独立。关闭上方开关可让第一页参与拼页。", color = colors.onSurfaceVariant, fontSize = 12.sp)
+                    } else if (wide) {
+                        Text("这一页是宽幅原图，保持整页显示。", color = colors.onSurfaceVariant, fontSize = 12.sp)
+                    } else {
+                        TextButton(onClick = {
+                            onCorrection(if (first in manualSingles) manualSingles - first else manualSingles + first)
+                            onDismiss()
+                        }) {
+                            Text(if (first in manualSingles) "恢复第 ${first + 1} 页的自动拼接"
+                                else "第 ${first + 1} 页独立，后续重新配对", color = colors.onSurface, fontSize = 13.sp)
+                        }
                     }
-                }
-                if (manualSingles.isNotEmpty()) TextButton(onClick = { onCorrection(emptySet()); onDismiss() }) {
-                    Text("清除本章调整", color = colors.onSurfaceVariant, fontSize = 12.sp)
+                    if (manualSingles.isNotEmpty()) TextButton(onClick = { onCorrection(emptySet()); onDismiss() }) {
+                        Text("清除本章调整", color = colors.onSurfaceVariant, fontSize = 12.sp)
+                    }
                 }
             }
         }
@@ -1350,7 +1351,7 @@ private fun ReaderChaptersDialog(
             Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
-                    Text("${visibleChapters.size}", Modifier.weight(1f).padding(start = 8.dp),
+                    Text("${visibleChapters.size} 章", Modifier.weight(1f).padding(start = 8.dp),
                         color = colors.onSurfaceVariant, fontSize = 12.sp)
                     Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
                         if (catalogBusy) CircularProgressIndicator(Modifier.size(13.dp)
@@ -1384,7 +1385,7 @@ private fun ReaderChaptersDialog(
                         } else state.stopScroll()
                     }
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(82.dp * fontScale), state = state,
+                        columns = GridCells.Adaptive(68.dp * fontScale), state = state,
                         modifier = Modifier.fillMaxWidth(), userScrollEnabled = active,
                         contentPadding = PaddingValues(top = 10.dp, bottom = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -1393,9 +1394,9 @@ private fun ReaderChaptersDialog(
                             val selected = chapter.id == currentId
                             val entry = saved[chapter.id]
                             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
-                                .background(if (selected) colors.onSurface.copy(alpha = .10f) else colors.surfaceVariant.copy(alpha = .65f))
+                                .background(colors.onSurface.copy(alpha = if (selected) .09f else .035f))
                                 .selectable(selected = selected, role = Role.RadioButton, onClick = { onSelect(chapter.id) })
-                                .padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                                .padding(horizontal = 6.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(chapter.title, Modifier.weight(1f), color = colors.onSurface,
                                     fontSize = 12.sp, lineHeight = 17.sp,
                                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
@@ -1410,7 +1411,7 @@ private fun ReaderChaptersDialog(
                                                 trackColor = colors.onSurface.copy(alpha = .10f))
                                         DownloadStatus.PAUSED -> Icon(Icons.Rounded.Pause, "下载已暂停", Modifier.size(11.dp), tint = colors.onSurfaceVariant)
                                         DownloadStatus.FAILED -> Icon(Icons.Rounded.Refresh, "下载未完成", Modifier.size(11.dp), tint = colors.error)
-                                        null -> Unit
+                                        null -> if (selected) Icon(Icons.Rounded.Check, "当前章节", Modifier.size(12.dp), tint = colors.onSurface)
                                     }
                                 }
                             }
@@ -1419,6 +1420,15 @@ private fun ReaderChaptersDialog(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ReaderPanelHeading(title: String, closeLabel: String, onDismiss: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, color = MaterialTheme.colorScheme.onSurface, fontSize = 17.sp,
+            fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+        ReaderIcon(Icons.Rounded.Close, closeLabel, onClick = onDismiss)
     }
 }
 

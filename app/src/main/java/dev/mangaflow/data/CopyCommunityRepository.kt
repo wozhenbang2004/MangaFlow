@@ -166,7 +166,14 @@ class CopyCommunityRepository(
         }
     }
 
-    /** The reader can show its exact chapter's last snapshot while refreshing, including offline. */
+    /** Reuse the manga detail's work-comment snapshot before the mixed reader feed refreshes. */
+    fun cachedWorkComments(manga: Manga): ReviewPage? {
+        if (!validUuid(manga.sourceUuid)) return null
+        val subjectId = UUID.fromString(manga.sourceUuid).toString()
+        return synchronized(commentCache) { commentCache["work:$subjectId:0"]?.page }
+    }
+
+    /** Chapter and work snapshots retain different identities, even in a mixed feed. */
     fun cachedChapterComments(chapter: Chapter): ReviewPage? {
         if (!validUuid(chapter.id)) return null
         val chapterId = UUID.fromString(chapter.id).toString()

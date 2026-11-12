@@ -5,7 +5,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -19,7 +18,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -34,14 +32,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
@@ -66,8 +62,8 @@ internal fun ReaderSurface(
         shape = shape,
         color = colors.surface.copy(alpha = .97f),
         contentColor = colors.onSurface,
-        border = BorderStroke(.5.dp, colors.outlineVariant.copy(alpha = .55f)),
-        shadowElevation = 3.dp,
+        border = BorderStroke(.5.dp, colors.outlineVariant.copy(alpha = .45f)),
+        shadowElevation = 2.dp,
         tonalElevation = 0.dp,
     ) {
         Box(Modifier.background(Brush.verticalGradient(listOf(
@@ -79,7 +75,7 @@ internal fun ReaderSurface(
 @Composable
 internal fun ReaderDialogSurface(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     val window = (LocalView.current.parent as? DialogWindowProvider)?.window
-    SideEffect { window?.setDimAmount(.16f) }
+    SideEffect { window?.setDimAmount(.12f) }
     ReaderSurface(modifier = modifier, content = content)
 }
 
@@ -100,13 +96,13 @@ internal fun ReaderSeekBar(
     val pressed by interactions.collectIsPressedAsState()
     val dragged by interactions.collectIsDraggedAsState()
     val motion = LocalMotionEnabled.current
-    val thumbScale = animateFloatAsState(
-        if (pressed || dragged) 1.16f else 1f,
-        tween(if (motion) MangaMotion.Quick else 0), label = "reader-slider-thumb",
+    val engagement = animateFloatAsState(
+        if (pressed || dragged) 1f else 0f,
+        tween(if (motion) MangaMotion.Quick else 0), label = "reader-slider-engagement",
     )
     val fraction = ((value - valueRange.start) /
         (valueRange.endInclusive - valueRange.start).coerceAtLeast(.001f)).coerceIn(0f, 1f)
-    val foreground = colors.onSurface.copy(alpha = if (enabled) .85f else .28f)
+    val foreground = colors.onSurface.copy(alpha = if (enabled) .72f else .24f)
     Slider(
         value = value.coerceIn(valueRange),
         onValueChange = onValueChange,
@@ -116,21 +112,23 @@ internal fun ReaderSeekBar(
         interactionSource = interactions,
         modifier = modifier.heightIn(min = 48.dp).semantics { contentDescription = label },
         thumb = {
-            Box(Modifier.size(16.dp).graphicsLayer {
-                scaleX = thumbScale.value
-                scaleY = scaleX
-            }.shadow(1.dp, CircleShape).border(2.dp, colors.surface, CircleShape)
-                .clip(CircleShape).background(foreground))
+            // The measured slot stays fixed; only the quiet halo grows during interaction.
+            Canvas(Modifier.size(20.dp)) {
+                drawCircle(foreground.copy(alpha = .10f * engagement.value), radius = 10.dp.toPx())
+                drawCircle(colors.surface, radius = 7.dp.toPx())
+                drawCircle(foreground, radius = (5f + engagement.value).dp.toPx())
+            }
         },
         track = {
-            Canvas(Modifier.fillMaxWidth().height(3.dp)) {
+            Canvas(Modifier.fillMaxWidth().height(6.dp)) {
                 val middle = size.height / 2f
                 val start = if (layoutDirection == LayoutDirection.Rtl) size.width else 0f
                 val end = if (layoutDirection == LayoutDirection.Rtl) 0f else size.width
+                val width = (2f + engagement.value * .5f).dp.toPx()
                 drawLine(colors.onSurface.copy(alpha = .12f), Offset(start, middle),
-                    Offset(end, middle), size.height, StrokeCap.Round)
+                    Offset(end, middle), width, StrokeCap.Round)
                 if (fraction > 0f) drawLine(foreground, Offset(start, middle),
-                    Offset(start + (end - start) * fraction, middle), size.height, StrokeCap.Round)
+                    Offset(start + (end - start) * fraction, middle), width, StrokeCap.Round)
             }
         },
     )

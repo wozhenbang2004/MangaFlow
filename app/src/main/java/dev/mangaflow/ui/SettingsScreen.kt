@@ -67,7 +67,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.BuildConfig
-import dev.mangaflow.data.CopyMangaConfig
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
@@ -233,11 +232,6 @@ fun SettingsScreen(
                     Text("漫流", style = MaterialTheme.typography.titleMedium, color = foreground)
                     Text("${BuildConfig.VERSION_NAME} · ${BuildConfig.VERSION_CODE}", style = MaterialTheme.typography.labelMedium, color = secondary)
                 }
-                SettingsTextAction(onClick = { context.openSettingsLink("https://github.com/${UpdateManager.REPOSITORY}/releases") }) {
-                    Text("版本记录", color = secondary, style = MaterialTheme.typography.labelLarge)
-                    Spacer(Modifier.width(4.dp))
-                    Icon(Icons.Outlined.OpenInNew, contentDescription = null, tint = secondary, modifier = Modifier.size(14.dp))
-                }
             }
             Spacer(Modifier.height(18.dp))
             update.release?.let { release ->
@@ -319,8 +313,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(28.dp))
             SettingsSectionLabel("关于")
             Spacer(Modifier.height(12.dp))
-            SettingsLinkRow("拷贝漫画", "原站", external = true) { context.openSettingsLink(CopyMangaConfig().websiteOrigin) }
-            SettingsLinkRow("MangaFlow", "项目主页", external = true) { context.openSettingsLink("https://github.com/${UpdateManager.REPOSITORY}") }
+            SettingsLinkRow("MangaFlow", "项目主页", external = true) { context.openProjectPage() }
         }
     }
 }
@@ -442,9 +435,10 @@ private tailrec fun Context.settingsActivity(): Activity? = when (this) {
     else -> null
 }
 
-private fun Context.openSettingsLink(url: String) {
-    runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-        .onFailure { Toast.makeText(this, "暂时无法打开链接", Toast.LENGTH_SHORT).show() }
+private fun Context.openProjectPage() {
+    val project = Uri.parse("https://github.com/${UpdateManager.REPOSITORY}")
+    runCatching { startActivity(Intent(Intent.ACTION_VIEW, project).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        .onFailure { Toast.makeText(this, "暂时无法打开项目主页", Toast.LENGTH_SHORT).show() }
 }
 
 private fun settingsBytes(bytes: Long): String = when {

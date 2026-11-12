@@ -30,10 +30,12 @@ internal data class ReaderDiscussionSource(
     val loaded: Boolean = false,
     val busy: Boolean = false,
     val failedPage: Int? = null,
-)
+) {
+    val key: String get() = "${source.id}:${if (isChapter) "chapter" else "work"}"
+}
 
 internal data class ReaderDiscussionRow(val source: ReaderDiscussionSource, val review: MangaReview) {
-    val key: String get() = "${source.source.id}:${source.source.subjectId}:${review.kind}:${review.id}"
+    val key: String get() = "${source.key}:${source.source.subjectId}:${review.kind}:${review.id}"
 }
 
 internal fun mixedDiscussionRows(sources: List<ReaderDiscussionSource>): List<ReaderDiscussionRow> =
@@ -71,6 +73,7 @@ internal class ChapterDiscussionState(
     private var generation = 0L
     private var refreshJob: Job? = null
     private var pageJob: Job? = null
+    private var started = false
 
     var sources by mutableStateOf(initialSources())
         private set
@@ -90,8 +93,16 @@ internal class ChapterDiscussionState(
             reviews = cached?.items.orEmpty(), reviewCount = cached?.total,
             nextPage = if (cached == null) 0 else cached.nextPage,
         )
+        val cachedCopy = chapters.cachedWorkComments(manga)
+        val copyWork = chapters.metric(manga).copy(
+            reviews = cachedCopy?.items.orEmpty(), reviewCount = cachedCopy?.total,
+            nextPage = if (cachedCopy == null) 0 else cachedCopy.nextPage,
+        )
         val cachedWorks = works.cachedSources(manga).associateBy(ReviewSource::id)
-        return listOf(ReaderDiscussionSource(chapterSource, isChapter = true, loaded = cached != null)) +
+        return listOf(
+            ReaderDiscussionSource(chapterSource, isChapter = true, loaded = cached != null),
+            ReaderDiscussionSource(copyWork, isChapter = false, loaded = cachedCopy != null),
+        ) +
             listOf("bangumi" to "Bangumi", "anilist" to "AniList").map { (id, name) ->
                 val source = cachedWorks[id]
                 ReaderDiscussionSource(source ?: ReviewSource(id, name, ReviewStatus.UNAVAILABLE, ""),
@@ -99,7 +110,13 @@ internal class ChapterDiscussionState(
             }
     }
 
+    /** The chapter end and toolbar share one lifetime, but neither starts work until displayed. */
+    fun ensureLoaded() {
+        if (!started) refresh()
+    }
+
     fun refresh(forceRefresh: Boolean = false) {
+        started = true
         val version = ++generation
         refreshJob?.cancel()
         pageJob?.cancel()
@@ -110,7 +127,8 @@ internal class ChapterDiscussionState(
         refreshJob = scope.launch {
             try {
                 coroutineScope {
-                    launch { fetchPage("copy", 0, version, forceRefresh) }
+                    launch { fetchPage("copy:chapter", 0, version, forceRefresh) }
+                    launch { fetchPage("copy:work", 0, version, forceRefresh) }
                     launch { refreshWorks(version, forceRefresh) }
                 }
             } finally {
@@ -136,7 +154,7 @@ internal class ChapterDiscussionState(
         } catch (failure: Exception) {
             if (version == generation) {
                 sources = sources.map { current ->
-                    if (current.isChapter) current else current.copy(busy = false, loaded = true,
+                    if (current.source.id == "copy") current else current.copy(busy = false, loaded = true,
                         source = current.source.copy(reviewsError = failure.message ?: "评论暂时无法读取"),
                         failedPage = 0)
                 }
@@ -170,43 +188,84 @@ internal class ChapterDiscussionState(
         val next = sources.filter(::canLoadMore)
             .minWithOrNull(compareBy<ReaderDiscussionSource> { it.source.reviews.size }
                 .thenBy { if (it.isChapter) 0 else 1 }) ?: return
-        loadPage(next.source.id, next.source.nextPage ?: return)
+        loadPage(next.key, next.source.nextPage ?: return)
     }
 
-    fun retry(sourceId: String) {
+    fun retry(sourceKey: String) {
         if (refreshing || paging) return
-        val current = sources.firstOrNull { it.source.id == sourceId } ?: return
-        if (!current.isChapter && (current.source.status != ReviewStatus.READY || current.source.subjectId.isBlank())) {
+        val current = sources.firstOrNull { it.key == sourceKey } ?: return
+        if (current.source.id != "copy" && (current.source.status != ReviewStatus.READY || current.source.subjectId.isBlank())) {
             refresh(forceRefresh = true)
         } else {
-            loadPage(sourceId, current.failedPage ?: 0, forceRefresh = true)
+            loadPage(sourceKey, current.failedPage ?: 0, forceRefresh = true)
         }
     }
 
-    private fun loadPage(sourceId: String, page: Int, forceRefresh: Boolean = false) {
+    fun choose(sourceId: String, subjectId: String) {
+        if (refreshing || paging || sourceId == "copy") return
+        val sourceKey = "$sourceId:work"
+        val current = sources.firstOrNull { it.key == sourceKey } ?: return
+        if (current.source.candidates.none { it.id == subjectId }) return
         val version = generation
         paging = true
-        updateSource(sourceId) { it.copy(busy = true, failedPage = null,
-            source = it.source.copy(reviewsError = null)) }
+        updateSource(sourceKey) { it.copy(busy = true) }
         pageJob = scope.launch {
-            try { fetchPage(sourceId, page, version, forceRefresh) }
-            finally {
+            try {
+                val source = works.choose(manga, sourceId, subjectId)
+                currentCoroutineContext().ensureActive()
+                if (version == generation) publishSource(source)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                if (version == generation) updateSource(sourceKey) {
+                    it.copy(loaded = true, source = it.source.copy(
+                        reviewsError = failure.message ?: "暂时无法关联漫画，请重试"))
+                }
+            } finally {
                 if (version == generation) {
                     paging = false
-                    updateSource(sourceId) { it.copy(busy = false) }
+                    updateSource(sourceKey) { it.copy(busy = false) }
                 }
             }
         }
     }
 
-    private suspend fun fetchPage(sourceId: String, page: Int, version: Long, forceRefresh: Boolean) {
-        val current = sources.firstOrNull { it.source.id == sourceId } ?: return
+    suspend fun loadReplies(source: ReviewSource, review: MangaReview, page: Int): ReviewPage =
+        chapters.replies(manga, source, review, page)
+
+    private fun loadPage(sourceKey: String, page: Int, forceRefresh: Boolean = false) {
+        val version = generation
+        paging = true
+        updateSource(sourceKey) { it.copy(busy = true, failedPage = null,
+            source = it.source.copy(reviewsError = null)) }
+        pageJob = scope.launch {
+            try { fetchPage(sourceKey, page, version, forceRefresh) }
+            finally {
+                if (version == generation) {
+                    paging = false
+                    updateSource(sourceKey) { it.copy(busy = false) }
+                }
+            }
+        }
+    }
+
+    private suspend fun fetchPage(sourceKey: String, page: Int, version: Long, forceRefresh: Boolean) {
+        val current = sources.firstOrNull { it.key == sourceKey } ?: return
         try {
-            val result: ReviewPage = if (current.isChapter) chapters.chapterComments(manga, chapter, page, forceRefresh)
-                else works.loadMore(manga, current.source, page)
+            if (!current.isChapter && current.source.id == "copy" && page == 0) {
+                val source = chapters.overview(manga, forceRefresh)
+                currentCoroutineContext().ensureActive()
+                if (version == generation) publishSource(source)
+                return
+            }
+            val result: ReviewPage = when {
+                current.isChapter -> chapters.chapterComments(manga, chapter, page, forceRefresh)
+                current.source.id == "copy" -> chapters.comments(manga, current.source, page, forceRefresh)
+                else -> works.loadMore(manga, current.source, page)
+            }
             currentCoroutineContext().ensureActive()
             if (version != generation) return
-            updateSource(sourceId) { state ->
+            updateSource(sourceKey) { state ->
                 state.copy(loaded = true, busy = false, failedPage = null,
                     source = state.source.copy(
                         reviews = (if (page == 0) result.items else state.source.reviews + result.items)
@@ -218,15 +277,15 @@ internal class ChapterDiscussionState(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (failure: Exception) {
-            if (version == generation) updateSource(sourceId) {
+            if (version == generation) updateSource(sourceKey) {
                 it.copy(busy = false, loaded = true, failedPage = page,
                     source = it.source.copy(reviewsError = failure.message ?: "评论暂时无法读取"))
             }
         }
     }
 
-    private fun updateSource(sourceId: String, transform: (ReaderDiscussionSource) -> ReaderDiscussionSource) {
-        sources = sources.map { if (it.source.id == sourceId) transform(it) else it }
+    private fun updateSource(sourceKey: String, transform: (ReaderDiscussionSource) -> ReaderDiscussionSource) {
+        sources = sources.map { if (it.key == sourceKey) transform(it) else it }
     }
 
     private fun canLoadMore(source: ReaderDiscussionSource): Boolean = source.loaded && !source.busy &&
