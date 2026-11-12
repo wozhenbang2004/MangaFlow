@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -56,7 +57,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -66,8 +69,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -132,6 +137,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         sectionName = destination.name
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
+    val drawerBackdrop = rememberHazeState()
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val savedState = rememberSaveableStateHolder()
@@ -171,7 +177,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     if (recentReadingOpen) {
         RecentReadingSheet(history, model.repository,
             onDismiss = { recentReadingOpen = false },
-            onContinue = { model.continueReading(it) })
+            onContinue = { model.continueReading(it) },
+            onRemoveHistory = model::removeHistory)
     }
     val activity = LocalContext.current.activityOrNull()
     val darkSystem = isSystemInDarkTheme()
@@ -186,7 +193,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
 
     val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
-    val drawerWidthPx = with(density) { 296.dp.toPx() }
+    var measuredDrawerWidth by remember { mutableFloatStateOf(0f) }
+    val drawerWidthPx = measuredDrawerWidth.takeIf { it > 0f } ?: with(density) { 296.dp.toPx() }
+    val drawerVisible by remember(drawer, drawerWidthPx) {
+        derivedStateOf {
+            val offset = drawer.currentOffset
+            drawer.isOpen || drawer.targetValue == DrawerValue.Open ||
+                (offset.isFinite() && offset > -drawerWidthPx + .5f)
+        }
+    }
     val routeTravel = with(density) { 24.dp.roundToPx() }
     CompositionLocalProvider(
         LocalMangaMetrics provides MangaMetricState(metrics, model::retainMetrics, model::releaseMetrics),
@@ -196,16 +211,26 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant),
         drawerState = drawer,
         gesturesEnabled = frame is Frame.Root,
-        scrimColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.22f),
+        scrimColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.14f),
         drawerContent = {
             ModalDrawerSheet(
-                modifier = Modifier.width(296.dp),
-                drawerShape = RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp),
-                drawerContainerColor = MaterialTheme.colorScheme.background,
+                modifier = Modifier.width(296.dp).onSizeChanged { measuredDrawerWidth = it.width.toFloat() }
+                    .padding(start = 8.dp, top = 10.dp, bottom = 10.dp),
+                drawerShape = RoundedCornerShape(26.dp),
+                drawerContainerColor = Color.Transparent,
                 drawerTonalElevation = 0.dp,
+                windowInsets = WindowInsets(0, 0, 0, 0),
             ) {
-                Column(Modifier.fillMaxHeight().statusBarsPadding().padding(20.dp)) {
-                    Row(Modifier.padding(12.dp, 20.dp, 12.dp, 36.dp), verticalAlignment = Alignment.CenterVertically) {
+                LiquidGlassSurface(
+                    state = drawerBackdrop,
+                    modifier = Modifier.fillMaxHeight().fillMaxWidth(),
+                    cornerRadius = 26.dp,
+                    role = GlassSurfaceRole.NAVIGATION,
+                    elevation = 0.dp,
+                ) {
+                Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                    .padding(horizontal = 14.dp, vertical = 12.dp)) {
+                    Row(Modifier.padding(12.dp, 12.dp, 12.dp, 28.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(28.dp))
                         Spacer(Modifier.width(12.dp))
                         Column {
@@ -215,29 +240,36 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     }
                     Section.entries.forEach { destination ->
                         NavigationDrawerItem(
-                            label = { Text(destination.title) },
+                            label = { Text(destination.title,
+                                fontWeight = if (section == destination) FontWeight.SemiBold else FontWeight.Normal) },
                             selected = section == destination,
                             onClick = { changeSection(destination); scope.launch { drawer.close() } },
                             icon = { Icon(destination.icon, null, modifier = Modifier.size(21.dp)) },
                             shape = RoundedCornerShape(14.dp),
                             colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                selectedContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f),
                                 selectedTextColor = MaterialTheme.colorScheme.onSurface,
                                 selectedIconColor = MaterialTheme.colorScheme.onSurface,
-                                unselectedContainerColor = MaterialTheme.colorScheme.background,
+                                unselectedContainerColor = Color.Transparent,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .88f),
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .82f),
                             ),
                             modifier = Modifier.padding(vertical = 3.dp),
                         )
                     }
                     Spacer(Modifier.weight(1f))
-                    Text("MangaFlow ${BuildConfig.VERSION_NAME}", modifier = Modifier.padding(12.dp).navigationBarsPadding(),
+                    Text("MangaFlow ${BuildConfig.VERSION_NAME}", modifier = Modifier.padding(12.dp),
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 }
             }
         },
     ) {
         Scaffold(
-            modifier = Modifier.graphicsLayer {
+            modifier = Modifier
+                // Capture only while opening, visible or closing; ordinary browsing pays no drawer capture cost.
+                .then(if (frame is Frame.Root && drawerVisible) Modifier.hazeSource(drawerBackdrop) else Modifier)
+                .graphicsLayer {
                 // Vaul's backdrop relationship follows the actual drag, without a second spring.
                 val offset = drawer.currentOffset
                 val progress = if (motion && frame is Frame.Root && offset.isFinite())
@@ -385,6 +417,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         opening = libraryOpening, active = rootActive,
                                         onOpen = model::readFromLibrary, onDetails = { model.openManga(it) },
                                         onContinue = model::continueReading,
+                                        onRemoveFavorite = model::removeFavorite,
+                                        onRemoveHistory = model::removeHistory,
                                         onDiscover = { changeSection(Section.DISCOVER) },
                                         onRetryOpen = model::retryLibraryReading, onCancelOpen = model::cancelLibraryReading,
                                     )

@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,7 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Forum
@@ -42,6 +43,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -57,6 +59,8 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import kotlinx.coroutines.delay
+import kotlin.math.PI
+import kotlin.math.sin
 
 /** A small end target belongs to the image list; the discussion itself stays in its sheet. */
 @Composable
@@ -103,7 +107,7 @@ internal fun ChapterEndFooter(
 }
 
 /**
- * Adapt the saved toast-stacked reference's bounded, keyed presence to an upward stream.
+ * Keep bounded, keyed presence while individual previews drift through a shallow bubble field.
  * These are real chapter rows. Leaving this composition cancels all decorative work.
  */
 @Composable
@@ -122,9 +126,10 @@ internal fun ChapterEndComments(
     val largeText = LocalDensity.current.fontScale > 1.3f
     val count = state.totalCount
     val candidates = remember(state.sources, chapterId) {
-        mixedDiscussionRows(state.sources, chapterId).mapNotNull { row ->
+        mixedDiscussionRows(state.sources, chapterId).mapIndexedNotNull { index, row ->
             floatingPreviewText(row.review)?.let { text ->
-                FloatingComment(row.key, row.source.source.id, row.review, text)
+                FloatingComment(row.key, row.source.source.id, row.review, text,
+                    bubbleFlight(row.key, index, text.length))
             }
         }
     }
@@ -135,30 +140,39 @@ internal fun ChapterEndComments(
         label = "chapter-comments-anchor",
     )
     LaunchedEffect(state) { state.ensureLoaded() }
-    LaunchedEffect(candidates, motion, touchExploration, largeText, lifecycle) {
-        bubbles = emptyList()
-        if (motion && !touchExploration && candidates.isNotEmpty()) {
-            lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                try {
-                    delay(250)
-                    // Larger text gets a single unobstructed preview instead of overlapping cards.
-                    candidates.forEach { row ->
-                        bubbles = (bubbles + row).takeLast(if (largeText) 1 else 3)
-                        delay(if (largeText) 7_500L else FloatingCommentIntervalMillis.toLong())
+    BoxWithConstraints(modifier.fillMaxWidth().padding(bottom = bottom).height(420.dp)) {
+        val fieldWidth = maxWidth
+        val fieldHeight = maxHeight
+        val singlePreview = largeText || fieldHeight < 280.dp
+        // Leave the next-chapter action and the comments button unobstructed at the bottom.
+        val launchBottom = if (singlePreview) 76.dp else 100.dp
+        LaunchedEffect(candidates, motion, touchExploration, singlePreview, lifecycle) {
+            bubbles = emptyList()
+            if (motion && !touchExploration && candidates.isNotEmpty()) {
+                lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                    try {
+                        delay(MangaMotion.Quick.toLong())
+                        candidates.forEach { row ->
+                            bubbles = (bubbles + row).takeLast(if (singlePreview) 1 else 4)
+                            delay(if (singlePreview) SinglePreviewLifetimeMillis + 250L else row.flight.intervalMillis)
+                        }
+                        delay(if (singlePreview) SinglePreviewLifetimeMillis.toLong()
+                            else MaximumBubbleLifetimeMillis.toLong())
+                    } finally {
+                        bubbles = emptyList()
                     }
-                    delay(FloatingCommentLifetimeMillis.toLong())
-                } finally {
-                    bubbles = emptyList()
                 }
             }
         }
-    }
-    Box(modifier.fillMaxWidth().padding(bottom = bottom).height(280.dp)) {
         bubbles.forEach { bubble ->
             key(bubble.key) {
+                val width = if (singlePreview) minOf(fieldWidth, 320.dp)
+                else (fieldWidth * bubble.flight.widthFraction).coerceIn(
+                    minOf(fieldWidth, 180.dp), minOf(fieldWidth, 264.dp))
                 FloatingCommentBubble(bubble, backdrop,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(bottom = 56.dp)
-                        .widthIn(max = 340.dp).fillMaxWidth(),
+                    modifier = Modifier.align(Alignment.BottomStart).padding(bottom = launchBottom).width(width),
+                    fieldWidth = fieldWidth, flightHeight = (fieldHeight - launchBottom).coerceAtLeast(0.dp),
+                    singlePreview = singlePreview,
                     onFinished = { bubbles = bubbles.filterNot { it.key == bubble.key } })
             }
         }
@@ -176,41 +190,77 @@ internal fun ChapterEndComments(
     }
 }
 
-private data class FloatingComment(val key: String, val sourceId: String, val review: MangaReview, val text: String)
+private data class FloatingComment(
+    val key: String,
+    val sourceId: String,
+    val review: MangaReview,
+    val text: String,
+    val flight: BubbleFlight,
+)
 
-private const val FloatingCommentLifetimeMillis = 7_200
-private const val FloatingCommentIntervalMillis = 2_300
+private data class BubbleFlight(
+    val anchor: Float,
+    val widthFraction: Float,
+    val sway: Float,
+    val phase: Float,
+    val lifetimeMillis: Int,
+    val intervalMillis: Long,
+)
+
+private const val MaximumBubbleLifetimeMillis = 4_700
+private const val SinglePreviewLifetimeMillis = 6_800
+
+/** Stable variations do not jump when source statuses or unrelated reader state changes. */
+private fun bubbleFlight(key: String, index: Int, textLength: Int): BubbleFlight {
+    val seed = key.hashCode().toLong() and 0x7fffffffL
+    val anchor = when (index % 4) { 0 -> .06f; 1 -> .92f; 2 -> .31f; else -> .72f }
+    return BubbleFlight(
+        anchor = anchor,
+        widthFraction = .54f + textLength.coerceAtMost(52) / 52f * .18f,
+        sway = 5f + (seed % 5).toFloat(),
+        phase = ((seed shr 4) % 100).toFloat() / 100f * (2 * PI).toFloat(),
+        lifetimeMillis = 4_000 + ((seed shr 8) % 701).toInt(),
+        intervalMillis = 1_250L + ((seed shr 12) % 401),
+    )
+}
 
 @Composable
 private fun FloatingCommentBubble(
     comment: FloatingComment,
     backdrop: HazeState,
     modifier: Modifier,
+    fieldWidth: Dp,
+    flightHeight: Dp,
+    singlePreview: Boolean,
     onFinished: () -> Unit,
 ) {
     val travel = remember(comment.key) { Animatable(0f) }
     val finished by rememberUpdatedState(onFinished)
     val foreground = MaterialTheme.colorScheme.onSurface
-    // Three readable lines plus padding and a gap keep successive previews separate at this font scale.
-    val risePx = with(LocalDensity.current) {
-        (47.sp.toPx() + 24.dp.toPx()) * FloatingCommentLifetimeMillis / FloatingCommentIntervalMillis
-    }
-    LaunchedEffect(comment.key) {
-        travel.animateTo(1f, tween(FloatingCommentLifetimeMillis, easing = LinearEasing))
+    val flight = comment.flight
+    LaunchedEffect(comment.key, singlePreview) {
+        travel.snapTo(0f)
+        travel.animateTo(1f, tween(if (singlePreview) SinglePreviewLifetimeMillis else flight.lifetimeMillis,
+            easing = LinearEasing))
         finished()
     }
     LiquidGlassSurface(
         state = backdrop,
         modifier = modifier.clearAndSetSemantics {}.graphicsLayer {
             val progress = travel.value
-            val enter = (progress / .08f).coerceIn(0f, 1f)
-            val leave = ((1f - progress) / .23f).coerceIn(0f, 1f)
+            val enter = (progress / .055f).coerceIn(0f, 1f)
+            val leave = ((1f - progress) / .20f).coerceIn(0f, 1f)
+            val room = (fieldWidth.toPx() - size.width).coerceAtLeast(0f)
+            val rise = (flightHeight.toPx() - size.height - 12.dp.toPx()).coerceAtLeast(0f)
+            val drift = (sin(flight.phase + progress * (PI * 1.6f).toFloat()) - sin(flight.phase)) * flight.sway.dp.toPx()
             alpha = minOf(enter, leave) * .96f
-            translationY = -(8.dp.toPx() + risePx * progress)
-            scaleX = .97f + .03f * enter
+            translationX = if (singlePreview) room * .5f else (room * flight.anchor + drift).coerceIn(0f, room)
+            // A gentle acceleration and independent drift avoid synchronized, elevator-like rows.
+            translationY = -rise * (.84f * progress + .16f * progress * progress)
+            scaleX = .94f + .06f * enter
             scaleY = scaleX
         },
-        cornerRadius = 14.dp,
+        cornerRadius = 18.dp,
     ) {
         // The preview has no pointer handler; scrolling the artwork passes straight through it.
         Row(Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
@@ -219,7 +269,7 @@ private fun FloatingCommentBubble(
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(comment.review.author, color = foreground.copy(alpha = .58f),
+                    Text(comment.review.author, color = foreground.copy(alpha = .90f),
                         fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Medium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     CommentSourceBadge(comment.sourceId)

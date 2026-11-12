@@ -4,7 +4,6 @@ import android.os.Build
 import android.util.Log
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -54,7 +53,7 @@ import kotlin.math.min
 
 internal val LocalGlassSkin = compositionLocalOf { GlassSkin.LIQUID }
 
-internal enum class GlassSurfaceRole { CONTROL, PANEL, THUMB }
+internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB }
 
 /** Haze captures the background; Backdrop optics affect that layer only. */
 @OptIn(ExperimentalHazeApi::class)
@@ -95,13 +94,15 @@ internal fun LiquidGlassSurface(
         HazeStyle(
             backgroundColor = colors.surface,
             // An explicit transparent tint prevents inheriting a frosted LocalHazeStyle.
-            // Liquid's readable center wash is applied after the author's refraction.
+            // Liquid's uniform readability tint is applied after the author's refraction.
             tints = listOf(HazeTint(if (liquid) Color.Transparent
                 else colors.surface.copy(alpha = if (light) .72f else .78f))),
             blurRadius = when {
                 role == GlassSurfaceRole.THUMB -> if (liquid) 1.dp else 4.dp
                 role == GlassSurfaceRole.PANEL -> if (liquid) 14.dp else 24.dp
-                else -> if (liquid) 4.dp else 20.dp
+                role == GlassSurfaceRole.NAVIGATION -> if (liquid) 18.dp else 28.dp
+                role == GlassSurfaceRole.ARTWORK -> if (liquid) 9.dp else 20.dp
+                else -> if (liquid) 6.dp else 20.dp
             },
             noiseFactor = 0f,
             fallbackTint = HazeTint(colors.surface.copy(alpha = .96f)),
@@ -132,13 +133,14 @@ internal fun LiquidGlassSurface(
         Box(modifier.shadow(elevation ?: if (liquid) 4.dp else 2.dp, shape, clip = false,
             ambientColor = Color.Black.copy(alpha = .04f),
             spotColor = Color.Black.copy(alpha = .065f))
-            .clip(shape).background(colors.surface.copy(alpha = .96f)).then(pointerTracking)) {
+            .clip(shape).then(pointerTracking)) {
             Box(Modifier.matchParentSize()
                 .drawWithContent {
-                    // A hardware View can still be drawn into a software screenshot Canvas.
-                    // Skip both optical layers there; labels remain in the sibling foreground.
-                    if (drawContext.canvas.nativeCanvas.isHardwareAccelerated) drawContent()
-                    else drawRect(colors.surface)
+                    // Do not put an opaque card beneath a successfully captured backdrop.
+                    // Keep the first/no-source frame and software drawing readable instead.
+                    if (drawContext.canvas.nativeCanvas.isHardwareAccelerated &&
+                        state.areas.any { it.contentLayer != null }) drawContent()
+                    else drawRect(colors.surface.copy(alpha = .96f))
                 }
                 .graphicsLayer {
                     renderEffect = if (liquid && Build.VERSION.SDK_INT >= 33 && optics != null) {

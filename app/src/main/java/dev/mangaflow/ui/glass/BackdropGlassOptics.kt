@@ -7,7 +7,7 @@
  * 65ab177e90e5c1d8c62e70cf7755841982da65f6.
  * Changes: Android RuntimeShader bindings for Haze 1.6's captured background;
  * uniform corners, bounded reader presets, interaction light and an independent
- * readability wash after refraction. No foreground content enters this effect.
+ * uniform readability tint after refraction. No foreground content enters this effect.
  */
 package dev.mangaflow.ui.glass
 
@@ -47,12 +47,16 @@ internal class BackdropGlassOptics {
         return try {
             val rimDp = when (role) {
                 GlassSurfaceRole.CONTROL -> 14f
+                GlassSurfaceRole.ARTWORK -> 16f
+                GlassSurfaceRole.NAVIGATION -> 18f
                 GlassSurfaceRole.PANEL -> 18f
                 GlassSurfaceRole.THUMB -> 7f
             }
             val rim = min(rimDp * density, shortSide * .28f).coerceAtLeast(.1f)
             val depth = when (role) {
                 GlassSurfaceRole.CONTROL -> .82f
+                GlassSurfaceRole.ARTWORK -> .72f
+                GlassSurfaceRole.NAVIGATION -> .52f
                 GlassSurfaceRole.PANEL -> .62f
                 GlassSurfaceRole.THUMB -> 1.05f
             }
@@ -64,12 +68,12 @@ internal class BackdropGlassOptics {
             lens.setFloatUniform("refractionAmount", -rim * (depth + .16f * engagement))
             lens.setFloatUniform("depthEffect", 0f)
             lens.setColorUniform("surfaceColor", surface.copy(alpha = 1f).toArgb())
-            lens.setFloatUniform("tintWidth", min(rim * 1.25f, shortSide * .45f).coerceAtLeast(.1f))
-            lens.setFloatUniform("edgeOpacity", if (role == GlassSurfaceRole.PANEL) .30f else .12f)
-            lens.setFloatUniform("centerOpacity", when (role) {
-                GlassSurfaceRole.CONTROL -> if (light) .66f else .74f
-                GlassSurfaceRole.PANEL -> if (light) .90f else .92f
-                GlassSurfaceRole.THUMB -> if (light) .58f else .72f
+            lens.setFloatUniform("tintOpacity", when (role) {
+                GlassSurfaceRole.CONTROL -> if (light) .60f else .72f
+                GlassSurfaceRole.ARTWORK -> if (light) .60f else .70f
+                GlassSurfaceRole.NAVIGATION -> if (light) .68f else .76f
+                GlassSurfaceRole.PANEL -> if (light) .74f else .80f
+                GlassSurfaceRole.THUMB -> if (light) .22f else .38f
             })
             android.graphics.RenderEffect.createRuntimeShaderEffect(lens, "content")
                 .asComposeRenderEffect().also { cached = it; previous = frame }
@@ -109,22 +113,17 @@ internal class BackdropGlassOptics {
     )
 
     companion object {
-        // Preserve the author's lens calculation, then stabilize the label area.
-        // The edge remains clearer so the refraction is not erased by a uniform tint.
+        // Preserve the author's lens calculation. A single, restrained tint prevents
+        // the previous edge-to-center wash from drawing an opaque white inner panel.
         private val ReadableRefraction = RoundedRectRefractionShaderString.replace(
             "half4 main(float2 coord)", "half4 refractBackdrop(float2 coord)",
         ) + """
         layout(color) uniform half4 surfaceColor;
-        uniform float tintWidth;
-        uniform float edgeOpacity;
-        uniform float centerOpacity;
+        uniform float tintOpacity;
 
         half4 main(float2 coord) {
             half4 sampled = refractBackdrop(coord);
-            float2 halfSize = size * 0.5;
-            float distance = sdRoundedRect(coord - halfSize, halfSize, radiusAt(coord, cornerRadii));
-            float inward = smoothstep(0.0, tintWidth, max(-distance, 0.0));
-            half opacity = half(mix(edgeOpacity, centerOpacity, inward));
+            half opacity = half(tintOpacity);
             half4 wash = half4(surfaceColor.rgb * opacity, opacity);
             return wash + sampled * (1.0 - opacity);
         }

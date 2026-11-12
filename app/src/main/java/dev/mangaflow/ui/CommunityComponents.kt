@@ -8,6 +8,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -305,6 +307,9 @@ fun CommunityComment(
         sourceId = sourceId)
 }
 
+private enum class CommentPresentation { HIDDEN, PREVIEW, EXPANDED }
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CommentContent(
     review: MangaReview,
@@ -315,15 +320,33 @@ private fun CommentContent(
     sourceId: String? = null,
 ) {
     val text = review.body.ifBlank { review.summary }.trim()
+    val reviewHeading = review.summary.trim().takeIf {
+        review.kind == ReviewKind.REVIEW && review.body.isNotBlank() && it.isNotBlank() && it != text
+    }
+    val translationText = remember(reviewHeading, text) {
+        reviewHeading?.let { "$it\n\n$text" } ?: text
+    }
     val conceal = review.spoiler || review.kind == ReviewKind.REVIEW
-    var revealed by rememberSaveable(review.id, review.url, conceal) { mutableStateOf(!conceal) }
-    var expanded by rememberSaveable(review.id, review.url) { mutableStateOf(false) }
+    // A long review has one visibility owner: revealing it also expands the full body.
+    var presentation by rememberSaveable(sourceId, review.id, review.url, conceal) {
+        mutableStateOf(if (conceal) CommentPresentation.HIDDEN else CommentPresentation.PREVIEW)
+    }
+    val revealed = presentation != CommentPresentation.HIDDEN
+    val expanded = presentation == CommentPresentation.EXPANDED
     var overflows by remember(text) { mutableStateOf(false) }
-    val expandable = revealed && (overflows || expanded)
+    val expandable = revealed && (conceal || overflows || expanded)
+    val toggleContent = {
+        presentation = when (presentation) {
+            CommentPresentation.HIDDEN, CommentPresentation.PREVIEW -> CommentPresentation.EXPANDED
+            CommentPresentation.EXPANDED -> if (conceal) CommentPresentation.HIDDEN else CommentPresentation.PREVIEW
+        }
+    }
+    val hasForeignText = remember(translationText) { hasForeignCommentText(translationText) }
+    val canTranslate = revealed && hasForeignText
     Row(modifier.fillMaxWidth().animateContentSize(
         animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap())
         .then(if (expandable) Modifier.clickable(role = Role.Button,
-            onClickLabel = if (expanded) "收起评论" else "展开评论") { expanded = !expanded } else Modifier),
+            onClickLabel = if (expanded) "收起评论" else "展开评论", onClick = toggleContent) else Modifier),
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         CommentAvatar(review, foreground)
         Column(Modifier.weight(1f)) {
@@ -347,7 +370,8 @@ private fun CommentContent(
             }
             if (!revealed) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(9.dp))
-                    .background(foreground.copy(alpha = .045f)).clickable(role = Role.Button) { revealed = true }
+                    .background(foreground.copy(alpha = .045f)).clickable(role = Role.Button,
+                        onClickLabel = "展开完整评论", onClick = toggleContent)
                     .padding(horizontal = 10.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.VisibilityOff, null, tint = muted, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(8.dp))
@@ -356,40 +380,39 @@ private fun CommentContent(
                     Icon(Icons.Outlined.ChevronRight, null, tint = muted, modifier = Modifier.size(15.dp))
                 }
             } else {
-                if (review.kind == ReviewKind.REVIEW && review.body.isNotBlank() && review.summary.isNotBlank() &&
-                    review.summary.trim() != text) {
-                    Text(review.summary, color = foreground, fontSize = 13.sp, lineHeight = 21.sp,
-                        fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(bottom = 5.dp))
+                if (reviewHeading != null) {
+                    Text(reviewHeading, color = foreground, fontSize = 13.sp, lineHeight = 21.sp,
+                        fontWeight = FontWeight.Medium, maxLines = if (expanded) Int.MAX_VALUE else 2,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 5.dp))
                 }
                 Text(text, color = foreground.copy(alpha = .92f), fontSize = 13.sp, lineHeight = 19.sp,
                     maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
                     onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
             }
             if (review.score != null || (review.upVotes ?: 0) > 0 || (review.downVotes ?: 0) > 0 ||
-                (revealed && conceal) ||
+                (revealed && conceal) || canTranslate ||
                 (showReplyCount && (review.replyCount ?: 0) > 0)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     review.score?.let {
                         Text("${communityScore(it)} / ${review.scoreScale}", color = muted, fontSize = 10.sp,
-                            modifier = Modifier.padding(top = 3.dp, end = 8.dp))
+                            modifier = Modifier.align(Alignment.CenterVertically).padding(end = 4.dp))
                     }
-                    if (conceal && revealed) TextButton(onClick = { revealed = false; expanded = false },
+                    if (conceal && revealed) TextButton(onClick = toggleContent,
                         contentPadding = PaddingValues(end = 12.dp)) {
                         Text(if (review.kind == ReviewKind.REVIEW) "收起长评" else "隐藏剧透", color = muted, fontSize = 11.sp)
                     }
-                    Spacer(Modifier.weight(1f))
+                    if (canTranslate) CommentTranslationAction(translationText, muted)
                     review.upVotes?.takeIf { it > 0 }?.let {
                         Text("${review.positiveVoteLabel} $it", color = muted, fontSize = 10.sp,
-                            modifier = Modifier.padding(end = 8.dp))
+                            modifier = Modifier.align(Alignment.CenterVertically).padding(end = 4.dp))
                     }
                     review.downVotes?.takeIf { it > 0 }?.let {
                         Text("踩 $it", color = muted, fontSize = 10.sp,
-                            modifier = Modifier.padding(end = 8.dp))
+                            modifier = Modifier.align(Alignment.CenterVertically).padding(end = 4.dp))
                     }
                     if (showReplyCount && (review.replyCount ?: 0) > 0) {
                         Text("${review.replyCount} 条回复", color = muted, fontSize = 11.sp,
-                            modifier = Modifier.padding(vertical = 10.dp))
+                            modifier = Modifier.align(Alignment.CenterVertically).padding(vertical = 8.dp))
                     }
                 }
             }

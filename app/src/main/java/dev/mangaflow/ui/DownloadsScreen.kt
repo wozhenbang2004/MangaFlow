@@ -1,7 +1,8 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,7 +24,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
@@ -173,7 +173,8 @@ fun DownloadsScreen(
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
     }
 
-    remove?.let { entry ->
+    remove?.let { requested ->
+        val entry = entries.firstOrNull { it.id == requested.id } ?: requested
         AlertDialog(
             onDismissRequest = { if (!removing) remove = null },
             shape = RoundedCornerShape(24.dp),
@@ -203,6 +204,7 @@ fun DownloadsScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () -> Unit, onPause: () -> Unit, onRetry: () -> Unit, onRemove: () -> Unit) {
     val colors = MaterialTheme.colorScheme
@@ -211,6 +213,7 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
     val finished = entry.status == DownloadStatus.COMPLETED
     val inProgress = entry.status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING)
     val interaction = remember { MutableInteractionSource() }
+    var actionsVisible by remember(entry.id) { mutableStateOf(false) }
     val stateLabel = when (entry.status) {
         DownloadStatus.QUEUED -> "排队中"
         DownloadStatus.RUNNING -> "下载中"
@@ -219,72 +222,75 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
         DownloadStatus.COMPLETED -> "已下载"
         DownloadStatus.FAILED -> "未完成"
     }
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(
-        interactionSource = interaction, indication = null, role = Role.Button,
-        onClickLabel = "阅读 ${entry.chapter.title}", onClick = onRead,
-    )) {
-        Row(Modifier.fillMaxWidth().motionPress(interaction, pressedScale = .99f).padding(vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            AsyncImage(
-                model = entry.manga.coverUrl,
-                contentDescription = null,
-                modifier = Modifier.size(width = 48.dp, height = 68.dp).clip(RoundedCornerShape(8.dp)).background(colors.surfaceVariant),
-                contentScale = ContentScale.Crop,
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(entry.manga.title, style = MaterialTheme.typography.titleSmall, color = foreground, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Spacer(Modifier.height(4.dp))
-                Text(entry.chapter.title, style = MaterialTheme.typography.bodySmall, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                // Reserve this slot when the transfer completes so the row never jumps.
-                Box(Modifier.fillMaxWidth().height(7.dp).drawBehind {
-                    if (!finished) {
-                        val y = size.height / 2f
-                        val fraction = if (entry.totalPages > 0)
-                            (entry.completedPages.toFloat() / entry.totalPages).coerceIn(0f, 1f) else 0f
-                        drawLine(secondary.copy(alpha = .12f), Offset(0f, y), Offset(size.width, y), 2.dp.toPx(), StrokeCap.Round)
-                        if (fraction > 0f) drawLine(secondary.copy(alpha = .62f), Offset(0f, y), Offset(size.width * fraction, y), 2.dp.toPx(), StrokeCap.Round)
-                    }
-                })
-                Text(
-                    if (finished) "$stateLabel · ${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
-                    else "$stateLabel · ${entry.completedPages}/${entry.totalPages} 页",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (entry.status == DownloadStatus.FAILED) colors.error else secondary,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+    Box {
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).combinedClickable(
+            interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = "阅读 ${entry.chapter.title}", onClick = onRead,
+            onLongClickLabel = "管理下载", onLongClick = { actionsVisible = true },
+        )) {
+            Row(Modifier.fillMaxWidth().motionPress(interaction, pressedScale = .99f).padding(vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                AsyncImage(
+                    model = entry.manga.coverUrl,
+                    contentDescription = null,
+                    modifier = Modifier.size(width = 48.dp, height = 68.dp).clip(RoundedCornerShape(8.dp)).background(colors.surfaceVariant),
+                    contentScale = ContentScale.Crop,
                 )
-            }
-            Spacer(Modifier.width(4.dp))
-            MotionIconButton(onClick = if (inProgress && !entry.needsSourceRefresh) onPause else onRetry,
-                enabled = !finished && !refreshing, modifier = Modifier.size(44.dp)) {
-                MotionSwap(Triple(entry.status, entry.needsSourceRefresh, refreshing), Modifier.size(20.dp)) { (status, needsRefresh, busy) ->
-                    if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp, color = secondary)
-                    else {
-                        val active = status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING)
-                        Icon(when {
-                            status == DownloadStatus.COMPLETED -> Icons.Outlined.Check
-                            needsRefresh || status == DownloadStatus.FAILED -> Icons.Outlined.Refresh
-                            active -> Icons.Outlined.Pause
-                            else -> Icons.Outlined.PlayArrow
-                        }, contentDescription = when {
-                            status == DownloadStatus.COMPLETED -> "已下载"
-                            needsRefresh -> "刷新图片地址并继续下载"
-                            active -> "暂停下载"
-                            status == DownloadStatus.FAILED -> "重试下载"
-                            else -> "继续下载"
-                        }, modifier = Modifier.size(20.dp), tint = if (status == DownloadStatus.COMPLETED) secondary else foreground)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(entry.manga.title, style = MaterialTheme.typography.titleSmall, color = foreground, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(4.dp))
+                    Text(entry.chapter.title, style = MaterialTheme.typography.bodySmall, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    // Reserve this slot when the transfer completes so the row never jumps.
+                    Box(Modifier.fillMaxWidth().height(7.dp).drawBehind {
+                        if (!finished) {
+                            val y = size.height / 2f
+                            val fraction = if (entry.totalPages > 0)
+                                (entry.completedPages.toFloat() / entry.totalPages).coerceIn(0f, 1f) else 0f
+                            drawLine(secondary.copy(alpha = .12f), Offset(0f, y), Offset(size.width, y), 2.dp.toPx(), StrokeCap.Round)
+                            if (fraction > 0f) drawLine(secondary.copy(alpha = .62f), Offset(0f, y), Offset(size.width * fraction, y), 2.dp.toPx(), StrokeCap.Round)
+                        }
+                    })
+                    Text(
+                        if (finished) "$stateLabel · ${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
+                        else "$stateLabel · ${entry.completedPages}/${entry.totalPages} 页",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (entry.status == DownloadStatus.FAILED) colors.error else secondary,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
+                MotionIconButton(onClick = if (inProgress && !entry.needsSourceRefresh) onPause else onRetry,
+                    enabled = !finished && !refreshing, modifier = Modifier.size(44.dp)) {
+                    MotionSwap(Triple(entry.status, entry.needsSourceRefresh, refreshing), Modifier.size(20.dp)) { (status, needsRefresh, busy) ->
+                        if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp, color = secondary)
+                        else {
+                            val active = status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING)
+                            Icon(when {
+                                status == DownloadStatus.COMPLETED -> Icons.Outlined.Check
+                                needsRefresh || status == DownloadStatus.FAILED -> Icons.Outlined.Refresh
+                                active -> Icons.Outlined.Pause
+                                else -> Icons.Outlined.PlayArrow
+                            }, contentDescription = when {
+                                status == DownloadStatus.COMPLETED -> "已下载"
+                                needsRefresh -> "刷新图片地址并继续下载"
+                                active -> "暂停下载"
+                                status == DownloadStatus.FAILED -> "重试下载"
+                                else -> "继续下载"
+                            }, modifier = Modifier.size(20.dp), tint = if (status == DownloadStatus.COMPLETED) secondary else foreground)
+                        }
                     }
                 }
             }
-            MotionIconButton(onClick = onRemove, enabled = !refreshing, modifier = Modifier.size(44.dp)) {
-                Icon(Icons.Outlined.DeleteOutline, contentDescription = "删除 ${entry.chapter.title}", tint = secondary, modifier = Modifier.size(19.dp))
+            if (entry.error.isNotBlank()) {
+                Text(entry.error, Modifier.padding(start = 60.dp, end = 8.dp, bottom = 6.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (entry.status == DownloadStatus.FAILED) colors.error else secondary)
             }
         }
-        if (entry.error.isNotBlank()) {
-            Text(entry.error, Modifier.padding(start = 60.dp, end = 8.dp, bottom = 6.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = if (entry.status == DownloadStatus.FAILED) colors.error else secondary)
-        }
+        RecordActionsMenu(actionsVisible, onDismiss = { actionsVisible = false },
+            removeLabel = if (entry.completedPages > 0) "删除本地章节" else "移除下载任务",
+            onRemove = onRemove)
     }
 }
 

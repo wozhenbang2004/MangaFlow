@@ -30,6 +30,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -42,6 +43,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.mangaflow.LibraryOpenState
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
@@ -56,12 +58,17 @@ fun LibraryScreen(
     onOpen: (Manga) -> Unit, onDetails: (Manga) -> Unit,
     onContinue: (ReadingProgress) -> Unit, onDiscover: () -> Unit,
     onRetryOpen: () -> Unit, onCancelOpen: () -> Unit,
+    onRemoveFavorite: (Manga) -> Unit, onRemoveHistory: (String) -> Unit,
 ) {
     var showHistory by rememberSaveable { mutableStateOf(false) }
+    var managedId by remember { mutableStateOf<String?>(null) }
+    var removal by remember { mutableStateOf<LibraryRemoval?>(null) }
     val favoritesPosition = rememberLazyListState()
     val historyPosition = rememberLazyListState()
     val progressById = remember(history) { history.associateBy { it.manga.id } }
     LaunchedEffect(active, showHistory) {
+        managedId = null
+        removal = null
         if (!active || showHistory) onCancelOpen()
     }
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
@@ -82,32 +89,42 @@ fun LibraryScreen(
                         if (history.isEmpty()) item(key = "empty-history") {
                             EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
                         }
-                        items(history, key = { "history-${it.manga.id}" }) {
-                            ContinueRow(it, repository, onContinue)
+                        items(history, key = { "history-${it.manga.id}" }) { progress ->
+                            Box {
+                                ContinueRow(progress, repository, onContinue,
+                                    onManage = { onCancelOpen(); managedId = progress.manga.id })
+                                RecordActionsMenu(managedId == progress.manga.id,
+                                    onDismiss = { managedId = null }, removeLabel = "删除阅读记录",
+                                    onRemove = { removal = LibraryRemoval(progress.manga, history = true) },
+                                    onDetails = { onDetails(progress.manga) })
+                            }
                         }
                     }
                 } else {
                     BoxWithConstraints(Modifier.fillMaxSize()) {
                         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                         val available = (maxWidth - 32.dp).coerceAtLeast(1.dp)
-                        val faceWidth = (114.dp * fontScale).coerceAtMost(available)
-                        val spineWidth = 76.dp * fontScale
-                        val gap = 10.dp
-                        val perShelf = (1 + ((available - faceWidth) / (spineWidth + gap)).toInt()).coerceAtLeast(1)
+                        val gap = 12.dp
+                        val minimumWidth = 94.dp * fontScale.coerceAtMost(1.6f)
+                        val perShelf = ((available + gap) / (minimumWidth + gap)).toInt().coerceIn(1, 6)
+                        val bookWidth = (available - gap * (perShelf - 1)) / perShelf
+                        val bookHeight = ((bookWidth - 8.dp).coerceAtLeast(1.dp) / .7f) + 6.dp
                         val rows = remember(favorites, perShelf) { favorites.chunked(perShelf) }
                         LazyColumn(
                             state = favoritesPosition,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(top = 20.dp, bottom = 32.dp),
-                            verticalArrangement = Arrangement.spacedBy(18.dp),
+                            contentPadding = PaddingValues(top = 14.dp, bottom = 32.dp),
+                            verticalArrangement = Arrangement.spacedBy(20.dp),
                         ) {
                             if (favorites.isEmpty()) item(key = "empty-shelf") {
                                 EmptyBookshelf(onDiscover)
                             }
                             items(rows, key = { "shelf-${it.first().id}" }) { books ->
                                 BookshelfRow(books, repository, progressById, opening,
-                                    faceWidth, spineWidth, 164.dp * fontScale.coerceAtMost(1.5f),
-                                    onOpen, onDetails)
+                                    bookWidth, bookHeight, managedId,
+                                    onOpen = onOpen, onDetails = onDetails,
+                                    onManage = { if (it != null) onCancelOpen(); managedId = it },
+                                    onRemove = { removal = LibraryRemoval(it, history = false) })
                             }
                         }
                     }
@@ -117,49 +134,78 @@ fun LibraryScreen(
                 Modifier.align(Alignment.BottomCenter).padding(16.dp))
         }
     }
+    RecordRemovalDialog(
+        prompt = removal?.let {
+            RecordRemovalPrompt(if (it.history) "删除阅读记录？" else "删除收藏？", it.manga.title,
+                if (it.history) "这本漫画的本机阅读进度会一并清除，收藏和下载保留。"
+                else "已登录时也会同步取消云端收藏；阅读记录和下载保留。")
+        },
+        onDismiss = { removal = null },
+        onConfirm = {
+            removal?.let {
+                onCancelOpen()
+                if (it.history) onRemoveHistory(it.manga.id) else onRemoveFavorite(it.manga)
+            }
+            removal = null
+        },
+    )
 }
+
+private data class LibraryRemoval(val manga: Manga, val history: Boolean)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun BookshelfRow(
     books: List<Manga>, repository: MangaRepository, progress: Map<String, ReadingProgress>,
-    opening: LibraryOpenState?, faceWidth: Dp, spineWidth: Dp, bookHeight: Dp,
+    opening: LibraryOpenState?, bookWidth: Dp, bookHeight: Dp, managedId: String?,
     onOpen: (Manga) -> Unit, onDetails: (Manga) -> Unit,
+    onManage: (String?) -> Unit, onRemove: (Manga) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Bottom) {
-            books.forEachIndexed { index, manga ->
-                BookshelfBook(manga, repository, progress[manga.id], faceOut = index == 0,
-                    opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
-                    onOpen = { onOpen(manga) }, onDetails = { onDetails(manga) },
-                    modifier = Modifier.width(if (index == 0) faceWidth else spineWidth).height(bookHeight))
+            horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
+            books.forEach { manga ->
+                key(manga.id) {
+                    Box(Modifier.width(bookWidth)) {
+                        BookshelfBook(manga, repository, progress[manga.id],
+                            opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
+                            onOpen = { onOpen(manga) }, onManage = { onManage(manga.id) },
+                            modifier = Modifier.fillMaxWidth().height(bookHeight))
+                        RecordActionsMenu(managedId == manga.id, onDismiss = { onManage(null) },
+                            removeLabel = "删除收藏", onRemove = { onRemove(manga) },
+                            onDetails = { onDetails(manga) })
+                    }
+                }
             }
         }
-        BookshelfPlank(Modifier.fillMaxWidth().height(20.dp))
+        BookshelfPlank(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(14.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            books.forEachIndexed { index, manga ->
-                val interaction = remember(manga.id) { MutableInteractionSource() }
-                val saved = progress[manga.id]
-                Column(Modifier.width(if (index == 0) faceWidth else spineWidth)
-                    .combinedClickable(interactionSource = interaction, indication = null,
-                        onClickLabel = if (saved == null) "开始阅读" else "继续阅读",
-                        onLongClickLabel = "查看详情和目录", onLongClick = { onDetails(manga) },
-                        onClick = { onOpen(manga) })
-                    .padding(top = 2.dp)) {
-                    Text(manga.title, style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2,
-                        overflow = TextOverflow.Ellipsis)
-                    Text(saved?.chapterTitle?.ifBlank { "继续阅读" } ?: "未读",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    // Keep native metrics; additional sources remain available in details.
-                    MangaMetricBadges(manga,
-                        Modifier.fillMaxWidth().padding(top = 5.dp)
-                            .heightIn(min = 68.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
-                        compact = true, maxScores = if (index == 0) 2 else 1)
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            books.forEach { manga ->
+                key(manga.id) {
+                    val interaction = remember(manga.id) { MutableInteractionSource() }
+                    val saved = progress[manga.id]
+                    Column(Modifier.width(bookWidth)
+                        .combinedClickable(interactionSource = interaction, indication = null,
+                            onClickLabel = if (saved == null) "开始阅读" else "继续阅读",
+                            onLongClickLabel = "管理收藏", onLongClick = { onManage(manga.id) },
+                            onClick = { onOpen(manga) })
+                        .padding(top = 2.dp)) {
+                        Text(manga.title, style = MaterialTheme.typography.bodyMedium,
+                            fontSize = 13.sp, lineHeight = 18.sp,
+                            fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2,
+                            overflow = TextOverflow.Ellipsis)
+                        Text(saved?.chapterTitle?.ifBlank { "继续阅读" } ?: "未读",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 11.sp, lineHeight = 15.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        // Keep native metrics; additional sources remain available in details.
+                        MangaMetricBadges(manga,
+                            Modifier.fillMaxWidth().padding(top = 4.dp)
+                                .heightIn(min = 44.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
+                            compact = true, maxScores = 1, showMore = false)
+                    }
                 }
             }
         }
@@ -176,9 +222,9 @@ private fun EmptyBookshelf(onDiscover: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton(onClick = onDiscover) { Text("去发现") }
         }
-        BookshelfPlank(Modifier.fillMaxWidth().height(20.dp))
+        BookshelfPlank(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(14.dp))
         Spacer(Modifier.height(156.dp))
-        BookshelfPlank(Modifier.fillMaxWidth().height(20.dp))
+        BookshelfPlank(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(14.dp))
     }
 }
 

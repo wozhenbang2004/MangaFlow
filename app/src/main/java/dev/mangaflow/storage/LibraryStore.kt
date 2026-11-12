@@ -41,6 +41,8 @@ class LibraryStore(context: Context) {
     private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pendingChapterPositions = mutableMapOf<String, ChapterProgress>()
     private val pendingLongImagePositions = mutableMapOf<String, Float>()
+    private val pendingProgressRemovals = mutableMapOf<String, Long>()
+    private var removalSequence = 0L
     private var progressWrite: ProgressWrite? = null
     private var progressWriterRunning = false
     private var progressEpoch = 0L
@@ -59,12 +61,20 @@ class LibraryStore(context: Context) {
         disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString()).apply()
     }
 
+    /** Idempotent removal: a stale item menu can never add the manga back. */
+    fun removeFavorite(mangaId: String) = synchronized(lock) {
+        val next = _favorites.value.filterNot { it.id == mangaId }
+        if (next.size == _favorites.value.size) return@synchronized
+        _favorites.value = next
+        disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString()).apply()
+    }
+
     fun progressFor(mangaId: String): ReadingProgress? = _history.value.firstOrNull { it.manga.id == mangaId }
 
     fun progressFor(mangaId: String, chapterId: String): ChapterProgress? = synchronized(lock) {
         val key = chapterProgressKey(mangaId, chapterId)
         pendingChapterPositions[key]?.let { return@synchronized it }
-        val stored = if (ignoreStoredProgress) null else disk.getString(key, null)?.let { encoded ->
+        val stored = if (ignoreStoredProgress || mangaId in pendingProgressRemovals) null else disk.getString(key, null)?.let { encoded ->
             runCatching {
                 val json = JSONObject(encoded)
                 ChapterProgress(
@@ -81,7 +91,7 @@ class LibraryStore(context: Context) {
         if (!restoreLegacyLongImages) return@synchronized null
         val key = longImagePositionKey(mangaId, chapterId, pageIndex)
         pendingLongImagePositions[key]?.let { return@synchronized it }
-        if (ignoreStoredProgress) return@synchronized null
+        if (ignoreStoredProgress || mangaId in pendingProgressRemovals) return@synchronized null
         if (!disk.contains(key)) return@synchronized null
         runCatching { disk.getFloat(key, 0f) }.getOrNull()?.takeIf(Float::isFinite)?.coerceIn(0f, 1f)
     }
@@ -131,11 +141,28 @@ class LibraryStore(context: Context) {
         _history.value = emptyList()
         pendingChapterPositions.clear()
         pendingLongImagePositions.clear()
+        pendingProgressRemovals.clear()
         // Queue clearing after any in-flight write. Readers must not see its old disk values
         // while that write finishes, and new reading positions can join the clearing batch.
         progressEpoch++
         ignoreStoredProgress = true
         progressWrite = ProgressWrite(progressEpoch, clear = true)
+        startProgressWriter()
+    }
+
+    /** Queue deletion after older writes so an in-flight save cannot restore a removed record. */
+    fun removeHistory(mangaId: String) = synchronized(lock) {
+        val next = _history.value.filterNot { it.manga.id == mangaId }
+        _history.value = next
+        pendingChapterPositions.keys.removeAll { isProgressKeyFor(it, mangaId) }
+        pendingLongImagePositions.keys.removeAll { isProgressKeyFor(it, mangaId) }
+        val write = pendingWrite()
+        write.chapters.keys.removeAll { isProgressKeyFor(it, mangaId) }
+        write.longImages.keys.removeAll { isProgressKeyFor(it, mangaId) }
+        val sequence = ++removalSequence
+        pendingProgressRemovals[mangaId] = sequence
+        write.removedManga[mangaId] = sequence
+        write.history = next
         startProgressWriter()
     }
 
@@ -169,6 +196,10 @@ class LibraryStore(context: Context) {
                         it.startsWith(CHAPTER_PROGRESS_PREFIX) || it.startsWith(LONG_IMAGE_POSITION_PREFIX)
                     }.forEach { editor.remove(it) }
                 }
+                if (write.removedManga.isNotEmpty()) {
+                    disk.all.keys.filter { key -> write.removedManga.keys.any { isProgressKeyFor(key, it) } }
+                        .forEach { editor.remove(it) }
+                }
                 write.chapters.forEach { (key, position) -> editor.putString(key, position.toJson().toString()) }
                 write.longImages.forEach { (key, position) -> editor.putFloat(key, position) }
                 write.history?.let { history -> editor.putString("history", JSONArray(history.map { it.toJson() }).toString()) }
@@ -178,6 +209,9 @@ class LibraryStore(context: Context) {
                 if (write.epoch == progressEpoch) {
                     if (persisted) {
                         if (write.clear) ignoreStoredProgress = false
+                        write.removedManga.forEach { (mangaId, sequence) ->
+                            if (pendingProgressRemovals[mangaId] == sequence) pendingProgressRemovals.remove(mangaId)
+                        }
                         write.chapters.forEach { (key, position) ->
                             if (pendingChapterPositions[key] == position) pendingChapterPositions.remove(key)
                         }
@@ -190,6 +224,11 @@ class LibraryStore(context: Context) {
                         progressWrite = write.apply {
                             clear = clear || newer?.clear == true
                             history = newer?.history ?: history
+                            newer?.removedManga?.forEach { (mangaId, sequence) ->
+                                chapters.keys.removeAll { isProgressKeyFor(it, mangaId) }
+                                longImages.keys.removeAll { isProgressKeyFor(it, mangaId) }
+                                removedManga[mangaId] = sequence
+                            }
                             newer?.chapters?.let(chapters::putAll)
                             newer?.longImages?.let(longImages::putAll)
                         }
@@ -207,6 +246,7 @@ class LibraryStore(context: Context) {
         var history: List<ReadingProgress>? = null,
         val chapters: MutableMap<String, ChapterProgress> = linkedMapOf(),
         val longImages: MutableMap<String, Float> = linkedMapOf(),
+        val removedManga: MutableMap<String, Long> = linkedMapOf(),
     )
 
     /** Explicit spread corrections live separately from reading history and source image data. */
@@ -282,6 +322,10 @@ class LibraryStore(context: Context) {
 
     private fun chapterProgressKey(mangaId: String, chapterId: String) =
         "$CHAPTER_PROGRESS_PREFIX${mangaId.length}:$mangaId$chapterId"
+
+    private fun isProgressKeyFor(key: String, mangaId: String): Boolean =
+        key.startsWith("$CHAPTER_PROGRESS_PREFIX${mangaId.length}:$mangaId") ||
+            key.startsWith("$LONG_IMAGE_POSITION_PREFIX${mangaId.length}:$mangaId")
 
     private fun longImagePositionKey(mangaId: String, chapterId: String, pageIndex: Int) =
         "$LONG_IMAGE_POSITION_PREFIX${mangaId.length}:$mangaId${chapterId.length}:$chapterId:$pageIndex"

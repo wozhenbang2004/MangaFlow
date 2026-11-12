@@ -48,6 +48,7 @@ internal fun MangaMetricBadges(
     heatLabel: String = "热",
     compact: Boolean = false,
     maxScores: Int = if (compact) 2 else Int.MAX_VALUE,
+    showMore: Boolean = true,
 ) {
     val state = LocalMangaMetrics.current
     // Lazy containers may briefly compose a passing item; don't start work for every fling.
@@ -85,7 +86,7 @@ internal fun MangaMetricBadges(
                         (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact, metric.sourceId)
             }
         }
-        if (compact && scores.size > visible.size) {
+        if (compact && showMore && scores.size > visible.size) {
             MetricBadge("+${scores.size - visible.size}", "评分", "更多来源评分可在漫画详情查看",
                 foreground, compact, "more")
         }

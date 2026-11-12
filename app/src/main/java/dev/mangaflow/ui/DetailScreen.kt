@@ -418,7 +418,8 @@ private fun HeroBookInformation(
     onContents: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    LiquidGlassSurface(backdrop, modifier.fillMaxWidth(), cornerRadius = 18.dp, trackPointer = true) {
+    LiquidGlassSurface(backdrop, modifier.fillMaxWidth(), cornerRadius = 18.dp,
+        role = GlassSurfaceRole.ARTWORK, trackPointer = true) {
         Column(
             Modifier.fillMaxWidth()
                 .padding(horizontal = 14.dp).padding(top = 13.dp, bottom = 5.dp),
@@ -429,14 +430,14 @@ private fun HeroBookInformation(
                 fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
             )
             if (manga.authors.isNotEmpty()) Text(
-                manga.authors.joinToString(" / "), color = DetailForeground.copy(alpha = .82f), fontSize = 11.sp,
+                manga.authors.joinToString(" / "), color = DetailForeground.copy(alpha = .94f), fontSize = 11.sp,
                 lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
             Text(
                 "简介 · " + manga.description.ifBlank { "暂无简介" },
                 modifier = Modifier.clip(RoundedCornerShape(4.dp))
                     .clickable(role = Role.Button, onClickLabel = "查看完整简介", onClick = onIntroduction),
-                color = DetailForeground.copy(alpha = .82f), fontSize = 12.sp, lineHeight = 18.sp,
+                color = DetailForeground.copy(alpha = .94f), fontSize = 12.sp, lineHeight = 18.sp,
                 maxLines = 2, overflow = TextOverflow.Ellipsis,
             )
             DetailTags(manga)
@@ -545,7 +546,7 @@ private fun DetailReadAction(
             .heightIn(min = 50.dp),
         shape = RoundedCornerShape(14.dp),
         colors = ButtonDefaults.buttonColors(
-            containerColor = DetailForeground, contentColor = DetailBackground,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh, contentColor = DetailForeground,
             disabledContainerColor = DetailSurface, disabledContentColor = DetailMuted,
         ),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
@@ -564,7 +565,7 @@ private fun DetailReadAction(
             )
             if (resume != null) Text(
                 "第 " + (resume.pageIndex + 1) + " 页",
-                color = DetailBackground.copy(alpha = .65f), fontSize = 11.sp,
+                color = DetailSecondary, fontSize = 11.sp,
                 maxLines = 1,
             )
         }

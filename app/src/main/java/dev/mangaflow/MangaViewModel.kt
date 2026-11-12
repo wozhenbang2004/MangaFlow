@@ -1081,6 +1081,25 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun removeFavorite(manga: Manga) {
+        if (_libraryOpening.value?.manga?.id == manga.id) cancelLibraryReading()
+        if (!library.isFavorite(manga.id)) return
+        library.removeFavorite(manga.id)
+        if (_account.value.profile != null && !_account.value.busy) {
+            val version = accountRepository.sessionVersion
+            viewModelScope.launch {
+                // A prior favorite operation may still be saving. The latest local intent wins.
+                favoriteSyncJobs[manga.id]?.join()
+                if (isCurrentAccount(version) && !library.isFavorite(manga.id)) setCloudFavorite(manga, false)
+            }
+        }
+    }
+
+    fun removeHistory(mangaId: String) {
+        if (_libraryOpening.value?.manga?.id == mangaId) cancelLibraryReading()
+        library.removeHistory(mangaId)
+    }
+
     fun setCloudFavorite(manga: Manga, favorite: Boolean) {
         val state = _account.value
         if (state.profile == null || state.busy || manga.id in state.syncingFavorites) return

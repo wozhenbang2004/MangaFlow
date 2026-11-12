@@ -3,14 +3,18 @@ package dev.mangaflow.ui
 import android.view.accessibility.AccessibilityManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -42,6 +46,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.CloudOff
@@ -75,6 +80,7 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -85,12 +91,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
@@ -109,7 +117,6 @@ import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabContent
-import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.BottomPullLoadIndicator
 import dev.mangaflow.ui.motion.bottomPullLoad
 import dev.mangaflow.ui.motion.rememberBottomPullLoadState
@@ -123,6 +130,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
+import kotlin.math.PI
+import kotlin.math.sin
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -305,6 +314,15 @@ private fun RankingPeriods(period: RankPeriod, onPeriod: (RankPeriod) -> Unit, m
 private fun RankingAudienceToggle(audience: RankAudience, onAudience: (RankAudience) -> Unit, modifier: Modifier) {
     val next = RankAudience.entries[(audience.ordinal + 1) % RankAudience.entries.size]
     val interaction = remember { MutableInteractionSource() }
+    val motion = LocalMotionEnabled.current
+    val depth = animateFloatAsState(
+        if (audience == RankAudience.FEMALE) 1f else 0f,
+        if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap(),
+        label = "audience-depth",
+    )
+    val femaleInFront by remember { derivedStateOf { depth.value >= .5f } }
+    val colors = MaterialTheme.colorScheme
+    val light = colors.surface.luminance() > .5f
     Box(modifier.height(48.dp)
         .clickable(interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "切换到${next.label}", onClick = { onAudience(next) })
@@ -314,11 +332,36 @@ private fun RankingAudienceToggle(audience: RankAudience, onAudience: (RankAudie
         }, contentAlignment = Alignment.Center) {
         Box(Modifier.size(34.dp).motionPress(interaction, pressedScale = .90f)
             .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .055f)),
+            .background(colors.onSurface.copy(alpha = .035f)),
             contentAlignment = Alignment.Center) {
-            MotionSwap(audience, Modifier.size(24.dp)) { shown ->
-                Icon(if (shown == RankAudience.MALE) Icons.Outlined.Male else Icons.Outlined.Female,
-                    contentDescription = null, modifier = Modifier.size(22.dp))
+            // Both faces retain their identity. The rear face travels around the front one,
+            // so rapid taps reverse the same depth motion without replacing either icon.
+            RankAudience.entries.forEach { shown ->
+                val female = shown == RankAudience.FEMALE
+                val tint = if (female) {
+                    if (light) Color(0xFFAF587D) else Color(0xFFE3A0BC)
+                } else {
+                    if (light) Color(0xFF426F9D) else Color(0xFF91BDE6)
+                }
+                Box(Modifier.size(26.dp)
+                    .zIndex(if (female == femaleInFront) 1f else 0f)
+                    .clearAndSetSemantics {}
+                    .graphicsLayer {
+                        val progress = depth.value
+                        val front = if (female) progress else 1f - progress
+                        val arc = sin(progress * PI).toFloat()
+                        translationX = (6f - 9f * front + (if (female) 4f else -4f) * arc).dp.toPx()
+                        translationY = (-4f + 6f * front).dp.toPx()
+                        scaleX = .66f + .34f * front
+                        scaleY = scaleX
+                        alpha = .38f + .62f * front
+                        rotationY = (if (female) -1f else 1f) * 18f * arc
+                        cameraDistance = 16.dp.toPx()
+                    }
+                    .background(colors.surface, CircleShape), contentAlignment = Alignment.Center) {
+                    Icon(if (female) Icons.Outlined.Female else Icons.Outlined.Male,
+                        contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
+                }
             }
         }
     }
@@ -575,11 +618,18 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun ContinueRow(progress: ReadingProgress, repository: MangaRepository, onContinue: (ReadingProgress) -> Unit) {
+internal fun ContinueRow(
+    progress: ReadingProgress, repository: MangaRepository, onContinue: (ReadingProgress) -> Unit,
+    onManage: (() -> Unit)? = null,
+) {
     val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-        .clickable(interactionSource = interaction, indication = null, onClickLabel = "继续阅读") { onContinue(progress) }
+        .combinedClickable(interactionSource = interaction, indication = null,
+            onClickLabel = "继续阅读", onClick = { onContinue(progress) },
+            onLongClickLabel = if (onManage != null) "管理阅读记录" else null,
+            onLongClick = onManage)
         .motionPress(interaction, pressedScale = .985f).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically) {
         MangaCover(progress.manga, repository, Modifier.width(46.dp).height(64.dp).clip(RoundedCornerShape(7.dp)))
@@ -593,36 +643,51 @@ internal fun ContinueRow(progress: ReadingProgress, repository: MangaRepository,
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun RecentReadingSheet(
     history: List<ReadingProgress>,
     repository: MangaRepository,
     onDismiss: () -> Unit,
     onContinue: (ReadingProgress) -> Unit,
+    onRemoveHistory: (String) -> Unit,
 ) {
+    var managedId by remember { mutableStateOf<String?>(null) }
+    var removal by remember { mutableStateOf<ReadingProgress?>(null) }
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background) { dismiss ->
         Text("最近阅读", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(start = 24.dp, bottom = 16.dp))
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
             items(history, key = { it.manga.id }) { progress ->
-                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                    .clickable { onContinue(progress); dismiss() }.padding(horizontal = 4.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    MangaCover(progress.manga, repository, Modifier.width(36.dp).height(50.dp).clip(RoundedCornerShape(6.dp)))
-                    Column(Modifier.weight(1f).padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(progress.manga.title, style = MaterialTheme.typography.titleSmall,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页",
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Box {
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .combinedClickable(onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() },
+                            onLongClickLabel = "管理阅读记录", onLongClick = { managedId = progress.manga.id })
+                        .padding(horizontal = 4.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        MangaCover(progress.manga, repository, Modifier.width(36.dp).height(50.dp).clip(RoundedCornerShape(6.dp)))
+                        Column(Modifier.weight(1f).padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(progress.manga.title, style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Icon(Icons.Outlined.PlayArrow, "继续阅读", Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Icon(Icons.Outlined.PlayArrow, "继续阅读", Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    RecordActionsMenu(managedId == progress.manga.id, onDismiss = { managedId = null },
+                        removeLabel = "删除阅读记录", onRemove = { removal = progress })
                 }
             }
         }
     }
+    RecordRemovalDialog(
+        prompt = removal?.let { RecordRemovalPrompt("删除阅读记录？", it.manga.title,
+            "这本漫画的本机阅读进度会一并清除，收藏和下载保留。") },
+        onDismiss = { removal = null },
+        onConfirm = { removal?.let { onRemoveHistory(it.manga.id) }; removal = null },
+    )
 }
 
 @Composable
