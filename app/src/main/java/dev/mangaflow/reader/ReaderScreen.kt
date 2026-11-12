@@ -196,7 +196,11 @@ fun ReaderScreen(
     onRetryChapters: () -> Unit = {},
     active: Boolean = true,
 ) {
-    val preferences by libraryStore.preferences.collectAsState()
+    val globalPreferences by libraryStore.preferences.collectAsState()
+    val mangaPreferences by libraryStore.mangaPreferences.collectAsState()
+    val preferences = remember(globalPreferences, mangaPreferences, manga.id) {
+        (mangaPreferences[manga.id] ?: globalPreferences).copy(glassSkin = globalPreferences.glassSkin)
+    }
     val downloads by downloadStore.entries.collectAsState()
     var chapterId by rememberSaveable(manga.id) { mutableStateOf(initialChapterId) }
     val chapter = chapters.firstOrNull { it.id == chapterId }
@@ -459,7 +463,7 @@ fun ReaderScreen(
                     if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
                         TextButton(enabled = controlsVisible, onClick = {
                             cursor.scrollOffset = 0
-                            libraryStore.updatePreferences(preferences.copy(doublePage = !preferences.doublePage))
+                            libraryStore.updateMangaPreferences(manga.id, preferences.copy(doublePage = !preferences.doublePage))
                         }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                             Text(if (preferences.doublePage) "双页" else "单页", color = colors.onSurface, fontSize = 12.sp)
                         }
@@ -590,10 +594,10 @@ fun ReaderScreen(
         if (next.mode != preferences.mode || next.doublePage != preferences.doublePage || next.coverAlone != preferences.coverAlone) {
             cursor.scrollOffset = 0
         }
-        libraryStore.updatePreferences(next)
+        libraryStore.updateMangaPreferences(manga.id, next)
     }) {
         dimPreview.value?.takeIf { it != preferences.dimAmount }?.let { amount ->
-            libraryStore.updatePreferences(preferences.copy(dimAmount = amount))
+            libraryStore.updateMangaPreferences(manga.id, preferences.copy(dimAmount = amount))
         }
         showSettings = false
     }
@@ -606,7 +610,7 @@ fun ReaderScreen(
         backdrop = readerBackdrop,
         onCoverChange = { cover ->
             cursor.scrollOffset = 0
-            libraryStore.updatePreferences(preferences.copy(coverAlone = cover))
+            libraryStore.updateMangaPreferences(manga.id, preferences.copy(coverAlone = cover))
         },
         onCorrection = { next ->
             cursor.scrollOffset = 0

@@ -112,7 +112,7 @@ internal fun CommunityPanel(
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
     modifier: Modifier = Modifier,
 ) {
-    val mixed = remember(sources) {
+    val sortedMixed = remember(sources) {
         sources.asSequence().filter { it.status == ReviewStatus.READY }
             .flatMap { source -> source.reviews.mapIndexed { index, review ->
                 MixedReview(source, review, index)
@@ -120,6 +120,26 @@ internal fun CommunityPanel(
             .sortedWith(compareByDescending<MixedReview> { reviewDateKey(it.review.date) }
                 .thenBy { CommunityProviders.indexOf(it.source.id).let { n -> if (n < 0) 99 else n } }
                 .thenBy(MixedReview::order)).toList()
+    }
+    fun MixedReview.stableKey(): String =
+        source.id + ":" + source.subjectId + ":" + review.kind + ":" + review.id
+    var stableOrder by remember(mangaId) { mutableStateOf<List<String>>(emptyList()) }
+    val mixed = remember(sortedMixed, stableOrder) {
+        if (stableOrder.isEmpty()) sortedMixed
+        else {
+            val byKey = sortedMixed.associateBy { it.stableKey() }
+            val retained = stableOrder.mapNotNull(byKey::get)
+            val known = stableOrder.toHashSet()
+            retained + sortedMixed.filterNot { it.stableKey() in known }
+        }
+    }
+    val currentKeys = remember(sortedMixed) { sortedMixed.map { it.stableKey() } }
+    LaunchedEffect(mangaId, currentKeys) {
+        val present = currentKeys.toHashSet()
+        val retained = stableOrder.filter { it in present }
+        val known = retained.toHashSet()
+        val next = retained + currentKeys.filterNot { it in known }
+        if (next != stableOrder) stableOrder = next
     }
     val listState = rememberLazyListState()
     val nearEnd by remember(listState) {
@@ -143,9 +163,7 @@ internal fun CommunityPanel(
     val failures = sources.filter { it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null }
     LazyColumn(state = listState, modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 12.dp)) {
-        items(mixed, key = {
-            it.source.id + ":" + it.source.subjectId + ":" + it.review.kind + ":" + it.review.id
-        }) { item ->
+        items(mixed, key = { it.stableKey() }) { item ->
             CommunityDiscussionComment(item.source, item.review, loadReplies)
             HorizontalDivider(color = CommunityLine, thickness = .5.dp)
         }

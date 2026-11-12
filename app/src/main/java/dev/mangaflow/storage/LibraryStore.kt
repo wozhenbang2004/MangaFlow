@@ -38,6 +38,7 @@ class LibraryStore(context: Context) {
     private val _favorites = MutableStateFlow(readArray("favorites") { readManga(it) }.distinctBy(Manga::id))
     private val _history = MutableStateFlow(readArray("history", ::readProgress).distinctBy { it.manga.id })
     private val _preferences = MutableStateFlow(readPreferences())
+    private val _mangaPreferences = MutableStateFlow(readMangaPreferences())
     private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pendingChapterPositions = mutableMapOf<String, ChapterProgress>()
     private val pendingLongImagePositions = mutableMapOf<String, Float>()
@@ -51,6 +52,7 @@ class LibraryStore(context: Context) {
     val favorites: StateFlow<List<Manga>> = _favorites.asStateFlow()
     val history: StateFlow<List<ReadingProgress>> = _history.asStateFlow()
     val preferences: StateFlow<ReaderPreferences> = _preferences.asStateFlow()
+    val mangaPreferences: StateFlow<Map<String, ReaderPreferences>> = _mangaPreferences.asStateFlow()
 
     fun isFavorite(mangaId: String): Boolean = _favorites.value.any { it.id == mangaId }
 
@@ -268,38 +270,77 @@ class LibraryStore(context: Context) {
     }
 
     fun updatePreferences(preferences: ReaderPreferences) = synchronized(lock) {
-        val next = preferences.copy(dimAmount = preferences.dimAmount.coerceIn(0f, 0.65f))
+        val next = preferences.sanitized()
         _preferences.value = next
-        disk.edit().putString("reader_preferences", JSONObject().apply {
-            put("mode", next.mode.name)
-            put("theme", next.theme.name)
-            put("keepScreenOn", next.keepScreenOn)
-            put("pageGap", next.pageGap)
-            put("doublePage", next.doublePage)
-            put("coverAlone", next.coverAlone)
-            put("dimAmount", next.dimAmount.toDouble())
-            put("glassSkin", next.glassSkin.name)
-        }.toString()).apply()
+        disk.edit().putString("reader_preferences", next.toJson().toString()).apply()
+    }
+
+    /**
+     * Reading layout is remembered per work. Glass remains a single app-wide skin so opening
+     * another manga never changes the navigation/search material behind the reader.
+     */
+    fun updateMangaPreferences(mangaId: String, preferences: ReaderPreferences) = synchronized(lock) {
+        if (mangaId.isBlank()) return@synchronized
+        val next = preferences.sanitized()
+        if (next.glassSkin != _preferences.value.glassSkin) {
+            val global = _preferences.value.copy(glassSkin = next.glassSkin)
+            _preferences.value = global
+            disk.edit().putString("reader_preferences", global.toJson().toString()).apply()
+        }
+        val updated = LinkedHashMap(_mangaPreferences.value)
+        updated[mangaId] = next
+        _mangaPreferences.value = updated
+        val root = JSONObject()
+        updated.forEach { (id, value) -> root.put(id, value.toJson()) }
+        disk.edit().putString(MANGA_READER_PREFERENCES_KEY, root.toString()).apply()
     }
 
     private fun readPreferences(): ReaderPreferences = runCatching {
-        val json = JSONObject(disk.getString("reader_preferences", "{}") ?: "{}")
-        val storedMode = json.optString("mode")
-        ReaderPreferences(
+        JSONObject(disk.getString("reader_preferences", "{}") ?: "{}").toReaderPreferences()
+    }.getOrDefault(ReaderPreferences())
+
+    private fun readMangaPreferences(): Map<String, ReaderPreferences> = runCatching {
+        val root = JSONObject(disk.getString(MANGA_READER_PREFERENCES_KEY, "{}") ?: "{}")
+        buildMap {
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val id = keys.next()
+                root.optJSONObject(id)?.let { put(id, it.toReaderPreferences()) }
+            }
+        }
+    }.getOrDefault(emptyMap())
+
+    private fun JSONObject.toReaderPreferences(): ReaderPreferences {
+        val storedMode = optString("mode")
+        return ReaderPreferences(
             mode = when (storedMode) {
                 "WEBTOON" -> ReadingMode.VERTICAL
                 else -> ReadingMode.entries.firstOrNull { it.name == storedMode } ?: ReadingMode.VERTICAL
             },
-            theme = ReaderTheme.entries.firstOrNull { it.name == json.optString("theme") } ?: ReaderTheme.PAPER,
-            keepScreenOn = json.optBoolean("keepScreenOn", true),
+            theme = ReaderTheme.entries.firstOrNull { it.name == optString("theme") } ?: ReaderTheme.PAPER,
+            keepScreenOn = optBoolean("keepScreenOn", true),
             // The former webtoon choice always rendered without page gaps.
-            pageGap = storedMode != "WEBTOON" && json.optBoolean("pageGap", false),
-            doublePage = json.optBoolean("doublePage", false),
-            coverAlone = json.optBoolean("coverAlone", true),
-            dimAmount = json.optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
-            glassSkin = GlassSkin.entries.firstOrNull { it.name == json.optString("glassSkin") } ?: GlassSkin.LIQUID,
+            pageGap = storedMode != "WEBTOON" && optBoolean("pageGap", false),
+            doublePage = optBoolean("doublePage", false),
+            coverAlone = optBoolean("coverAlone", true),
+            dimAmount = optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
+            glassSkin = GlassSkin.entries.firstOrNull { it.name == optString("glassSkin") } ?: GlassSkin.LIQUID,
         )
-    }.getOrDefault(ReaderPreferences())
+    }
+
+    private fun ReaderPreferences.sanitized(): ReaderPreferences =
+        copy(dimAmount = dimAmount.coerceIn(0f, 0.65f))
+
+    private fun ReaderPreferences.toJson(): JSONObject = JSONObject().apply {
+        put("mode", mode.name)
+        put("theme", theme.name)
+        put("keepScreenOn", keepScreenOn)
+        put("pageGap", pageGap)
+        put("doublePage", doublePage)
+        put("coverAlone", coverAlone)
+        put("dimAmount", dimAmount.toDouble())
+        put("glassSkin", glassSkin.name)
+    }
 
     private fun readLegacyLongImageMigration(): Boolean {
         val key = "restore_legacy_vertical_positions"
@@ -334,6 +375,7 @@ class LibraryStore(context: Context) {
         "${SPREAD_PREFIX}${mangaId.length}:$mangaId${chapterId.length}:$chapterId"
 
     private companion object {
+        const val MANGA_READER_PREFERENCES_KEY = "reader_preferences_by_manga"
         const val SPREAD_PREFIX = "spread_singles:"
         const val CHAPTER_PROGRESS_PREFIX = "chapter_progress:"
         const val LONG_IMAGE_POSITION_PREFIX = "long_image_position:"
