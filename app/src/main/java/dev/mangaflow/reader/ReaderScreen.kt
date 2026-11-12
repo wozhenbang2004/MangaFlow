@@ -74,6 +74,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
@@ -543,10 +544,10 @@ private fun ChapterPages(
         ) { index ->
             val group = groups.getOrNull(index)
             if (group != null) {
-                val renderImage: @Composable (Int, Modifier) -> Unit = { imageIndex, modifier ->
+                val renderImage: @Composable (Int, Modifier, Alignment) -> Unit = { imageIndex, modifier, alignment ->
                     Box(modifier) {
                         ReaderPage(
-                            pages[imageIndex], headers, paged = true, onTap = onTap,
+                            pages[imageIndex], headers, paged = true, pagedAlignment = alignment, onTap = onTap,
                             onMeasured = { loadedPages[imageIndex] = true },
                             onComposed = { present -> if (present) composedPages[imageIndex] = true else composedPages.remove(imageIndex) },
                             prefetch = prefetchRequests[imageIndex],
@@ -555,17 +556,27 @@ private fun ChapterPages(
                 }
                 val second = group.second
                 if (second != null) {
-                    Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                        if (preferences.mode == ReadingMode.RIGHT_TO_LEFT) {
-                            renderImage(second, Modifier.weight(1f).fillMaxHeight())
-                            renderImage(group.first, Modifier.weight(1f).fillMaxHeight())
-                        } else {
-                            renderImage(group.first, Modifier.weight(1f).fillMaxHeight())
-                            renderImage(second, Modifier.weight(1f).fillMaxHeight())
-                        }
+                    // Pair the image edges at the spine, leaving unused space outside the spread.
+                    // Reading direction, rather than the system locale, selects the physical sides.
+                    Row(
+                        Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.Absolute.Left,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val rightToLeft = preferences.mode == ReadingMode.RIGHT_TO_LEFT
+                        renderImage(
+                            if (rightToLeft) second else group.first,
+                            Modifier.weight(1f).fillMaxHeight(),
+                            AbsoluteAlignment.CenterRight,
+                        )
+                        renderImage(
+                            if (rightToLeft) group.first else second,
+                            Modifier.weight(1f).fillMaxHeight(),
+                            AbsoluteAlignment.CenterLeft,
+                        )
                     }
                 } else {
-                    renderImage(group.first, Modifier.fillMaxSize())
+                    renderImage(group.first, Modifier.fillMaxSize(), Alignment.Center)
                 }
             } else {
                 LazyColumn(Modifier.fillMaxSize()) {
@@ -669,6 +680,7 @@ private fun ReaderPage(
     headers: Map<String, String>,
     paged: Boolean,
     continuous: Boolean = false,
+    pagedAlignment: Alignment = Alignment.Center,
     onTap: () -> Unit,
     onMeasured: () -> Unit,
     longImagePosition: () -> Float? = { null },
@@ -764,7 +776,7 @@ private fun ReaderPage(
                     contentDescription = "第 ${page.index + 1} 页",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = if (paged) ContentScale.Fit else ContentScale.FillWidth,
-                    alignment = if (paged) Alignment.Center else Alignment.TopCenter,
+                    alignment = if (paged) pagedAlignment else Alignment.TopCenter,
                     gesturesEnabled = !continuous && (!longImage || longImageRestored),
                     onClick = { onTap() },
                 )

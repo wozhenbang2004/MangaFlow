@@ -27,6 +27,14 @@ Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 - Active repair after "不是哥们怎么又这样了": the screenshot again shows one website group with zero chapters and disabled reading. Catalog and body now use the anonymous App protocol together, with a persistent random installation identity and ordered chapter2 images; no account credentials, mirror hopping or identity rotation. Keep a previously usable directory or saved chapter usable when refreshing metadata fails.
 - Real source evidence on 2026-11-12: production Kotlin fetched all 236 chapters for `modujingbingdenuli` (215/1/20 across three groups), 61 pages for chapter 01 and 13 for the latest default-group chapter. Sample original images returned HTTP 200 and decoded. `woduzishenji` returned 201 chapters and 66 pages for the prologue after fixing the numeric `comic.ban` misclassification. Its actual App result explicitly reports `is_banned=false`, `is_lock=false` while `comic.ban=2`; do not convert that numeric metadata into a Boolean denial. Catalog/body require explicit Boolean access results and still reject locked/banned content. These service observations do not establish Android device smoothness or personal login success.
 
+## Double-page landscape repair · 2026-11-12
+
+- User feedback: "我横屏后双页就成这样了", with screenshot `1000121332.jpg`. The two pages are separately centered in equal half-screen slots, leaving a large central gap. This is a visible failure of the existing spread presentation, not a new reading mode request.
+- READER-SPREAD-01: fit each page proportionally inside its available half, align the left image's right edge and the right image's left edge at the center spine, and leave unused screen space outside the pair. Preserve white margins contained in the original artwork; do not crop or stretch images to fill the screen.
+- READER-SPREAD-02: reading direction determines the physical page order independently of the system locale. Single covers, wide artwork and manually isolated pages remain centered; original image indexes, chapter-specific alignment, long-image positions and chapter discussions keep their existing behavior.
+- Adapt the existing Telephoto 0.16.0 `ZoomableAsyncImage` alignment parameter. Its Fit transform already recomputes from the viewport; the screenshot does not establish a separate rotation-scale or bottom-cropping defect. Do not reset saved zoom or long-image state speculatively.
+- Scope is the two-page alignment in `ReaderScreen.kt` and this record. Source review and feature compilation precede main; no tests, emulator checks or UI automation. The supplied screenshot is the before-state evidence; the corrected phone layout remains pending user experience.
+
 ## Login repair · 2026-11-12
 
 - User request: "我们的漫画软件登录界面不允许截图我怎么拍给你报错啊服了而且还是登录不了实在不行你看看人家 relay 桌面端的漫画部分怎么实现的呢我吐了也别弄个官网登录的按钮纯多余".
