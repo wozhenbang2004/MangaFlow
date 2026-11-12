@@ -33,11 +33,13 @@ internal fun PageTitleHeader(
     modifier: Modifier = Modifier,
     actions: (@Composable () -> Unit)? = null,
     summary: (@Composable () -> Unit)? = null,
+    leading: (@Composable () -> Unit)? = null,
 ) {
     Row(modifier.fillMaxWidth().heightIn(min = 44.dp).semantics { paneTitle = title }, verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
             role = GlassSurfaceRole.NAVIGATION, trackPointer = true) { navigation() }
+        if (leading != null) leading()
         if (summary != null) Box(Modifier.weight(1f)) { summary() }
         else Spacer(Modifier.weight(1f))
         if (actions != null) LiquidGlassSurface(backdrop, cornerRadius = 22.dp,

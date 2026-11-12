@@ -39,6 +39,8 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.CheckCircleOutline
+import androidx.compose.material.icons.outlined.Downloading
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.AlertDialog
@@ -140,6 +142,9 @@ fun DownloadsScreen(
     var expandedBooks by rememberSaveable { mutableStateOf(listOf<String>()) }
     var showImportSources by remember { mutableStateOf(false) }
     var showQueueActions by remember { mutableStateOf(false) }
+    var filterMenuExpanded by remember { mutableStateOf(false) }
+    val filterChoices = remember { listOf(GlassTabChoice("全部", Icons.Outlined.Inventory2), GlassTabChoice("进行中", Icons.Outlined.Downloading), GlassTabChoice("已下载", Icons.Outlined.CheckCircleOutline)) }
+    val filterWidth = if (filter == DownloadFilter.ALL) 112.dp else 126.dp
     var pendingImport by remember { mutableStateOf<PendingLocalImport?>(null) }
     var importBusy by remember { mutableStateOf(false) }
     val allScroll = rememberLazyListState()
@@ -148,7 +153,7 @@ fun DownloadsScreen(
     val showLoading = rememberDelayedBusy(loading)
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
-    var headerHeightPx by remember { mutableIntStateOf(with(density) { 92.dp.toPx().toInt() }) }
+    var headerHeightPx by remember { mutableIntStateOf(with(density) { 44.dp.toPx().toInt() }) }
     val contentTopPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -341,10 +346,9 @@ fun DownloadsScreen(
         Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
             .onSizeChanged { headerHeightPx = it.height }) {
             PageTitleHeader("下载", backdrop, navigation,
-                summary = {
-                    Text(if (managing) "已选 ${selectedEntries.size} 话" else "${downloadBytes(usedBytes)} 已保存",
-                        style = MaterialTheme.typography.bodySmall, color = secondary, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis)
+                leading = {
+                    MorphGlassTabTrigger(backdrop, filterChoices, filter.ordinal, filterWidth,
+                        expanded = filterMenuExpanded, onToggle = { filterMenuExpanded = !filterMenuExpanded; showQueueActions = false })
                 }, actions = {
                 toolbar {
                     if (managing) {
@@ -400,20 +404,15 @@ fun DownloadsScreen(
                     }
                 }
             })
-            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().padding(top = 4.dp),
-                cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    MotionTabs(
-                        selected = filter.ordinal, labels = DownloadFilter.entries.map { it.label },
-                        onSelect = { filter = DownloadFilter.entries[it]; selectedIds = emptySet() }, modifier = Modifier.weight(1f),
-                        controlHeight = 44.dp, indicatorHeight = 32.dp, fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
-                        foreground = colors.primary, muted = secondary, indicator = colors.primary.copy(alpha = .10f),
-                        fontSize = MaterialTheme.typography.labelLarge.fontSize,
-                        selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
-                    )
-                }
-            }
+
         }
+        MorphGlassTabOverlay(backdrop, filterChoices, filter.ordinal, filterWidth,
+            expanded = filterMenuExpanded, onDismiss = { filterMenuExpanded = false },
+            onSelect = { index ->
+                filterMenuExpanded = false
+                filter = DownloadFilter.entries[index]
+                selectedIds = emptySet()
+            })
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
     }
 

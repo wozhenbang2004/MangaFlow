@@ -39,6 +39,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Collections
 import androidx.compose.material.icons.outlined.BarChart
+import androidx.compose.material.icons.outlined.Bookmarks
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
@@ -113,11 +116,15 @@ fun LibraryScreen(
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
     val haptics = LocalHapticFeedback.current
-    var headerHeightPx by remember { mutableIntStateOf(with(density) { 92.dp.toPx().toInt() }) }
+    var headerHeightPx by remember { mutableIntStateOf(with(density) { 44.dp.toPx().toInt() }) }
     val headerPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showCollections by rememberSaveable { mutableStateOf(false) }
     var showStats by rememberSaveable { mutableStateOf(false) }
+    var shelfMenuExpanded by remember { mutableStateOf(false) }
+    var libraryActionsOpen by remember { mutableStateOf(false) }
+    val shelfTabs = remember { listOf(GlassTabChoice("收藏", Icons.Outlined.Bookmarks), GlassTabChoice("最近阅读", Icons.Outlined.History)) }
+    val shelfWidth = if (showHistory) 142.dp else 112.dp
     val collections by libraryStore.pageCollections.collectAsStateWithLifecycle()
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     val readingActivity by libraryStore.readingActivity.collectAsStateWithLifecycle()
@@ -178,6 +185,7 @@ fun LibraryScreen(
         }
     }
     LaunchedEffect(active, showHistory) {
+        if (!active) { shelfMenuExpanded = false; libraryActionsOpen = false }
         managedId = null
         draggedFavorite = null
         dragPoint = Offset.Unspecified
@@ -318,42 +326,39 @@ fun LibraryScreen(
     }
         Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
             .onSizeChanged { headerHeightPx = it.height }) {
-            PageTitleHeader("书架", backdrop, navigation, actions = {
-                toolbar {
-                    MotionIconButton(onClick = { showCollections = true }, enabled = active, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.Collections, "画面收藏，${collections.size} 项", Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    MotionIconButton(onClick = { showStats = true }, enabled = active, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.BarChart, "阅读统计", Modifier.size(21.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            })
-            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().padding(top = 4.dp),
-                cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    MotionTabs(selected = if (showHistory) 1 else 0, labels = listOf("收藏", "最近阅读"),
-                        onSelect = { index ->
-                            if (showHistory != (index == 1)) onCancelOpen()
-                            showHistory = index == 1
-                        }, modifier = Modifier.weight(1f), controlHeight = 44.dp, indicatorHeight = 36.dp,
-                        fullWidthIndicator = true,
-                        treatment = MotionTabTreatment.Soft,
-                        indicator = MaterialTheme.colorScheme.primary.copy(alpha = .10f), fontSize = 14.sp,
-                        foreground = MaterialTheme.colorScheme.primary,
-                        selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
-                        itemContent = { index, selected, color ->
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(if (index == 0) "收藏" else "最近阅读", color = color, fontSize = 14.sp,
-                                    modifier = Modifier.weight(1f, fill = false), overflow = TextOverflow.Ellipsis,
-                                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal, maxLines = 1)
-                                if (index == 0) Text(favorites.size.toString(), fontSize = 11.sp, color = color.copy(alpha = .6f), maxLines = 1)
+            PageTitleHeader("书架", backdrop, navigation,
+                leading = {
+                    MorphGlassTabTrigger(backdrop, shelfTabs, if (showHistory) 1 else 0, shelfWidth,
+                        expanded = shelfMenuExpanded, enabled = active,
+                        onToggle = { shelfMenuExpanded = !shelfMenuExpanded; libraryActionsOpen = false })
+                },
+                actions = {
+                    toolbar {
+                        Box {
+                            MotionIconButton(onClick = { libraryActionsOpen = !libraryActionsOpen; shelfMenuExpanded = false },
+                                enabled = active, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Outlined.MoreHoriz, "书架工具", Modifier.size(21.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                        })
-                }
-            }
+                            CompactGlassPopover(libraryActionsOpen, backdrop, onDismiss = { libraryActionsOpen = false }) {
+                                CompactMenuAction(Icons.Outlined.Collections, "画面收藏 · " + collections.size) {
+                                    libraryActionsOpen = false; showCollections = true
+                                }
+                                CompactMenuAction(Icons.Outlined.BarChart, "阅读统计") {
+                                    libraryActionsOpen = false; showStats = true
+                                }
+                            }
+                        }
+                    }
+                })
         }
+        MorphGlassTabOverlay(backdrop, shelfTabs, if (showHistory) 1 else 0, shelfWidth,
+            expanded = shelfMenuExpanded, onDismiss = { shelfMenuExpanded = false },
+            onSelect = { index ->
+                shelfMenuExpanded = false
+                if (showHistory != (index == 1)) onCancelOpen()
+                showHistory = index == 1
+            })
         AnimatedVisibility(
             visible = draggedFavorite != null,
             modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 18.dp),
