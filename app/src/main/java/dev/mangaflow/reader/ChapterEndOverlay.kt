@@ -112,7 +112,7 @@ internal fun ChapterEndComments(
     chapterId: String,
     state: ChapterDiscussionState,
     backdrop: HazeState,
-    controlsVisible: Boolean,
+    bottomClearance: Dp,
     touchExploration: Boolean,
     onOpen: () -> Unit,
     modifier: Modifier = Modifier,
@@ -133,8 +133,8 @@ internal fun ChapterEndComments(
     var bubbles by remember(chapterId) { mutableStateOf<List<FloatingComment>>(emptyList()) }
     val latestCandidates by rememberUpdatedState(candidates)
     val bottom by animateDpAsState(
-        if (controlsVisible) 112.dp else 0.dp,
-        animationSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap(),
+        bottomClearance,
+        animationSpec = if (motion) tween(MangaMotion.Chrome, easing = MangaMotion.EnterEasing) else snap(),
         label = "chapter-comments-anchor",
     )
     LaunchedEffect(state) { state.ensureLoaded() }
@@ -146,7 +146,9 @@ internal fun ChapterEndComments(
         val launchBottom = 56.dp
         LaunchedEffect(chapterId, candidates.isNotEmpty(), motion, touchExploration, singlePreview, lifecycle) {
             bubbles = emptyList()
-            if (motion && !touchExploration && candidates.isNotEmpty()) {
+            if ((!motion || touchExploration) && candidates.isNotEmpty()) {
+                bubbles = candidates.take(1)
+            } else if (candidates.isNotEmpty()) {
                 lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                     try {
                         val initial = latestCandidates.take(if (singlePreview) 1 else 3)
@@ -155,14 +157,14 @@ internal fun ChapterEndComments(
                         }
                         var cursor = initial.size
                         while (true) {
-                            delay(if (singlePreview) SinglePreviewLifetimeMillis + 100L else 380L)
+                            delay(if (singlePreview) SinglePreviewLifetimeMillis + 100L else 1_200L)
                             val available = latestCandidates
                             if (available.isNotEmpty()) {
                                 val row = available[cursor++ % available.size]
-                                if (bubbles.none { it.key == row.key }) {
-                                    bubbles = (bubbles + row).takeLast(if (singlePreview) 1 else 8)
+                                if (bubbles.none { it.key == row.key } && (singlePreview || bubbles.size < 3)) {
+                                    bubbles = (bubbles + row).takeLast(if (singlePreview) 1 else 3)
                                 }
-                                if (!singlePreview) delay(row.flight.intervalMillis - 380L)
+                                if (!singlePreview) delay(row.flight.intervalMillis - 1_200L)
                             }
                         }
                     } finally {
@@ -179,7 +181,8 @@ internal fun ChapterEndComments(
                 FloatingCommentBubble(bubble,
                     modifier = Modifier.align(Alignment.BottomStart).padding(bottom = launchBottom).width(width),
                     fieldWidth = fieldWidth, flightHeight = (fieldHeight - launchBottom).coerceAtLeast(0.dp),
-                    singlePreview = singlePreview,
+                    singlePreview = singlePreview || !motion || touchExploration,
+                    animate = motion && !touchExploration,
                     onFinished = { bubbles = bubbles.filterNot { it.key == bubble.key } })
             }
         }
@@ -226,8 +229,8 @@ private fun bubbleFlight(key: String, index: Int, textLength: Int): BubbleFlight
         widthFraction = .46f + textLength.coerceAtMost(72) / 72f * .24f,
         sway = 5f + (seed % 5).toFloat(),
         phase = ((seed shr 4) % 100).toFloat() / 100f * (2 * PI).toFloat(),
-        lifetimeMillis = 2_900 + ((seed shr 8) % 501).toInt(),
-        intervalMillis = 380L + ((seed shr 12) % 181),
+        lifetimeMillis = 3_600 + ((seed shr 8) % 801).toInt(),
+        intervalMillis = 1_200L + ((seed shr 12) % 401),
     )
 }
 
@@ -238,13 +241,15 @@ private fun FloatingCommentBubble(
     fieldWidth: Dp,
     flightHeight: Dp,
     singlePreview: Boolean,
+    animate: Boolean,
     onFinished: () -> Unit,
 ) {
     val travel = remember(comment.key) { Animatable(0f) }
     val finished by rememberUpdatedState(onFinished)
     val foreground = MaterialTheme.colorScheme.onSurface
     val flight = comment.flight
-    LaunchedEffect(comment.key, singlePreview) {
+    LaunchedEffect(comment.key, singlePreview, animate) {
+        if (!animate) { travel.snapTo(0f); return@LaunchedEffect }
         travel.snapTo(comment.initialProgress)
         val lifetime = if (singlePreview) SinglePreviewLifetimeMillis else flight.lifetimeMillis
         travel.animateTo(1f, tween((lifetime * (1f - comment.initialProgress)).toInt(),
@@ -253,7 +258,7 @@ private fun FloatingCommentBubble(
     }
     Box(
         modifier = modifier.clearAndSetSemantics {}.graphicsLayer {
-            val progress = travel.value
+            val progress = if (animate) travel.value else .10f
             val enter = (progress / .055f).coerceIn(0f, 1f)
             val leave = ((1f - progress) / .20f).coerceIn(0f, 1f)
             val room = (fieldWidth.toPx() - size.width).coerceAtLeast(0f)
@@ -305,3 +310,4 @@ private val PreviewSolicitation = Regex(
     """加[微vＶ群]|[微薇]信|vx|群[号號]|掃碼|扫码|網址|网址|免费[看观]|免費[看觀]|搜妹|找哥|互相解决|互相解決|约炮|約炮|裸聊|成人视频|成人視頻|赌[博場]|賭[博場]""",
     RegexOption.IGNORE_CASE,
 )
+

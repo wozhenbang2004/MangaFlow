@@ -54,6 +54,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -106,6 +107,8 @@ internal class BottomPullLoadState private constructor(
     private var disposed = false
     private var settleJob: Job? = null
     private var dispatchJob: Job? = null
+    private val velocityTracker = VelocityTracker()
+    private var feedbackVelocity = 0f
 
     private val canRequest: Boolean
         get() = !disposed && inputs().enabled && !loading && !dispatchPending
@@ -122,7 +125,7 @@ internal class BottomPullLoadState private constructor(
                 val consumed = minOf(delta, distancePulled)
                 distancePulled -= consumed
                 updateGesturePresentation()
-                if (distancePulled < thresholdPx) thresholdAnnounced = false
+                if (distancePulled < thresholdPx * .88f) thresholdAnnounced = false
                 return axisOffset(consumed)
             }
             if (horizontal && delta < 0f && !inputs().canScrollForward()) {
@@ -165,7 +168,7 @@ internal class BottomPullLoadState private constructor(
         if (distancePulled >= thresholdPx && !thresholdAnnounced) {
             thresholdAnnounced = true
             inputs().onThresholdReached()
-        } else if (distancePulled < thresholdPx) thresholdAnnounced = false
+        } else if (distancePulled < thresholdPx * .88f) thresholdAnnounced = false
         return previous - distancePulled
     }
 
@@ -176,9 +179,15 @@ internal class BottomPullLoadState private constructor(
         thresholdAnnounced = false
         consumeReleaseVelocity = false
         distancePulled = 0f
+        velocityTracker.resetTracking()
         settleJob?.cancel()
         gestureFeedbackOrigin = feedback.coerceIn(0f, 1f)
+        feedbackVelocity = 0f
         if (!loading) progress = 0f
+    }
+
+    internal fun trackPointer(timeMillis: Long, position: Offset) {
+        velocityTracker.addPosition(timeMillis, position)
     }
 
     private fun updateGesturePresentation() {
@@ -191,6 +200,11 @@ internal class BottomPullLoadState private constructor(
 
     internal fun finishGesture(released: Boolean) {
         if (!pointerDown) return
+        val pointerVelocity = velocityTracker.calculateVelocity()
+        // Presentation momentum cannot arm an action. The distance/release checks below own it.
+        val releaseVelocity = if (released)
+            (-(if (horizontal) pointerVelocity.x else pointerVelocity.y) / thresholdPx).coerceIn(-8f, 8f)
+            else feedbackVelocity
         val ready = released && gestureEligible && distancePulled >= thresholdPx && !inputs().canScrollForward()
         consumeReleaseVelocity = distancePulled > 0f
         pointerDown = false
@@ -199,8 +213,8 @@ internal class BottomPullLoadState private constructor(
         distancePulled = 0f
         if (ready && requestMore()) {
             progress = 1f
-            settle(resetProgress = false)
-        } else settle(resetProgress = !loading)
+            settle(resetProgress = false, initialVelocity = releaseVelocity)
+        } else settle(resetProgress = !loading, initialVelocity = releaseVelocity)
     }
 
     internal fun accessibilityLoadMore(): Boolean {
@@ -235,11 +249,12 @@ internal class BottomPullLoadState private constructor(
         }
     }
 
-    private fun settle(resetProgress: Boolean = true) {
+    private fun settle(resetProgress: Boolean = true, initialVelocity: Float = feedbackVelocity) {
         settleJob?.cancel()
         if (disposed || (feedback == 0f && (!resetProgress || progress == 0f))) return
         if (!inputs().motion) {
             feedback = 0f
+            feedbackVelocity = 0f
             if (resetProgress) progress = 0f
             return
         }
@@ -248,11 +263,13 @@ internal class BottomPullLoadState private constructor(
         settleJob = scope.launch {
             // The saved Jelly material and beUI press roles separate direct manipulation from
             // a short damped release. Only the drawing layer rebounds; labels never stretch.
-            animate(initialValue = 1f, targetValue = 0f,
-                animationSpec = spring(dampingRatio = .78f, stiffness = 420f)) { value, _ ->
-                feedback = initialFeedback * value
-                if (resetProgress) progress = (initialProgress * value).coerceIn(0f, 1f)
+            animate(initialValue = initialFeedback, targetValue = 0f, initialVelocity = initialVelocity,
+                animationSpec = spring(MangaMotion.GestureDamping, MangaMotion.GestureStiffness)) { value, velocity ->
+                feedback = value
+                feedbackVelocity = velocity
+                if (resetProgress) progress = (initialProgress * value / initialFeedback.coerceAtLeast(.001f)).coerceIn(0f, 1f)
             }
+            feedbackVelocity = 0f
         }
     }
 
@@ -312,12 +329,14 @@ internal fun rememberBottomPullLoadState(
 internal fun Modifier.bottomPullLoad(state: BottomPullLoadState): Modifier =
     nestedScroll(state.connection).pointerInput(state) {
         awaitEachGesture {
-            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
             state.beginGesture()
+            state.trackPointer(down.uptimeMillis, down.position)
             var released = false
             try {
                 do {
                     val event = awaitPointerEvent(PointerEventPass.Initial)
+                    event.changes.firstOrNull { it.id == down.id }?.let { state.trackPointer(it.uptimeMillis, it.position) }
                     if (event.changes.count { it.pressed } > 1) state.finishGesture(released = false)
                     if (event.changes.none { it.pressed }) {
                         // Compose marks synthetic cancellation ups consumed before the Initial pass.
@@ -391,3 +410,4 @@ internal fun BottomPullLoadIndicator(
         }
     }
 }
+

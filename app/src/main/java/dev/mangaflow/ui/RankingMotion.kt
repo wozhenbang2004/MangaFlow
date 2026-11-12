@@ -15,7 +15,7 @@ import dev.mangaflow.ui.motion.MangaMotion
 internal fun Modifier.rankingRowEntrance(visibleSlot: Int): Modifier {
     val scope = LocalTabVisibilityScope.current ?: return this
     if (!LocalMotionEnabled.current) return this
-    val delay = visibleSlot.coerceIn(0, 5) * 22
+    val delay = visibleSlot.coerceIn(0, 5) * 18
     return with(scope) {
         this@rankingRowEntrance.animateEnterExit(
             enter = fadeIn(tween(MangaMotion.Content, delayMillis = delay)) +
@@ -25,3 +25,4 @@ internal fun Modifier.rankingRowEntrance(visibleSlot: Int): Modifier {
         )
     }
 }
+

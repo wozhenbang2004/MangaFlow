@@ -28,6 +28,8 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -77,6 +79,7 @@ internal fun CompactGlassPopover(
     }, label = "reader-actions-scale") { if (it) 1f else .94f }
     val present = presence.currentState || presence.targetState || !presence.isIdle
     val reportPresence by rememberUpdatedState(onPresenceChange)
+    var origin by remember { mutableStateOf(TransformOrigin(if (direction == LayoutDirection.Ltr) 1f else 0f, if (aboveAnchor) 1f else 0f)) }
     SideEffect { reportPresence(present) }
     DisposableEffect(Unit) { onDispose { reportPresence(false) } }
     if (!present) return
@@ -95,10 +98,13 @@ internal fun CompactGlassPopover(
                 val below = anchorBounds.bottom + gap
                 val above = anchorBounds.top - popupContentSize.height - gap
                 val desiredY = if (aboveAnchor || below + popupContentSize.height > windowSize.height - margin) above else below
-                return IntOffset(
-                    x.coerceIn(margin, (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)),
-                    desiredY.coerceIn(margin, (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin)),
+                val placedX = x.coerceIn(margin, (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin))
+                val placedY = desiredY.coerceIn(margin, (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin))
+                origin = TransformOrigin(
+                    ((anchorBounds.center.x - placedX).toFloat() / popupContentSize.width.coerceAtLeast(1)).coerceIn(0f, 1f),
+                    ((anchorBounds.center.y - placedY).toFloat() / popupContentSize.height.coerceAtLeast(1)).coerceIn(0f, 1f),
                 )
+                return IntOffset(placedX, placedY)
             }
         }
     }
@@ -109,8 +115,8 @@ internal fun CompactGlassPopover(
                 .motionInputGate(visible).graphicsLayer {
                     this.alpha = alpha.value
                     scaleX = scale.value; scaleY = scale.value
-                    transformOrigin = TransformOrigin(if (direction == LayoutDirection.Ltr) 1f else 0f, if (aboveAnchor) 1f else 0f)
-                    translationY = (if (aboveAnchor) 6.dp.toPx() else -6.dp.toPx()) * (1f - alpha.value)
+                    transformOrigin = origin
+                    translationY = (if (origin.pivotFractionY >= .5f) 6.dp.toPx() else -6.dp.toPx()) * (1f - alpha.value)
                 }, cornerRadius = 18.dp, role = GlassSurfaceRole.POPOVER, softCard = true) {
             Column(Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp - 64).coerceAtLeast(96).dp)
                 .verticalScroll(rememberScrollState()).padding(6.dp), content = content)
@@ -133,4 +139,5 @@ internal fun CompactMenuAction(icon: ImageVector, label: String, enabled: Boolea
         Text(label, Modifier.padding(start = 12.dp), color = color, fontSize = 13.sp, lineHeight = 19.sp)
     }
 }
+
 

@@ -26,7 +26,7 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material3.CircularProgressIndicator
+import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -248,3 +248,4 @@ private fun downloadStateLabel(entry: DownloadEntry): String = when (entry.statu
     DownloadStatus.FAILED -> "未完成"
     DownloadStatus.COMPLETED -> "已保存"
 }
+

@@ -41,7 +41,7 @@ import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -410,4 +410,5 @@ private fun CloudContinueRow(entry: CloudHistoryEntry, repository: MangaReposito
         Icon(Icons.Outlined.PlayArrow, "打开阅读记录", Modifier.size(23.dp))
     }
 }
+
 

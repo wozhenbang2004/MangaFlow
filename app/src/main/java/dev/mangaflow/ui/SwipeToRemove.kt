@@ -1,6 +1,7 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
@@ -25,6 +26,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +36,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -43,8 +46,10 @@ import androidx.compose.ui.unit.dp
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlin.math.PI
-import kotlin.math.abs
 import kotlin.math.sin
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /** Physical left swipe, committed on release by distance; a short fast fling cannot delete. */
 @Composable
@@ -61,9 +66,27 @@ internal fun SwipeToRemove(
     val remove by rememberUpdatedState(onRemove)
     val swipeEnabled by rememberUpdatedState(enabled)
     val motion = LocalMotionEnabled.current
-    val position = animateFloatAsState(offset,
-        if (dragging || !motion || !enabled) snap() else spring(dampingRatio = .78f, stiffness = 420f),
-        label = "record-swipe")
+    val position = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val velocityTracker = remember { VelocityTracker() }
+    var settleJob by remember { mutableStateOf<Job?>(null) }
+    var returning by remember { mutableStateOf(false) }
+    var thresholdAnnounced by remember { mutableStateOf(false) }
+    val currentMotion by rememberUpdatedState(motion)
+    fun drawnOffset() = if (returning) position.value.coerceIn(-width.toFloat(), 0f) else offset
+    fun returnToRest(velocity: Float = 0f) {
+        settleJob?.cancel()
+        if (!currentMotion) { returning = false; offset = 0f; return }
+        val start = offset
+        settleJob = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            position.snapTo(start)
+            returning = true
+            position.animateTo(0f, spring(MangaMotion.GestureDamping, MangaMotion.GestureStiffness),
+                initialVelocity = velocity.coerceIn(-width * 8f, width * 8f))
+            offset = 0f
+            returning = false
+        }
+    }
     val fraction = if (width > 0) (-offset / width).coerceIn(0f, 1f) else 0f
     val armed = enabled && fraction >= .55f
     val readiness = animateFloatAsState(if (armed) 1f else 0f,
@@ -71,26 +94,46 @@ internal fun SwipeToRemove(
         label = "record-delete-ready")
     val haptics = LocalHapticFeedback.current
     val colors = MaterialTheme.colorScheme
-    LaunchedEffect(armed) {
-        if (armed && dragging) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+    LaunchedEffect(fraction, dragging) {
+        if (armed && dragging && !thresholdAnnounced) {
+            thresholdAnnounced = true
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        } else if (!dragging || fraction < .47f) thresholdAnnounced = false
     }
-    LaunchedEffect(enabled) {
-        if (!enabled) { dragging = false; offset = 0f }
+    LaunchedEffect(enabled, motion) {
+        if (!enabled || !motion) {
+            settleJob?.cancel()
+            returning = false
+            if (!enabled || !dragging) offset = 0f
+            if (!enabled) dragging = false
+        }
     }
     val gesture = if (enabled) Modifier.pointerInput(width) {
         detectHorizontalDragGestures(
             onDragStart = {
-                if (swipeEnabled) { offset = position.value.coerceAtMost(0f); dragging = true }
+                if (swipeEnabled) {
+                    val caught = if (returning) position.value else offset
+                    settleJob?.cancel()
+                    returning = false
+                    offset = caught.coerceIn(-width.toFloat(), 0f)
+                    thresholdAnnounced = false
+                    velocityTracker.resetTracking()
+                    dragging = true
+                }
             },
-            onDragCancel = { dragging = false; offset = 0f },
+            onDragCancel = { dragging = false; returnToRest() },
             onDragEnd = {
                 val commit = swipeEnabled && width > 0 && -offset >= width * .55f
                 dragging = false
-                offset = 0f
-                if (commit) remove()
+                if (commit) {
+                    // The parent keyed item's exit owns removal; undo/storage never waits for it.
+                    offset = 0f
+                    remove()
+                } else returnToRest(velocityTracker.calculateVelocity().x)
             },
             onHorizontalDrag = { change, amount ->
                 if (swipeEnabled) {
+                    velocityTracker.addPosition(change.uptimeMillis, change.position)
                     val next = (offset + amount).coerceIn(-width.toFloat(), 0f)
                     if (offset < 0f || next < 0f) change.consume()
                     offset = next
@@ -99,15 +142,15 @@ internal fun SwipeToRemove(
         )
     } else Modifier
     Box(modifier.fillMaxWidth().onSizeChanged { width = it.width }
-        .then(if (enabled && (dragging || offset < 0f || abs(position.value) > .5f))
+        .then(if (enabled && (dragging || returning || offset < 0f))
             Modifier.clip(RoundedCornerShape(12.dp)) else Modifier)
         .semantics {
             customActions = if (enabled) listOf(CustomAccessibilityAction(label) { remove(); true }) else emptyList()
         }
         .then(gesture)) {
-        if (offset < 0f || position.value < -.5f) Box(
+        if (offset < 0f || returning) Box(
             Modifier.matchParentSize().drawBehind {
-                val reveal = (-(if (dragging) offset else position.value)).coerceIn(0f, size.width)
+                val reveal = (-drawnOffset()).coerceIn(0f, size.width)
                 val progress = (reveal / (size.width * .55f).coerceAtLeast(1f)).coerceIn(0f, 1f)
                 val eased = if (motion) MangaMotion.SearchEasing.transform(progress) else progress
                 val edge = size.width - reveal
@@ -128,7 +171,7 @@ internal fun SwipeToRemove(
                 verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.DeleteOutline, null, Modifier.size(22.dp).graphicsLayer {
                     if (motion) {
-                        val reveal = (-(if (dragging) offset else position.value)).coerceAtLeast(0f)
+                        val reveal = (-drawnOffset()).coerceAtLeast(0f)
                         val p = (reveal / (width * .55f).coerceAtLeast(1f)).coerceIn(0f, 1f)
                         val eased = MangaMotion.SearchEasing.transform(p)
                         rotationZ = -18f * (1f - eased) + sin(eased * PI).toFloat() * 4f
@@ -142,7 +185,7 @@ internal fun SwipeToRemove(
                 Text(if (armed) "松手删除" else "左滑删除", color = colors.error,
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.graphicsLayer {
-                        val reveal = (-(if (dragging) offset else position.value)).coerceAtLeast(0f)
+                        val reveal = (-drawnOffset()).coerceAtLeast(0f)
                         val p = (reveal / (width * .55f).coerceAtLeast(1f)).coerceIn(0f, 1f)
                         alpha = (p * 3f).coerceIn(0f, 1f)
                         translationX = if (motion) 6.dp.toPx() * (1f - MangaMotion.SearchEasing.transform(p)) else 0f
@@ -150,7 +193,8 @@ internal fun SwipeToRemove(
             }
         }
         Box(Modifier.fillMaxWidth().graphicsLayer {
-            translationX = if (!enabled) 0f else if (dragging) offset else position.value
+            translationX = if (!enabled) 0f else drawnOffset()
         }.background(colors.background)) { content() }
     }
 }
+

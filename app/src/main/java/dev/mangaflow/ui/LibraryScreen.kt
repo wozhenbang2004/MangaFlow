@@ -1,6 +1,10 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -56,6 +60,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInRoot
@@ -83,6 +90,8 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
@@ -102,6 +111,8 @@ fun LibraryScreen(
     backdrop: HazeState, navigation: @Composable () -> Unit, toolbar: @Composable (@Composable () -> Unit) -> Unit,
 ) {
     val density = LocalDensity.current
+    val motion = LocalMotionEnabled.current
+    val haptics = LocalHapticFeedback.current
     var headerHeightPx by remember { mutableIntStateOf(with(density) { 92.dp.toPx().toInt() }) }
     val headerPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     var showHistory by rememberSaveable { mutableStateOf(false) }
@@ -122,6 +133,13 @@ fun LibraryScreen(
         return (point - bounds.center).getDistanceSquared() <= radius * radius
     }
     val trashArmed = draggedFavorite != null && isTrashDrop(dragPoint)
+    val trashColor by animateColorAsState(
+        if (trashArmed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+        tween(if (motion) MangaMotion.Quick else 0), label = "trash-target-color")
+    val trashEmphasis = animateFloatAsState(if (trashArmed) 1.12f else 1f,
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else androidx.compose.animation.core.snap(),
+        label = "trash-target-press")
+    LaunchedEffect(trashArmed) { if (trashArmed) haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
     val favoritesPosition = rememberLazyGridState()
     val historyPosition = rememberLazyListState()
     val progressById = remember(history) { history.associateBy { it.manga.id } }
@@ -191,7 +209,11 @@ fun LibraryScreen(
                             EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
                         }
                         items(history.filterNot { it.manga.id in pendingHistory }, key = { "history-${it.manga.id}" }) { progress ->
-                            SwipeToRemove(onRemove = { removeHistoryWithUndo(progress.manga.id) }, label = "删除阅读记录") {
+                            SwipeToRemove(onRemove = { removeHistoryWithUndo(progress.manga.id) }, label = "删除阅读记录",
+                                modifier = Modifier.animateItem(
+                                    fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
+                                    placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
+                                    fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)) {
                                 ContinueRow(progress, repository, onContinue,
                                     onManage = { onCancelOpen(); managedId = progress.manga.id },
                                     onHistory = { onCancelOpen(); managedId = null; chapterHistoryManga = progress.manga })
@@ -226,7 +248,10 @@ fun LibraryScreen(
                                 val saved = progressById[manga.id]
                                 val dragged = draggedFavorite?.id == manga.id
                                 val interaction = remember(manga.id) { MutableInteractionSource() }
-                                Column(Modifier.fillMaxWidth().animateItem().zIndex(if (dragged) 8f else 0f)) {
+                                Column(Modifier.fillMaxWidth().animateItem(
+                                    fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
+                                    placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
+                                    fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null).zIndex(if (dragged) 8f else 0f)) {
                                     SwipeToRemove(onRemove = { removeFavoriteWithUndo(manga) },
                                         label = "删除收藏", enabled = !dragged) {
                                         BookshelfBook(
@@ -332,14 +357,15 @@ fun LibraryScreen(
         AnimatedVisibility(
             visible = draggedFavorite != null,
             modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 18.dp),
-            enter = fadeIn() + scaleIn(initialScale = .82f),
-            exit = fadeOut() + scaleOut(targetScale = .9f),
+            enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) +
+                scaleIn(tween(if (motion) MangaMotion.Chrome else 0), initialScale = if (motion) .9f else 1f),
+            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                scaleOut(tween(if (motion) MangaMotion.Quick else 0), targetScale = if (motion) .94f else 1f),
         ) {
             Surface(
                 modifier = Modifier.size(72.dp).onGloballyPositioned { trashBounds = it.boundsInRoot() },
                 shape = CircleShape,
-                color = if (trashArmed) MaterialTheme.colorScheme.errorContainer
-                    else MaterialTheme.colorScheme.surfaceContainerHigh,
+                color = trashColor,
                 tonalElevation = 0.dp,
                 shadowElevation = if (trashArmed) 10.dp else 5.dp,
             ) {
@@ -347,7 +373,7 @@ fun LibraryScreen(
                     Icon(
                         Icons.Outlined.DeleteOutline,
                         contentDescription = if (trashArmed) "松手删除收藏" else "拖到这里删除",
-                        modifier = Modifier.size(27.dp),
+                        modifier = Modifier.size(27.dp).graphicsLayer { scaleX = trashEmphasis.value; scaleY = scaleX },
                         tint = if (trashArmed) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -394,3 +420,4 @@ private fun LibraryOpeningNotice(
         }
     }
 }
+

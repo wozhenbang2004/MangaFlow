@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
-import androidx.activity.compose.BackHandler
+import dev.mangaflow.ui.motion.MotionBackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
@@ -75,7 +75,7 @@ import androidx.compose.material.icons.rounded.MenuBook
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material3.CircularProgressIndicator
+import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -271,6 +271,7 @@ fun ReaderScreen(
     var showReaderActions by remember(chapterId) { mutableStateOf(false) }
     var readerActionsPresent by remember(chapterId) { mutableStateOf(false) }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
+    var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showComments by remember(chapterId) { mutableStateOf(false) }
     var showSpreadAdjustment by remember(chapterId) { mutableStateOf(false) }
@@ -394,7 +395,7 @@ fun ReaderScreen(
 
     if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showChapters || showSpreadAdjustment || showComments, lightChrome)
     val leaveReader = { leavingReader = true; onBack() }
-    BackHandler(enabled = active, onBack = leaveReader)
+    MotionBackHandler(enabled = active, onBack = leaveReader)
     LaunchedEffect(active) { leavingReader = !active }
 
     LaunchedEffect(chapterId, retry, initialCollection?.key) {
@@ -545,10 +546,13 @@ fun ReaderScreen(
 
         if (!localImport && active && !leavingReader && atChapterEnd && !loading && error == null &&
             !showComments && !showSettings && !showChapters && !showSpreadAdjustment &&
-            !showReaderActions && !readerActionsPresent) {
+            !showReaderActions && !readerActionsPresent && !showPageNavigator && !progressInteracting) {
             ChapterEndComments(
                 chapterId = chapterId, state = discussionState, backdrop = readerBackdrop,
-                controlsVisible = controlsVisible, touchExploration = touchExploration,
+                bottomClearance = if (controlsVisible) with(LocalDensity.current) {
+                    (bottomControlsHeightPx - WindowInsets.navigationBarsIgnoringVisibility.getBottom(this)).coerceAtLeast(0).toDp()
+                } else 0.dp,
+                touchExploration = touchExploration,
                 onOpen = { showComments = true },
                 modifier = Modifier.align(Alignment.BottomStart)
                     .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
@@ -559,7 +563,7 @@ fun ReaderScreen(
         AnimatedVisibility(
             controlsVisible, Modifier.align(Alignment.TopCenter),
             enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)) +
-                slideInVertically(tween(if (motionEnabled) MangaMotion.Enter else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
+                slideInVertically(tween(if (motionEnabled) MangaMotion.Chrome else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
                 slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
         ) {
@@ -595,9 +599,9 @@ fun ReaderScreen(
         }
 
         AnimatedVisibility(
-            controlsVisible, Modifier.align(Alignment.BottomCenter),
+            controlsVisible, Modifier.align(Alignment.BottomCenter).onSizeChanged { bottomControlsHeightPx = it.height },
             enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)) +
-                slideInVertically(tween(if (motionEnabled) MangaMotion.Enter else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
+                slideInVertically(tween(if (motionEnabled) MangaMotion.Chrome else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
                 slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
         ) {
@@ -1818,3 +1822,4 @@ private fun ReaderIcon(icon: ImageVector, label: String, enabled: Boolean = true
 private fun ReaderTheme.background() = when (this) { ReaderTheme.INK -> Color(0xFF101012); ReaderTheme.PAPER -> Color(0xFFF7F6F2); ReaderTheme.SEPIA -> Color(0xFFECE4D5) }
 private fun ReaderTheme.foreground() = if (this == ReaderTheme.INK) Color.White else Color(0xFF242426)
 private tailrec fun Context.activity(): Activity? = when (this) { is Activity -> this; is ContextWrapper -> baseContext.activity(); else -> null }
+

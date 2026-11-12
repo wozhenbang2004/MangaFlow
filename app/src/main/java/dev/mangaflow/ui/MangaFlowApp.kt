@@ -4,12 +4,17 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
+import dev.mangaflow.ui.motion.MotionBackHandler
+import dev.mangaflow.ui.motion.MotionBackState
+import dev.mangaflow.ui.motion.LocalMotionBackState
+import dev.mangaflow.ui.motion.motionBackPreview
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -178,16 +183,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             drawer.close()
         }
     }
-    BackHandler(reading != null || detail != null || drawer.isOpen || libraryOpening != null || section != Section.DISCOVER) {
-        when {
-            reading != null -> model.closeReader()
-            detail != null -> model.closeDetail()
-            drawer.isOpen -> scope.launch { drawer.close() }
-            libraryOpening != null -> model.cancelLibraryReading()
-            else -> changeSection(Section.DISCOVER)
-        }
-    }
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)
+    BackHandler(drawer.isOpen || libraryOpening != null) {
+        if (drawer.isOpen) scope.launch { drawer.close() }
+        else model.cancelLibraryReading()
+    }
     val focus = LocalFocusManager.current
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
     if (recentReadingOpen) {
@@ -322,8 +322,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     else {
                         val forward = targetState.depth >= initialState.depth
                         val direction = if (forward) 1 else -1
-                        ((fadeIn(tween(MangaMotion.Content)) +
-                            slideInHorizontally(tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing)) { direction * routeTravel }) togetherWith
+                        ((fadeIn(tween(MangaMotion.NavigationFade)) +
+                            slideInHorizontally(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { direction * routeTravel }) togetherWith
                             (fadeOut(tween(MangaMotion.Quick)) +
                                 slideOutHorizontally(tween(MangaMotion.Exit, easing = MangaMotion.EnterEasing)) { -direction * routeTravel / 2 }))
                             .using(null)
@@ -333,9 +333,24 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 label = "page",
                 modifier = Modifier.fillMaxSize(),
             ) { current ->
+                val currentBack = remember(current.key) { MotionBackState() }
+                MotionBackHandler(
+                    enabled = current.key == frame.key && !drawer.isOpen && libraryOpening == null &&
+                        !recentReadingOpen && authorWorks == null &&
+                        (reading != null || detail != null || section != Section.DISCOVER),
+                    state = currentBack,
+                ) {
+                    when {
+                        reading != null -> model.closeReader()
+                        detail != null -> model.closeDetail()
+                        else -> changeSection(Section.DISCOVER)
+                    }
+                }
                 CompositionLocalProvider(LocalMangaCoverTransition provides
-                    MangaCoverTransition(coverScope, this, selectedCover) { selectedCover = it }) {
-                Box(Modifier.fillMaxSize().motionInputGate(current.key == frame.key)) {
+                    MangaCoverTransition(coverScope, this, selectedCover) { selectedCover = it },
+                    LocalMotionBackState provides currentBack) {
+                Box(Modifier.fillMaxSize().motionBackPreview(currentBack)
+                    .motionInputGate(current.key == frame.key && !currentBack.gesturing && !currentBack.completed)) {
                 when (current) {
                     is Frame.Reader -> ReaderScreen(
                         manga = current.session.manga, chapters = current.session.chapters,
@@ -410,7 +425,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val chromeReady by remember {
                             derivedStateOf { !searchExpanded && (searchForeground?.value ?: 0f) <= .02f }
                         }
-                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen && authorWorks == null
+                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen && authorWorks == null &&
+                            !currentBack.gesturing && !currentBack.completed
                         val closeSearch: () -> Unit = {
                             keyboard?.hide()
                             focus.clearFocus(force = true)
@@ -589,4 +605,5 @@ internal tailrec fun Context.activityOrNull(): Activity? = when (this) {
     is ContextWrapper -> baseContext.activityOrNull()
     else -> null
 }
+
 

@@ -180,10 +180,7 @@ private fun SourceChoice(id: String?, name: String, selected: Boolean, modifier:
     val motion = LocalMotionEnabled.current
     val background by animateColorAsState(if (selected) accent.copy(alpha = .12f) else DetailForeground.copy(alpha = .025f),
         tween(if (motion) MangaMotion.Content else 0), label = "source-selection-color")
-    val emphasis by animateFloatAsState(if (selected) 1f else 0f,
-        if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(), label = "source-selection")
-    Row(modifier.heightIn(min = 38.dp).clip(RoundedCornerShape(12.dp))
-        .graphicsLayer { scaleX = 1f + .02f * emphasis; scaleY = scaleX }
+    Row(modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
         .background(background)
         .selectable(selected, role = Role.RadioButton, onClick = onClick)
         .semantics(mergeDescendants = true) { contentDescription = name }
@@ -204,7 +201,7 @@ private fun SourceChoice(id: String?, name: String, selected: Boolean, modifier:
 @Composable
 private fun FilterToggle(icon: ImageVector, label: String, checked: Boolean, onClick: () -> Unit) {
     val accent = reviewSourceAccent("anilist", DetailForeground.luminance() > .5f)
-    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).clip(RoundedCornerShape(12.dp))
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
         .toggleable(checked, role = Role.Switch) { onClick() }.padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
         Icon(icon, null, tint = DetailSecondary, modifier = Modifier.size(16.dp))
@@ -215,3 +212,4 @@ private fun FilterToggle(icon: ImageVector, label: String, checked: Boolean, onC
         }
     }
 }
+

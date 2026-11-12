@@ -13,13 +13,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -57,7 +55,7 @@ import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
+import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -80,10 +78,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -121,6 +115,7 @@ import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionSwitchThumb
 import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.motionInputGate
@@ -921,13 +916,6 @@ private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onS
 private fun SettingsToggle(title: String, checked: Boolean, leadingInset: Dp = 31.dp, compact: Boolean = false, onCheckedChange: (Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val motion = LocalMotionEnabled.current
-    // Saved 17:03 press-stretch switch: position and width retain the same moving anchor.
-    val position = animateFloatAsState(if (checked) 1f else 0f,
-        if (motion) spring(dampingRatio = .72f, stiffness = 300f) else snap(), label = "setting-switch-position")
-    val thumbWidth = animateFloatAsState(if (pressed) 21f else 18f,
-        if (motion) spring(dampingRatio = .72f, stiffness = 300f) else snap(), label = "setting-switch-press")
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .toggleable(checked, interactionSource = interaction, indication = null,
@@ -937,17 +925,7 @@ private fun SettingsToggle(title: String, checked: Boolean, leadingInset: Dp = 3
         Text(title, Modifier.weight(1f).padding(start = leadingInset, end = 12.dp),
             style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
         Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
-            Box(Modifier.width(36.dp).height(22.dp).drawBehind {
-                val p = position.value.coerceIn(0f, 1f)
-                drawRoundRect(lerp(colors.surfaceContainerHigh, colors.primary, p),
-                    cornerRadius = CornerRadius(size.height / 2f))
-                val w = thumbWidth.value.dp.toPx()
-                val x = 2.dp.toPx() + (size.width - 4.dp.toPx() - w) *
-                    if (layoutDirection == androidx.compose.ui.unit.LayoutDirection.Rtl) 1f - p else p
-                drawRoundRect(lerp(colors.surface, colors.onPrimary, p),
-                    topLeft = Offset(x, 2.dp.toPx()), size = Size(w, 18.dp.toPx()),
-                    cornerRadius = CornerRadius(9.dp.toPx()))
-            })
+            MotionSwitchThumb(checked, interaction)
         }
     }
 }
@@ -1008,3 +986,4 @@ private fun settingsLastCheck(time: Long): String {
     return if (now - time < DateUtils.MINUTE_IN_MILLIS) "刚刚检查"
         else "${DateUtils.getRelativeTimeSpanString(time, now, DateUtils.MINUTE_IN_MILLIS, DateUtils.FORMAT_ABBREV_RELATIVE)}检查"
 }
+

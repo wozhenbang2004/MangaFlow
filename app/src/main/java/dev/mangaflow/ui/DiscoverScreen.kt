@@ -65,7 +65,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
+import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalTextStyle
@@ -431,7 +431,7 @@ private fun RankingAudienceToggle(audience: RankAudience, onAudience: (RankAudie
             contentDescription = "榜单分类"
             stateDescription = audience.label
         }, contentAlignment = Alignment.Center) {
-        Box(Modifier.size(38.dp).motionPress(interaction, pressedScale = .90f),
+        Box(Modifier.size(38.dp).motionPress(interaction, pressedScale = .94f),
             contentAlignment = Alignment.Center) {
             // Both faces retain their identity. The rear face travels around the front one,
             // so rapid taps reverse the same depth motion without replacing either icon.
@@ -595,13 +595,16 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, onOpen: (
 @Composable
 private fun DiscoveryRefresh(state: BrowseState, onRefresh: () -> Unit) {
     val motion = LocalMotionEnabled.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     val rotation = remember { Animatable(0f) }
-    LaunchedEffect(state.refreshing, motion) {
+    LaunchedEffect(state.refreshing, motion, lifecycle) {
         if (!motion) rotation.snapTo(0f)
         else if (state.refreshing) {
-            while (true) {
-                rotation.animateTo(360f, tween(1400, easing = LinearEasing))
-                rotation.snapTo(0f)
+            lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (true) {
+                    rotation.animateTo(360f, tween(1400, easing = LinearEasing))
+                    rotation.snapTo(0f)
+                }
             }
         } else if (rotation.value > 0f) {
             rotation.animateTo(360f, tween(380, easing = MangaMotion.EnterEasing))
@@ -996,3 +999,4 @@ private val SearchPositionsSaver = listSaver<LinkedHashMap<String, LazyListState
         }
     } },
 )
+

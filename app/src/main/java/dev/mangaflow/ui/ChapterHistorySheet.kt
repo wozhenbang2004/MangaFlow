@@ -17,7 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material3.CircularProgressIndicator
+import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -134,3 +134,4 @@ private fun historyTime(time: Long): String {
     val format = if (moment.year == Instant.now().atZone(zone).year) "MM-dd HH:mm" else "yyyy-MM-dd"
     return DateTimeFormatter.ofPattern(format).format(moment)
 }
+

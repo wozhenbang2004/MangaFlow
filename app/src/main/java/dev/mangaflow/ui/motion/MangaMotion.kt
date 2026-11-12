@@ -91,11 +91,18 @@ internal object MangaMotion {
     // Approximate Compose counterpart of beUI Morphing Search's 580ms / .22 bounce role.
     const val SearchStiffness = 230f
     const val SearchDamping = .78f
-    const val SearchLead = 70L
     const val SearchClip = 320
+    const val NavigationStiffness = 520f
+    const val NavigationDamping = 1f
+    const val NavigationFade = 160
+    const val GestureStiffness = 420f
+    const val GestureDamping = .86f
+    const val SwitchStiffness = 300f
+    const val SwitchDamping = .72f
+    const val Chrome = 180
     val SearchEasing = CubicBezierEasing(.16f, 1f, .3f, 1f)
-    const val ListEnter = 320
-    const val ListExit = 190
+    const val ListEnter = 200
+    const val ListExit = 140
     val ListFadeEasing = CubicBezierEasing(.2f, 0f, .15f, 1f)
 }
 
@@ -137,7 +144,7 @@ internal fun rememberDelayedBusy(busy: Boolean, delayMillis: Long = 160L): Boole
 internal fun Modifier.motionPress(
     interaction: MutableInteractionSource,
     enabled: Boolean = true,
-    pressedScale: Float = .97f,
+    pressedScale: Float = .985f,
 ): Modifier {
     val pressed by interaction.collectIsPressedAsState()
     val motion = LocalMotionEnabled.current
@@ -166,7 +173,7 @@ internal fun MotionIconButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     IconButton(onClick = onClick, modifier = modifier, enabled = enabled, interactionSource = interaction) {
-        Box(Modifier.motionPress(interaction, enabled, pressedScale = .90f), contentAlignment = Alignment.Center) { content() }
+        Box(Modifier.motionPress(interaction, enabled, pressedScale = .94f), contentAlignment = Alignment.Center) { content() }
     }
 }
 
@@ -215,11 +222,11 @@ internal fun <T> MotionTabContent(
                 val direction = if (layoutDirection == LayoutDirection.Rtl) -step else step
                 if (soft) {
                     ((fadeIn(tween(MangaMotion.ListEnter, easing = MangaMotion.ListFadeEasing)) +
-                        slideInHorizontally(spring(dampingRatio = 1f, stiffness = 240f)) { direction * distance }) togetherWith
+                        slideInHorizontally(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { direction * distance }) togetherWith
                         (fadeOut(tween(MangaMotion.ListExit, easing = MangaMotion.ListFadeEasing)) +
                             slideOutHorizontally(tween(MangaMotion.ListEnter, easing = MangaMotion.EnterEasing)) { -direction * distance / 3 }))
                 } else ((fadeIn(tween(MangaMotion.Content)) +
-                    slideInHorizontally(tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing)) { direction * distance }) togetherWith
+                    slideInHorizontally(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { direction * distance }) togetherWith
                     (fadeOut(tween(MangaMotion.Quick)) +
                         slideOutHorizontally(tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)) { -direction * distance / 2 }))
             }
@@ -321,3 +328,4 @@ internal fun MotionBottomSheet(
         Column(Modifier.fillMaxWidth().motionInputGate(!closing)) { content(dismiss) }
     }
 }
+

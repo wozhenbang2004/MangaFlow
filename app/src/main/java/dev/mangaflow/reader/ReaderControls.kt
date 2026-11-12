@@ -34,13 +34,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -60,6 +58,7 @@ import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionSwitchThumb
 import kotlin.math.roundToInt
 
 /** Reader controls follow the app theme, independently from the artwork background preference. */
@@ -212,12 +211,11 @@ internal fun ReaderToggle(
     update: (Boolean) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    val motion = LocalMotionEnabled.current
-    val position = animateFloatAsState(if (value) 1f else 0f,
-        tween(if (motion) MangaMotion.Quick else 0, easing = MangaMotion.EnterEasing), label = "reader-toggle")
+    val interaction = remember { MutableInteractionSource() }
     Row(
         Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
-            .toggleable(value = value, role = Role.Switch, onValueChange = update)
+            .toggleable(value = value, interactionSource = interaction, indication = null,
+                role = Role.Switch, onValueChange = update)
             .padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -226,14 +224,9 @@ internal fun ReaderToggle(
             if (description != null) Text(description, color = colors.onSurfaceVariant, fontSize = 11.sp,
                 lineHeight = 16.sp, modifier = Modifier.padding(top = 2.dp))
         }
-        Box(Modifier.width(36.dp).height(22.dp).drawBehind {
-            val p = position.value
-            drawRoundRect(colors.onSurface.copy(alpha = .13f + .70f * p),
-                cornerRadius = CornerRadius(size.height / 2f), size = size)
-            val radius = 8.dp.toPx()
-            val x = 3.dp.toPx() + radius + (size.width - 6.dp.toPx() - radius * 2f) *
-                (if (layoutDirection == LayoutDirection.Rtl) (1f - p) else p)
-            drawCircle(colors.surface, radius, Offset(x, size.height / 2f))
-        })
+        Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
+            MotionSwitchThumb(value, interaction)
+        }
     }
 }
+

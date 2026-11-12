@@ -1,6 +1,11 @@
 package dev.mangaflow.ui
 
-import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.platform.LocalWindowInfo
+import dev.mangaflow.ui.motion.MotionBackHandler
+import dev.mangaflow.ui.motion.MotionBackState
 import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.snap
@@ -75,7 +80,6 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionInputGate
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlin.math.max
 import kotlin.math.min
@@ -104,15 +108,16 @@ internal fun ExpandingSearchBar(
     val focus = LocalFocusManager.current
     val density = LocalDensity.current
     val requester = remember { FocusRequester() }
+    val back = remember { MotionBackState() }
+    val windowFocused = LocalWindowInfo.current.isWindowFocused
     val foregroundClip = remember { Path() }
     val searchInteraction = remember { MutableInteractionSource() }
     var retainedQuery by remember { mutableStateOf(query) }
     var inputFocused by remember { mutableStateOf(false) }
     var inputPlaced by remember { mutableStateOf(false) }
-    var shellOpen by remember { mutableStateOf(expanded) }
     var foregroundHeight by remember { mutableStateOf(44.dp) }
     val displayedQuery = if (expanded) query else retainedQuery
-    val shell = updateTransition(shellOpen, label = "search-shell")
+    val shell = updateTransition(expanded, label = "search-shell")
     val reveal = shell.animateFloat(
         transitionSpec = {
             if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
@@ -130,29 +135,28 @@ internal fun ExpandingSearchBar(
         }, label = "search-icon",
     ) { if (it) 1f else 0f }
     val present = expanded || shell.currentState || shell.targetState || shell.isRunning
+    val visibleForeground = remember(foreground, back) {
+        derivedStateOf { foreground.value * (1f - back.progress.value.coerceIn(0f, 1f)) }
+    }
     SideEffect {
         if (expanded) retainedQuery = query
         onPresenceChange(present)
         // Restore the underlying controls with the foreground's finite exit, not the spring's long tail.
         // An opening hides them immediately, including the trigger's lead-in, to avoid icon flashes.
-        onForegroundState(foreground)
+        onForegroundState(visibleForeground)
     }
 
-    LaunchedEffect(expanded, motion) {
-        // Only a fully closed entrance gets the lead-in; an interrupted morph reverses in place.
-        if (expanded && motion && !shell.currentState && !shell.isRunning && reveal.value < .001f) {
-            delay(MangaMotion.SearchLead)
-        }
-        shellOpen = expanded
-    }
-    LaunchedEffect(expanded, active, inputPlaced) {
-        if (expanded && active && inputPlaced) {
-            snapshotFlow { reveal.value >= .90f && foreground.value >= .98f }.first { it }
-            requester.requestFocus()
-            keyboard?.show()
-        } else if (inputFocused) {
+    LaunchedEffect(expanded, active) {
+        if ((!expanded || !active) && inputFocused) {
             keyboard?.hide()
             focus.clearFocus(force = true)
+        }
+    }
+    LaunchedEffect(present) {
+        if (!present) {
+            back.settling?.cancel()
+            back.completed = false
+            back.progress.snapTo(0f)
         }
     }
     val dismiss = {
@@ -160,7 +164,9 @@ internal fun ExpandingSearchBar(
         focus.clearFocus(force = true)
         onExpandedChange(false)
     }
-    BackHandler(active && expanded, onBack = dismiss)
+    // The IME owns its first back. The next back previews this shell, not the route beneath it.
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    MotionBackHandler(active && expanded && !imeVisible, state = back, onBack = dismiss)
 
     // Only the overlay takes IME insets. The toolbar and browsing content keep their layout.
     BoxWithConstraints(modifier.imePadding()) {
@@ -177,7 +183,24 @@ internal fun ExpandingSearchBar(
                 if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
             }, label = "search-shell-height",
         ) { if (it) panelHeight else 44.dp }
-        val progress = reveal.value.coerceIn(0f, 1f)
+        val backRemaining = 1f - back.progress.value.coerceIn(0f, 1f)
+        val visibleWidth = 44.dp + (width.value - 44.dp) * backRemaining
+        val visibleHeight = 44.dp + (height.value - 44.dp) * backRemaining
+        val progress = (reveal.value * backRemaining).coerceIn(0f, 1f)
+        val requiredTextWidth = minOf(96.dp, (panelWidth - 60.dp).coerceAtLeast(0.dp))
+        LaunchedEffect(expanded, active, inputPlaced, windowFocused, panelWidth) {
+            if (expanded && active && inputPlaced && windowFocused) {
+                snapshotFlow {
+                    val remaining = 1f - back.progress.value.coerceIn(0f, 1f)
+                    val liveWidth = 44.dp + (width.value - 44.dp) * remaining
+                    val clipLeft = max((panelWidth - 44.dp).value * (1f - visibleForeground.value),
+                        (panelWidth - liveWidth).value).coerceAtLeast(16f)
+                    !back.gesturing && panelWidth.value - 44f - clipLeft >= requiredTextWidth.value
+                }.first { it }
+                requester.requestFocus()
+                keyboard?.show()
+            }
+        }
         val endInset = 8.dp
         val topInset = 0.dp
 
@@ -189,9 +212,9 @@ internal fun ExpandingSearchBar(
         LiquidGlassSurface(
             state = backdrop,
             modifier = Modifier.align(Alignment.TopEnd).padding(top = topInset, end = endInset)
-                .width(width.value.coerceAtLeast(44.dp)).height(height.value.coerceAtLeast(44.dp))
+                .width(visibleWidth.coerceAtLeast(44.dp)).height(visibleHeight.coerceAtLeast(44.dp))
                 .graphicsLayer {
-                    alpha = reveal.value.coerceIn(0f, 1f)
+                    alpha = progress
                     compositingStrategy = CompositingStrategy.ModulateAlpha
                 },
             cornerRadius = 22.dp + 2.dp * progress,
@@ -210,11 +233,11 @@ internal fun ExpandingSearchBar(
                 val fullWidth = panelWidth.roundToPx()
                 val placeable = measurable.measure(constraints.copy(minWidth = fullWidth, maxWidth = fullWidth,
                     minHeight = 0, maxHeight = (44.dp + resultsRoom).roundToPx()))
-                val foregroundGone = !expanded && foreground.value <= .02f
+                val foregroundGone = !expanded && visibleForeground.value <= .02f
                 // Use the same threshold as the restored toolbar's input gate. The optical
                 // shell may settle longer, but the invisible foreground owns only its trigger.
-                val liveWidth = (if (foregroundGone) 44.dp else width.value.coerceAtLeast(44.dp)).roundToPx()
-                val liveHeight = (if (foregroundGone) 44.dp else height.value.coerceAtLeast(44.dp)).roundToPx()
+                val liveWidth = (if (foregroundGone) 44.dp else visibleWidth.coerceAtLeast(44.dp)).roundToPx()
+                val liveHeight = (if (foregroundGone) 44.dp else visibleHeight.coerceAtLeast(44.dp)).roundToPx()
                 layout(liveWidth, liveHeight) {
                     if (present && !foregroundGone) placeable.placeRelative(liveWidth - placeable.width, 0)
                 }
@@ -223,11 +246,11 @@ internal fun ExpandingSearchBar(
             .onSizeChanged { foregroundHeight = with(density) { it.height.toDp() } }
             .semantics { paneTitle = "搜索漫画" }
             .pointerInput(Unit) {}
-            .graphicsLayer { alpha = foreground.value.coerceIn(0f, 1f) }
+            .graphicsLayer { alpha = visibleForeground.value.coerceIn(0f, 1f) }
             .drawWithContent {
-                val p = foreground.value.coerceIn(0f, 1f)
-                val shellWidth = width.value.coerceAtLeast(44.dp).toPx()
-                val shellHeight = height.value.coerceAtLeast(44.dp).toPx()
+                val p = visibleForeground.value.coerceIn(0f, 1f)
+                val shellWidth = visibleWidth.coerceAtLeast(44.dp).toPx()
+                val shellHeight = visibleHeight.coerceAtLeast(44.dp).toPx()
                 val left = max((size.width - 44.dp.toPx()).coerceAtLeast(0f) * (1f - p),
                     size.width - shellWidth).coerceAtLeast(0f)
                 val top = topInset.toPx()
@@ -283,19 +306,20 @@ internal fun ExpandingSearchBar(
                 },
         ) {
             Box(Modifier.size(22.dp).graphicsLayer {
-                val response = sin(icon.value.coerceIn(0f, 1f) * Math.PI).toFloat()
+                val response = sin((icon.value * backRemaining).coerceIn(0f, 1f) * Math.PI).toFloat()
                 scaleX = 1f - .16f * response
                 scaleY = scaleX
             }) {
                 Icon(Icons.Outlined.Search, null, Modifier.fillMaxSize().graphicsLayer {
-                    alpha = 1f - icon.value
-                    rotationZ = -45f * icon.value
+                    alpha = 1f - icon.value * backRemaining
+                    rotationZ = -45f * icon.value * backRemaining
                 })
                 Icon(Icons.Outlined.Close, null, Modifier.fillMaxSize().graphicsLayer {
-                    alpha = icon.value
-                    rotationZ = 45f * (1f - icon.value)
+                    alpha = icon.value * backRemaining
+                    rotationZ = 45f * (1f - icon.value * backRemaining)
                 })
             }
         }
     }
 }
+

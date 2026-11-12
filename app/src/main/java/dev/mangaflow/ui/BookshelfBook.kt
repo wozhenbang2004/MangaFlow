@@ -1,6 +1,8 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
@@ -16,12 +18,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
+import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,6 +37,7 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -46,6 +52,9 @@ import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /** The app's ordinary MangaCover with existing flat press, swipe and drag ownership. */
 @Composable
@@ -69,12 +78,41 @@ internal fun BookshelfBook(
     var rootOrigin by remember(manga.id) { mutableStateOf(Offset.Zero) }
     var dragOffset by remember(manga.id) { mutableStateOf(Offset.Zero) }
     var dragPoint by remember(manga.id) { mutableStateOf(Offset.Zero) }
+    val returnPosition = remember(manga.id) { Animatable(Offset.Zero, Offset.VectorConverter) }
+    val velocityTracker = remember(manga.id) { VelocityTracker() }
+    val scope = rememberCoroutineScope()
+    var returning by remember(manga.id) { mutableStateOf(false) }
+    var settleJob by remember(manga.id) { mutableStateOf<Job?>(null) }
+    val latestMotion by rememberUpdatedState(motion)
+    val latestDeleteArmed by rememberUpdatedState(deleteArmed)
+    val latestDragEnd by rememberUpdatedState(onDragEnd)
+    val latestDragCancel by rememberUpdatedState(onDragCancel)
+    fun returnToSlot(velocity: Offset = Offset.Zero) {
+        settleJob?.cancel()
+        if (!latestMotion) { returning = false; dragOffset = Offset.Zero; return }
+        val start = dragOffset
+        settleJob = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            returnPosition.snapTo(start)
+            returning = true
+            returnPosition.animateTo(Offset.Zero, spring(MangaMotion.GestureDamping, MangaMotion.GestureStiffness),
+                initialVelocity = Offset(velocity.x.coerceIn(-2_000f, 2_000f), velocity.y.coerceIn(-2_000f, 2_000f)))
+            dragOffset = Offset.Zero
+            returning = false
+        }
+    }
+    LaunchedEffect(motion) {
+        if (!motion && returning) {
+            settleJob?.cancel()
+            returning = false
+            dragOffset = Offset.Zero
+        }
+    }
     val scale = animateFloatAsState(
         targetValue = when {
             !motion -> 1f
             dragging && deleteArmed -> .9f
             dragging -> 1.02f
-            pressed -> .97f
+            pressed -> .985f
             else -> 1f
         },
         animationSpec = if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
@@ -91,30 +129,39 @@ internal fun BookshelfBook(
         .pointerInput(manga.id) {
             detectDragGesturesAfterLongPress(
                 onDragStart = { local ->
-                    dragOffset = Offset.Zero
+                    val caught = if (returning) returnPosition.value else Offset.Zero
+                    settleJob?.cancel()
+                    returning = false
+                    dragOffset = caught
+                    velocityTracker.resetTracking()
                     dragPoint = rootOrigin + local
                     onDragStart(dragPoint)
                 },
                 onDrag = { change, amount ->
+                    velocityTracker.addPosition(change.uptimeMillis, change.position)
                     change.consume()
                     dragOffset += amount
                     dragPoint += amount
                     onDragMove(dragPoint)
                 },
                 onDragEnd = {
-                    onDragEnd(dragPoint)
-                    dragOffset = Offset.Zero
+                    val remove = latestDeleteArmed
+                    val velocity = velocityTracker.calculateVelocity()
+                    latestDragEnd(dragPoint)
+                    if (remove) dragOffset = Offset.Zero
+                    else returnToSlot(Offset(velocity.x, velocity.y))
                 },
                 onDragCancel = {
-                    onDragCancel()
-                    dragOffset = Offset.Zero
+                    latestDragCancel()
+                    returnToSlot()
                 },
             )
         }
         .graphicsLayer {
             compositingStrategy = CompositingStrategy.ModulateAlpha
-            translationX = dragOffset.x
-            translationY = dragOffset.y
+            val offset = if (returning) returnPosition.value else dragOffset
+            translationX = offset.x
+            translationY = offset.y
             scaleX = scale.value
             scaleY = scale.value
             alpha = if (dragging && deleteArmed) .82f else if (!motion && pressed) .84f else 1f
@@ -144,3 +191,4 @@ internal fun BookshelfBook(
         }
     }
 }
+
