@@ -44,6 +44,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -91,6 +94,11 @@ class DownloadStore private constructor(context: Context) {
     private val chapterChanges = ConcurrentHashMap<String, Mutex>()
     private val availablePages = mutableMapOf<String, MutableSet<Int>>()
     private val readerPositions = mutableMapOf<String, Int>()
+    private val restoredMetadata = mutableSetOf<String>()
+    private val validationLocks = ConcurrentHashMap<String, Mutex>()
+    private val validatedGenerations = mutableMapOf<String, String>()
+    private val pageWriteVersions = mutableMapOf<String, MutableMap<Int, Long>>()
+    private var entryOrder = emptyList<String>()
     private val transferSlots = Semaphore(3)
     private val _entries = MutableStateFlow<List<DownloadEntry>>(emptyList())
     val entries: StateFlow<List<DownloadEntry>> = _entries.asStateFlow()
@@ -107,24 +115,11 @@ class DownloadStore private constructor(context: Context) {
                         directory.deleteRecursively()
                         return@forEach
                     }
-                    directory.listFiles()?.filter { it.name.endsWith(".part") }?.forEach { it.delete() }
-                    val record = runCatching {
-                        val json = JSONObject(AtomicFile(File(directory, "manifest.json")).openRead().bufferedReader().use { it.readText() })
-                        readRecord(json)
-                    }.getOrNull()
-                    if (record != null && record.entry.id == directory.name) {
-                        val present = record.pages.indices.filter { isReadableImage(pageFile(record.entry.id, it)) }.toMutableSet()
-                        synchronized(lock) {
-                            records[record.entry.id] = record.copy(entry = record.entry.copy(
-                                completedPages = present.size,
-                                downloadedBytes = present.sumOf { pageFile(record.entry.id, it).length() },
-                            ))
-                            availablePages[record.entry.id] = present
-                        }
-                    }
+                    restoreChapter(directory.name, publishRestored = false)
                 }
                 synchronized(lock) { publish() }
-                // Saved reading can start before scheduler reconciliation finishes in the background.
+                // Global readiness covers manifests only. Image validation follows on IO;
+                // a reader can restore its one manifest even before this scan finishes.
                 initialized.complete(Unit)
                 _loading.value = false
                 reconcileRestoredRecords()
@@ -136,6 +131,73 @@ class DownloadStore private constructor(context: Context) {
     }
 
     internal suspend fun awaitReady() = initialized.await()
+
+    fun observeManga(mangaId: String): Flow<List<DownloadEntry>> = entries
+        .map { all -> all.filter { it.manga.id == mangaId } }.distinctUntilChanged()
+
+    fun observeChapter(mangaId: String, chapterId: String): Flow<DownloadEntry?> = entries
+        .map { all -> all.firstOrNull { it.manga.id == mangaId && it.chapter.id == chapterId } }
+        .distinctUntilChanged()
+
+    private suspend fun restoreChapter(id: String, publishRestored: Boolean = true) = withContext(Dispatchers.IO) {
+        if (!id.matches(Regex("[a-f0-9]{64}"))) return@withContext
+        chapterChanges.getOrPut(id) { Mutex() }.withLock {
+            if (synchronized(lock) { id in restoredMetadata || id in records }) return@withLock
+            val folder = directory(id)
+            // This is done before a restored worker can run, never during validation of live transfers.
+            folder.listFiles()?.filter { it.name.endsWith(".part") }?.forEach { it.delete() }
+            val restored = runCatching {
+                val json = JSONObject(AtomicFile(File(folder, "manifest.json")).openRead().bufferedReader().use { it.readText() })
+                readRecord(json).takeIf { it.entry.id == id }
+            }.getOrNull()
+            // File metadata is enough for the initial index. Decode only a requested page now;
+            // all remaining image headers are checked by background validation.
+            val present = restored?.pages?.indices?.filter {
+                val file = pageFile(id, it)
+                file.isFile && file.length() > 0L
+            }.orEmpty().toMutableSet()
+            val bytes = present.sumOf { pageFile(id, it).length() }
+            synchronized(lock) {
+                restoredMetadata += id
+                if (restored != null && id !in records) {
+                    records[id] = restored.copy(entry = restored.entry.copy(
+                        completedPages = present.size, downloadedBytes = bytes))
+                    availablePages[id] = present
+                    if (publishRestored) publish()
+                }
+            }
+        }
+    }
+
+    /** Only workers and background reconciliation validate a whole chapter. Readers validate one page. */
+    internal suspend fun prepareChapter(id: String) = withContext(Dispatchers.IO) {
+        restoreChapter(id)
+        validationLocks.getOrPut(id) { Mutex() }.withLock {
+            val snapshot = synchronized(lock) {
+                records[id]?.takeUnless { validatedGenerations[id] == it.generation }
+            } ?: return@withLock
+            val versions = synchronized(lock) { pageWriteVersions[id]?.toMap().orEmpty() }
+            val present = snapshot.pages.indices.filter { isReadableImage(pageFile(id, it)) }.toSet()
+            synchronized(lock) {
+                val current = records[id]?.takeIf { it.generation == snapshot.generation } ?: return@synchronized
+                val available = availablePages.getOrPut(id) { mutableSetOf() }
+                for (index in snapshot.pages.indices) {
+                    // A reader may save a validated replacement while this scan is decoding.
+                    if (pageWriteVersions[id]?.get(index) == versions[index]) {
+                        if (index in present) available.add(index) else available.remove(index)
+                    }
+                }
+                validatedGenerations[id] = current.generation
+                val bytes = available.sumOf { pageFile(id, it).length() }
+                if (current.entry.completedPages != available.size || current.entry.downloadedBytes != bytes) {
+                    // Startup verification is a cache/index correction, not a durable user intent.
+                    // Avoid rewriting every manifest and requiring free disk just to read a chapter.
+                    records[id] = current.copy(entry = current.entry.copy(completedPages = available.size, downloadedBytes = bytes))
+                    publish(reorder = false)
+                }
+            }
+        }
+    }
 
     fun availableStorageBytes(): Long = root.usableSpace.coerceAtLeast(0L)
 
@@ -488,6 +550,8 @@ class DownloadStore private constructor(context: Context) {
                 records.remove(id)
                 availablePages.remove(id)
                 readerPositions.remove(id)
+                validatedGenerations.remove(id)
+                pageWriteVersions.remove(id)
                 publish()
             }
         }
@@ -512,14 +576,14 @@ class DownloadStore private constructor(context: Context) {
 
     /** Keep the original page order and remote URLs, even when only some images are saved. */
     suspend fun storedPages(mangaId: String, chapterId: String): List<Page>? = withContext(Dispatchers.IO) {
-        awaitReady()
+        restoreChapter(chapterKey(mangaId, chapterId))
         synchronized(lock) { records[chapterKey(mangaId, chapterId)]?.pages?.takeIf { it.isNotEmpty() } }
     }
 
     /** Read-only preview: prefer a saved first image, never start a transfer or enqueue a job. */
     suspend fun coverPage(mangaId: String, chapterId: String, preferLocal: Boolean = true): Page? = withContext(Dispatchers.IO) {
-        awaitReady()
         val id = chapterKey(mangaId, chapterId)
+        restoreChapter(id)
         val page = synchronized(lock) { records[id]?.pages?.firstOrNull() } ?: return@withContext null
         val file = pageFile(id, 0)
         if (preferLocal && file.isFile && file.length() > 0L) page.copy(url = file.toURI().toString()) else page
@@ -527,8 +591,8 @@ class DownloadStore private constructor(context: Context) {
 
     /** Called for an image when it is needed, never on every download-progress publication. */
     suspend fun resolveReaderPage(mangaId: String, chapterId: String, page: Page): Page = withContext(Dispatchers.IO) {
-        awaitReady()
         val id = chapterKey(mangaId, chapterId)
+        restoreChapter(id)
         val snapshot = chapterChanges.getOrPut(id) { Mutex() }.withLock {
             synchronized(lock) { records[id] }
         } ?: return@withContext page
@@ -671,10 +735,12 @@ class DownloadStore private constructor(context: Context) {
                 if (destination.exists() && !destination.delete()) throw DownloadStorageException("无法替换本地图片")
                 if (!partial.renameTo(destination)) throw DownloadStorageException("无法保存本地图片")
                 val available = availablePages.getOrPut(key.id) { mutableSetOf() }.apply { add(key.index) }
+                val versions = pageWriteVersions.getOrPut(key.id) { mutableMapOf() }
+                versions[key.index] = (versions[key.index] ?: 0L) + 1L
                 val updatedPages = current.pages.mapIndexed { position, value ->
                     if (position == key.index) value.copy(width = bounds.first, height = bounds.second) else value
                 }
-                val complete = available.size == current.pages.size
+                val complete = available.size == current.pages.size && validatedGenerations[key.id] == current.generation
                 save(current.copy(pages = updatedPages, entry = current.entry.copy(
                     completedPages = available.size,
                     downloadedBytes = available.sumOf { pageFile(key.id, it).length() },
@@ -769,9 +835,11 @@ class DownloadStore private constructor(context: Context) {
     }
 
     /** Reconcile persisted intent against the scheduler without holding the state lock during reads. */
-    private fun reconcileRestoredRecords() {
-        val snapshots = synchronized(lock) { records.values.toList() }
-        for (snapshot in snapshots) {
+    private suspend fun reconcileRestoredRecords() {
+        val ids = synchronized(lock) { records.keys.sortedBy { if (it in readerPositions) 0 else 1 } }
+        for (id in ids) {
+            prepareChapter(id)
+            val snapshot = synchronized(lock) { records[id] } ?: continue
             if (snapshot.entry.status == DownloadStatus.PAUSED) continue
             val active = snapshot.entry.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
             if (!active && snapshot.entry.status != DownloadStatus.COMPLETED) continue
@@ -852,8 +920,9 @@ class DownloadStore private constructor(context: Context) {
 
     private fun save(record: DownloadRecord) {
         writeManifest(directory(record.entry.id), record)
+        val previous = records[record.entry.id]
         records[record.entry.id] = record
-        publish()
+        publish(reorder = previous == null || previous.entry.createdAt != record.entry.createdAt)
     }
 
     private fun writeManifest(targetDirectory: File, record: DownloadRecord) {
@@ -873,7 +942,12 @@ class DownloadStore private constructor(context: Context) {
         }
     }
 
-    private fun publish() { _entries.value = records.values.map(DownloadRecord::entry).sortedByDescending(DownloadEntry::createdAt) }
+    private fun publish(reorder: Boolean = true) {
+        if (reorder || entryOrder.size != records.size) {
+            entryOrder = records.values.sortedByDescending { it.entry.createdAt }.map { it.entry.id }
+        }
+        _entries.value = entryOrder.mapNotNull { records[it]?.entry }
+    }
 
     private fun memoryFailure(id: String, error: Exception, generation: String? = null) = synchronized(lock) {
         val record = records[id] ?: return@synchronized

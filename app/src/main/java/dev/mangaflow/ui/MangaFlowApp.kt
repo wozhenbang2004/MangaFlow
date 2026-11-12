@@ -142,7 +142,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
     val history by model.library.history.collectAsStateWithLifecycle()
     val preferences by model.library.preferences.collectAsStateWithLifecycle()
-    val downloads by model.downloads.entries.collectAsStateWithLifecycle()
     val refreshingDownloads by model.refreshingDownloads.collectAsStateWithLifecycle()
     val account by model.account.collectAsStateWithLifecycle()
     val update by model.updates.state.collectAsStateWithLifecycle()
@@ -355,6 +354,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         active = current.key == frame.key,
                     )
                     is Frame.Detail -> savedState.SaveableStateProvider(current.key) {
+                        val downloadFlow = remember(model, current.state.manga.id) {
+                            model.downloads.observeManga(current.state.manga.id)
+                        }
+                        val downloads by downloadFlow.collectAsStateWithLifecycle(
+                            initialValue = model.downloads.entries.value.filter { it.manga.id == current.state.manga.id })
                         val chapterPositions = rememberChapterPositions(current.state.manga, model.library,
                             active = current.key == frame.key)
                         DetailScreen(

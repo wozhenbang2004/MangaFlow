@@ -146,6 +146,11 @@ fun SettingsScreen(
     readMetadataCacheBytes: suspend () -> Long,
     clearMetadataCache: suspend () -> Unit,
 ) {
+    val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
+    if (!libraryReady) {
+        LibraryRestoreStatus(libraryStore)
+        return
+    }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val preferences by libraryStore.preferences.collectAsStateWithLifecycle()

@@ -108,6 +108,7 @@ fun LibraryScreen(
     var showCollections by rememberSaveable { mutableStateOf(false) }
     var showStats by rememberSaveable { mutableStateOf(false) }
     val collections by libraryStore.pageCollections.collectAsStateWithLifecycle()
+    val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     val readingActivity by libraryStore.readingActivity.collectAsStateWithLifecycle()
     var managedId by remember { mutableStateOf<String?>(null) }
     var chapterHistoryManga by remember { mutableStateOf<Manga?>(null) }
@@ -177,7 +178,8 @@ fun LibraryScreen(
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(backdrop)) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            MotionTabContent(if (showHistory) 1 else 0, Modifier.fillMaxSize()) { tab ->
+            if (!libraryReady) LibraryRestoreStatus(libraryStore, Modifier.padding(top = headerPadding))
+            else MotionTabContent(if (showHistory) 1 else 0, Modifier.fillMaxSize()) { tab ->
                 if (tab == 1) {
                     LazyColumn(
                         state = historyPosition,

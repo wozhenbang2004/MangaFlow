@@ -5,11 +5,15 @@ import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -53,17 +57,23 @@ data class LibraryBackupInfo(
 
 /** Device-local reading state. Neither favorites nor reading history require a source account. */
 class LibraryStore(context: Context) {
-    private val disk = context.applicationContext.getSharedPreferences("mangaflow_library", Context.MODE_PRIVATE)
+    private val application = context.applicationContext
+    private val disk by lazy { application.getSharedPreferences("mangaflow_library", Context.MODE_PRIVATE) }
     private val lock = Any()
-    private var restoreLegacyLongImages = readLegacyLongImageMigration()
-    private val _favorites = MutableStateFlow(readArray("favorites") { readManga(it) }.distinctBy(Manga::id))
-    private val _history = MutableStateFlow(readArray("history", ::readProgress).distinctBy { it.manga.id })
+    private var restoreLegacyLongImages = false
+    private val _favorites = MutableStateFlow<List<Manga>>(emptyList())
+    private val _history = MutableStateFlow<List<ReadingProgress>>(emptyList())
     private val _chapterHistoryRevision = MutableStateFlow(0L)
-    private val _shelfStates = MutableStateFlow(readShelfStates())
-    private val _pageCollections = MutableStateFlow(readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key))
-    private val _readingActivity = MutableStateFlow(readArray(READING_ACTIVITY_KEY, ::readReadingActivity).distinctBy { it.manga.id })
-    private val _preferences = MutableStateFlow(readPreferences())
-    private val _mangaPreferences = MutableStateFlow(readMangaPreferences())
+    private val _shelfStates = MutableStateFlow<Map<String, ShelfState>>(emptyMap())
+    private val _pageCollections = MutableStateFlow<List<PageCollection>>(emptyList())
+    private val _readingActivity = MutableStateFlow<List<ReadingActivity>>(emptyList())
+    private val _preferences = MutableStateFlow(ReaderPreferences())
+    private val _mangaPreferences = MutableStateFlow<Map<String, ReaderPreferences>>(emptyMap())
+    private val _ready = MutableStateFlow(false)
+    private val _restoreError = MutableStateFlow<String?>(null)
+    private var stateRestored = false
+    private var restoreJob: Job? = null
+    private val deferredMutations = mutableListOf<() -> Unit>()
     private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pendingChapterPositions = mutableMapOf<String, ChapterProgress>()
     private val pendingLongImagePositions = mutableMapOf<String, Float>()
@@ -84,10 +94,61 @@ class LibraryStore(context: Context) {
     val readingActivity: StateFlow<List<ReadingActivity>> = _readingActivity.asStateFlow()
     val preferences: StateFlow<ReaderPreferences> = _preferences.asStateFlow()
     val mangaPreferences: StateFlow<Map<String, ReaderPreferences>> = _mangaPreferences.asStateFlow()
+    val ready: StateFlow<Boolean> = _ready.asStateFlow()
+    val restoreError: StateFlow<String?> = _restoreError.asStateFlow()
+
+    init { retryRestore() }
+
+    /** Preference loading and JSON parsing never block the first frame. */
+    fun retryRestore(): Unit = synchronized(lock) {
+        if (stateRestored || restoreJob?.isActive == true) return@synchronized
+        _restoreError.value = null
+        restoreJob = progressScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val legacy = readLegacyLongImageMigration()
+                val favorites = readArray("favorites", ::readManga).distinctBy(Manga::id)
+                val history = readArray("history", ::readProgress).distinctBy { it.manga.id }
+                val states = readShelfStates()
+                val pictures = readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key)
+                val activity = readArray(READING_ACTIVITY_KEY, ::readReadingActivity).distinctBy { it.manga.id }
+                val preferences = readPreferences()
+                val perManga = readMangaPreferences()
+                synchronized(lock) {
+                    restoreLegacyLongImages = legacy
+                    _favorites.value = favorites
+                    _history.value = history
+                    _shelfStates.value = states
+                    _pageCollections.value = pictures
+                    _readingActivity.value = activity
+                    _preferences.value = preferences
+                    _mangaPreferences.value = perManga
+                    stateRestored = true
+                    // Replay early user intent against restored data, never against an empty shelf.
+                    val pending = deferredMutations.toList()
+                    deferredMutations.clear()
+                    try { pending.forEach { it() } }
+                    finally { _ready.value = true }
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                _restoreError.value = failure.message ?: "本地记录暂时无法恢复，请重试"
+            }
+        }.also { it.start() }
+    }
+
+    suspend fun awaitReady() { ready.first { it } }
+
+    /** Called under lock, in the same order as user actions arriving during restoration. */
+    private fun deferUntilReady(action: () -> Unit): Boolean {
+        if (stateRestored) return false
+        deferredMutations += action
+        return true
+    }
 
     fun isFavorite(mangaId: String): Boolean = _favorites.value.any { it.id == mangaId }
 
-    fun toggleFavorite(manga: Manga) = synchronized(lock) {
+    fun toggleFavorite(manga: Manga): Unit = synchronized(lock) {
+        if (deferUntilReady { toggleFavorite(manga) }) return@synchronized
         val removing = isFavorite(manga.id)
         val next = if (removing) _favorites.value.filterNot { it.id == manga.id }
         else listOf(manga) + _favorites.value
@@ -97,7 +158,8 @@ class LibraryStore(context: Context) {
     }
 
     /** Idempotent removal: a stale item menu can never add the manga back. */
-    fun removeFavorite(mangaId: String) = synchronized(lock) {
+    fun removeFavorite(mangaId: String): Unit = synchronized(lock) {
+        if (deferUntilReady { removeFavorite(mangaId) }) return@synchronized
         val next = _favorites.value.filterNot { it.id == mangaId }
         if (next.size == _favorites.value.size) return@synchronized
         _favorites.value = next
@@ -105,7 +167,8 @@ class LibraryStore(context: Context) {
         removeShelfStateLocked(mangaId)
     }
 
-    fun setShelfState(mangaId: String, state: ShelfState) = synchronized(lock) {
+    fun setShelfState(mangaId: String, state: ShelfState): Unit = synchronized(lock) {
+        if (deferUntilReady { setShelfState(mangaId, state) }) return@synchronized
         if (_favorites.value.none { it.id == mangaId }) return@synchronized
         val next = LinkedHashMap(_shelfStates.value)
         if (state == ShelfState.NORMAL) next.remove(mangaId) else next[mangaId] = state
@@ -140,6 +203,7 @@ class LibraryStore(context: Context) {
     }.getOrDefault(emptyMap())
 
     suspend fun exportBackup(): String = withContext(Dispatchers.IO) {
+        awaitReady()
         waitForProgressWriter()
         synchronized(lock) {
             val entries = JSONArray()
@@ -171,6 +235,7 @@ class LibraryStore(context: Context) {
     }
 
     suspend fun restoreBackup(encoded: String): LibraryBackupInfo = withContext(Dispatchers.IO) {
+        awaitReady()
         val decoded = decodeBackup(encoded)
         waitForProgressWriter()
         synchronized(lock) {
@@ -266,6 +331,7 @@ class LibraryStore(context: Context) {
     fun progressFor(mangaId: String): ReadingProgress? = _history.value.firstOrNull { it.manga.id == mangaId }
 
     fun progressFor(mangaId: String, chapterId: String): ChapterProgress? = synchronized(lock) {
+        if (!stateRestored) return@synchronized null
         val key = chapterProgressKey(mangaId, chapterId)
         pendingChapterPositions[key]?.let { return@synchronized it }
         val stored = if (ignoreStoredProgress || mangaId in pendingProgressRemovals) null else disk.getString(key, null)?.let { encoded ->
@@ -285,6 +351,7 @@ class LibraryStore(context: Context) {
 
     /** Read compact per-chapter keys on IO; manga metadata is shared, never copied to each key. */
     suspend fun chapterHistoryFor(manga: Manga): List<ReadingProgress> = withContext(Dispatchers.IO) {
+        awaitReady()
         val prefix = "$CHAPTER_PROGRESS_PREFIX${manga.id.length}:${manga.id}"
         val (encoded, pending, recent) = synchronized(lock) {
             val stored = if (ignoreStoredProgress || manga.id in pendingProgressRemovals) emptyMap() else
@@ -320,6 +387,7 @@ class LibraryStore(context: Context) {
     }
 
     fun longImagePositionFor(mangaId: String, chapterId: String, pageIndex: Int): Float? = synchronized(lock) {
+        if (!stateRestored) return@synchronized null
         if (!restoreLegacyLongImages) return@synchronized null
         val key = longImagePositionKey(mangaId, chapterId, pageIndex)
         pendingLongImagePositions[key]?.let { return@synchronized it }
@@ -335,6 +403,8 @@ class LibraryStore(context: Context) {
     ) {
         if (pageCount <= 0) return
         synchronized(lock) {
+            if (deferUntilReady { saveProgress(manga, chapter, pageIndex, pageCount, scrollOffset,
+                clearLegacyLongImagePosition, updateRecent) }) return@synchronized
             val progress = ReadingProgress(
                 manga = manga,
                 chapterId = chapter.id,
@@ -378,7 +448,8 @@ class LibraryStore(context: Context) {
         }
     }
 
-    fun clearHistory() = synchronized(lock) {
+    fun clearHistory(): Unit = synchronized(lock) {
+        if (deferUntilReady { clearHistory() }) return@synchronized
         _history.value = emptyList()
         _chapterHistoryRevision.value++
         pendingChapterPositions.clear()
@@ -393,7 +464,8 @@ class LibraryStore(context: Context) {
     }
 
     /** Queue deletion after older writes so an in-flight save cannot restore a removed record. */
-    fun removeHistory(mangaId: String) = synchronized(lock) {
+    fun removeHistory(mangaId: String): Unit = synchronized(lock) {
+        if (deferUntilReady { removeHistory(mangaId) }) return@synchronized
         val next = _history.value.filterNot { it.manga.id == mangaId }
         _history.value = next
         _chapterHistoryRevision.value++
@@ -492,13 +564,15 @@ class LibraryStore(context: Context) {
         val removedManga: MutableMap<String, Long> = linkedMapOf(),
     )
 
-    fun togglePageCollection(collection: PageCollection) = synchronized(lock) {
+    fun togglePageCollection(collection: PageCollection): Unit = synchronized(lock) {
+        if (deferUntilReady { togglePageCollection(collection) }) return@synchronized
         val present = _pageCollections.value.any { it.key == collection.key }
         val next = _pageCollections.value.filterNot { it.key == collection.key }
         persistPageCollections(if (present) next else listOf(collection) + next)
     }
 
-    fun removePageCollection(key: String) = synchronized(lock) {
+    fun removePageCollection(key: String): Unit = synchronized(lock) {
+        if (deferUntilReady { removePageCollection(key) }) return@synchronized
         persistPageCollections(_pageCollections.value.filterNot { it.key == key })
     }
 
@@ -508,7 +582,8 @@ class LibraryStore(context: Context) {
     }
 
     /** Old explicit page markers become pictures once their real chapter images are available. */
-    fun migratePageBookmarks(manga: Manga, chapter: Chapter, pages: List<Page>) = synchronized(lock) {
+    fun migratePageBookmarks(manga: Manga, chapter: Chapter, pages: List<Page>): Unit = synchronized(lock) {
+        if (deferUntilReady { migratePageBookmarks(manga, chapter, pages) }) return@synchronized
         val migrated = "picture_migrated:" + bookmarkKey(manga.id, chapter.id)
         val done = disk.getStringSet(migrated, emptySet()).orEmpty()
         val old = bookmarksFor(manga.id, chapter.id).filterNot { it.pageIndex.toString() in done }
@@ -529,6 +604,7 @@ class LibraryStore(context: Context) {
     fun recordReadingTime(manga: Manga, elapsedMillis: Long, endedAt: Long = System.currentTimeMillis()) {
         if (elapsedMillis <= 0L) return
         synchronized(lock) {
+            if (deferUntilReady { recordReadingTime(manga, elapsedMillis, endedAt) }) return@synchronized
             val previous = _readingActivity.value.firstOrNull { it.manga.id == manga.id }
                 ?: ReadingActivity(manga)
             val days = previous.days.toMutableMap()
@@ -568,6 +644,7 @@ class LibraryStore(context: Context) {
 
     /** Explicit page bookmarks survive ordinary history cleanup because the user created them deliberately. */
     fun bookmarksFor(mangaId: String, chapterId: String): List<ReaderBookmark> = synchronized(lock) {
+        if (!stateRestored) return@synchronized emptyList()
         val encoded = disk.getString(bookmarkKey(mangaId, chapterId), "[]") ?: "[]"
         runCatching {
             val array = JSONArray(encoded)
@@ -586,6 +663,7 @@ class LibraryStore(context: Context) {
 
     fun saveBookmark(mangaId: String, chapterId: String, pageIndex: Int, note: String): List<ReaderBookmark> =
         synchronized(lock) {
+            if (deferUntilReady { saveBookmark(mangaId, chapterId, pageIndex, note) }) return@synchronized emptyList()
             if (pageIndex < 0) return@synchronized bookmarksFor(mangaId, chapterId)
             val next = (bookmarksFor(mangaId, chapterId).filterNot { it.pageIndex == pageIndex } +
                 ReaderBookmark(pageIndex, note.trim().take(240)))
@@ -596,6 +674,7 @@ class LibraryStore(context: Context) {
 
     fun removeBookmark(mangaId: String, chapterId: String, pageIndex: Int): List<ReaderBookmark> =
         synchronized(lock) {
+            if (deferUntilReady { removeBookmark(mangaId, chapterId, pageIndex) }) return@synchronized emptyList()
             val next = bookmarksFor(mangaId, chapterId).filterNot { it.pageIndex == pageIndex }
             persistBookmarks(mangaId, chapterId, next)
             next
@@ -617,6 +696,7 @@ class LibraryStore(context: Context) {
 
     /** Explicit spread corrections live separately from reading history and source image data. */
     fun spreadSinglesFor(mangaId: String, chapterId: String): Set<Int> = synchronized(lock) {
+        if (!stateRestored) return@synchronized emptySet()
         val value = disk.getString(spreadKey(mangaId, chapterId), "[]") ?: "[]"
         runCatching {
             val json = JSONArray(value)
@@ -624,7 +704,8 @@ class LibraryStore(context: Context) {
         }.getOrDefault(emptySet())
     }
 
-    fun saveSpreadSingles(mangaId: String, chapterId: String, pages: Set<Int>) = synchronized(lock) {
+    fun saveSpreadSingles(mangaId: String, chapterId: String, pages: Set<Int>): Unit = synchronized(lock) {
+        if (deferUntilReady { saveSpreadSingles(mangaId, chapterId, pages) }) return@synchronized
         val key = spreadKey(mangaId, chapterId)
         val cleaned = pages.filter { it >= 0 }.sorted()
         val editor = disk.edit()
@@ -633,7 +714,8 @@ class LibraryStore(context: Context) {
         editor.apply()
     }
 
-    fun updatePreferences(preferences: ReaderPreferences) = synchronized(lock) {
+    fun updatePreferences(preferences: ReaderPreferences): Unit = synchronized(lock) {
+        if (deferUntilReady { updatePreferences(preferences) }) return@synchronized
         val next = preferences.sanitized()
         _preferences.value = next
         disk.edit().putString("reader_preferences", next.toJson().toString()).apply()
@@ -643,7 +725,8 @@ class LibraryStore(context: Context) {
      * Reading layout is remembered per work. Glass remains a single app-wide skin so opening
      * another manga never changes the navigation/search material behind the reader.
      */
-    fun updateMangaPreferences(mangaId: String, preferences: ReaderPreferences) = synchronized(lock) {
+    fun updateMangaPreferences(mangaId: String, preferences: ReaderPreferences): Unit = synchronized(lock) {
+        if (deferUntilReady { updateMangaPreferences(mangaId, preferences) }) return@synchronized
         if (mangaId.isBlank()) return@synchronized
         val next = preferences.sanitized()
         if (next.glassSkin != _preferences.value.glassSkin) {

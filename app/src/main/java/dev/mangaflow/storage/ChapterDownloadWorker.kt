@@ -35,6 +35,7 @@ class ChapterDownloadWorker(context: Context, parameters: WorkerParameters) : Co
         }
 
         try {
+            store.prepareChapter(id)
             DownloadStore.transferGate.withLock {
                 currentCoroutineContext().ensureActive()
                 val record = store.beginTransfer(id, workerId, retryAttempt = runAttemptCount > 0) ?: return@withLock

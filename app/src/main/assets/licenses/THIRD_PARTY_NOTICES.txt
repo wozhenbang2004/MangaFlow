@@ -1,5 +1,14 @@
 # Third-party notices
 
+## Telephoto
+
+Telephoto 0.16.0, copyright Saket Narayan, Apache License 2.0:
+`https://github.com/saket/telephoto/tree/2a5e5f502605367c0f497bbbdc3804a15f5e2f74`
+and `https://www.apache.org/licenses/LICENSE-2.0`.
+The app uses the actual zoomable/sub-sampling libraries. Its vertical-band custom-source
+adapter delegates region decoding, sampling, EXIF and pooling to that upstream engine.
+Integration and source-reading boundaries are recorded in `third_party/telephoto/ADAPTATION.md`.
+
 ## Virtual bookshelf
 
 The local collection's `ui/BookshelfBook.kt` adapts Petar Gyurov's

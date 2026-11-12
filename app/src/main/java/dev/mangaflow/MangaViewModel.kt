@@ -857,7 +857,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun readFromLibrary(manga: Manga) {
         if (_libraryOpening.value?.let { it.manga.id == manga.id && it.loading } == true) return
         cancelLibraryReading()
-        library.progressFor(manga.id)?.takeIf { it.chapterId.isNotBlank() }?.let {
+        library.progressFor(manga.id)?.takeIf { library.ready.value && it.chapterId.isNotBlank() }?.let {
             continueReading(it)
             return
         }
@@ -865,6 +865,14 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _libraryOpening.value = LibraryOpenState(manga)
         val request = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
+                library.awaitReady()
+                if (requestId != libraryOpenRequestId) return@launch
+                library.progressFor(manga.id)?.takeIf { it.chapterId.isNotBlank() }?.let {
+                    libraryOpenJob = null
+                    _libraryOpening.value = null
+                    continueReading(it)
+                    return@launch
+                }
                 if (manga.sourceUrl == LOCAL_SOURCE_URL) {
                     downloads.awaitReady()
                     val chapters = downloadedChapters(manga.id)
@@ -1257,6 +1265,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleFavorite(manga: Manga) {
+        if (!library.ready.value) {
+            viewModelScope.launch { library.awaitReady(); toggleFavorite(manga) }
+            return
+        }
         if (manga.id in _account.value.syncingFavorites) return
         library.toggleFavorite(manga)
         if (_account.value.profile != null && !_account.value.busy) {
@@ -1265,6 +1277,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun removeFavorite(manga: Manga) {
+        if (!library.ready.value) {
+            viewModelScope.launch { library.awaitReady(); removeFavorite(manga) }
+            return
+        }
         if (_libraryOpening.value?.manga?.id == manga.id) cancelLibraryReading()
         if (!library.isFavorite(manga.id)) return
         library.removeFavorite(manga.id)

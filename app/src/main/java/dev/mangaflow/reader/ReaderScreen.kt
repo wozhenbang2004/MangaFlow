@@ -152,7 +152,6 @@ import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.Page
-import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
@@ -162,6 +161,7 @@ import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.LibraryRestoreStatus
 import dev.mangaflow.ui.ChapterReadMark
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.CompactMenuAction
@@ -191,7 +191,6 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
 import me.saket.telephoto.zoomable.rememberZoomableImageState
@@ -218,6 +217,12 @@ fun ReaderScreen(
     active: Boolean = true,
     startAtBeginning: Boolean = false,
 ) {
+    val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
+    if (!libraryReady) {
+        BackHandler(enabled = active, onBack = onBack)
+        LibraryRestoreStatus(libraryStore)
+        return
+    }
     var chapterId by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(initialChapterId) }
     var collectionPresentation by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(initialCollection != null) }
     var collectionPositionApplied by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(false) }
@@ -236,14 +241,6 @@ fun ReaderScreen(
         } ?: savedPreferences
     }
     val pageCollections by libraryStore.pageCollections.collectAsStateWithLifecycle()
-    // Changes to unrelated downloads must not invalidate this reader's controls.
-    val activeDownload by remember(downloadStore, manga.id, chapterId) {
-        downloadStore.entries.map { items ->
-            items.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
-        }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = downloadStore.entries.value.firstOrNull {
-        it.manga.id == manga.id && it.chapter.id == chapterId
-    })
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     val readerForeground = active && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
     var restartPending by rememberSaveable(manga.id, initialChapterId, initialCollection?.key) {
@@ -310,6 +307,11 @@ fun ReaderScreen(
     val headers = remember(manga.id, chapterId, repository, localImport) {
         if (localImport) emptyMap() else repository.imageHeaders(manga.id, chapterId)
     }
+    val chapterDownload = remember(downloadStore, manga.id, chapterId) { downloadStore.observeChapter(manga.id, chapterId) }
+    val initialDownload = remember(downloadStore, manga.id, chapterId) {
+        downloadStore.entries.value.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
+    }
+    val activeDownload by chapterDownload.collectAsStateWithLifecycle(initialValue = initialDownload)
     val background = preferences.theme.background()
     val colors = MaterialTheme.colorScheme
     val lightChrome = colors.surface.luminance() > .5f
@@ -399,7 +401,6 @@ fun ReaderScreen(
         loading = true
         error = null
         try {
-            downloadStore.awaitReady()
             // A stable source manifest represents the chapter, even when only some pages are saved.
             // File selection belongs to each image request and never creates a separate offline mode.
             val stored = downloadStore.storedPages(manga.id, chapterId)
@@ -974,6 +975,13 @@ private fun ChapterPages(
                         knownDimensions = pageDimensions[page.url],
                         onDimensionsKnown = { pageDimensions[page.url] = it },
                         deferResize = { list.isScrollInProgress },
+                        visibleWindow = {
+                            val layout = list.layoutInfo
+                            layout.visibleItemsInfo.firstOrNull { it.index == index }?.let { item ->
+                                VerticalPageWindow((layout.viewportStartOffset - item.offset).coerceAtLeast(0),
+                                    (layout.viewportEndOffset - item.offset).coerceIn(0, item.size))
+                            }
+                        },
                         onLayoutReady = { pageLayoutReady[index] = it },
                     )
                 }
@@ -1239,6 +1247,7 @@ private fun ReaderPage(
     knownDimensions: IntSize? = null,
     onDimensionsKnown: (IntSize) -> Unit = {},
     deferResize: () -> Boolean = { false },
+    visibleWindow: () -> VerticalPageWindow? = { null },
     onLayoutReady: (Boolean) -> Unit = {},
     onChapterSwipeReadyChanged: (Boolean) -> Unit = {},
 ) {
@@ -1420,6 +1429,13 @@ private fun ReaderPage(
                         contentScale = ContentScale.Fit,
                         alignment = Alignment.TopCenter,
                     )
+                    val originalSize = knownDimensions ?: observedDimensions
+                        ?: page.takeIf { it.width > 0 && it.height > 0 }?.let { IntSize(it.width, it.height) }
+                    if (hasDimensions && originalSize != null && naturalHeightPx > previewHeight * 2 &&
+                        originalSize.readerAspectRatio() == aspect && loadedImage != null) {
+                        VerticalReaderTiles(requireNotNull(resource), loadedImage?.diskCacheKey,
+                            originalSize, with(density) { maxWidth.roundToPx() }, naturalHeightPx, visibleWindow)
+                    }
                 }
             }
             if (delayedLoading && imageError == null) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
@@ -1692,21 +1708,15 @@ private fun ReaderChaptersDialog(
     var selectedGroup by rememberSaveable { mutableStateOf(currentGroup) }
     val group = selectedGroup.takeIf { it in groups } ?: currentGroup
     val visibleChapters = remember(chapters, group) { chapters.filter { it.group == group }.sortedBy(Chapter::index) }
-    // The full manga download list is relevant only while the chapter dialog is open.
-    // The main reader observes the active chapter alone, so other jobs cannot invalidate it.
-    val downloads by remember(downloadStore, manga.id, visible) {
-        downloadStore.entries.map { entries ->
-            if (visible) entries.filter { it.manga.id == manga.id } else emptyList()
-        }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(initialValue = if (visible) {
-        downloadStore.entries.value.filter { it.manga.id == manga.id }
-    } else emptyList())
-    val saved = remember(downloads) { downloads.associateBy { it.chapter.id } }
     val catalogBusy = rememberDelayedBusy(visible && loading)
     val availableHeight = (LocalConfiguration.current.screenHeightDp - 210).coerceAtLeast(112).dp
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     LaunchedEffect(visible, currentId, currentGroup) { if (visible) selectedGroup = currentGroup }
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val downloadFlow = remember(downloadStore, manga.id) { downloadStore.observeManga(manga.id) }
+        val downloads by downloadFlow.collectAsStateWithLifecycle(
+            initialValue = downloadStore.entries.value.filter { it.manga.id == manga.id })
+        val saved = remember(downloads) { downloads.associateBy { it.chapter.id } }
         ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth(), backdrop) {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
