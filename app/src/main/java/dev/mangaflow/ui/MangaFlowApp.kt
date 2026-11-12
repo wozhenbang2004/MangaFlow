@@ -1,0 +1,247 @@
+package dev.mangaflow.ui
+
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bookmarks
+import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material.icons.outlined.FileDownload
+import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.view.WindowCompat
+import dev.mangaflow.BuildConfig
+import dev.mangaflow.DetailState
+import dev.mangaflow.MangaViewModel
+import dev.mangaflow.ReadingSession
+import dev.mangaflow.reader.ReaderScreen
+import dev.mangaflow.update.UpdatePhase
+import kotlinx.coroutines.launch
+
+private enum class Section(val title: String, val icon: ImageVector) {
+    DISCOVER("发现", Icons.Outlined.Explore), LIBRARY("书架", Icons.Outlined.Bookmarks),
+    DOWNLOADS("下载", Icons.Outlined.FileDownload), SETTINGS("设置", Icons.Outlined.Settings),
+}
+private sealed interface Frame {
+    val key: String
+    data class Root(val section: Section) : Frame { override val key = "root-${section.name}" }
+    data class Detail(val state: DetailState) : Frame { override val key = "detail-${state.manga.id}" }
+    data class Reader(val session: ReadingSession) : Frame { override val key = "reader-${session.manga.id}-${session.chapterId}" }
+}
+
+@Composable
+fun MangaFlowApp(openUpdatesRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = viewModel()) {
+    val browse by model.browse.collectAsStateWithLifecycle()
+    val detail by model.detail.collectAsStateWithLifecycle()
+    val reading by model.reading.collectAsStateWithLifecycle()
+    val favorites by model.library.favorites.collectAsStateWithLifecycle()
+    val history by model.library.history.collectAsStateWithLifecycle()
+    val downloads by model.downloads.entries.collectAsStateWithLifecycle()
+    val update by model.updates.state.collectAsStateWithLifecycle()
+    var sectionName by rememberSaveable { mutableStateOf(Section.DISCOVER.name) }
+    val section = Section.valueOf(sectionName)
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+    val savedState = rememberSaveableStateHolder()
+
+    LaunchedEffect(Unit) { model.events.collect { snackbar.showSnackbar(it) } }
+    LaunchedEffect(openUpdatesRequest) {
+        if (openUpdatesRequest > 0) {
+            model.closeReader()
+            model.closeDetail()
+            sectionName = Section.SETTINGS.name
+        }
+    }
+    BackHandler(reading != null || detail != null || drawer.isOpen || section != Section.DISCOVER) {
+        when {
+            reading != null -> model.closeReader()
+            detail != null -> model.closeDetail()
+            drawer.isOpen -> scope.launch { drawer.close() }
+            else -> sectionName = Section.DISCOVER.name
+        }
+    }
+    val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)
+    val activity = LocalContext.current.activityOrNull()
+    val darkSystem = isSystemInDarkTheme()
+    SideEffect {
+        if (frame !is Frame.Reader && activity != null) {
+            WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
+                isAppearanceLightStatusBars = frame is Frame.Root && !darkSystem
+                isAppearanceLightNavigationBars = frame is Frame.Root && !darkSystem
+            }
+        }
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawer,
+        gesturesEnabled = frame is Frame.Root,
+        scrimColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.22f),
+        drawerContent = {
+            ModalDrawerSheet(
+                modifier = Modifier.width(296.dp),
+                drawerShape = RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp),
+                drawerContainerColor = MaterialTheme.colorScheme.background,
+                drawerTonalElevation = 0.dp,
+            ) {
+                Column(Modifier.fillMaxHeight().statusBarsPadding().padding(20.dp)) {
+                    Row(Modifier.padding(12.dp, 20.dp, 12.dp, 36.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(28.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("漫流", style = MaterialTheme.typography.titleLarge)
+                            Text("MANGAFLOW", fontSize = 10.sp, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    Section.entries.forEach { destination ->
+                        NavigationDrawerItem(
+                            label = { Text(destination.title) },
+                            selected = section == destination,
+                            onClick = { sectionName = destination.name; scope.launch { drawer.close() } },
+                            icon = { Icon(destination.icon, null, modifier = Modifier.size(21.dp)) },
+                            shape = RoundedCornerShape(14.dp),
+                            colors = NavigationDrawerItemDefaults.colors(
+                                selectedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                                selectedIconColor = MaterialTheme.colorScheme.onSurface,
+                                unselectedContainerColor = MaterialTheme.colorScheme.background,
+                            ),
+                            modifier = Modifier.padding(vertical = 3.dp),
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Text("MangaFlow ${BuildConfig.VERSION_NAME}", modifier = Modifier.padding(12.dp).navigationBarsPadding(),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        },
+    ) {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
+        ) { _ ->
+            AnimatedContent(
+                targetState = frame,
+                contentKey = { it.key },
+                transitionSpec = { (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 24 }) togetherWith fadeOut(tween(100)) },
+                label = "page",
+                modifier = Modifier.fillMaxSize(),
+            ) { current ->
+                when (current) {
+                    is Frame.Reader -> ReaderScreen(
+                        manga = current.session.manga, chapters = current.session.chapters,
+                        initialChapterId = current.session.chapterId,
+                        repository = model.repository, libraryStore = model.library, downloadStore = model.downloads,
+                        onBack = model::closeReader, onRequestNotificationPermission = onRequestNotifications,
+                    )
+                    is Frame.Detail -> DetailScreen(
+                        manga = current.state.manga, detail = current.state.detail,
+                        loading = current.state.loading, error = current.state.error,
+                        reviews = current.state.reviews, reviewsLoading = current.state.reviewsLoading,
+                        isFavorite = favorites.any { it.id == current.state.manga.id },
+                        progress = history.firstOrNull { it.manga.id == current.state.manga.id },
+                        downloadEntries = downloads,
+                        onBack = model::closeDetail, onRetry = model::retryDetail,
+                        onToggleFavorite = { model.library.toggleFavorite(current.state.manga) },
+                        onRead = model::readChapter,
+                        onDownload = { onRequestNotifications(); model.downloadChapter(it) },
+                    )
+                    is Frame.Root -> savedState.SaveableStateProvider(current.key) {
+                        Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                            Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = { scope.launch { drawer.open() } }) { Icon(Icons.Outlined.Menu, "打开导航", Modifier.size(22.dp)) }
+                                Text("漫流", modifier = Modifier.padding(start = 4.dp), fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.weight(1f))
+                                if (update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)) {
+                                    TextButton(onClick = { sectionName = Section.SETTINGS.name }) { Text("有新版本", style = MaterialTheme.typography.labelMedium) }
+                                }
+                            }
+                            Box(Modifier.weight(1f).fillMaxWidth()) {
+                                when (current.section) {
+                                    Section.DISCOVER -> DiscoverScreen(
+                                        state = browse, history = history, repository = model.repository,
+                                        onQuery = model::setQuery, onRefresh = model::refresh, onMore = model::loadMore,
+                                        onOpen = { model.openManga(it) },
+                                        onContinue = { model.openManga(it.manga, it.chapterId) },
+                                    )
+                                    Section.LIBRARY -> LibraryScreen(
+                                        favorites = favorites, history = history, repository = model.repository,
+                                        onOpen = { model.openManga(it) }, onContinue = { model.openManga(it.manga, it.chapterId) },
+                                        onDiscover = { sectionName = Section.DISCOVER.name },
+                                    )
+                                    Section.DOWNLOADS -> DownloadsScreen(model.downloads, model::openDownload)
+                                    Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private tailrec fun Context.activityOrNull(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.activityOrNull()
+    else -> null
+}

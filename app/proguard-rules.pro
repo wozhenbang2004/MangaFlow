@@ -1,0 +1,2 @@
+-keepattributes Signature,InnerClasses,EnclosingMethod
+-dontwarn org.slf4j.impl.**

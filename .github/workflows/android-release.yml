@@ -1,0 +1,126 @@
+name: Android release
+run-name: MangaFlow 0.1.${{ github.run_number }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mangaflow-android-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'wozhenbang2004/MangaFlow' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Select this run's version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py plan
+
+      - name: Require the permanent signing identity
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        env:
+          KEYSTORE: ${{ secrets.MANGAFLOW_SIGNING_KEYSTORE_B64 }}
+          PASSWORD: ${{ secrets.MANGAFLOW_SIGNING_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import os
+          if not os.environ.get('KEYSTORE') or not os.environ.get('PASSWORD'):
+              raise SystemExit('Configure MANGAFLOW_SIGNING_KEYSTORE_B64 and MANGAFLOW_SIGNING_PASSWORD before publishing. A temporary signing identity will not be created.')
+          PY
+
+      - name: Set up Java 17
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            **/*.gradle.kts
+            gradle/wrapper/gradle-wrapper.properties
+
+      - name: Install Android build tools
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          set -o pipefail
+          "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Assemble release APK
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --console=plain --max-workers=2 \
+            -PmangaVersionCode="$RELEASE_VERSION_CODE" \
+            -PmangaVersionName="$RELEASE_VERSION_NAME" \
+            :app:assembleRelease
+
+      - name: Sign APK and update metadata
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        env:
+          MANGAFLOW_SIGNING_KEYSTORE_B64: ${{ secrets.MANGAFLOW_SIGNING_KEYSTORE_B64 }}
+          MANGAFLOW_SIGNING_PASSWORD: ${{ secrets.MANGAFLOW_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          SIGN_DIR=$(mktemp -d "$RUNNER_TEMP/mangaflow-signing.XXXXXX")
+          export SIGN_DIR
+          trap 'rm -rf -- "$SIGN_DIR"' EXIT
+          python3 - <<'PY'
+          import base64, os, pathlib
+          value = base64.b64decode(os.environ.pop('MANGAFLOW_SIGNING_KEYSTORE_B64'), validate=True)
+          pathlib.Path(os.environ['SIGN_DIR'], 'mangaflow.p12').write_bytes(value)
+          PY
+          unset MANGAFLOW_SIGNING_KEYSTORE_B64
+          mkdir -p dist
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -P 16 -f 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk "$SIGN_DIR/aligned.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks "$SIGN_DIR/mangaflow.p12" --ks-type PKCS12 --ks-key-alias mangaflow \
+            --ks-pass env:MANGAFLOW_SIGNING_PASSWORD --key-pass env:MANGAFLOW_SIGNING_PASSWORD \
+            --v4-signing-enabled false \
+            --out "dist/MangaFlow-$RELEASE_VERSION_NAME.apk" "$SIGN_DIR/aligned.apk"
+          openssl pkcs12 -in "$SIGN_DIR/mangaflow.p12" \
+            -passin env:MANGAFLOW_SIGNING_PASSWORD -nocerts -nodes -out "$SIGN_DIR/private.pem"
+          unset MANGAFLOW_SIGNING_PASSWORD
+          python3 scripts/release.py manifest \
+            --apk "dist/MangaFlow-$RELEASE_VERSION_NAME.apk" --private-key "$SIGN_DIR/private.pem"
+
+      - name: Preserve release assets
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mangaflow-${{ github.run_number }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py publish
