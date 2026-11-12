@@ -8,6 +8,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -42,6 +44,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -69,9 +72,11 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.BuildConfig
 import dev.mangaflow.storage.GlassSkin
+import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
+import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.motionPress
@@ -112,6 +117,57 @@ fun SettingsScreen(
     var cacheSizes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     var clearingCache by remember { mutableStateOf<String?>(null) }
     var cacheNotice by remember { mutableStateOf<String?>(null) }
+    var backupBusy by remember { mutableStateOf<String?>(null) }
+    var backupNotice by remember { mutableStateOf<String?>(null) }
+    var pendingRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
+
+    val exportBackup = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri != null && backupBusy == null) {
+            backupBusy = "export"
+            backupNotice = null
+            cacheScope.launch {
+                try {
+                    val payload = libraryStore.exportBackup()
+                    withContext(Dispatchers.IO) {
+                        val stream = context.contentResolver.openOutputStream(uri, "wt")
+                            ?: error("无法创建备份文件")
+                        stream.bufferedWriter().use { it.write(payload) }
+                    }
+                    backupNotice = "阅读备份已导出"
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (failure: Exception) {
+                    backupNotice = failure.message ?: "备份导出失败"
+                } finally {
+                    backupBusy = null
+                }
+            }
+        }
+    }
+    val importBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && backupBusy == null) {
+            backupBusy = "inspect"
+            backupNotice = null
+            cacheScope.launch {
+                try {
+                    val payload = withContext(Dispatchers.IO) {
+                        val stream = context.contentResolver.openInputStream(uri)
+                            ?: error("无法读取备份文件")
+                        stream.bufferedReader().use { it.readText() }
+                    }
+                    require(payload.length <= 8 * 1024 * 1024) { "备份文件过大或格式异常" }
+                    val info = libraryStore.inspectBackup(payload)
+                    pendingRestore = PendingLibraryRestore(payload, info)
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (failure: Exception) {
+                    backupNotice = failure.message ?: "备份文件无法读取"
+                } finally {
+                    backupBusy = null
+                }
+            }
+        }
+    }
 
     suspend fun readCacheSizes() {
         cacheSizes = mapOf(
@@ -214,6 +270,33 @@ fun SettingsScreen(
             SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn) { libraryStore.updatePreferences(preferences.copy(keepScreenOn = it)) }
             SettingsToggle("图片之间留白", preferences.pageGap) { libraryStore.updatePreferences(preferences.copy(pageGap = it)) }
             Spacer(Modifier.height(20.dp))
+            HorizontalDivider(color = colors.outlineVariant)
+            Spacer(Modifier.height(28.dp))
+            SettingsSectionLabel("数据与迁移")
+            Spacer(Modifier.height(8.dp))
+            SettingsLinkRow(
+                "导出阅读备份",
+                if (backupBusy == "export") "正在导出…" else "收藏、进度、书签与阅读习惯",
+            ) {
+                if (backupBusy == null) exportBackup.launch("MangaFlow-backup.json")
+            }
+            SettingsLinkRow(
+                "恢复阅读备份",
+                if (backupBusy == "inspect" || backupBusy == "restore") "正在处理…" else "从备份文件覆盖本机阅读数据",
+            ) {
+                if (backupBusy == null) importBackup.launch(arrayOf("application/json", "text/plain"))
+            }
+            Text(
+                "不包含账号登录态、缓存和已下载图片；恢复前会再次确认。",
+                style = MaterialTheme.typography.bodySmall,
+                color = secondary,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+            backupNotice?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
+                    modifier = Modifier.padding(top = 8.dp))
+            }
+            Spacer(Modifier.height(26.dp))
             HorizontalDivider(color = colors.outlineVariant)
             Spacer(Modifier.height(28.dp))
             SettingsSectionLabel("缓存")
@@ -337,6 +420,85 @@ fun SettingsScreen(
             SettingsSectionLabel("关于")
             Spacer(Modifier.height(12.dp))
             SettingsLinkRow("MangaFlow", "项目主页", external = true) { context.openProjectPage() }
+        }
+    }
+
+    BackupRestoreDialog(
+        pending = pendingRestore,
+        busy = backupBusy == "restore",
+        onDismiss = { if (backupBusy == null) pendingRestore = null },
+        onConfirm = {
+            val pending = pendingRestore ?: return@BackupRestoreDialog
+            if (backupBusy != null) return@BackupRestoreDialog
+            backupBusy = "restore"
+            backupNotice = null
+            cacheScope.launch {
+                try {
+                    val restored = libraryStore.restoreBackup(pending.payload)
+                    backupNotice = "已恢复 ${restored.favorites} 本收藏、${restored.history} 条阅读记录"
+                    pendingRestore = null
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (failure: Exception) {
+                    backupNotice = failure.message ?: "恢复失败，本机数据未完成替换"
+                } finally {
+                    backupBusy = null
+                }
+            }
+        },
+    )
+}
+
+private data class PendingLibraryRestore(
+    val payload: String,
+    val info: LibraryBackupInfo,
+)
+
+@Composable
+private fun BackupRestoreDialog(
+    pending: PendingLibraryRestore?,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    MotionDialog(visible = pending != null, onDismissRequest = onDismiss) {
+        pending?.let { restore ->
+            val colors = MaterialTheme.colorScheme
+            Surface(
+                modifier = Modifier.padding(24.dp).fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                color = colors.surface,
+            ) {
+                Column(Modifier.padding(start = 22.dp, end = 16.dp, top = 22.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("恢复阅读备份？", style = MaterialTheme.typography.titleMedium)
+                    val date = restore.info.createdAt.takeIf { it > 0 }?.let {
+                        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.getDefault())
+                            .format(Date(it))
+                    } ?: "未知时间"
+                    Text("备份时间 $date", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "${restore.info.favorites} 本收藏 · ${restore.info.history} 条阅读记录 · ${restore.info.bookmarks} 个有书签的章节",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                    Text(
+                        "这会覆盖本机书架、阅读位置、书签和阅读偏好。下载文件与登录状态保持不变。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") }
+                        TextButton(onClick = onConfirm, enabled = !busy) {
+                            if (busy) {
+                                CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text("恢复")
+                        }
+                    }
+                }
+            }
         }
     }
 }

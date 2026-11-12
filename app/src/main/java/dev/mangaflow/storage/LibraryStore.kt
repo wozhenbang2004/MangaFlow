@@ -10,7 +10,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -38,11 +40,18 @@ data class ReaderBookmark(
     val updatedAt: Long = System.currentTimeMillis(),
 )
 
+data class LibraryBackupInfo(
+    val createdAt: Long,
+    val favorites: Int,
+    val history: Int,
+    val bookmarks: Int,
+)
+
 /** Device-local reading state. Neither favorites nor reading history require a source account. */
 class LibraryStore(context: Context) {
     private val disk = context.applicationContext.getSharedPreferences("mangaflow_library", Context.MODE_PRIVATE)
     private val lock = Any()
-    private val restoreLegacyLongImages = readLegacyLongImageMigration()
+    private var restoreLegacyLongImages = readLegacyLongImageMigration()
     private val _favorites = MutableStateFlow(readArray("favorites") { readManga(it) }.distinctBy(Manga::id))
     private val _history = MutableStateFlow(readArray("history", ::readProgress).distinctBy { it.manga.id })
     private val _shelfStates = MutableStateFlow(readShelfStates())
@@ -117,6 +126,118 @@ class LibraryStore(context: Context) {
             }
         }
     }.getOrDefault(emptyMap())
+
+    suspend fun exportBackup(): String = withContext(Dispatchers.IO) {
+        waitForProgressWriter()
+        synchronized(lock) {
+            val entries = JSONArray()
+            disk.all.toSortedMap().forEach { (key, value) ->
+                val entry = JSONObject().put("key", key)
+                when (value) {
+                    is String -> entry.put("type", "string").put("value", value)
+                    is Boolean -> entry.put("type", "boolean").put("value", value)
+                    is Int -> entry.put("type", "int").put("value", value)
+                    is Long -> entry.put("type", "long").put("value", value)
+                    is Float -> entry.put("type", "float").put("value", value.toDouble())
+                    is Set<*> -> entry.put("type", "stringSet").put("value",
+                        JSONArray(value.filterIsInstance<String>().sorted()))
+                    else -> error("无法备份字段 $key")
+                }
+                entries.put(entry)
+            }
+            JSONObject()
+                .put("format", BACKUP_FORMAT)
+                .put("version", BACKUP_VERSION)
+                .put("createdAt", System.currentTimeMillis())
+                .put("entries", entries)
+                .toString()
+        }
+    }
+
+    suspend fun inspectBackup(encoded: String): LibraryBackupInfo = withContext(Dispatchers.IO) {
+        backupInfo(decodeBackup(encoded))
+    }
+
+    suspend fun restoreBackup(encoded: String): LibraryBackupInfo = withContext(Dispatchers.IO) {
+        val decoded = decodeBackup(encoded)
+        waitForProgressWriter()
+        synchronized(lock) {
+            val editor = disk.edit().clear()
+            decoded.values.forEach { (key, value) ->
+                when (value) {
+                    is String -> editor.putString(key, value)
+                    is Boolean -> editor.putBoolean(key, value)
+                    is Int -> editor.putInt(key, value)
+                    is Long -> editor.putLong(key, value)
+                    is Float -> editor.putFloat(key, value)
+                    is Set<*> -> editor.putStringSet(key, value.filterIsInstance<String>().toSet())
+                }
+            }
+            check(editor.commit()) { "无法写入备份，请检查存储空间" }
+
+            progressEpoch++
+            progressWrite = null
+            pendingChapterPositions.clear()
+            pendingLongImagePositions.clear()
+            pendingProgressRemovals.clear()
+            ignoreStoredProgress = false
+            restoreLegacyLongImages = readLegacyLongImageMigration()
+            _favorites.value = readArray("favorites") { readManga(it) }.distinctBy(Manga::id)
+            _history.value = readArray("history", ::readProgress).distinctBy { it.manga.id }
+            _shelfStates.value = readShelfStates()
+            _preferences.value = readPreferences()
+            _mangaPreferences.value = readMangaPreferences()
+            backupInfo(decoded)
+        }
+    }
+
+    private suspend fun waitForProgressWriter() {
+        while (synchronized(lock) { progressWriterRunning }) delay(12)
+    }
+
+    private data class DecodedBackup(
+        val createdAt: Long,
+        val values: Map<String, Any>,
+    )
+
+    private fun decodeBackup(encoded: String): DecodedBackup {
+        val root = JSONObject(encoded)
+        require(root.optString("format") == BACKUP_FORMAT) { "这不是 MangaFlow 备份文件" }
+        require(root.optInt("version") == BACKUP_VERSION) { "备份版本暂不支持" }
+        val array = root.optJSONArray("entries") ?: error("备份内容不完整")
+        val values = linkedMapOf<String, Any>()
+        repeat(array.length()) { index ->
+            val entry = array.optJSONObject(index) ?: error("备份字段损坏")
+            val key = entry.optString("key").takeIf(String::isNotBlank) ?: error("备份字段缺少名称")
+            require(key.length <= 512) { "备份字段名称异常" }
+            val value: Any = when (entry.optString("type")) {
+                "string" -> entry.optString("value")
+                "boolean" -> entry.optBoolean("value")
+                "int" -> entry.optInt("value")
+                "long" -> entry.optLong("value")
+                "float" -> entry.optDouble("value").toFloat()
+                "stringSet" -> {
+                    val set = entry.optJSONArray("value") ?: JSONArray()
+                    (0 until set.length()).mapNotNull { set.optString(it).takeIf(String::isNotBlank) }.toSet()
+                }
+                else -> error("备份字段类型不支持")
+            }
+            values[key] = value
+        }
+        return DecodedBackup(root.optLong("createdAt").coerceAtLeast(0L), values)
+    }
+
+    private fun backupInfo(decoded: DecodedBackup): LibraryBackupInfo {
+        fun arraySize(key: String): Int = (decoded.values[key] as? String)?.let { value ->
+            runCatching { JSONArray(value).length() }.getOrDefault(0)
+        } ?: 0
+        return LibraryBackupInfo(
+            createdAt = decoded.createdAt,
+            favorites = arraySize("favorites"),
+            history = arraySize("history"),
+            bookmarks = decoded.values.keys.count { it.startsWith(BOOKMARK_PREFIX) },
+        )
+    }
 
     fun progressFor(mangaId: String): ReadingProgress? = _history.value.firstOrNull { it.manga.id == mangaId }
 
@@ -474,6 +595,8 @@ class LibraryStore(context: Context) {
         "${BOOKMARK_PREFIX}${mangaId.length}:$mangaId${chapterId.length}:$chapterId"
 
     private companion object {
+        const val BACKUP_FORMAT = "MangaFlowLibraryBackup"
+        const val BACKUP_VERSION = 1
         const val SHELF_STATES_KEY = "shelf_states"
         const val MANGA_READER_PREFERENCES_KEY = "reader_preferences_by_manga"
         const val BOOKMARK_PREFIX = "reader_bookmarks:"
