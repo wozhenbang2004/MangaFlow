@@ -101,6 +101,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -130,6 +131,8 @@ import coil3.request.ErrorResult
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import coil3.size.Scale
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
@@ -143,6 +146,7 @@ import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
+import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialog
@@ -232,6 +236,7 @@ fun ReaderScreen(
     val background = preferences.theme.background()
     val colors = MaterialTheme.colorScheme
     val lightChrome = colors.surface.luminance() > .5f
+    val readerBackdrop = rememberHazeState()
     val readingChapterId = chapterId
     val resolvePage: suspend (Page) -> Page = remember(manga.id, chapterId, downloadStore) {
         { page -> downloadStore.resolveReaderPage(manga.id, readingChapterId, page) }
@@ -321,62 +326,65 @@ fun ReaderScreen(
     LaunchedEffect(preferences.dimAmount) { dimPreview.value = null }
     LaunchedEffect(touchExploration) { if (touchExploration) controlsVisible = true }
 
-    Box(Modifier.fillMaxSize().background(background)) {
-        when {
-            loading -> if (delayedLoading) Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator(Modifier.size(28.dp), color = preferences.theme.foreground(), strokeWidth = 2.dp)
-                Spacer(Modifier.height(16.dp))
-                Text("正在打开章节", color = preferences.theme.foreground().copy(alpha = .6f), fontSize = 13.sp)
+    Box(Modifier.fillMaxSize()) {
+        // Sample the existing artwork and dim layer; controls stay outside their own backdrop.
+        Box(Modifier.fillMaxSize().hazeSource(readerBackdrop).background(background)) {
+            when {
+                loading -> if (delayedLoading) Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(Modifier.size(28.dp), color = preferences.theme.foreground(), strokeWidth = 2.dp)
+                    Spacer(Modifier.height(16.dp))
+                    Text("正在打开章节", color = preferences.theme.foreground().copy(alpha = .6f), fontSize = 13.sp)
+                }
+                error != null -> Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Rounded.MenuBook, null, Modifier.size(32.dp), tint = preferences.theme.foreground().copy(alpha = .5f))
+                    Spacer(Modifier.height(16.dp))
+                    Text(error.orEmpty(), color = preferences.theme.foreground(), style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(16.dp))
+                    TextButton(onClick = { retry++ }) { Text("重新读取", color = preferences.theme.foreground()) }
+                }
+                pages.isNotEmpty() -> key(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) {
+                    ChapterPages(
+                        pages = pages,
+                        headers = headers,
+                        resolvePage = resolvePage,
+                        retryPage = retryPage,
+                        preferences = preferences,
+                        manualSingles = manualSingles,
+                        initialPage = pageIndex,
+                        initialOffset = cursor.scrollOffset,
+                        targetPage = targetPage,
+                        onTargetConsumed = { targetPage = null },
+                        onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
+                        onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, pages.size, offset) },
+                        longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
+                        onSaveLongImagePosition = { index, position -> libraryStore.saveLongImagePosition(manga.id, chapter.id, index, position) },
+                        onVisibleImageLoaded = {
+                            if (active && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
+                                chapterVisibilityReported = true
+                                chapterVisible(manga, chapter)
+                            }
+                        },
+                        onNearEnd = {
+                            val next = siblings.getOrNull(chapterIndex + 1)
+                            if (active && !leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
+                                nextChapterPrefetched = true
+                                nearChapterEnd(manga, next)
+                            }
+                        },
+                        onTap = { controlsVisible = !controlsVisible },
+                        endContent = {
+                            ChapterDiscussion(manga, chapter, communityRepository, colors.background, colors.onSurface,
+                                onNext = siblings.getOrNull(chapterIndex + 1)?.let { next ->
+                                    { chapterId = next.id; controlsVisible = true }
+                                }, reviewRepository = reviewRepository, state = discussionState)
+                        },
+                    )
+                }
             }
-            error != null -> Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Rounded.MenuBook, null, Modifier.size(32.dp), tint = preferences.theme.foreground().copy(alpha = .5f))
-                Spacer(Modifier.height(16.dp))
-                Text(error.orEmpty(), color = preferences.theme.foreground(), style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(16.dp))
-                TextButton(onClick = { retry++ }) { Text("重新读取", color = preferences.theme.foreground()) }
-            }
-            pages.isNotEmpty() -> key(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) {
-                ChapterPages(
-                    pages = pages,
-                    headers = headers,
-                    resolvePage = resolvePage,
-                    retryPage = retryPage,
-                    preferences = preferences,
-                    manualSingles = manualSingles,
-                    initialPage = pageIndex,
-                    initialOffset = cursor.scrollOffset,
-                    targetPage = targetPage,
-                    onTargetConsumed = { targetPage = null },
-                    onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
-                    onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, pages.size, offset) },
-                    longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
-                    onSaveLongImagePosition = { index, position -> libraryStore.saveLongImagePosition(manga.id, chapter.id, index, position) },
-                    onVisibleImageLoaded = {
-                        if (active && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
-                            chapterVisibilityReported = true
-                            chapterVisible(manga, chapter)
-                        }
-                    },
-                    onNearEnd = {
-                        val next = siblings.getOrNull(chapterIndex + 1)
-                        if (active && !leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
-                            nextChapterPrefetched = true
-                            nearChapterEnd(manga, next)
-                        }
-                    },
-                    onTap = { controlsVisible = !controlsVisible },
-                    endContent = {
-                        ChapterDiscussion(manga, chapter, communityRepository, colors.background, colors.onSurface,
-                            onNext = siblings.getOrNull(chapterIndex + 1)?.let { next ->
-                                { chapterId = next.id; controlsVisible = true }
-                            }, reviewRepository = reviewRepository, state = discussionState)
-                    },
-                )
-            }
-        }
 
-        // Read the live dim preview during drawing; dragging does not publish or persist preferences.
-        Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
+            // Read the live dim preview during drawing; dragging does not publish or persist preferences.
+            Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
+        }
 
         AnimatedVisibility(
             controlsVisible, Modifier.align(Alignment.TopCenter),
@@ -385,18 +393,20 @@ fun ReaderScreen(
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
                 slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
         ) {
-            ReaderSurface(
-                Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
+            LiquidGlassSurface(
+                state = readerBackdrop,
+                modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             ) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 4.dp),
+                // Retain Surface's input shield on blank chrome without consuming child gestures.
+                Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).pointerInput(Unit) {}.padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回", interactive = controlsVisible, onClick = leaveReader)
                     Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp, top = 8.dp, bottom = 8.dp)) {
                         Text(manga.title, color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title).joinToString(" · "),
-                            color = colors.onSurfaceVariant, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
                         TextButton(enabled = controlsVisible, onClick = {
@@ -418,11 +428,12 @@ fun ReaderScreen(
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
                 slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
         ) {
-            ReaderSurface(
-                Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+            LiquidGlassSurface(
+                state = readerBackdrop,
+                modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
                     .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 8.dp),
             ) {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
+                Column(Modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 8.dp, vertical = 2.dp)) {
                     if (pages.isNotEmpty()) key(chapterId) {
                         ReaderProgressSlider(
                             pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
@@ -1140,7 +1151,7 @@ private fun ReaderProgressSlider(
         )
         Row(Modifier.width(numberWidth), horizontalArrangement = Arrangement.Center) {
             Text("${shown.roundToInt() + 1}", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-            Text(" / $pageCount", color = colors.onSurfaceVariant, fontSize = 12.sp)
+            Text(" / $pageCount", color = colors.onSurface.copy(alpha = .86f), fontSize = 12.sp)
         }
     }
 }
