@@ -54,6 +54,7 @@ internal class BackdropGlassOptics {
                 GlassSurfaceRole.THUMB -> 7f
                 GlassSurfaceRole.READING_DOCK -> 12f
                 GlassSurfaceRole.POPOVER -> 14f
+                GlassSurfaceRole.DRAWER -> 18f
             }
             val rim = min(rimDp * density, shortSide * .28f).coerceAtLeast(.1f)
             val depth = if (softCard) .28f else when (role) {
@@ -64,6 +65,7 @@ internal class BackdropGlassOptics {
                 GlassSurfaceRole.THUMB -> 1.05f
                 GlassSurfaceRole.READING_DOCK -> .9f
                 GlassSurfaceRole.POPOVER -> .65f
+                GlassSurfaceRole.DRAWER -> .62f
             }
             lens.setFloatUniform("size", width, height)
             lens.setFloatUniform("offset", 0f, 0f)
@@ -73,7 +75,7 @@ internal class BackdropGlassOptics {
             lens.setFloatUniform("refractionAmount", -rim * (depth + (if (softCard) .06f else .16f) * engagement))
             lens.setFloatUniform("depthEffect", 0f)
             lens.setColorUniform("surfaceColor", surface.copy(alpha = 1f).toArgb())
-            lens.setFloatUniform("tintOpacity", if (softCard) { if (light) .78f else .82f } else when (role) {
+            lens.setFloatUniform("tintOpacity", if (softCard && role != GlassSurfaceRole.DRAWER) { if (light) .78f else .82f } else when (role) {
                 GlassSurfaceRole.CONTROL -> if (light) .60f else .72f
                 GlassSurfaceRole.ARTWORK -> if (light) .60f else .70f
                 GlassSurfaceRole.NAVIGATION -> if (light) .68f else .76f
@@ -81,6 +83,7 @@ internal class BackdropGlassOptics {
                 GlassSurfaceRole.THUMB -> if (light) .22f else .38f
                 GlassSurfaceRole.READING_DOCK -> if (light) .20f else .34f
                 GlassSurfaceRole.POPOVER -> if (light) .44f else .60f
+                GlassSurfaceRole.DRAWER -> if (light) .28f else .46f
             })
             android.graphics.RenderEffect.createRuntimeShaderEffect(lens, "content")
                 .asComposeRenderEffect().also { cached = it; previous = frame }

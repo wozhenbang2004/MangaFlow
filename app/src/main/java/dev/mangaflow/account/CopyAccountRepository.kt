@@ -1,6 +1,7 @@
 package dev.mangaflow.account
 
 import android.content.Context
+import android.os.SystemClock
 import dev.mangaflow.data.CopyAnonymousIdentityStore
 import dev.mangaflow.data.CopyMangaConfig
 import dev.mangaflow.data.Manga
@@ -30,6 +31,7 @@ import okio.BufferedSink
 import org.json.JSONObject
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 
 /** Relay's owner-only routes. Public catalogs, pages and downloads never use this client. */
 class CopyAccountRepository(context: Context) {
@@ -38,8 +40,10 @@ class CopyAccountRepository(context: Context) {
     // owner requests instead of negotiating OkHttp's default HTTP/2 path.
     private val accountClient = sourceClient().newBuilder().protocols(listOf(Protocol.HTTP_1_1)).build()
     private val loginClient = sourceClient().newBuilder().protocols(listOf(Protocol.HTTP_1_1)).build()
-    private val accountHttp = SourceHttp(accountClient)
-    private val loginHttp = SourceHttp(loginClient)
+    // Honor owner Retry-After across both stages without inheriting public-reader pauses.
+    private val accountPauses = ConcurrentHashMap<String, Long>()
+    private val accountHttp = SourceHttp(accountClient, accountPauses)
+    private val loginHttp = SourceHttp(loginClient, accountPauses)
     private val appContext = context.applicationContext
     private val appProtocol by lazy { CopyAppAccountProtocol(CopyAnonymousIdentityStore.load(appContext)) }
     private val requests = Mutex()
@@ -49,6 +53,11 @@ class CopyAccountRepository(context: Context) {
     @Volatile private var version = 0L
     val sessionVersion: Long get() = version
     private var sessionCredential: StoredAccountCredential? = null
+    private var pendingLogin: PendingLogin? = null
+    val hasPendingLogin: Boolean get() = synchronized(sessionLock) { pendingLogin?.lease?.version == version }
+    val canRetryLogin: Boolean get() = synchronized(sessionLock) {
+        pendingLogin?.let { it.lease.version == version && SystemClock.elapsedRealtime() < it.expiresAt } == true
+    }
     private val apiOrigin = "https://api.copy202601.com".toHttpUrl()
     private val websiteOrigin = "https://copy4000.com".toHttpUrl()
     private val webLoginUrl = websiteOrigin.newBuilder().addPathSegments("api/kb/web/login").build()
@@ -61,6 +70,14 @@ class CopyAccountRepository(context: Context) {
         return withContext(Dispatchers.IO) {
             requests.withLock {
                 ensureVersion(expected)
+                val pending = synchronized(sessionLock) { pendingLogin?.takeIf { it.lease.version == expected } }
+                if (pending != null) {
+                    if (SystemClock.elapsedRealtime() >= pending.expiresAt) {
+                        clearPending(pending)
+                        throw SourceException("本次登录验证已超时，请重新输入账号密码。")
+                    }
+                    return@withLock finishLogin(pending)
+                }
                 val current = synchronized(sessionLock) {
                     if (version != expected) staleSession()
                     mutableProfile.value
@@ -84,9 +101,9 @@ class CopyAccountRepository(context: Context) {
         return withContext(Dispatchers.IO) {
             val token = AccountTokenInput.parse(input)
             requests.withLock {
-                val lease = SessionLease(expected, StoredAccountCredential(token, AccountChannel.WEB), committed = false)
-                ensureLease(lease)
-                commit(lease, verify(lease), persist = true)
+                ensureVersion(expected)
+                val pending = retainLogin(SessionLease(expected, StoredAccountCredential(token, AccountChannel.WEB_API), committed = false))
+                finishLogin(pending)
             }
         }
     }
@@ -103,17 +120,14 @@ class CopyAccountRepository(context: Context) {
                 ensureVersion(expected)
                 val token = webLogin(name, password, expected)
                 val lease = SessionLease(expected, StoredAccountCredential(token, AccountChannel.WEB_API), committed = false)
-                val account = try { verify(lease) } catch (error: SourceException) {
-                    throw SourceException("已收到登录凭据，但账号资料验证未完成。\n${error.message}",
-                        retryAfterSeconds = error.retryAfterSeconds, cause = error)
-                }
-                commit(lease, account, persist = true)
+                finishLogin(retainLogin(lease))
             }
         }
     }
 
     fun logout() = synchronized(sessionLock) {
         version++
+        pendingLogin = null
         sessionCredential = null
         mutableProfile.value = null
         accountClient.dispatcher.cancelAll()
@@ -268,7 +282,7 @@ class CopyAccountRepository(context: Context) {
         if (!allowed(url, method) || (!lease.committed && url != profileUrl(lease))) {
             throw SourceException("该操作不属于个人账号接口，未发送登录凭据。")
         }
-        val request = if (lease.channel == AccountChannel.APP) {
+        val request = if (lease.channel != AccountChannel.WEB || url != webProfileUrl) {
             val appUrl = url.newBuilder().removeAllQueryParameters("_t").removeAllQueryParameters("_update")
                 .setQueryParameter("platform", "3").apply {
                 if (CHAPTER_PATH.matches(url.encodedPath)) {
@@ -278,11 +292,8 @@ class CopyAccountRepository(context: Context) {
             }.build()
             appProtocol.memberRequest(appUrl, lease.token, body)
         } else {
-            // Imported and legacy Web sessions retain their original request path.
-            val builder = if (url == webProfileUrl) websiteRequest(url).header("Authorization", "Token ${lease.token}")
-            else Request.Builder().url(url).header("User-Agent", "COPY/3.0.9")
-                .header("Accept", "application/json").header("source", "copyApp").header("platform", "3")
-                .header("version", "3.0.9").header("webp", "1").header("Authorization", "Token ${lease.token}")
+            // Only a legacy Web profile uses the original website route.
+            val builder = websiteRequest(url).header("Authorization", "Token ${lease.token}")
             if (body != null) builder.post(body)
             builder.build()
         }
@@ -298,14 +309,15 @@ class CopyAccountRepository(context: Context) {
         secrets: List<String> = emptyList()): Any? {
         if (response.text.length > maxChars) throw SourceException("$operation 返回的数据过大。")
         val root = try { JSONObject(response.text) } catch (_: Exception) {
-            throw SourceException("$operation 返回的数据无法识别（HTTP ${response.statusCode}），请稍后重试。")
+            throw SourceException("$operation 返回的数据无法识别（HTTP ${response.statusCode}），请稍后重试。",
+                httpStatus = response.statusCode)
         }
         val code = if (response.statusCode in setOf(209, 210) || response.statusCode >= 400) response.statusCode
             else root.integer("code") ?: throw SourceException("$operation 缺少有效状态。")
         val message = accountSourceMessage(root, secrets)
         when (code) {
             401, 403 -> throw SourceException("$operation 未通过（$code）" +
-                if (message.isNotBlank()) "：$message" else "，登录状态无效或已过期，请重新登录。")
+                (if (message.isNotBlank()) "：$message" else "，登录状态无效或已过期，请重新登录。"), httpStatus = code)
             209, 429 -> {
                 val retry = response.retryAfterSeconds
                 http.rememberPause(url, retry)
@@ -323,7 +335,8 @@ class CopyAccountRepository(context: Context) {
             }
         }
         if (code != 200) {
-            throw SourceException("$operation 失败（$code）" + if (message.isNotBlank()) "：$message" else "，请核对账号信息或稍后重试。")
+            throw SourceException("$operation 失败（$code）" +
+                (if (message.isNotBlank()) "：$message" else "，请核对账号信息或稍后重试。"), httpStatus = code)
         }
         return root.opt("results").takeUnless { it == JSONObject.NULL }
     }
@@ -391,9 +404,45 @@ class CopyAccountRepository(context: Context) {
 
     private fun beginAttempt(): Long = synchronized(sessionLock) {
         version++
+        pendingLogin = null
         accountClient.dispatcher.cancelAll()
         loginClient.dispatcher.cancelAll()
         version
+    }
+
+    private suspend fun retainLogin(lease: SessionLease): PendingLogin {
+        ensureLease(lease)
+        return synchronized(sessionLock) {
+            if (version != lease.version) staleSession()
+            PendingLogin(lease, SystemClock.elapsedRealtime() + 5 * 60_000L).also { pendingLogin = it }
+        }
+    }
+
+    private suspend fun finishLogin(pending: PendingLogin): AccountProfile {
+        val lease = pending.lease
+        val account = try {
+            ensureLease(lease)
+            verify(lease)
+        } catch (cancelled: CancellationException) {
+            clearPending(pending)
+            throw cancelled
+        } catch (error: SourceException) {
+            if (error.httpStatus in setOf(400, 401, 403, 422)) clearPending(pending)
+            val retryHint = if (canRetryLogin) "\n可点重试连接继续验证，无需重新输入密码。" else ""
+            throw SourceException("已收到登录凭据，但账号资料验证未完成。\n${error.message}$retryHint",
+                retryAfterSeconds = error.retryAfterSeconds, cause = error, httpStatus = error.httpStatus)
+        }
+        // Verification and encrypted persistence report their own failures.
+        // A disk/Keystore failure is not another failed server authentication.
+        return try { commit(lease, account, persist = true) }
+        catch (cancelled: CancellationException) {
+            clearPending(pending)
+            throw cancelled
+        }
+    }
+
+    private fun clearPending(pending: PendingLogin) = synchronized(sessionLock) {
+        if (pendingLogin === pending) pendingLogin = null
     }
 
     private fun requireSession(): SessionLease = synchronized(sessionLock) {
@@ -417,6 +466,7 @@ class CopyAccountRepository(context: Context) {
         return synchronized(sessionLock) {
             if (version != lease.version) staleSession()
             if (persist) store.write(lease.credential)
+            pendingLogin = null
             sessionCredential = lease.credential
             version++
             mutableProfile.value = account
@@ -442,6 +492,7 @@ class CopyAccountRepository(context: Context) {
         val token: String get() = credential.token
         val channel: AccountChannel get() = credential.channel
     }
+    private class PendingLogin(val lease: SessionLease, val expiresAt: Long)
     private data class AccountRows(val items: List<JSONObject>, val hasMore: Boolean)
 
     private companion object {

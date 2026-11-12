@@ -30,10 +30,13 @@ internal fun sourceClient(): OkHttpClient = OkHttpClient.Builder()
     .followSslRedirects(false)
     .build()
 
-internal class SourceHttp(private val client: OkHttpClient = sourceClient()) {
+internal class SourceHttp(
+    private val client: OkHttpClient = sourceClient(),
+    private val pauses: ConcurrentHashMap<String, Long> = sharedPauses,
+) {
     companion object {
         private const val MAX_TEXT_BYTES = 8 * 1024 * 1024
-        private val pauses = ConcurrentHashMap<String, Long>()
+        private val sharedPauses = ConcurrentHashMap<String, Long>()
         private val ACCOUNT_ERROR_CODES = setOf(209, 210, 400, 401, 403, 422, 429)
     }
 

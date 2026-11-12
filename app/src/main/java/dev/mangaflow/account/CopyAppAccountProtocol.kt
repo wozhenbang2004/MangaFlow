@@ -6,7 +6,7 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 
-/** Existing App sessions keep their issuing protocol; new password login follows Relay's Web flow. */
+/** Current signed account-API headers; password submission remains on Relay's Web flow. */
 internal class CopyAppAccountProtocol(private val identity: CopyAnonymousIdentity) {
     fun memberRequest(url: HttpUrl, token: String, form: FormBody? = null): Request {
         require(allowed(url, if (form == null) "GET" else "POST")) { "该地址不属于个人账号接口。" }
