@@ -1,5 +1,17 @@
 # MangaFlow detail · 2026-11-12
 
+## Liquid material correction · 2026-11-13 (current)
+
+User: “现在的液态玻璃没做好啊”. Source evidence at `8f8f704`: `softCard` imposed a fixed 78%/82% wash and a weak .28 lens, then suppressed the directional light on every navigation/reader soft card. That explains a white-card tendency in the implementation; it does not establish a measured device result or a missing capture on this phone.
+
+| ID | Adopted correction / source reuse | Evidence and acceptance boundary |
+| --- | --- | --- |
+| GLASS-MATERIAL-04 | Separate the existing shadow/card presentation from optical response. One remembered role preset feeds Haze blur, the preserved Backdrop 2.0.1 edge lens, tint bounds and light. Liquid navigation starts at .28 light/.40 dark tint with 12dp blur, rather than a blanket .78/.82. Captured contrast increases tint only up to the role limit. Long menus/panels diffuse more and refract less than small controls. | Retain backdrop colour/structure without a coordinate-based inner white plate. Lens movement stays within a bounded edge band, leaving the text-bearing centre geometrically stable. Contrast coefficients are application tuning, not a claim of measured WCAG compliance. The frosted skin and unavailable/software/no-source fallback retain their previous readable treatment. |
+| GLASS-LIGHT-04 | Retain Backdrop's actual directional-highlight shader on liquid soft cards as well as other liquid surfaces, using a restrained sub-dp optical edge. Remove the liquid mode's uniform dark outline; keep the existing diffuse exterior shadow. | Navigation, search, reader controls and floating menus share the same material owner. No new border container, rainbow dispersion, changing layout, blurred labels or whole-card scaling. Plain white content naturally has less visible refraction than artwork. |
+| GLASS-INPUT-04 | Observe raw pointer movement after child handlers and end raw glass pressing when a child consumes a drag or the pointer leaves bounds plus touch slop. Preserve shared Press/DragInteraction ownership and the existing reduced-motion setting. | Glass observes without consuming input. Scrolling must not leave the material pressed; slider/button interaction signals can remain active through their own source. Cancellation returns the directional light/strength to rest. |
+
+Reference checked: the fixed Backdrop `65ab177` Lens/rounded-rectangle/highlight source already bundled and attributed; Haze 1.6.0's HazeStyle/RenderEffect capture and window-coordinate behavior; the archived Haze Glass 2.1.0 Regular/Clear role distinction at `ca21ff2`. The application keeps Haze 1.6.0 and the existing Compose/runtime dependencies; it does not claim to include Haze Glass 2.1.0 or Apple's renderer. Preserve all screenshot reversals, per-chapter data, performance and recent motion changes. Source/diff and read-only review only; no tests, local build, device automation, frame-rate or visual verification. Direct latest main and observed CI trigger; device appearance and hand feel remain pending user feedback.
+
 ## UI/UX code review follow-up · 2026-11-13 (UIUX-REVIEW-01)
 
 User explicitly requested an implementation follow-up: “去看现在的代码看看 uiux 还有什么能优化的” followed by “去全部落地”. Preserve the previous screenshot reversals, stable data semantics and existing Ovio/Backdrop/beUI adaptations; this batch is a concrete source refinement rather than a replacement design system.

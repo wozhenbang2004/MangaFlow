@@ -47,6 +47,7 @@ import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.ui.glass.BackdropGlassOptics
+import dev.mangaflow.ui.glass.glassMaterial
 import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
@@ -98,28 +99,15 @@ internal fun LiquidGlassSurface(
         if (liquid && motion && (pointerDown || pressed || dragged)) 1f else 0f,
         tween(if (motion) MangaMotion.Quick else 0), label = "glass-engagement",
     )
-    val style = remember(surfaceTint, light, liquid, role, softCard) {
+    val material = remember(role, light, liquid, softCard) { glassMaterial(role, light, liquid, softCard) }
+    val style = remember(surfaceTint, material, liquid) {
         HazeStyle(
             backgroundColor = surfaceTint,
             // An explicit transparent tint prevents inheriting a frosted LocalHazeStyle.
-            // Liquid's uniform readability tint is applied after the author's refraction.
+            // Liquid's bounded readability response follows the author's refraction.
             tints = listOf(HazeTint(if (liquid) Color.Transparent
-                else surfaceTint.copy(alpha = if (softCard && role != GlassSurfaceRole.DRAWER) { if (light) .78f else .82f } else when (role) {
-                    GlassSurfaceRole.READING_DOCK -> if (light) .40f else .52f
-                    GlassSurfaceRole.POPOVER -> if (light) .64f else .72f
-                    GlassSurfaceRole.DRAWER -> if (light) .38f else .52f
-                    else -> if (light) .72f else .78f
-                }))),
-            blurRadius = when {
-                role == GlassSurfaceRole.THUMB -> if (liquid) 1.dp else 4.dp
-                role == GlassSurfaceRole.READING_DOCK -> if (liquid) 10.dp else 18.dp
-                role == GlassSurfaceRole.POPOVER -> if (liquid) 16.dp else 24.dp
-                role == GlassSurfaceRole.DRAWER -> if (liquid) 10.dp else 20.dp
-                role == GlassSurfaceRole.PANEL -> if (liquid) 14.dp else 24.dp
-                role == GlassSurfaceRole.NAVIGATION -> if (liquid) 18.dp else 28.dp
-                role == GlassSurfaceRole.ARTWORK -> if (liquid) 9.dp else 20.dp
-                else -> if (liquid) 6.dp else 20.dp
-            },
+                else surfaceTint.copy(alpha = material.tintOpacity))),
+            blurRadius = material.blurRadius,
             noiseFactor = 0f,
             fallbackTint = HazeTint(surfaceTint.copy(alpha = .96f)),
         )
@@ -133,9 +121,15 @@ internal fun LiquidGlassSurface(
                     pointerPosition.value = down.position
                     pointerDown = true
                     do {
-                        val change = awaitPointerEvent(PointerEventPass.Initial).changes
+                        val change = awaitPointerEvent(PointerEventPass.Main).changes
                             .firstOrNull { it.id == down.id }
                         if (change == null || !change.pressed) break
+                        // Observe after children: a scroll owns its drag, so raw glass
+                        // pressing must end without consuming or delaying that gesture.
+                        if (change.isConsumed && change.position != change.previousPosition) break
+                        val slop = viewConfiguration.touchSlop
+                        if (change.position.x < -slop || change.position.y < -slop ||
+                            change.position.x > size.width + slop || change.position.y > size.height + slop) break
                         pointerPosition.value = change.position
                     } while (true)
                 } finally {
@@ -164,17 +158,17 @@ internal fun LiquidGlassSurface(
                 .graphicsLayer {
                     renderEffect = if (liquid && Build.VERSION.SDK_INT >= 33 && optics != null) {
                         optics.effect(size.width, size.height, cornerRadius.toPx(), density,
-                            engagement.value, surfaceTint, light, role, softCard)
+                            engagement.value, surfaceTint, material)
                     } else null
                 }
                 .hazeEffect(state, style) { inputScale = HazeInputScale.Auto })
-            if (!softCard) Box(Modifier.matchParentSize().drawBehind {
+            if (liquid || !softCard) Box(Modifier.matchParentSize().drawBehind {
                 val stroke = .65.dp.toPx()
                 val inset = stroke * .5f
                 val radius = min(cornerRadius.toPx(), size.minDimension * .5f)
                 val outlineSize = Size((size.width - stroke).coerceAtLeast(0f), (size.height - stroke).coerceAtLeast(0f))
                 val outlineRadius = CornerRadius((radius - inset).coerceAtLeast(0f))
-                drawRoundRect(colors.onSurface.copy(alpha = if (liquid) .09f else .055f),
+                if (!liquid) drawRoundRect(colors.onSurface.copy(alpha = .055f),
                     topLeft = Offset(inset, inset), size = outlineSize,
                     cornerRadius = outlineRadius, style = Stroke(stroke))
                 if (liquid && Build.VERSION.SDK_INT >= 33 && optics != null &&
@@ -186,7 +180,7 @@ internal fun LiquidGlassSurface(
                     optics.highlight(size.width, size.height, radius, angle)?.let { brush ->
                         drawRoundRect(brush, topLeft = Offset(inset, inset), size = outlineSize,
                             cornerRadius = outlineRadius, style = Stroke(stroke),
-                            alpha = (if (light) .65f else .40f) + engagement.value * .18f)
+                            alpha = material.highlightOpacity + engagement.value * .10f)
                     }
                 }
             })

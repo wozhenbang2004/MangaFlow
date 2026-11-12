@@ -288,7 +288,7 @@ MangaFlow preserves the upstream optical formulas and copyright notice, changes
 the Kotlin package and removes IDE-only annotations. Lens and highlight uniforms
 are bound to Android RuntimeShader using the existing Haze 1.6 background capture.
 The adaptation uses uniform corners and bounded reader presets, adds interaction
-lighting, and applies an independent uniform readability tint after refraction.
+lighting, and applies an independent contrast-bounded readability tint after refraction.
 Labels and icons remain outside the optical layer. This is a source adaptation;
 the complete Backdrop framework and its sample applications are not included.
 `ui/glass/BackdropSoftShadow.kt` additionally adapts the upstream blurred outline
