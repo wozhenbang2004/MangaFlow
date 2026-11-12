@@ -84,7 +84,6 @@ class DownloadStore private constructor(context: Context) {
     private val availablePages = mutableMapOf<String, MutableSet<Int>>()
     private val readerPositions = mutableMapOf<String, Int>()
     private val transferSlots = Semaphore(3)
-    private val readingChoices = this.context.getSharedPreferences("reading-downloads", Context.MODE_PRIVATE)
     private val _entries = MutableStateFlow<List<DownloadEntry>>(emptyList())
     val entries: StateFlow<List<DownloadEntry>> = _entries.asStateFlow()
     private val initialized = CompletableDeferred<Unit>()
@@ -126,29 +125,20 @@ class DownloadStore private constructor(context: Context) {
 
     internal suspend fun awaitReady() = initialized.await()
 
+    /** Only explicit download actions create records; opening a reader reuses existing ones. */
     suspend fun enqueue(
         manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>,
-        isEnabled: () -> Boolean = { true },
-    ): String = enqueueInternal(manga, chapter, pages, headers, automatic = false, isEnabled = isEnabled)
+    ): String = enqueueInternal(manga, chapter, pages, headers)
         ?: chapterKey(manga.id, chapter.id)
-
-    /** An opened chapter is the only automatic unit; paused, failed and removed downloads stay so. */
-    suspend fun ensureReadingDownload(
-        manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>,
-        isEnabled: () -> Boolean = { true },
-    ): String? = enqueueInternal(manga, chapter, pages, headers, automatic = true, isEnabled = isEnabled)
 
     /** Refresh only the exact entry that requested metadata; a later pause/delete/retry wins. */
     suspend fun refreshReadingDownload(
         manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>, expectedEntry: DownloadEntry,
-        isEnabled: () -> Boolean = { true },
-    ): Boolean = enqueueInternal(manga, chapter, pages, headers, automatic = false,
-        expectedEntry = expectedEntry, isEnabled = isEnabled) != null
+    ): Boolean = enqueueInternal(manga, chapter, pages, headers, expectedEntry = expectedEntry) != null
 
     private suspend fun enqueueInternal(
-        manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>, automatic: Boolean,
+        manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>,
         expectedEntry: DownloadEntry? = null,
-        isEnabled: () -> Boolean = { true },
     ): String? = withContext(Dispatchers.IO) {
         awaitReady()
         require(pages.isNotEmpty()) { "本章没有可下载的图片" }
@@ -157,10 +147,7 @@ class DownloadStore private constructor(context: Context) {
         changeChapter(id) {
             val change = synchronized(lock) {
                 val old = records[id]
-                if (!isEnabled()) return@changeChapter null
                 if (expectedEntry != null && old?.entry !== expectedEntry) return@changeChapter null
-                if (automatic && (old != null || readingChoices.getBoolean(id, false))) return@changeChapter old?.entry?.id
-                if (!automatic) readingChoices.edit().remove(id).apply()
                 if (old?.entry?.status in ACTIVE_STATUSES) return@changeChapter id
                 old?.let { detachWriter(it) }
             }
@@ -168,7 +155,6 @@ class DownloadStore private constructor(context: Context) {
             synchronized(lock) {
                 // A later pause/retry/removal supersedes a source refresh that was waiting for I/O.
                 if (records[id] !== change?.detached) return@changeChapter null
-                if (!isEnabled()) return@changeChapter null
                 val old = change?.previous
                 val sameContent = old?.pages?.map { it.url.substringBefore('?') } == pages.map { it.url.substringBefore('?') }
                 if (old != null && !sameContent) directory(id).listFiles()?.filter { it.name != "manifest.json" }?.forEach {
@@ -213,7 +199,6 @@ class DownloadStore private constructor(context: Context) {
                     if (record.entry.needsSourceRefresh || record.entry.status in setOf(DownloadStatus.COMPLETED, DownloadStatus.RUNNING, DownloadStatus.QUEUED) ||
                         (!includePaused && record.entry.status == DownloadStatus.PAUSED)) return@changeChapter
                     generation = record.generation
-                    readingChoices.edit().remove(id).apply()
                     detachWriter(record)
                 }
                 generation = change.detached.generation
@@ -257,8 +242,6 @@ class DownloadStore private constructor(context: Context) {
         awaitReady()
         changeChapter(id) {
             val change = synchronized(lock) {
-                // A visible page or a new reader composition must not recreate a chapter the user removed.
-                readingChoices.edit().putBoolean(id, true).apply()
                 records[id]?.let { detachWriter(it) }
             } ?: return@changeChapter
             stopWriter(change)

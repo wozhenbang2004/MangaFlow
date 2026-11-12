@@ -270,9 +270,6 @@ fun ReaderScreen(
             val saved = libraryStore.progressFor(manga.id, chapterId)
             pageIndex = saved?.pageIndex?.coerceIn(0, loaded.lastIndex) ?: 0
             cursor.scrollOffset = saved?.scrollOffset ?: 0
-            try { downloadStore.ensureReadingDownload(manga, chapter, loaded, headers) }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { downloadMessage = failure.message ?: "本章暂时未能保存，可继续阅读" }
             downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
             pages = loaded
         } catch (cancelled: CancellationException) {

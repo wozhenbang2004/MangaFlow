@@ -30,13 +30,15 @@ Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 
 ## Unified reader and downloads · 2026-11-12
 
-Latest user correction: “章节的混合评论流不要混入作品的啊只保留章节的以及纵向和条漫其实是一个东西吧以及那个边看边下为什么要弄成开关？这种功能肯定是默认提供啊别暴露开关”. This supersedes the former mixed chapter/work feed and persistent download-switch requirements below.
+Earlier user correction: “章节的混合评论流不要混入作品的啊只保留章节的以及纵向和条漫其实是一个东西吧以及那个边看边下为什么要弄成开关？这种功能肯定是默认提供啊别暴露开关”. This supersedes the former mixed chapter/work feed and separate webtoon choice. Its download direction is replaced by the following correction.
+
+Latest user correction: “哦我理解错了是边下边看这个功能得有，边看边下这个功能删掉”. Keep reading unfinished, explicitly requested downloads; remove automatic downloads caused by opening a chapter.
 
 - Keep one vertical reading choice for ordinary manga and continuous strips. Preserve horizontal directions, double-page controls and reading positions. Migrate the stored WEBTOON choice into vertical reading; do not expose separate vertical/webtoon modes.
 - Reader controls and dialogs use the app's quiet theme surfaces, independently from the chosen paper background. Preserve compact sliders with stable accessible hit areas, the dense chapter grid and shared motion.
 - Download rows open the ordinary reader directly, including partially downloaded chapters. Do not restore a separate “离线阅读” button or a downloaded-only catalog. Load a retained full directory when available and update it without blocking the chapter.
 - Keep one original page manifest and resolve each image to a valid local file or its source address. Reader and worker share in-flight page transfers; progress updates must not replace image identity, zoom or scroll state. Pause, deletion and newer retry intent supersede older transfers.
-- “边看边下” is automatic for the opened chapter, with no global or reader switch and no persisted enable/disable preference. Old false preferences must not disable it. Recomposition must not restart an explicitly paused, failed or deleted task; keep the existing individual pause/retry/delete actions.
+- “边下边看” lets an explicitly requested download open before completion. Opening or switching chapters must not create a download record or enqueue background saving. Reuse completed local pages and the shared transfers of an existing active download; ordinary online reading uses the normal image cache. Do not restore an automatic-download preference or switch. Preserve individual pause/retry/delete actions and generation guards.
 - The reader's mixed discussion accepts only comments mapped to the current chapter, with compact source labels and a single owner shared by chapter-end and toolbar entry points. Only Copy currently supplies exact chapter comments; do not request work comments or use them to fill an empty chapter feed. Preserve avatars, provider spoiler rules, chapter totals and explicit latest refresh. Opening comments must leave image progress untouched.
 - Comment density comes from compact metadata and spacing, not unreadably small body text. Keep author, source and short date together; do not restore full timestamps on a separate row, large empty headers or separate provider feeds.
 - Only the MangaFlow project homepage may open a web page. Source/author attribution stays inert, third-party references in documentation are plain code-formatted addresses, and required license text stays intact. API/image/download addresses and Android system settings/install actions are functional data, not outward navigation links.
