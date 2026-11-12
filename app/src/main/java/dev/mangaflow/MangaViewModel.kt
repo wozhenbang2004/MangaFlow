@@ -49,6 +49,8 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 
@@ -182,6 +184,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val reviewPageJobs = mutableMapOf<String, Job>()
     private val reviewOverrides = ConcurrentHashMap.newKeySet<String>()
     private val preparingDownloads = mutableSetOf<String>()
+    private val downloadPreparationSlots = Semaphore(2)
     private var accountJob: Job? = null
     private var accountRequestId = 0L
     private var accountCleanupFailed = false
@@ -1336,10 +1339,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         if (!preparingDownloads.add(key)) return
         viewModelScope.launch {
             try {
-                messages.send("正在准备 ${chapter.title}")
-                val pages = repository.pages(manga.id, chapter.id)
-                downloads.enqueue(manga, chapter, pages, repository.imageHeaders(manga.id, chapter.id))
-                messages.send("已加入下载，可在下载页查看进度")
+                // A bulk selection still uses the ordinary queue, with bounded source preparation.
+                downloadPreparationSlots.withPermit {
+                    messages.send("正在准备 ${chapter.title}")
+                    val pages = repository.pages(manga.id, chapter.id)
+                    downloads.enqueue(manga, chapter, pages, repository.imageHeaders(manga.id, chapter.id))
+                    messages.send("已加入下载，可在下载页查看进度")
+                }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {

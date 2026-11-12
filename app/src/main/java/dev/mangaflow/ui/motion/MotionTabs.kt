@@ -77,6 +77,7 @@ internal fun MotionTabs(
     treatment: MotionTabTreatment = MotionTabTreatment.Capsule,
     fontSize: TextUnit = 13.sp,
     indicatorHeight: Dp? = null,
+    indicatorCornerRadius: Dp? = null,
     selectedFontWeight: FontWeight = FontWeight.Medium,
     unselectedFontWeight: FontWeight = FontWeight.Medium,
     role: Role = Role.Tab,
@@ -165,7 +166,8 @@ internal fun MotionTabs(
             val topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - end else start,
                 if (treatment == MotionTabTreatment.Underline) size.height - h - 5.dp.toPx() else (size.height - h) / 2)
             val pillSize = Size(width, h)
-            val radius = CornerRadius(if (treatment == MotionTabTreatment.Soft) 10.dp.toPx() else h / 2)
+            val radius = CornerRadius(indicatorCornerRadius?.toPx()
+                ?: if (treatment == MotionTabTreatment.Soft) 10.dp.toPx() else h / 2)
             val tint = when (treatment) {
                 MotionTabTreatment.Underline, MotionTabTreatment.Soft -> indicator
                 MotionTabTreatment.Capsule -> if (underline || compact) foreground.copy(alpha = .065f) else indicator

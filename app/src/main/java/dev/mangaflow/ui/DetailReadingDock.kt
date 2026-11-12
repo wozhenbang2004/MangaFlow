@@ -3,7 +3,6 @@ package dev.mangaflow.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -20,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -29,10 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -49,7 +46,6 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
-import kotlin.math.roundToInt
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -73,10 +69,7 @@ internal fun DetailReadingDock(
     val visibility by animateFloatAsState(if (hidden && !actions) 0f else 1f,
         tween(if (LocalMotionEnabled.current) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
         label = "reading-dock")
-    val fraction = resume?.takeIf { it.pageCount > 0 }?.let {
-        ((it.pageIndex + 1).toFloat() / it.pageCount).coerceIn(0f, 1f)
-    }
-    val percent = fraction?.let { (it * 100).roundToInt() }
+    val percent = detailReadingPercent(resume)
     val subtitle = when {
         resume != null -> resume.chapterTitle + (percent?.let { " · 上次读至 $it%" } ?: " · 继续上次位置")
         firstChapter != null -> firstChapter.title
@@ -101,13 +94,12 @@ internal fun DetailReadingDock(
                     })
                 }
             }.motionPress(interaction, enabled = canRead, pressedScale = .985f),
-        cornerRadius = 24.dp, role = GlassSurfaceRole.READING_DOCK,
+        cornerRadius = 22.dp, role = GlassSurfaceRole.READING_DOCK, softCard = true,
         interactionSource = interaction, trackPointer = true) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 16.dp, vertical = 8.dp)
+        Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 14.dp, vertical = 8.dp)
             .semantics(mergeDescendants = true) { contentDescription = "${if (resume != null) "继续阅读" else "开始阅读"}，$subtitle" },
             verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.PlayArrow, null, tint = reviewSourceAccent("anilist", DetailForeground.luminance() > .5f),
-                modifier = Modifier.size(23.dp))
+            Icon(Icons.Filled.PlayArrow, null, tint = DetailForeground, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(if (resume != null) "继续阅读" else "开始阅读", color = DetailForeground,
@@ -115,14 +107,8 @@ internal fun DetailReadingDock(
                 Text(subtitle, color = DetailSecondary, fontSize = 11.sp, lineHeight = 16.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            if (fraction != null) {
-                val color = DetailForeground
-                Canvas(Modifier.padding(start = 12.dp).size(25.dp)) {
-                    val stroke = Stroke(2.dp.toPx(), cap = StrokeCap.Round)
-                    drawArc(color.copy(alpha = .12f), -90f, 360f, false, style = stroke)
-                    drawArc(color.copy(alpha = .8f), -90f, 360f * fraction, false, style = stroke)
-                }
-            }
+            Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, tint = DetailSecondary,
+                modifier = Modifier.padding(start = 10.dp).size(16.dp))
         }
     }
     BackHandler(enabled = active && actions) { actions = false }

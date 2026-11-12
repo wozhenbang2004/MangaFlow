@@ -70,6 +70,7 @@ internal fun VolumeBookTile(
     progressKnown: Boolean,
     current: Boolean,
     downloadMode: Boolean,
+    selected: Boolean,
     enabled: Boolean,
     onRead: () -> Unit,
     onDownload: () -> Unit,
@@ -95,14 +96,14 @@ internal fun VolumeBookTile(
         Modifier.fillMaxWidth().combinedClickable(
             interactionSource = interaction, indication = null, enabled = enabled,
             role = Role.Button,
-            onClickLabel = if (downloadMode) "下载这一卷" else "阅读这一卷",
+            onClickLabel = if (downloadMode) { if (selected) "取消选择这一卷" else "选择这一卷下载" } else "阅读这一卷",
             onLongClickLabel = "单行本详情和操作",
             onClick = if (downloadMode) onDownload else onRead,
             onLongClick = onActions,
         ).motionPress(interaction, enabled = enabled).semantics {
             contentDescription = chapter.title + "，" + chapter.group
             stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
-                .filter(String::isNotBlank).joinToString("，")
+                .filter(String::isNotBlank).joinToString("，") + if (downloadMode && selected) "，已选择下载" else ""
         },
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
@@ -126,12 +127,8 @@ internal fun VolumeBookTile(
                 fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
                 modifier = Modifier.weight(1f))
-            ChapterReadMark(progress, progressKnown)
-            if (entry != null || downloadMode) ChapterDownloadMark(entry, downloadMode && entry == null)
+            ChapterTileAction(entry, downloadMode, selected)
         }
-        if (progress != null) Text(if (progress.pageCount > 0 && progress.pageIndex >= progress.pageCount - 1) "已读完"
-            else "读至第 ${progress.pageIndex + 1} 页",
-            color = DetailMuted, fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1,
-            modifier = Modifier.padding(horizontal = 1.dp))
+        ChapterReadingStatus(progress, progressKnown)
     }
 }
