@@ -307,9 +307,14 @@ class DownloadStore private constructor(context: Context) {
         return resolveReaderPage(mangaId, chapterId, page)
     }
 
-    fun prioritizeReadingPage(mangaId: String, chapterId: String, index: Int) = synchronized(lock) {
-        val id = chapterKey(mangaId, chapterId)
-        if (records[id] != null) readerPositions[id] = index.coerceAtLeast(0)
+    suspend fun prioritizeReadingPage(mangaId: String, chapterId: String, index: Int) = withContext(Dispatchers.IO) {
+        val requestContext = currentCoroutineContext()
+        synchronized(lock) {
+            // A completed transfer may hold this lock while persisting its manifest.
+            requestContext.ensureActive()
+            val id = chapterKey(mangaId, chapterId)
+            if (records[id] != null) readerPositions[id] = index.coerceAtLeast(0)
+        }
     }
 
     internal fun nextPageIndex(id: String, workId: String, visited: Set<Int>): Int? = synchronized(lock) {

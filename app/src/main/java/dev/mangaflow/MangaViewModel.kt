@@ -691,7 +691,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val current = session.chapters.firstOrNull { it.id == visible.second.id } ?: return
         val siblings = session.chapters.filter { it.group == current.group }.sortedBy(Chapter::index)
         val next = siblings.getOrNull(siblings.indexOfFirst { it.id == current.id } + 1) ?: return
-        if (next.id != chapter.id || downloads.entryFor(manga.id, chapter.id)?.status == DownloadStatus.COMPLETED) return
+        if (next.id != chapter.id) return
+        val alreadyDownloaded = downloads.entries.value.any {
+            it.manga.id == manga.id && it.chapter.id == chapter.id && it.status == DownloadStatus.COMPLETED
+        }
+        if (alreadyDownloaded) return
         val key = "${manga.id}/${chapter.id}"
         if (chapterPrefetchKey == key && chapterPrefetchJob?.isActive == true) return
         chapterPrefetchJob?.cancel()

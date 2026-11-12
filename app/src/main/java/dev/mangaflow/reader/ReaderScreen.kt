@@ -111,6 +111,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
@@ -127,6 +128,7 @@ import coil3.request.CachePolicy
 import coil3.request.Disposable
 import coil3.request.ErrorResult
 import coil3.request.ImageRequest
+import coil3.request.SuccessResult
 import coil3.request.crossfade
 import coil3.size.Scale
 import dev.chrisbanes.haze.HazeState
@@ -167,6 +169,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
 import me.saket.telephoto.zoomable.rememberZoomableImageState
@@ -637,11 +640,18 @@ private fun ChapterPages(
     val loadedPages = remember { mutableStateMapOf<Int, Boolean>() }
     val composedPages = remember { mutableStateMapOf<Int, Boolean>() }
     val prefetchRequests = remember { mutableStateMapOf<Int, Disposable>() }
+    val pageDimensions = remember { mutableStateMapOf<String, IntSize>() }
     val startPage = remember { initialPage.coerceIn(0, pages.lastIndex) }
     val startOffset = remember { initialOffset.coerceAtLeast(0) }
     val endRevealPx = with(LocalDensity.current) { 24.dp.roundToPx() }
     if (preferences.mode == ReadingMode.VERTICAL) {
         val list = rememberLazyListState(initialFirstVisibleItemIndex = startPage)
+        val pageLayoutReady = remember { mutableStateMapOf<Int, Boolean>() }
+        val endLayoutReady = {
+            pageLayoutReady[pages.lastIndex] == true && list.layoutInfo.visibleItemsInfo.all {
+                it.index !in pages.indices || pageLayoutReady[it.index] == true
+            }
+        }
         val legacyLongPosition = remember { longImagePosition(startPage)?.takeIf { it > 0f } }
         var restoring by remember { mutableStateOf(startOffset > 0 || legacyLongPosition != null) }
         var targetHeight by remember { mutableIntStateOf(0) }
@@ -649,14 +659,15 @@ private fun ChapterPages(
             key = list,
             enabled = active && !restoring && onNext != null,
             loading = false,
-            canScrollForward = { list.canScrollForward },
+            // An unresolved long last image can make its placeholder look like the end.
+            canScrollForward = { list.canScrollForward || !endLayoutReady() },
             onLoadMore = { onNext?.invoke() },
             actionLabel = "进入下一话",
         )
         LaunchedEffect(list, endRevealPx) {
             snapshotFlow {
                 val layout = list.layoutInfo
-                !restoring && layout.visibleItemsInfo.any {
+                !restoring && endLayoutReady() && layout.visibleItemsInfo.any {
                     it.key == "chapter-end" && it.offset < layout.viewportEndOffset - endRevealPx &&
                         it.offset + it.size > layout.viewportStartOffset
                 }
@@ -705,7 +716,8 @@ private fun ChapterPages(
             onDispose { if (!restoring) save(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
                 if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0) }
         }
-        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests, resolvePage) {
+        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests, resolvePage,
+            onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size }) {
             val visible = list.layoutInfo.visibleItemsInfo.filter { it.index in pages.indices }
             val anchor = list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex)
             (visible.firstOrNull()?.index ?: anchor) to (visible.lastOrNull()?.index ?: anchor)
@@ -719,6 +731,10 @@ private fun ChapterPages(
                     onHeightMeasured = { if (index == startPage) targetHeight = it },
                     onComposed = { present -> if (present) composedPages[index] = true else composedPages.remove(index) },
                     prefetch = prefetchRequests[index],
+                    knownDimensions = pageDimensions[page.url],
+                    onDimensionsKnown = { pageDimensions[page.url] = it },
+                    canResize = { !list.isScrollInProgress },
+                    onLayoutReady = { pageLayoutReady[index] = it },
                 )
             }
             item("chapter-end", contentType = "chapter-end") {
@@ -840,6 +856,10 @@ private class ReaderCursor(var scrollOffset: Int = 0)
 
 private data class PrefetchWindow(val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>)
 
+private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize)
+
+private fun IntSize.readerAspectRatio(): Float = (width.toFloat() / height).coerceAtLeast(.005f)
+
 /** Telephoto preloads tiles inside an image, not upcoming comic pages. */
 @OptIn(ExperimentalCoilApi::class)
 @Composable
@@ -850,11 +870,13 @@ private fun AdjacentPagePrefetch(
     composedPages: Map<Int, Boolean>,
     requests: MutableMap<Int, Disposable>,
     resolvePage: suspend (Page) -> Page,
+    onPageDimensions: (Int, IntSize) -> Unit = { _, _ -> },
     visibleRange: () -> Pair<Int, Int>,
 ) {
     val context = LocalContext.current
     val imageLoader = context.imageLoader
     val visible by rememberUpdatedState(visibleRange)
+    val dimensionsKnown by rememberUpdatedState(onPageDimensions)
     LaunchedEffect(pages, headers, mode, imageLoader, resolvePage) {
         val finished = mutableSetOf<Int>()
         var previousFirst = -1
@@ -892,7 +914,13 @@ private fun AdjacentPagePrefetch(
                         catch (cancelled: CancellationException) { throw cancelled }
                         catch (_: Exception) { finished += index; continue }
                         // Persistent downloads already have a file for Telephoto to read.
-                        if (!resource.url.startsWith("https:")) { finished += index; continue }
+                        if (!resource.url.startsWith("https:")) {
+                            if (mode == ReadingMode.VERTICAL) {
+                                readerImageDimensions(imageLoader, resource)?.let { dimensionsKnown(index, it) }
+                            }
+                            finished += index
+                            continue
+                        }
                         // Fetch original bytes into Coil's existing disk cache. Never cache the
                         // empty decoder image in memory or report it as a visibly loaded page.
                         val request = imageLoader.enqueue(
@@ -907,6 +935,10 @@ private fun AdjacentPagePrefetch(
                         launch {
                             val result = try { request.job.await() }
                             catch (_: CancellationException) { return@launch }
+                            if (mode == ReadingMode.VERTICAL && result is SuccessResult && requests[index] === request) {
+                                val size = readerImageDimensions(imageLoader, resource, result.diskCacheKey)
+                                if (size != null && requests[index] === request) dimensionsKnown(index, size)
+                            }
                             if (requests[index] === request) {
                                 finished += index
                                 // Keep a failed prefetch available for its visible image to report.
@@ -943,6 +975,10 @@ private fun ReaderPage(
     onHeightMeasured: (Int) -> Unit = {},
     onComposed: (Boolean) -> Unit = {},
     prefetch: Disposable? = null,
+    knownDimensions: IntSize? = null,
+    onDimensionsKnown: (IntSize) -> Unit = {},
+    canResize: () -> Boolean = { true },
+    onLayoutReady: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -952,26 +988,50 @@ private fun ReaderPage(
     val retrySource by rememberUpdatedState(retryPage)
     val composed by rememberUpdatedState(onComposed)
     val heightMeasured by rememberUpdatedState(onHeightMeasured)
+    val dimensionsMeasured by rememberUpdatedState(onDimensionsKnown)
+    val resizeAllowed by rememberUpdatedState(canResize)
+    val layoutReady by rememberUpdatedState(onLayoutReady)
     // Lazy layout recycling must not collapse a measured page back to its placeholder height.
-    var aspect by rememberSaveable(page.index) { mutableFloatStateOf(if (page.width > 0 && page.height > 0) page.width.toFloat() / page.height else 0.7f) }
-    var dimensionsKnown by rememberSaveable(page.index) { mutableStateOf(page.width > 0 && page.height > 0) }
+    var aspect by rememberSaveable(page.index) { mutableFloatStateOf(
+        knownDimensions?.readerAspectRatio()
+            ?: if (page.width > 0 && page.height > 0) page.width.toFloat() / page.height else 0.7f) }
+    var hasDimensions by rememberSaveable(page.index) { mutableStateOf(knownDimensions != null || (page.width > 0 && page.height > 0)) }
+    var observedDimensions by remember(page.url) { mutableStateOf<IntSize?>(null) }
     var measuredHeight by remember { mutableIntStateOf(0) }
     var error by remember(page.url) { mutableStateOf<String?>(null) }
     var loading by remember(page.url) { mutableStateOf(true) }
     var reload by remember(page.url) { mutableIntStateOf(0) }
+    var loadedImage by remember(page.url, reload) { mutableStateOf<LoadedReaderImage?>(null) }
     var resolvedPage by remember(page.url) { mutableStateOf<Page?>(null) }
     LaunchedEffect(page.url, reload) {
         loading = true
         error = null
         resolvedPage = null
         try {
-            resolvedPage = if (reload > 0) retrySource(page) else resolve(page)
+            val resource = if (reload > 0) retrySource(page) else resolve(page)
+            if (!paged && knownDimensions == null) {
+                readerImageDimensions(context.imageLoader, resource)?.let {
+                    observedDimensions = it
+                    dimensionsMeasured(it)
+                }
+            }
+            resolvedPage = resource
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {
             // A failed persistent fetch must not immediately repeat the same HTTP request in Coil.
             loading = false
             error = failure.message ?: "图片暂时无法读取"
         }
+    }
+    LaunchedEffect(knownDimensions, observedDimensions) {
+        val size = knownDimensions ?: observedDimensions ?: return@LaunchedEffect
+        val measuredAspect = size.readerAspectRatio()
+        if (!paged && aspect != measuredAspect) {
+            // Keep a late image/header response from resizing the list under a drag or fling.
+            snapshotFlow { resizeAllowed() }.first { it }
+        }
+        aspect = measuredAspect
+        hasDimensions = true
     }
     val delayedLoading = rememberDelayedBusy(loading)
     var prefetchError by remember(page.url) { mutableStateOf<String?>(null) }
@@ -1012,11 +1072,8 @@ private fun ReaderPage(
                     onSuccess = { _, result ->
                         val width = result.image.width
                         val height = result.image.height
-                        // Original dimensions keep the lazy item's height stable. A decoded preview
-                        // may have been rounded while fitting the viewport and is only a fallback.
-                        if ((page.width <= 0 || page.height <= 0) && width > 0 && height > 0) {
-                            aspect = (width.toFloat() / height).coerceAtLeast(.005f)
-                            dimensionsKnown = true
+                        if (!paged && width > 0 && height > 0) {
+                            loadedImage = LoadedReaderImage(result.diskCacheKey, IntSize(width, height))
                         }
                         loading = false
                         measured()
@@ -1034,12 +1091,25 @@ private fun ReaderPage(
                 )
                 .build() }
         }
+        LaunchedEffect(resource, loadedImage) {
+            val image = loadedImage ?: return@LaunchedEffect
+            if (!paged && resource != null && knownDimensions == null) {
+                val size = readerImageDimensions(context.imageLoader, resource, image.diskCacheKey) ?: image.previewSize
+                observedDimensions = size
+                dimensionsMeasured(size)
+            }
+        }
         val imageError = error ?: prefetchError.takeUnless { resource?.url?.startsWith("file:") == true }
         val naturalHeight = maxWidth / aspect
         val naturalHeightPx = with(density) { naturalHeight.roundToPx() }
-        LaunchedEffect(paged, dimensionsKnown, naturalHeightPx, measuredHeight) {
+        val pendingAspect = (knownDimensions ?: observedDimensions)?.readerAspectRatio()
+        LaunchedEffect(paged, hasDimensions, pendingAspect, aspect, naturalHeightPx, measuredHeight) {
+            if (!paged) layoutReady(hasDimensions && (pendingAspect == null || pendingAspect == aspect) &&
+                measuredHeight == naturalHeightPx && measuredHeight > 0)
+        }
+        LaunchedEffect(paged, hasDimensions, naturalHeightPx, measuredHeight) {
             // A successful image request can precede its new layout. Never restore from the placeholder height.
-            if (!paged && dimensionsKnown && measuredHeight == naturalHeightPx && measuredHeight > 0) {
+            if (!paged && hasDimensions && measuredHeight == naturalHeightPx && measuredHeight > 0) {
                 heightMeasured(measuredHeight)
             }
         }
@@ -1055,7 +1125,9 @@ private fun ReaderPage(
                     state = imageState,
                     contentDescription = "第 ${page.index + 1} 页",
                     modifier = Modifier.fillMaxSize(),
-                    contentScale = if (paged) ContentScale.Fit else ContentScale.FillWidth,
+                    // FillWidth can overflow this rounded-height item by a fraction of a pixel.
+                    // Telephoto then claims the whole drag as image panning, even at base zoom.
+                    contentScale = ContentScale.Fit,
                     alignment = if (paged) pagedAlignment else Alignment.TopCenter,
                     gesturesEnabled = !longImage,
                     onClick = { onTap() },
