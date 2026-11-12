@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
+import androidx.activity.compose.BackHandler
 import dev.mangaflow.ui.motion.MotionBackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -1337,7 +1338,8 @@ private fun ReaderPage(
         onDispose { composed(false) }
     }
     BoxWithConstraints(if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
-        val previewWidth = with(density) { maxWidth.roundToPx() }.coerceIn(1, 1600)
+        val viewportWidthPx = with(density) { maxWidth.roundToPx() }
+        val previewWidth = viewportWidthPx.coerceIn(1, 1600)
         val previewHeight = with(density) { screenHeight.roundToPx() }.coerceIn(1, 4096)
         val resource = resolvedPage
         val request = remember(resource?.url, headers, reload, previewWidth, previewHeight) {
@@ -1438,7 +1440,7 @@ private fun ReaderPage(
                     if (hasDimensions && originalSize != null && naturalHeightPx > previewHeight * 2 &&
                         originalSize.readerAspectRatio() == aspect && loadedImage != null) {
                         VerticalReaderTiles(requireNotNull(resource), loadedImage?.diskCacheKey,
-                            originalSize, with(density) { maxWidth.roundToPx() }, naturalHeightPx, visibleWindow)
+                            originalSize, viewportWidthPx, naturalHeightPx, visibleWindow)
                     }
                 }
             }
