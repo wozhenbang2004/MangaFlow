@@ -278,6 +278,8 @@ fun DiscoverScreen(
             exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)),
         ) {
             BoxWithConstraints(Modifier.fillMaxSize()) {
+                // Capture constraints before entering LazyColumn's DSL receiver.
+                val resultListMaxHeight = maxHeight * .58f
                 Box(
                     Modifier.fillMaxSize()
                         .background(MaterialTheme.colorScheme.scrim.copy(alpha = .16f))
@@ -342,7 +344,7 @@ fun DiscoverScreen(
                                     if (state.error != null) TextButton(onClick = onRetry) { Text("重试") }
                                 }
                                 else -> LazyColumn(
-                                    modifier = Modifier.fillMaxWidth().heightIn(max = maxHeight * .58f),
+                                    modifier = Modifier.fillMaxWidth().heightIn(max = resultListMaxHeight),
                                     contentPadding = PaddingValues(bottom = 4.dp),
                                     verticalArrangement = Arrangement.spacedBy(2.dp),
                                 ) {
