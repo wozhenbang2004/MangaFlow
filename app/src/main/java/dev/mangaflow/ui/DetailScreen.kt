@@ -130,6 +130,7 @@ fun DetailScreen(
     val resume = progress?.takeIf { it.manga.id == manga.id && it.chapterId.isNotBlank() }
     var section by rememberSaveable(manga.id) { mutableIntStateOf(0) }
     val sections = rememberSaveableStateHolder()
+    val activeSection = section.coerceIn(0, 1)
 
     BoxWithConstraints(
         Modifier.fillMaxSize().background(DetailInk)
@@ -161,13 +162,13 @@ fun DetailScreen(
                     foreground = DetailWhite)
             }
             DetailSections(
-                selected = section,
+                selected = activeSection,
                 labels = listOf(if (chapters.isEmpty()) "章节" else "章节 " + chapters.size, "评论"),
                 onSelect = { section = it },
             )
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                sections.SaveableStateProvider(section) {
-                    when (section) {
+                sections.SaveableStateProvider(activeSection) {
+                    when (activeSection) {
                         0 -> DetailCatalog(
                             mangaId = current.id, chapters = chapters, downloaded = downloaded,
                             progress = resume, loading = loading, error = error,
@@ -330,7 +331,7 @@ private fun DetailSections(selected: Int, labels: List<String>, onSelect: (Int) 
                     )
                 }
                 Box(
-                    Modifier.width(if (selected == index) 32.dp else 32.dp).height(2.dp)
+                    Modifier.width(32.dp).height(2.dp)
                         .background(if (selected == index) DetailWhite else Color.Transparent,
                             RoundedCornerShape(2.dp)),
                 )
