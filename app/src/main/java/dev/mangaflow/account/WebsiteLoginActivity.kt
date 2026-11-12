@@ -71,7 +71,7 @@ class WebsiteLoginActivity : ComponentActivity() {
     private var closing by mutableStateOf(false)
     private var pageError by mutableStateOf<String?>(null)
     private var notice by mutableStateOf<String?>(null)
-    private var progress by mutableStateOf(0f)
+    private var pageProgress by mutableStateOf(0f)
     private var foreground = false
     private var blocked = false
     private var resultReturned = false
@@ -113,7 +113,7 @@ class WebsiteLoginActivity : ComponentActivity() {
                     }
                     when {
                         preparing || closing -> LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
-                        pageLoading -> LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(2.dp))
+                        pageLoading -> LinearProgressIndicator(progress = { pageProgress }, modifier = Modifier.fillMaxWidth().height(2.dp))
                         else -> HorizontalDivider(color = colors.outlineVariant)
                     }
                     pageError?.let { error ->
@@ -233,7 +233,7 @@ class WebsiteLoginActivity : ComponentActivity() {
                         return
                     }
                     pageLoading = true
-                    progress = 0f
+                    pageProgress = 0f
                     notice = null
                 }
 
@@ -279,7 +279,7 @@ class WebsiteLoginActivity : ComponentActivity() {
             }
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView, newProgress: Int) {
-                    if (accepts(view)) progress = (newProgress / 100f).coerceIn(0f, 1f)
+                    if (accepts(view)) pageProgress = (newProgress / 100f).coerceIn(0f, 1f)
                 }
                 override fun onPermissionRequest(request: PermissionRequest) { request.deny() }
                 override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean = false
