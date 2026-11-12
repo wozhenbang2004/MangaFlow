@@ -107,7 +107,7 @@ internal fun ExpandingSearchBar(
     var inputFocused by remember { mutableStateOf(false) }
     var inputPlaced by remember { mutableStateOf(false) }
     var shellOpen by remember { mutableStateOf(expanded) }
-    var foregroundHeight by remember { mutableStateOf(52.dp) }
+    var foregroundHeight by remember { mutableStateOf(44.dp) }
     val displayedQuery = if (expanded) query else retainedQuery
     val shell = updateTransition(shellOpen, label = "search-shell")
     val reveal = shell.animateFloat(
@@ -158,24 +158,24 @@ internal fun ExpandingSearchBar(
 
     // Only the overlay takes IME insets. The toolbar and browsing content keep their layout.
     BoxWithConstraints(modifier.imePadding()) {
-        val panelWidth = (maxWidth - 64.dp).coerceIn(48.dp, 448.dp)
+        val panelWidth = (maxWidth - 64.dp).coerceIn(44.dp, 448.dp)
         val resultsRoom = (maxHeight - 64.dp).coerceIn(0.dp, 360.dp)
-        val panelHeight = foregroundHeight.coerceIn(52.dp, 52.dp + resultsRoom)
+        val panelHeight = foregroundHeight.coerceIn(44.dp, 44.dp + resultsRoom)
         val width = shell.animateDp(
             transitionSpec = {
                 if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
             }, label = "search-shell-width",
-        ) { if (it) panelWidth else 48.dp }
+        ) { if (it) panelWidth else 44.dp }
         val height = shell.animateDp(
             transitionSpec = {
                 if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
             }, label = "search-shell-height",
-        ) { if (it) panelHeight else 48.dp }
+        ) { if (it) panelHeight else 44.dp }
         val progress = reveal.value.coerceIn(0f, 1f)
         val endInset = 8.dp
-        val topInset = 2.dp * (1f - progress)
+        val topInset = 0.dp
 
-        if (present) Box(Modifier.fillMaxSize().padding(top = 52.dp)
+        if (present) Box(Modifier.fillMaxSize().padding(top = 44.dp)
             .motionInputGate(expanded && active)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
                 onClickLabel = "关闭搜索", onClick = dismiss))
@@ -184,20 +184,20 @@ internal fun ExpandingSearchBar(
         LiquidGlassSurface(
             state = backdrop,
             modifier = Modifier.align(Alignment.TopEnd).padding(top = topInset, end = endInset)
-                .width(width.value.coerceAtLeast(48.dp)).height(height.value.coerceAtLeast(48.dp))
+                .width(width.value.coerceAtLeast(44.dp)).height(height.value.coerceAtLeast(44.dp))
                 .graphicsLayer { alpha = reveal.value.coerceIn(0f, 1f) }
                 .drawWithContent {
                     // Remove this search shell's outer rim without changing the shared material.
                     // The captured backdrop and rounded refraction remain inside the light edge.
                     val inset = .85.dp.toPx()
-                    val radius = ((24.dp + 2.dp * progress).toPx() - inset).coerceAtLeast(0f)
+                    val radius = ((22.dp + 2.dp * progress).toPx() - inset).coerceAtLeast(0f)
                     opticalClip.reset()
                     opticalClip.addRoundRect(RoundRect(inset, inset,
                         (size.width - inset).coerceAtLeast(inset),
                         (size.height - inset).coerceAtLeast(inset), CornerRadius(radius)))
                     clipPath(opticalClip) { this@drawWithContent.drawContent() }
                 },
-            cornerRadius = 24.dp + 2.dp * progress,
+            cornerRadius = 22.dp + 2.dp * progress,
             role = if (displayedQuery.isBlank()) GlassSurfaceRole.CONTROL else GlassSurfaceRole.PANEL,
             interactionSource = searchInteraction,
             elevation = 0.dp,
@@ -205,7 +205,7 @@ internal fun ExpandingSearchBar(
 
         // Keep the result-position owner composed while closed, but place no hidden hit region.
         Column(Modifier.align(Alignment.TopEnd).padding(end = 8.dp).width(panelWidth)
-            .heightIn(max = 52.dp + resultsRoom)
+            .heightIn(max = 44.dp + resultsRoom)
             .onSizeChanged { foregroundHeight = with(density) { it.height.toDp() } }
             .layout { measurable, constraints ->
                 val placeable = measurable.measure(constraints)
@@ -217,12 +217,12 @@ internal fun ExpandingSearchBar(
             .graphicsLayer { alpha = foreground.value.coerceIn(0f, 1f) }
             .drawWithContent {
                 val p = foreground.value.coerceIn(0f, 1f)
-                val shellWidth = width.value.coerceAtLeast(48.dp).toPx()
-                val shellHeight = height.value.coerceAtLeast(48.dp).toPx()
-                val left = max((size.width - 48.dp.toPx()).coerceAtLeast(0f) * (1f - p),
+                val shellWidth = width.value.coerceAtLeast(44.dp).toPx()
+                val shellHeight = height.value.coerceAtLeast(44.dp).toPx()
+                val left = max((size.width - 44.dp.toPx()).coerceAtLeast(0f) * (1f - p),
                     size.width - shellWidth).coerceAtLeast(0f)
                 val top = topInset.toPx()
-                val radius = (24.dp + 2.dp * progress).toPx()
+                val radius = (22.dp + 2.dp * progress).toPx()
                 foregroundClip.reset()
                 foregroundClip.addRoundRect(RoundRect(size.width - shellWidth, top,
                     size.width, top + shellHeight, CornerRadius(radius)))
@@ -232,7 +232,7 @@ internal fun ExpandingSearchBar(
                         bottom = min(size.height, top + shellHeight)) { this@drawWithContent.drawContent() }
                 }
             }) {
-            Row(Modifier.width(panelWidth).height(52.dp).padding(start = 16.dp, end = 48.dp),
+            Row(Modifier.width(panelWidth).height(44.dp).padding(start = 16.dp, end = 44.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 BasicTextField(
                     value = displayedQuery,
@@ -274,7 +274,7 @@ internal fun ExpandingSearchBar(
         MotionIconButton(
             onClick = { if (expanded) dismiss() else onExpandedChange(true) },
             enabled = active,
-            modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp, end = 8.dp).size(48.dp)
+            modifier = Modifier.align(Alignment.TopEnd).padding(end = 8.dp).size(44.dp)
                 .semantics {
                     contentDescription = if (expanded) "关闭搜索" else "搜索漫画、作者"
                     stateDescription = if (expanded) "已展开" else "已收起"

@@ -28,6 +28,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Manga
@@ -56,16 +57,19 @@ internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean
     val primary = metrics.firstOrNull { it.sourceId == "mangadex" } ?: metrics.firstOrNull()
     val visible = (listOfNotNull(primary) + metrics.filterNot { it.sourceId == primary?.sourceId }).take(3)
     val heat = manga.totalPopularity ?: manga.popularity
+    val valueStyle = MaterialTheme.typography.labelMedium.copy(
+        fontFamily = FontFamily.SansSerif, fontSize = 14.sp, lineHeight = 20.sp,
+        fontWeight = FontWeight.Medium, letterSpacing = 0.sp, fontFeatureSettings = "tnum")
     Row(Modifier.fillMaxWidth().heightIn(min = 40.dp)
         .clickable(enabled = enabled, role = Role.Button, onClickLabel = "查看各站评分、样本与口径", onClick = onExpand),
         verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.weight(1f).horizontalScroll(rememberScrollState(), enabled = enabled),
-            horizontalArrangement = Arrangement.spacedBy(15.dp), verticalAlignment = Alignment.CenterVertically) {
+            horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
             heat?.let {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
                     modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = "热度 $it" }) {
                     ReviewSourceMark("copy", size = 18.dp, onDark = foreground.luminance() > .5f, heat = true)
-                    Text(detailMetricCount(it), color = foreground.copy(alpha = .86f), fontSize = 12.sp)
+                    Text(detailMetricCount(it), color = foreground.copy(alpha = .86f), style = valueStyle, maxLines = 1)
                 }
             }
             visible.forEach { metric ->
@@ -76,11 +80,10 @@ internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean
                         contentDescription = "${metric.name} ${detailMetricScore(score)}" +
                             (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "") + "，${metric.scoreLabel}"
                     }) {
-                    ReviewSourceMark(metric.sourceId, size = if (metric == primary) 21.dp else 18.dp,
+                    ReviewSourceMark(metric.sourceId, size = 18.dp,
                         onDark = foreground.luminance() > .5f)
                     Text(detailMetricScore(score) + scale, color = foreground,
-                        fontSize = if (metric == primary) 17.sp else 13.sp,
-                        fontWeight = if (metric == primary) FontWeight.SemiBold else FontWeight.Medium)
+                        style = valueStyle, maxLines = 1)
                 }
             }
             if (metrics.isEmpty()) Text("各站评分", color = foreground.copy(alpha = .75f), fontSize = 12.sp)

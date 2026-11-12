@@ -4,8 +4,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 
 /** Keep the compact toolbar geometry while sharing interruptible, draw-time tab motion. */
 @Composable
@@ -17,9 +19,12 @@ internal fun BrowseTabs(selected: Int, labels: List<String>, modifier: Modifier 
         modifier = modifier,
         foreground = MaterialTheme.colorScheme.onSurface,
         muted = MaterialTheme.colorScheme.onSurface.copy(alpha = .43f),
-        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f),
+        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .045f),
+        controlHeight = 44.dp,
+        indicatorHeight = 28.dp,
+        treatment = MotionTabTreatment.Soft,
         fontSize = 14.sp,
-        selectedFontWeight = FontWeight.SemiBold,
+        selectedFontWeight = FontWeight.Medium,
         unselectedFontWeight = FontWeight.Normal,
     )
 }

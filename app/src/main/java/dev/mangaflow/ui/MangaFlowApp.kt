@@ -37,6 +37,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountCircle
+import androidx.compose.material.icons.outlined.CloudQueue
+import androidx.compose.material.icons.outlined.SystemUpdateAlt
 import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FileDownload
@@ -55,7 +57,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -391,7 +392,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         rankingPresence.targetState = displayedDiscovery.mode == DiscoveryMode.RANKING
                         var chromeHeightPx by remember {
                             mutableIntStateOf(with(chromeDensity) {
-                                (if (rankingPresence.targetState) 100.dp else 52.dp).toPx().toInt()
+                                (if (rankingPresence.targetState) 88.dp else 44.dp).toPx().toInt()
                             })
                         }
                         val chromePadding = with(chromeDensity) { chromeHeightPx.toDp() } + 4.dp
@@ -408,13 +409,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         Box(Modifier.fillMaxSize()) {
                             val compactHeader = current.section in setOf(Section.DISCOVER, Section.LIBRARY,
                                 Section.DOWNLOADS, Section.SETTINGS)
-                            val toolbar: @Composable () -> Unit = {
-                            Row(Modifier.fillMaxWidth().height(if (compactHeader) 52.dp else 60.dp)
+                            val toolbar: @Composable (@Composable () -> Unit) -> Unit = { actions ->
+                            Row(Modifier.fillMaxWidth().height(if (compactHeader) 44.dp else 60.dp)
                                 .padding(horizontal = if (compactHeader) 8.dp else 12.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
                                 Box {
-                                    MotionIconButton(onClick = {
+                                    MotionIconButton(modifier = Modifier.size(if (compactHeader) 44.dp else 48.dp), onClick = {
                                         closeSearch()
                                         model.cancelLibraryReading()
                                         scope.launch { drawer.open() }
@@ -434,14 +435,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             closeSearch()
                                             model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
                                         }
-                                        if (history.isNotEmpty()) MotionIconButton(onClick = {
+                                        if (history.isNotEmpty()) MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
                                             closeSearch()
                                             recentReadingOpen = true
                                         }) {
                                             Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
                                         }
                                         // The root overlay owns the button; this slot keeps all toolbar bounds fixed.
-                                        Spacer(Modifier.size(48.dp))
+                                        Spacer(Modifier.size(44.dp))
                                     }
                                 } else {
                                     Text(when (current.section) {
@@ -454,16 +455,21 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Spacer(Modifier.weight(1f))
                                 }
                                 if (hasUpdate && current.section != Section.DISCOVER) {
-                                    TextButton(onClick = { changeSection(Section.SETTINGS) }) { Text("有新版本", style = MaterialTheme.typography.labelMedium) }
+                                    MotionIconButton(modifier = Modifier.size(44.dp), onClick = { changeSection(Section.SETTINGS) }) {
+                                        Icon(Icons.Outlined.SystemUpdateAlt, "有新版本", Modifier.size(21.dp))
+                                    }
                                 }
                                 if (current.section == Section.LIBRARY) {
-                                    TextButton(onClick = { changeSection(Section.ACCOUNT) }) { Text("云端书架") }
+                                    MotionIconButton(modifier = Modifier.size(44.dp), onClick = { changeSection(Section.ACCOUNT) }) {
+                                        Icon(Icons.Outlined.CloudQueue, "云端书架", Modifier.size(21.dp))
+                                    }
                                 }
+                                actions()
                             }
                             }
                             Box(Modifier.fillMaxSize().padding(top =
                                 if (current.section == Section.DISCOVER || current.section == Section.DOWNLOADS) 0.dp
-                                else if (compactHeader) 52.dp else 60.dp)) {
+                                else if (compactHeader) 44.dp else 60.dp)) {
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
@@ -515,7 +521,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     trackPointer = true, elevation = 2.dp,
                                 ) {
                                     Column(Modifier.pointerInput(Unit) {}) {
-                                        toolbar()
+                                        toolbar {}
                                         AnimatedVisibility(visibleState = rankingPresence,
                                             enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) +
                                                 expandVertically(tween(if (motion) MangaMotion.Content else 0)),
@@ -530,9 +536,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         }
                                     }
                                 } else Box(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)) {
-                                    toolbar()
+                                    toolbar {}
                                 }
-                            } else if (current.section != Section.DOWNLOADS) toolbar()
+                            } else if (current.section != Section.DOWNLOADS) toolbar {}
                         }
                         if (current.section == Section.DISCOVER) ExpandingSearchBar(
                             expanded = searchExpanded,

@@ -70,6 +70,8 @@ import dev.mangaflow.storage.PageCollection
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabContent
+import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 
 @Composable
@@ -116,16 +118,27 @@ fun LibraryScreen(
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            BrowseTabs(if (showHistory) 1 else 0, listOf("收藏 ${favorites.size}", "最近阅读"),
-                Modifier.weight(1f)) { index ->
-                if (showHistory != (index == 1)) onCancelOpen()
-                showHistory = index == 1
-            }
-            MotionIconButton(onClick = { showCollections = true }, enabled = active) {
+            MotionTabs(selected = if (showHistory) 1 else 0, labels = listOf("收藏", "最近阅读"),
+                onSelect = { index ->
+                    if (showHistory != (index == 1)) onCancelOpen()
+                    showHistory = index == 1
+                }, modifier = Modifier.weight(1f), controlHeight = 44.dp, indicatorHeight = 28.dp,
+                treatment = MotionTabTreatment.Soft,
+                indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .045f), fontSize = 14.sp,
+                selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
+                itemContent = { index, selected, color ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(if (index == 0) "收藏" else "最近阅读", color = color, fontSize = 14.sp,
+                            modifier = Modifier.weight(1f, fill = false), overflow = TextOverflow.Ellipsis,
+                            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal, maxLines = 1)
+                        if (index == 0) Text(favorites.size.toString(), fontSize = 11.sp, color = color.copy(alpha = .6f), maxLines = 1)
+                    }
+                })
+            MotionIconButton(onClick = { showCollections = true }, enabled = active, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Collections, "画面收藏，${collections.size} 项", Modifier.size(20.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            MotionIconButton(onClick = { showStats = true }, enabled = active) {
+            MotionIconButton(onClick = { showStats = true }, enabled = active, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.BarChart, "阅读统计", Modifier.size(21.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -165,7 +178,7 @@ fun LibraryScreen(
                         LazyColumn(
                             state = favoritesPosition,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(top = 18.dp, bottom = 32.dp),
+                            contentPadding = PaddingValues(top = 8.dp, bottom = 32.dp),
                             verticalArrangement = Arrangement.spacedBy(18.dp),
                         ) {
                             if (favorites.isEmpty()) item(key = "empty-collection") {

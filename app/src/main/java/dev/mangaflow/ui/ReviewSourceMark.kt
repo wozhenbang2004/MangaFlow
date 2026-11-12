@@ -14,6 +14,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -57,7 +58,9 @@ internal fun ReviewSourceMark(
             modifier = modifier.size(size).clearAndSetSemantics { })
         else -> Text(when (id) { "bangumi" -> "bgm"; "mangaupdates" -> "MU"; "mangadex" -> "MD"
             else -> ReviewProviders.find(id)?.mark ?: id.take(2).uppercase() },
-            color = color, fontWeight = FontWeight.Bold, fontSize = (size.value * .66f).sp,
-            lineHeight = size.value.sp, modifier = modifier.clearAndSetSemantics { })
+            color = color, style = MaterialTheme.typography.labelSmall.copy(
+                fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
+                fontSize = (size.value * .66f).sp, lineHeight = size.value.sp, letterSpacing = 0.sp),
+            maxLines = 1, modifier = modifier.clearAndSetSemantics { })
     }
 }

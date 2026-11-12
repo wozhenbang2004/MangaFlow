@@ -57,6 +57,8 @@ import kotlinx.coroutines.launch
 import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.ui.LocalGlassSkin
 
+internal enum class MotionTabTreatment { Capsule, Soft, Underline }
+
 /** Ovio Minimal Liquid Tabs, 81a1bcb: two independent edges, with stationary labels/hit regions. */
 @Composable
 internal fun MotionTabs(
@@ -72,6 +74,7 @@ internal fun MotionTabs(
     compact: Boolean = false,
     fullWidthIndicator: Boolean = false,
     controlHeight: Dp? = null,
+    treatment: MotionTabTreatment = MotionTabTreatment.Capsule,
     fontSize: TextUnit = 13.sp,
     indicatorHeight: Dp? = null,
     selectedFontWeight: FontWeight = FontWeight.Medium,
@@ -91,7 +94,8 @@ internal fun MotionTabs(
     val textMeasurer = rememberTextMeasurer()
     val textStyle = LocalTextStyle.current.copy(fontSize = fontSize)
     val density = LocalDensity.current
-    val wrapLabels = controlHeight != null && itemContent == null && density.fontScale > 1.3f
+    val wrapLabels = controlHeight != null && treatment == MotionTabTreatment.Capsule &&
+        itemContent == null && density.fontScale > 1.3f
     val height = maxOf(controlHeight ?: if (compact) 38.dp else 48.dp,
         with(density) { fontSize.toDp() * (if (wrapLabels) 2.6f else 1.3f) + 16.dp })
     val labelWidths = labels.map { label ->
@@ -141,7 +145,7 @@ internal fun MotionTabs(
                 return values[from] + (values[to] - values[from]) * (value - from)
             }
             val widths = labels.indices.map { i ->
-                (labelWidths[i] + 24.dp.toPx()).coerceAtMost(
+                (labelWidths[i] + (if (treatment == MotionTabTreatment.Underline) 4.dp else 24.dp).toPx()).coerceAtMost(
                     if (compact) labelWidths[i] + 24.dp.toPx() else (slot - 6.dp.toPx()).coerceAtLeast(1f),
                 )
             }
@@ -154,25 +158,30 @@ internal fun MotionTabs(
             val width = (end - start).coerceAtLeast(2.dp.toPx())
             val restingWidth = if (fillSegment) slot - inset * 2f else widths[index]
             val stretch = (width / restingWidth.coerceAtLeast(1f) - 1f).coerceAtLeast(0f)
-            val h = (indicatorHeight?.toPx() ?: if (fillSegment) size.height - 8.dp.toPx()
+            val h = (indicatorHeight?.toPx() ?: if (treatment == MotionTabTreatment.Underline) 2.dp.toPx()
+                else if (fillSegment) size.height - 8.dp.toPx()
                 else (if (compact) 28.dp else 32.dp).toPx()).coerceAtLeast(1f) *
                 (1f - .06f * stretch).coerceAtLeast(.8f)
             val topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - end else start,
-                (size.height - h) / 2)
+                if (treatment == MotionTabTreatment.Underline) size.height - h - 5.dp.toPx() else (size.height - h) / 2)
             val pillSize = Size(width, h)
-            val radius = CornerRadius(h / 2)
-            drawRoundRect(if (underline || compact) foreground.copy(alpha = .065f) else indicator,
+            val radius = CornerRadius(if (treatment == MotionTabTreatment.Soft) 10.dp.toPx() else h / 2)
+            val tint = when (treatment) {
+                MotionTabTreatment.Underline, MotionTabTreatment.Soft -> indicator
+                MotionTabTreatment.Capsule -> if (underline || compact) foreground.copy(alpha = .065f) else indicator
+            }
+            drawRoundRect(tint,
                 topLeft = topLeft, size = pillSize, cornerRadius = radius)
             // A small glass rim on the flat navigation surface; text stays outside the material.
             // Backdrop blur/refraction remains in the existing floating controls over artwork.
-            if (liquid) {
+            if (liquid && treatment == MotionTabTreatment.Capsule) {
                 drawRoundRect(Brush.linearGradient(
                     listOf(Color.White.copy(alpha = if (light) .52f else .10f), Color.Transparent,
                         foreground.copy(alpha = .025f)),
                     start = topLeft, end = topLeft + Offset(width * .35f, h)),
                     topLeft = topLeft, size = pillSize, cornerRadius = radius)
             }
-            drawRoundRect(foreground.copy(alpha = if (liquid) .07f else .04f),
+            if (treatment == MotionTabTreatment.Capsule) drawRoundRect(foreground.copy(alpha = if (liquid) .07f else .04f),
                 topLeft = topLeft, size = pillSize, cornerRadius = radius, style = Stroke(.6.dp.toPx()))
         }.padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
         horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
@@ -203,7 +212,8 @@ internal fun MotionTabs(
                 contentAlignment = Alignment.Center) {
                 if (itemContent != null) itemContent(i, i == index, labelColor)
                 else Text(label, color = labelColor, fontSize = fontSize,
-                        modifier = if (controlHeight != null) Modifier.padding(horizontal = 8.dp) else Modifier,
+                        modifier = if (controlHeight != null) Modifier.padding(
+                            horizontal = if (treatment == MotionTabTreatment.Capsule) 8.dp else 2.dp) else Modifier,
                         textAlign = TextAlign.Center,
                         fontWeight = if (i == index) selectedFontWeight else unselectedFontWeight,
                         maxLines = if (wrapLabels) 2 else 1, overflow = TextOverflow.Ellipsis)

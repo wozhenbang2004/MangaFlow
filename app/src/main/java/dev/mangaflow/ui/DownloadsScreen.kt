@@ -77,6 +77,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -92,6 +94,7 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import java.util.Locale
@@ -118,7 +121,7 @@ fun DownloadsScreen(
     onRead: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
     backdrop: HazeState,
-    toolbar: @Composable () -> Unit,
+    toolbar: @Composable (@Composable () -> Unit) -> Unit,
     refreshingIds: Set<String> = emptySet(),
 ) {
     val context = LocalContext.current
@@ -140,7 +143,7 @@ fun DownloadsScreen(
     val showLoading = rememberDelayedBusy(loading)
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
-    var headerHeightPx by remember { mutableIntStateOf(with(density) { 144.dp.toPx().toInt() }) }
+    var headerHeightPx by remember { mutableIntStateOf(with(density) { 88.dp.toPx().toInt() }) }
     val contentTopPadding = with(density) { headerHeightPx.toDp() } + 4.dp
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -282,61 +285,64 @@ fun DownloadsScreen(
             trackPointer = true, elevation = 2.dp,
         ) {
             Column(Modifier.fillMaxWidth().pointerInput(Unit) {}) {
-                toolbar()
-                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Text(if (loading) "正在恢复下载" else "${completedEntries.size} / ${entries.size} 章已下载",
-                                color = foreground, style = MaterialTheme.typography.labelLarge,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${downloadBytes(usedBytes)} · ${downloadBytes(availableBytes)} 可用",
-                                color = secondary, style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                toolbar {
+                    MotionIconButton(enabled = !importBusy, modifier = Modifier.size(44.dp),
+                        onClick = { showImportSources = true }) {
+                        if (importBusy) CircularProgressIndicator(Modifier.size(16.dp)
+                            .semantics { contentDescription = "正在导入" }, strokeWidth = 1.5.dp, color = secondary)
+                        else Icon(Icons.Outlined.Add, "导入漫画", Modifier.size(21.dp), tint = foreground)
+                    }
+                    Box {
+                        MotionIconButton(onClick = { showQueueActions = true },
+                            enabled = !bulkBusy, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Outlined.MoreHoriz, "下载详情与队列操作", Modifier.size(21.dp), tint = secondary)
                         }
-                        DownloadTextAction(enabled = !importBusy,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                            onClick = { showImportSources = true }) {
-                            if (importBusy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = secondary)
-                            else Icon(Icons.Outlined.Add, null, Modifier.size(18.dp), tint = foreground)
-                            Spacer(Modifier.width(4.dp))
-                            Text(if (importBusy) "导入中" else "导入", color = foreground,
-                                style = MaterialTheme.typography.labelMedium)
-                        }
-                        Box {
-                            MotionIconButton(onClick = { showQueueActions = true },
-                                enabled = entries.isNotEmpty() && !bulkBusy, modifier = Modifier.size(44.dp)) {
-                                Icon(Icons.Outlined.MoreHoriz, "下载队列操作", Modifier.size(21.dp), tint = secondary)
-                            }
-                            // Reuse the record-menu skin without a permanent extra toolbar row.
-                            DropdownMenu(expanded = showQueueActions && entries.isNotEmpty(),
-                                onDismissRequest = { showQueueActions = false },
-                                modifier = Modifier.widthIn(min = 164.dp, max = 240.dp),
-                                shape = RoundedCornerShape(18.dp), containerColor = colors.surfaceContainerLow,
-                                tonalElevation = 0.dp, shadowElevation = 4.dp) {
-                                if (activeEntries.isNotEmpty()) DropdownMenuItem(
-                                    text = { Text("全部暂停") }, leadingIcon = { Icon(Icons.Outlined.Pause, null) },
-                                    enabled = !bulkBusy,
-                                    onClick = { showQueueActions = false; activeEntries.forEach { store.pause(it.id) } })
-                                if (resumableEntries.isNotEmpty()) DropdownMenuItem(
-                                    text = { Text("继续未完成") }, leadingIcon = { Icon(Icons.Outlined.PlayArrow, null) },
-                                    enabled = !bulkBusy,
-                                    onClick = { showQueueActions = false; resumableEntries.forEach(onRetry) })
-                                if (completedEntries.isNotEmpty()) DropdownMenuItem(
-                                    text = { Text("清理已下载") }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
-                                    enabled = !bulkBusy,
-                                    onClick = { showQueueActions = false; clearCompleted = true })
-                            }
+                        DropdownMenu(expanded = showQueueActions,
+                            onDismissRequest = { showQueueActions = false },
+                            modifier = Modifier.widthIn(min = 164.dp, max = 240.dp),
+                            shape = RoundedCornerShape(18.dp), containerColor = colors.surfaceContainerLow,
+                            tonalElevation = 0.dp, shadowElevation = 4.dp) {
+                            DropdownMenuItem(enabled = false, onClick = {}, text = {
+                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(if (loading) "正在恢复下载" else "${completedEntries.size} / ${entries.size} 章已下载",
+                                        color = foreground, style = MaterialTheme.typography.labelMedium)
+                                    Text("${downloadBytes(usedBytes)} · ${downloadBytes(availableBytes)} 可用",
+                                        color = secondary, style = MaterialTheme.typography.labelSmall)
+                                }
+                            })
+                            if (activeEntries.isNotEmpty()) DropdownMenuItem(
+                                text = { Text("全部暂停") }, leadingIcon = { Icon(Icons.Outlined.Pause, null) },
+                                enabled = !bulkBusy,
+                                onClick = { showQueueActions = false; activeEntries.forEach { store.pause(it.id) } })
+                            if (resumableEntries.isNotEmpty()) DropdownMenuItem(
+                                text = { Text("继续未完成") }, leadingIcon = { Icon(Icons.Outlined.PlayArrow, null) },
+                                enabled = !bulkBusy,
+                                onClick = { showQueueActions = false; resumableEntries.forEach(onRetry) })
+                            if (completedEntries.isNotEmpty()) DropdownMenuItem(
+                                text = { Text("清理已下载") }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
+                                enabled = !bulkBusy,
+                                onClick = { showQueueActions = false; clearCompleted = true })
                         }
                     }
-                    Spacer(Modifier.height(4.dp))
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     MotionTabs(
                         selected = filter.ordinal, labels = DownloadFilter.entries.map { it.label },
-                        onSelect = { filter = DownloadFilter.entries[it] }, underline = true, compact = true,
-                        foreground = foreground, muted = secondary, indicator = foreground,
+                        onSelect = { filter = DownloadFilter.entries[it] }, modifier = Modifier.weight(1f),
+                        controlHeight = 44.dp, treatment = MotionTabTreatment.Underline,
+                        foreground = foreground, muted = secondary, indicator = foreground.copy(alpha = .78f),
                         fontSize = MaterialTheme.typography.labelLarge.fontSize,
-                        selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
+                        selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
                     )
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Row(Modifier.semantics(mergeDescendants = true) {
+                        contentDescription = if (loading) "正在恢复下载" else "已下载 ${completedEntries.size} 章，共 ${entries.size} 章"
+                    }, horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (loading) CircularProgressIndicator(Modifier.size(12.dp), color = secondary, strokeWidth = 1.dp)
+                        else Icon(if (entries.isNotEmpty() && completedEntries.size == entries.size) Icons.Outlined.Check
+                            else Icons.Outlined.Download, null, Modifier.size(14.dp), tint = secondary)
+                        Text("${completedEntries.size}/${entries.size}", color = secondary, style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
