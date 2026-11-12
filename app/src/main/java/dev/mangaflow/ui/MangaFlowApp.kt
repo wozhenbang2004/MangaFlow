@@ -214,22 +214,24 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         chaptersError = current.session.chaptersError,
                         onRetryChapters = model::retryReadingChapters,
                     )
-                    is Frame.Detail -> DetailScreen(
-                        manga = current.state.manga, detail = current.state.detail,
-                        loading = current.state.loading, error = current.state.error,
-                        reviews = current.state.reviews, reviewsLoading = current.state.reviewsLoading,
-                        isFavorite = favorites.any { it.id == current.state.manga.id },
-                        progress = history.firstOrNull { it.manga.id == current.state.manga.id },
-                        downloadEntries = downloads,
-                        onBack = model::closeDetail, onRetry = model::retryDetail,
-                        onToggleFavorite = { model.toggleFavorite(current.state.manga) },
-                        onRead = model::readChapter,
-                        onContinue = model::continueReading,
-                        onDownload = { onRequestNotifications(); model.downloadChapter(it) },
-                        onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
-                        onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
-                        loadReplies = model::reviewReplies,
-                    )
+                    is Frame.Detail -> savedState.SaveableStateProvider(current.key) {
+                        DetailScreen(
+                            manga = current.state.manga, detail = current.state.detail,
+                            loading = current.state.loading, error = current.state.error,
+                            reviews = current.state.reviews, reviewsLoading = current.state.reviewsLoading,
+                            isFavorite = favorites.any { it.id == current.state.manga.id },
+                            progress = history.firstOrNull { it.manga.id == current.state.manga.id },
+                            downloadEntries = downloads,
+                            onBack = model::closeDetail, onRetry = model::retryDetail,
+                            onToggleFavorite = { model.toggleFavorite(current.state.manga) },
+                            onRead = model::readChapter,
+                            onContinue = model::continueReading,
+                            onDownload = { onRequestNotifications(); model.downloadChapter(it) },
+                            onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
+                            onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
+                            loadReplies = model::reviewReplies,
+                        )
+                    }
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
                         Column(Modifier.fillMaxSize().statusBarsPadding()) {
                             Row(Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 12.dp),
