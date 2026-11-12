@@ -93,6 +93,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
@@ -119,6 +120,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.annotation.ExperimentalCoilApi
@@ -377,21 +379,39 @@ fun ReaderScreen(
                         onAtEndChanged = { atChapterEnd = it },
                         onNext = openNextChapter,
                         endContent = { pull ->
-                            ChapterEndFooter(
-                                pull = pull,
-                                nextTitle = nextChapter?.title,
-                                unavailableMessage = when {
-                                    chaptersLoading -> "正在读取目录"
-                                    chaptersError != null -> "目录暂未更新"
-                                    chapterIndex < 0 -> "目录暂不可用"
-                                    else -> "已到最后一话"
-                                },
-                                background = background,
-                                foreground = preferences.theme.foreground(),
-                                onTap = { controlsVisible = !controlsVisible },
-                                onNext = openNextChapter,
-                                onRetry = onRetryChapters.takeIf { !chaptersLoading && (chaptersError != null || chapterIndex < 0) },
-                            )
+                            val footer: @Composable () -> Unit = {
+                                ChapterEndFooter(
+                                    pull = pull,
+                                    nextTitle = nextChapter?.title,
+                                    unavailableMessage = when {
+                                        chaptersLoading -> "正在读取目录"
+                                        chaptersError != null -> "目录暂未更新"
+                                        chapterIndex < 0 -> "目录暂不可用"
+                                        else -> "已到最后一话"
+                                    },
+                                    background = background,
+                                    foreground = preferences.theme.foreground(),
+                                    onTap = { controlsVisible = !controlsVisible },
+                                    onNext = openNextChapter,
+                                    onRetry = onRetryChapters.takeIf { !chaptersLoading && (chaptersError != null || chapterIndex < 0) },
+                                )
+                            }
+                            if (preferences.mode == ReadingMode.VERTICAL) {
+                                footer()
+                            } else {
+                                Column(Modifier.fillMaxWidth()) {
+                                    ChapterEndComments(
+                                        chapterId = chapterId,
+                                        state = discussionState,
+                                        backdrop = readerBackdrop,
+                                        controlsVisible = false,
+                                        touchExploration = touchExploration,
+                                        onOpen = { showComments = true },
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    )
+                                    footer()
+                                }
+                            }
                         },
                     )
                 }
@@ -401,7 +421,7 @@ fun ReaderScreen(
             Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
         }
 
-        if (active && !leavingReader && atChapterEnd && !loading && error == null &&
+        if (preferences.mode == ReadingMode.VERTICAL && active && !leavingReader && atChapterEnd && !loading && error == null &&
             !showComments && !showSettings && !showChapters && !showSpreadAdjustment) {
             ChapterEndComments(
                 chapterId = chapterId, state = discussionState, backdrop = readerBackdrop,
@@ -547,7 +567,8 @@ fun ReaderScreen(
         }
 
         if (!controlsVisible && pages.isNotEmpty()) Text(
-            "${pageIndex + 1} / ${pages.size}", color = colors.onSurfaceVariant, fontSize = 11.sp,
+            if (atChapterEnd && preferences.mode != ReadingMode.VERTICAL) "章节末" else "${pageIndex + 1} / ${pages.size}",
+            color = colors.onSurfaceVariant, fontSize = 11.sp,
             modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility).padding(12.dp)
                 .clip(RoundedCornerShape(8.dp)).background(colors.surface.copy(alpha = .9f)).padding(horizontal = 8.dp, vertical = 4.dp)
                 .clickable { controlsVisible = true },
@@ -733,7 +754,6 @@ private fun ChapterPages(
                     prefetch = prefetchRequests[index],
                     knownDimensions = pageDimensions[page.url],
                     onDimensionsKnown = { pageDimensions[page.url] = it },
-                    canResize = { !list.isScrollInProgress },
                     onLayoutReady = { pageLayoutReady[index] = it },
                 )
             }
@@ -900,8 +920,8 @@ private fun AdjacentPagePrefetch(
                 }
                 direction = nextDirection
                 previousFirst = window.first
-                val candidates = if (direction > 0) listOf(window.last + 1, window.last + 2, window.first - 1)
-                    else listOf(window.first - 1, window.first - 2, window.last + 1)
+                val candidates = if (direction > 0) listOf(window.last + 1, window.last + 2, window.last + 3, window.first - 1)
+                    else listOf(window.first - 1, window.first - 2, window.first - 3, window.last + 1)
                 val desired = candidates.filter { index ->
                     index in pages.indices && index !in window.composed && pages[index].url.startsWith("https:")
                 }.toSet()
@@ -909,7 +929,7 @@ private fun AdjacentPagePrefetch(
                 requests.keys.filter { it !in retained }.forEach { index -> requests.remove(index)?.dispose() }
                 finished.retainAll(retained)
                 for (index in desired) {
-                    if (index !in requests && index !in finished && requests.size < 3) {
+                    if (index !in requests && index !in finished && requests.size < 4) {
                         val resource = try { resolvePage(pages[index]) }
                         catch (cancelled: CancellationException) { throw cancelled }
                         catch (_: Exception) { finished += index; continue }
@@ -977,7 +997,6 @@ private fun ReaderPage(
     prefetch: Disposable? = null,
     knownDimensions: IntSize? = null,
     onDimensionsKnown: (IntSize) -> Unit = {},
-    canResize: () -> Boolean = { true },
     onLayoutReady: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -989,7 +1008,6 @@ private fun ReaderPage(
     val composed by rememberUpdatedState(onComposed)
     val heightMeasured by rememberUpdatedState(onHeightMeasured)
     val dimensionsMeasured by rememberUpdatedState(onDimensionsKnown)
-    val resizeAllowed by rememberUpdatedState(canResize)
     val layoutReady by rememberUpdatedState(onLayoutReady)
     // Lazy layout recycling must not collapse a measured page back to its placeholder height.
     var aspect by rememberSaveable(page.index) { mutableFloatStateOf(
@@ -1026,10 +1044,6 @@ private fun ReaderPage(
     LaunchedEffect(knownDimensions, observedDimensions) {
         val size = knownDimensions ?: observedDimensions ?: return@LaunchedEffect
         val measuredAspect = size.readerAspectRatio()
-        if (!paged && aspect != measuredAspect) {
-            // Keep a late image/header response from resizing the list under a drag or fling.
-            snapshotFlow { resizeAllowed() }.first { it }
-        }
         aspect = measuredAspect
         hasDimensions = true
     }
@@ -1113,25 +1127,39 @@ private fun ReaderPage(
                 heightMeasured(measuredHeight)
             }
         }
-        val longImage = !paged && naturalHeight > screenHeight * 3f
         // Vertical reading uses one continuous scroll surface for pages and long strips.
         val pageModifier = if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(naturalHeight)
             .onSizeChanged { measuredHeight = it.height }
         Box(pageModifier.clipToBounds(), contentAlignment = Alignment.Center) {
             if (request != null && !waitingForPrefetch && imageError == null) key(reload) {
-                val imageState = rememberZoomableImageState()
-                ZoomableAsyncImage(
-                    model = request,
-                    state = imageState,
-                    contentDescription = "第 ${page.index + 1} 页",
-                    modifier = Modifier.fillMaxSize(),
-                    // FillWidth can overflow this rounded-height item by a fraction of a pixel.
-                    // Telephoto then claims the whole drag as image panning, even at base zoom.
-                    contentScale = ContentScale.Fit,
-                    alignment = if (paged) pagedAlignment else Alignment.TopCenter,
-                    gesturesEnabled = !longImage,
-                    onClick = { onTap() },
-                )
+                if (paged) {
+                    val imageState = rememberZoomableImageState()
+                    ZoomableAsyncImage(
+                        model = request,
+                        state = imageState,
+                        contentDescription = "第 ${page.index + 1} 页",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit,
+                        alignment = pagedAlignment,
+                        gesturesEnabled = true,
+                        onClick = { onTap() },
+                    )
+                } else {
+                    val tapSource = remember(page.url) { MutableInteractionSource() }
+                    AsyncImage(
+                        model = request,
+                        contentDescription = "第 ${page.index + 1} 页",
+                        modifier = Modifier.fillMaxSize()
+                            .alpha(if (hasDimensions) 1f else 0f)
+                            .clickable(
+                                interactionSource = tapSource,
+                                indication = null,
+                                onClick = onTap,
+                            ),
+                        contentScale = ContentScale.Fit,
+                        alignment = Alignment.TopCenter,
+                    )
+                }
             }
             if (delayedLoading && imageError == null) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
             if (imageError != null) Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
