@@ -33,6 +33,30 @@ This is an implementation and packaging slice. Read current code, inspect the di
 
 The source review found no new blocker in catalog paging, selection, download guards or history continuation. Provider selection and comment-list positions are retained; the existing reply sublist still releases expanded replies when leaving its composition and loads again when reopened. This slice does not claim persistent reply-thread caching.
 
+## Motion system · 2026-11-12
+
+Current request: “去深度优化我们现在漫画软件的动画系统可以深度学习下我们审美库先”. This slice changes motion and the state updates that disrupt it. Existing source/account contracts, artwork, dense layouts, reader modes and saved progress remain the product baseline. Other ongoing detail/home redesigns must be preserved when integrating.
+
+| ID | Adopted mechanism and implementation | Observable requirement |
+| --- | --- | --- |
+| MOTION-01 | Shared press, swap, panel and navigation roles. Adapt beUI `a866cb2` physics/lifecycle and Ovio `81a1bcb` indicator edges; retain the approved Jelly reference's stationary labels and Josh reference's immediate press/release. Compose supplies the animation engine. | Repeated input retargets the current motion. No timers delay real actions or simulate completion. |
+| MOTION-02 | Ovio leading/trailing springs animate only a tab's indicator. Press transforms and drawer depth read animated values in drawing layers. | Layout positions, touch targets and chapter dimensions stay stable; tab labels do not deform; no whole-list entrance on refresh. |
+| MOTION-03 | Forward/back route transitions use opposite short translations, fixed viewport bounds and outgoing interaction gates. Vaul's actual drawer-offset coupling provides a small background recession only for root navigation. | Returning restores the existing saveable scroll/section state. Drawer dragging stays attached to the finger. Reader images never shrink with small tool dialogs. |
+| MOTION-04 | Adapt beUI PresenceGate/MorphingModal: keep the outgoing visual until it settles, release its interaction/focus immediately, and animate only the panel. Bottom sheets hide before disposal. | Close/reopen can interrupt an exit; no invisible control receives actions, no stacked content makes a panel grow and shrink. |
+| MOTION-05 | Reader chrome is an overlay with visibility-independent system insets. Scrubbing previews a page and commits once on release; horizontal history uses settled pages. Brightness previews locally before one persistence update. | Toolbars do not push artwork; dragging a slider does not decode or save every intermediate page. Preserve exact page/long-image position. |
+| MOTION-06 | Short cache work gets delayed busy feedback, with fixed reserved slots. Known image aspect ratios survive thumbnail decoding. Icon changes use a fixed slot. | No flash of a spinner for a brief hit, no fake progress, no layout movement when download state changes. |
+| MOTION-07 | Observe Android's animator-duration setting for reduced motion; disable additional spatial effects and carousel autoplay when disabled. Native gesture/animation timing still uses the platform clock. | All controls and status information remain usable with animations disabled. No completion depends on a decorative animation. |
+
+### Reference evidence and adaptation
+
+- beUI `a866cb2f37ce68c3fc0c66425e86e3f31566e4be`: `lib/ease.ts`, `lib/presence-gate.tsx`, `components/motion/morphing-modal.tsx`, MIT. Original code read; saved official modal/tab screenshots inspected. The screenshot deployment was not proven to match the archived commit. Adapt physics and presence ownership, without copying its full-screen blur or changing the reader viewport.
+- Ovio `81a1bcb6737356038163728b3b2a657c9dcffa32`: existing Liquid Tabs reference above. Keep independent edges, stationary text and continuous retargeting. The existing catalog grouping/layout is outside this motion slice.
+- Vaul `3e97aac6a38e4481bade71d7233ed6002e80f9b0` (1.1.2): `src/use-scale-background.ts`, `src/index.tsx`, MIT. Original video frame inspected. Adapt progress-coupled background depth to the existing side drawer; preserve Material's gesture arbitration instead of copying Web velocity units.
+- Aesthetic-library records `uiux-motion-transition-system-20261110`, `uiux-motion-easing-kubai-20261106`, `uiux-doc-component-tabs-fluid`, `uiux-doc-component-button-tactile-review`: original motion-system text, saved approved tabs and Josh source/review read. These establish motion roles and prior preferences, not approval of this new Android implementation.
+- Android official animation, graphicsLayer, DrawerState and bottom-sheet documentation was checked against the APIs used. Web stiffness/damping/mass are converted as `k/m` and `c/(2*sqrt(k*m))`; equal parameters do not guarantee identical frames across engines.
+
+Implementation, main CI compilation, release packaging and phone experience are separate evidence. Follow AGENTS.md's current direct-main delivery rules: review source, submit to main and confirm CI triggered, without a separate branch build or waiting for completion. No tests, lint, emulator, UI automation or screenshot fixtures are permitted in this slice. Phone smoothness, visual quality and accessibility interaction remain pending user experience after delivery.
+
 ## Ranking and shelf density · 2026-11-12
 
 User feedback: “图一顶上这块占用空间太大了图二信息密度太低了”. The supplied ranking screenshot repeats the selected period/audience below two navigation rows; the shelf screenshot repeats the page title below the app bar, adds 24dp gaps between large history cards, and repeats “继续阅读” in every item.
@@ -62,6 +86,8 @@ The user rejected the three-tab/paginated screenshot and explicitly requested th
 
 This section overrides older paging and section-transition advice in the same document. A successful CI build confirms compilation only; device interaction remains unverified.
 
+Motion integration preserves this revised layout: the shared Ovio edge animation uses the actual compact text widths, 38dp tab height and 32dp underline; it does not restore the former capsule or crossfade the chapter grid. Catalog icons keep their existing 14dp slots, and the fixed toolbar retains the latest mode label and icons. The user's “要啊直接合到 main 啊” explicitly authorizes this integration and the existing signed-release workflow; the current direct-main rules in AGENTS.md supersede the former branch-compilation gate.
+
 ## Large artwork and scrolling · 2026-11-12 (current contract)
 
 User: "没事 ci 触发了就行别管了你去改新的这个问题漫画详情我希望做成 kayokoi.site 这个网站那样的大图而且这个网站滑动那个大图相关的逻辑也要学过来以及为什么要弄黑色背景额". Recorded 2026-11-12 07:31 UTC. This replaces DETAIL-01/02's fixed small header and the revised contract's prohibition on outer header motion. The dense catalog and two-tab requirements remain active.
@@ -80,3 +106,5 @@ User: "没事 ci 触发了就行别管了你去改新的这个问题漫画详情
 - The site's live style/scripts failed to load in this environment (upstream 503 / smoothscroll 404), and the browser displayed its loader. Actual rendered site motion is unverified. Source evidence does not establish an unmodified live deployment. No scroll-driven zoom or blur was found; the theme's 0.8-second blur is an entry animation only.
 - Sakurairo is GPL v2 or later. Its behavior is used as a reference; no theme code or assets are copied. The implementation reuses existing MangaFlow artwork, metadata and catalog components plus Apache-2.0 AndroidX APIs: Google Maven BOM 2025.05.01 maps to Material3 1.3.2 and Foundation/UI 1.8.2. Their published source JARs were read, including AppBar.kt ExitUntilCollapsed and Scrollable.kt pre/self/post dispatch.
 - Source review is required; tests and UI automation remain prohibited. Per the latest explicit instruction, verify CI triggered and stop waiting. Compilation, actual device layout, image crop and gesture feel remain unverified until build/user feedback; do not call the new design visually accepted.
+
+The shared-motion integration retains this large-artwork contract, its nested-scroll and shortcut cancellation behavior, and all Material theme roles. It only replaces the existing tab indicator, button feedback, icon swaps and sheet presence with the shared motion components. The original landscape Fit/Crop condition is cached at the outer layout scope to fix its Kotlin receiver error; artwork size and scrolling are unchanged by that repair.

@@ -15,6 +15,7 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import dev.mangaflow.ui.MangaFlowApp
 import dev.mangaflow.ui.MangaFlowTheme
+import dev.mangaflow.ui.motion.MangaMotionProvider
 
 class MainActivity : ComponentActivity() {
     private var openUpdatesRequest by mutableIntStateOf(0)
@@ -27,7 +28,9 @@ class MainActivity : ComponentActivity() {
         consumeNavigationIntent(intent)
         setContent {
             MangaFlowTheme {
-                MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
+                MangaMotionProvider {
+                    MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
+                }
             }
         }
     }

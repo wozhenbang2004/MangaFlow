@@ -15,12 +15,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -40,11 +37,12 @@ import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaReview
 import dev.mangaflow.ui.CommunityComment
+import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /** Composed only at the chapter end. The discussion never counts as an image or changes page totals. */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ChapterDiscussion(
     manga: Manga,
@@ -62,6 +60,7 @@ internal fun ChapterDiscussion(
     var expanded by rememberSaveable(chapter.id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val muted = foreground.copy(alpha = .54f)
+    val delayedLoading = rememberDelayedBusy(loading)
 
     suspend fun load(page: Int) {
         loading = true
@@ -99,7 +98,7 @@ internal fun ChapterDiscussion(
             Text("拷贝", color = muted, fontSize = 11.sp)
         }
         Text(chapter.title, color = muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp, bottom = 16.dp))
-        if (loading && comments.isEmpty()) {
+        if (delayedLoading && comments.isEmpty()) {
             CircularProgressIndicator(Modifier.padding(vertical = 18.dp).size(18.dp), color = muted, strokeWidth = 1.5.dp)
         }
         comments.take(3).forEach { comment ->
@@ -119,16 +118,15 @@ internal fun ChapterDiscussion(
     }
 
     if (expanded) {
-        ModalBottomSheet(onDismissRequest = { expanded = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = background, contentColor = foreground) {
+        MotionBottomSheet(onDismissRequest = { expanded = false },
+            containerColor = background, contentColor = foreground) { dismiss ->
             Column(Modifier.fillMaxWidth().fillMaxHeight(.90f).navigationBarsPadding()) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("本章讨论", color = foreground, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                         Text("${chapter.title} · 拷贝", color = muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
                     }
-                    TextButton(onClick = { expanded = false }) { Text("完成", color = foreground, fontSize = 13.sp) }
+                    TextButton(onClick = dismiss) { Text("完成", color = foreground, fontSize = 13.sp) }
                 }
                 LazyColumn(modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -138,7 +136,7 @@ internal fun ChapterDiscussion(
                     }
                     item("discussion-more") {
                         when {
-                            loading -> CircularProgressIndicator(Modifier.size(20.dp), color = muted, strokeWidth = 1.5.dp)
+                            loading -> if (delayedLoading) CircularProgressIndicator(Modifier.size(20.dp), color = muted, strokeWidth = 1.5.dp)
                             error != null -> Column {
                                 Text(error.orEmpty(), color = muted, fontSize = 12.sp)
                                 TextButton(onClick = loadMore) { Text("重试", color = foreground) }
