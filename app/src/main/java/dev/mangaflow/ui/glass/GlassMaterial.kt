@@ -39,8 +39,10 @@ internal fun glassMaterial(
     shortestSide: Dp,
 ): GlassMaterial {
     if (!liquid) {
-        val tint = if (softCard && role != GlassSurfaceRole.DRAWER) {
-            if (light) .78f else .82f
+        val tint = if (softCard && role == GlassSurfaceRole.NAVIGATION) {
+            if (light) .54f else .62f
+        } else if (softCard && role != GlassSurfaceRole.DRAWER) {
+            if (light) .70f else .76f
         } else when (role) {
             GlassSurfaceRole.READING_DOCK -> if (light) .40f else .52f
             GlassSurfaceRole.POPOVER -> if (light) .64f else .72f

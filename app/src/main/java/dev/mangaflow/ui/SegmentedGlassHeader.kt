@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -61,8 +62,8 @@ internal fun SegmentedGlassHeader(
         verticalAlignment = Alignment.Top) {
         LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
             role = GlassSurfaceRole.NAVIGATION, trackPointer = true) { navigation() }
-        Box(Modifier.weight(1f), contentAlignment = Alignment.TopEnd) {
-            LiquidGlassSurface(backdrop, Modifier.width(controlsWidth).graphicsLayer {
+        BoxWithConstraints(Modifier.weight(1f), contentAlignment = Alignment.TopEnd) {
+            LiquidGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth)).graphicsLayer {
                 alpha = controlsAlpha()
                 compositingStrategy = CompositingStrategy.ModulateAlpha
             }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {

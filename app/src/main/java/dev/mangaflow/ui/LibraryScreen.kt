@@ -112,6 +112,7 @@ fun LibraryScreen(
     onRetryOpen: () -> Unit, onCancelOpen: () -> Unit,
     onRemoveFavorite: (Manga) -> Unit, onRemoveHistory: (String) -> Unit,
     backdrop: HazeState, navigation: @Composable () -> Unit, toolbar: @Composable (@Composable () -> Unit) -> Unit,
+    wallpaper: @Composable () -> Unit = {},
 ) {
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
@@ -202,7 +203,9 @@ fun LibraryScreen(
         ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
     }
     Box(Modifier.fillMaxSize()) {
-    Column(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(backdrop)) {
+    Box(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(backdrop)) {
+        wallpaper()
+        Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (!libraryReady) LibraryRestoreStatus(libraryStore, Modifier.padding(top = headerPadding))
             else MotionTabContent(if (showHistory) 1 else 0, Modifier.fillMaxSize()) { tab ->
@@ -322,6 +325,7 @@ fun LibraryScreen(
             }
             if (!showHistory) LibraryOpeningNotice(opening, onRetryOpen, onCancelOpen,
                 Modifier.align(Alignment.BottomCenter).padding(16.dp))
+        }
         }
     }
         Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)

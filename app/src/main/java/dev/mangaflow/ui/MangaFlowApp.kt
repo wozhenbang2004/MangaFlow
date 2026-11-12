@@ -359,7 +359,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
         ) { _ ->
             Box(Modifier.fillMaxSize()) {
-            if (frame is Frame.Root && wallpaper.mediaPath != null) {
+            // The three primary scenes render their wallpaper inside their own Haze source.
+            // Account/settings retain the shared root wallpaper.
+            if (frame is Frame.Root && wallpaper.mediaPath != null &&
+                frame.section !in setOf(Section.DISCOVER, Section.LIBRARY, Section.DOWNLOADS)) {
                 AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = !drawerVisible && !recentReadingOpen)
             }
             SharedTransitionLayout {
@@ -451,6 +454,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     }
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
                         val searchBackdrop = rememberHazeState()
+                        val backdropWallpaper: @Composable () -> Unit = {
+                            if (wallpaper.mediaPath != null) {
+                                AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
+                                    active = !drawerVisible && !recentReadingOpen && !tagSearchVisible)
+                            }
+                        }
                         val chromeDensity = LocalDensity.current
                         val discoveryBackground = model.browseBackground(browse)
                         val displayedDiscovery = if (!browse.isSearch) browse else discoveryBackground
@@ -548,6 +557,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         backgroundState = discoveryBackground,
                                         searchExpanded = searchVisible,
                                         searchBackdrop = searchBackdrop,
+                                        wallpaper = backdropWallpaper,
                                         contentTopPadding = chromePadding,
                                         active = rootActive,
                                         canAutoAdvance = rootActive && !searchVisible,
@@ -562,6 +572,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
                                         repository = model.repository, opening = libraryOpening, active = rootActive,
                                         backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
+                                        wallpaper = backdropWallpaper,
                                         onOpen = model::readFromLibrary, onDetails = { model.openManga(it) },
                                         onContinue = model::continueReading,
                                         onRemoveFavorite = model::removeFavorite,
@@ -571,6 +582,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     )
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, repository = model.repository, onRead = model::openDownload,
                                         onRetry = model::retryDownload, backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
+                                        wallpaper = backdropWallpaper,
                                         refreshingIds = refreshingDownloads, history = history)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,

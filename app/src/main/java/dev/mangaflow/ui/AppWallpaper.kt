@@ -52,7 +52,7 @@ internal fun AppWallpaper(store: WallpaperStore, modifier: Modifier = Modifier, 
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
-    val desaturate = remember { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(.45f) }) }
+    val desaturate = remember { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(.70f) }) }
     Box(modifier.clearAndSetSemantics {}.graphicsLayer { alpha = selected.strength }) {
         val preview = if (selected.kind == WallpaperKind.VIDEO) selected.posterPath else path
         if (preview != null && (selected.kind == WallpaperKind.VIDEO || selected.error == null)) {

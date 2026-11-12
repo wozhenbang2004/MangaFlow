@@ -128,6 +128,7 @@ fun DownloadsScreen(
     toolbar: @Composable (@Composable () -> Unit) -> Unit,
     refreshingIds: Set<String> = emptySet(),
     history: List<ReadingProgress> = emptyList(),
+    wallpaper: @Composable () -> Unit = {},
 ) {
     val context = LocalContext.current
     val entries by store.entries.collectAsStateWithLifecycle()
@@ -244,8 +245,9 @@ fun DownloadsScreen(
     }
 
     Box(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
-        // Only the original scrolling lists feed the glass; controls remain foreground siblings.
+        // The captured scene contains the wallpaper and scrolling list, never the header itself.
         Box(Modifier.fillMaxSize().hazeSource(backdrop)) {
+            wallpaper()
             // The filter owns the transition; progress updates keep the existing list in place.
             MotionTabContent(filter.ordinal, Modifier.fillMaxSize()) { index ->
                 val pageFilter = DownloadFilter.entries[index]
