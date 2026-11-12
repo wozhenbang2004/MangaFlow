@@ -50,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -92,6 +93,7 @@ private sealed interface Frame {
 @Composable
 fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = viewModel()) {
     val browse by model.browse.collectAsStateWithLifecycle()
+    val metrics by model.metrics.collectAsStateWithLifecycle()
     val detail by model.detail.collectAsStateWithLifecycle()
     val reading by model.reading.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
@@ -144,6 +146,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
 
+    CompositionLocalProvider(LocalMangaMetrics provides MangaMetricState(metrics, model::retainMetrics, model::releaseMetrics)) {
     ModalNavigationDrawer(
         drawerState = drawer,
         gesturesEnabled = frame is Frame.Root,
@@ -268,7 +271,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onSetFavorite = model::setCloudFavorite,
                                         onRetrySync = model::retryAccountSync,
                                     )
-                                    Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications)
+                                    Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications,
+                                        readBrowseCacheBytes = model::browseCacheSize, clearBrowseCache = model::clearBrowseCache,
+                                        readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache)
                                 }
                             }
                         }
@@ -277,6 +282,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             }
         }
     }
+}
 }
 
 private tailrec fun Context.activityOrNull(): Activity? = when (this) {

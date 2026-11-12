@@ -28,12 +28,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
-import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
@@ -60,6 +60,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -92,7 +98,6 @@ internal fun CommunityOverview(
     mangaTitle: String,
     sources: List<ReviewSource>,
     loading: Boolean,
-    openLink: (String) -> Unit,
     onMore: (String) -> Unit,
     onRetry: (String) -> Unit,
     onMatch: (String, String) -> Unit,
@@ -117,13 +122,13 @@ internal fun CommunityOverview(
         if (selected == null) {
             PendingSource(selectedId, loading, onRetry)
         } else {
-            SourceSummary(selected, openLink)
+            SourceSummary(selected)
             if (selected.reviews.isNotEmpty()) {
                 selected.reviews.take(2).forEachIndexed { index, review ->
                     key(selected.id, selected.subjectId, review.id) {
                         if (index > 0) HorizontalDivider(color = CommunityLine, thickness = 0.5.dp,
                             modifier = Modifier.padding(top = 10.dp, bottom = 6.dp))
-                        CommunityComment(review, openLink, foreground = CommunityWhite, muted = CommunityMuted)
+                        CommunityComment(review, foreground = CommunityWhite, muted = CommunityMuted)
                     }
                 }
             }
@@ -185,7 +190,7 @@ internal fun CommunityOverview(
                             item("pending") { PendingSource(selectedId, loading, onRetry) }
                         } else {
                             item("source") {
-                                SourceSummary(selected, openLink, showMatchedTitle = true)
+                                SourceSummary(selected, showMatchedTitle = true)
                                 if (selected.status != ReviewStatus.READY) {
                                     SourceNotice(selected, onRetry, onChoose = { chooseMatch = !chooseMatch },
                                         chooseLabel = if (chooseMatch) "收起候选条目" else "选择对应漫画")
@@ -228,7 +233,7 @@ internal fun CommunityOverview(
                                 }
                             }
                             items(selected.reviews, key = { "${selected.id}:${selected.subjectId}:${it.kind}:${it.id}" }) { review ->
-                                DiscussionComment(selected, review, openLink, loadReplies)
+                                DiscussionComment(selected, review, loadReplies)
                                 HorizontalDivider(color = CommunityLine, thickness = 0.5.dp)
                             }
                             item("pagination") {
@@ -312,8 +317,8 @@ internal fun ProviderMark(id: String, modifier: Modifier = Modifier, tint: Color
 }
 
 @Composable
-private fun SourceSummary(source: ReviewSource, openLink: (String) -> Unit, showMatchedTitle: Boolean = false) {
-    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun SourceSummary(source: ReviewSource, showMatchedTitle: Boolean = false) {
+    Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             val detail = listOfNotNull(
                 source.ratingCount?.let { "$it 人评分" },
@@ -328,9 +333,6 @@ private fun SourceSummary(source: ReviewSource, openLink: (String) -> Unit, show
                 Text(source.matchedTitle, color = CommunityWhite.copy(alpha = 0.75f), fontSize = 12.sp,
                     modifier = Modifier.padding(top = 4.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-        }
-        IconButton(onClick = { openLink(source.url) }, enabled = source.url.isNotBlank(), modifier = Modifier.size(44.dp)) {
-            Icon(Icons.Outlined.OpenInNew, "在原站查看${source.name}", tint = CommunityMuted, modifier = Modifier.size(16.dp))
         }
     }
 }
@@ -389,88 +391,106 @@ private fun SmallLoading() {
 @Composable
 fun CommunityComment(
     review: MangaReview,
-    openLink: (String) -> Unit,
     modifier: Modifier = Modifier,
     foreground: Color = Color.White,
     muted: Color = Color.White.copy(alpha = 0.5f),
 ) {
-    CommentContent(review, openLink, modifier, foreground, muted, showReplyCount = true)
+    CommentContent(review, modifier, foreground, muted, showReplyCount = true)
 }
 
 @Composable
 private fun CommentContent(
     review: MangaReview,
-    openLink: (String) -> Unit,
     modifier: Modifier,
     foreground: Color,
     muted: Color,
     showReplyCount: Boolean,
 ) {
     val text = review.body.ifBlank { review.summary }.trim()
-    // Long reviews do not reliably carry spoiler flags. Reveal their prose explicitly.
     val conceal = review.spoiler || review.kind == ReviewKind.REVIEW
     var revealed by rememberSaveable(review.id, review.url, conceal) { mutableStateOf(!conceal) }
     var expanded by rememberSaveable(review.id, review.url) { mutableStateOf(false) }
     var overflows by remember(text) { mutableStateOf(false) }
-    Column(modifier.fillMaxWidth().animateContentSize(animationSpec = tween(160))) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).heightIn(min = 44.dp).then(
-                if (review.authorUrl.isNotBlank()) Modifier.clip(RoundedCornerShape(6.dp)).clickable(
-                    role = Role.Button, onClickLabel = "查看${review.author}的主页",
-                ) { openLink(review.authorUrl) } else Modifier,
-            ), verticalArrangement = Arrangement.Center) {
-                Text(review.author, color = foreground.copy(alpha = 0.82f), fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (review.date.isNotBlank()) Text(review.date, color = muted, fontSize = 10.sp,
-                    modifier = Modifier.padding(top = 2.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            review.score?.let {
-                Text("${communityScore(it)} / ${review.scoreScale}", color = muted, fontSize = 11.sp)
-            }
-            if (review.url.isNotBlank()) IconButton(onClick = { openLink(review.url) }, modifier = Modifier.size(44.dp)) {
-                Icon(Icons.Outlined.OpenInNew, "查看${review.author}的原文", tint = muted, modifier = Modifier.size(14.dp))
-            }
-        }
-        if (review.replyTo.isNotBlank()) {
-            Text("回复 ${review.replyTo}", color = muted, fontSize = 11.sp, maxLines = 1,
-                overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 5.dp))
-        }
-        if (!revealed) {
-            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(9.dp))
-                .background(foreground.copy(alpha = 0.045f)).clickable(role = Role.Button) { revealed = true }
-                .padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.VisibilityOff, null, tint = muted, modifier = Modifier.size(15.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(if (review.kind == ReviewKind.REVIEW) "展开长评 · 可能涉及后续剧情" else "含剧透，点按查看",
-                    color = muted, fontSize = 12.sp, lineHeight = 19.sp, modifier = Modifier.weight(1f))
-                Icon(Icons.Outlined.ChevronRight, null, tint = muted, modifier = Modifier.size(15.dp))
-            }
-        } else {
-            if (review.kind == ReviewKind.REVIEW && review.body.isNotBlank() && review.summary.isNotBlank() &&
-                review.summary.trim() != text) {
-                Text(review.summary, color = foreground, fontSize = 13.sp, lineHeight = 21.sp,
-                    fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(bottom = 5.dp))
-            }
-            Text(text, color = foreground.copy(alpha = 0.88f), fontSize = 13.sp, lineHeight = 22.sp,
-                maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
-                onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
-        }
-        if ((revealed && (overflows || expanded || conceal)) || (showReplyCount && (review.replyCount ?: 0) > 0)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                if (revealed && (overflows || expanded)) TextButton(
-                    onClick = { expanded = !expanded }, contentPadding = PaddingValues(end = 12.dp),
-                ) { Text(if (expanded) "收起" else "展开", color = muted, fontSize = 11.sp) }
-                if (conceal && revealed) TextButton(onClick = { revealed = false; expanded = false },
-                    contentPadding = PaddingValues(end = 12.dp)) {
-                    Text(if (review.kind == ReviewKind.REVIEW) "收起长评" else "隐藏剧透", color = muted, fontSize = 11.sp)
+    Row(modifier.fillMaxWidth().animateContentSize(animationSpec = tween(160)),
+        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        CommentAvatar(review, foreground)
+        Column(Modifier.weight(1f)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 34.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(review.author, color = foreground.copy(alpha = .84f), fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (review.date.isNotBlank()) Text(review.date, color = muted, fontSize = 10.sp,
+                        modifier = Modifier.padding(top = 2.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Spacer(Modifier.weight(1f))
-                if (showReplyCount && (review.replyCount ?: 0) > 0) {
-                    Text("${review.replyCount} 条回复", color = muted, fontSize = 11.sp,
-                        modifier = Modifier.padding(vertical = 10.dp))
+                review.score?.let {
+                    Text("${communityScore(it)} / ${review.scoreScale}", color = muted, fontSize = 11.sp,
+                        modifier = Modifier.padding(start = 8.dp))
                 }
             }
+            Spacer(Modifier.height(7.dp))
+            if (review.replyTo.isNotBlank()) {
+                Text("回复 ${review.replyTo}", color = muted, fontSize = 11.sp, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 5.dp))
+            }
+            if (!revealed) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(9.dp))
+                    .background(foreground.copy(alpha = .045f)).clickable(role = Role.Button) { revealed = true }
+                    .padding(horizontal = 10.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.VisibilityOff, null, tint = muted, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (review.kind == ReviewKind.REVIEW) "展开长评 · 可能涉及后续剧情" else "含剧透，点按查看",
+                        color = muted, fontSize = 12.sp, lineHeight = 19.sp, modifier = Modifier.weight(1f))
+                    Icon(Icons.Outlined.ChevronRight, null, tint = muted, modifier = Modifier.size(15.dp))
+                }
+            } else {
+                if (review.kind == ReviewKind.REVIEW && review.body.isNotBlank() && review.summary.isNotBlank() &&
+                    review.summary.trim() != text) {
+                    Text(review.summary, color = foreground, fontSize = 13.sp, lineHeight = 21.sp,
+                        fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(bottom = 5.dp))
+                }
+                Text(text, color = foreground.copy(alpha = .92f), fontSize = 14.sp, lineHeight = 23.sp,
+                    maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
+                    onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
+            }
+            if ((revealed && (overflows || expanded || conceal)) || (showReplyCount && (review.replyCount ?: 0) > 0)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    if (revealed && (overflows || expanded)) TextButton(
+                        onClick = { expanded = !expanded }, contentPadding = PaddingValues(end = 12.dp),
+                    ) { Text(if (expanded) "收起" else "展开", color = muted, fontSize = 11.sp) }
+                    if (conceal && revealed) TextButton(onClick = { revealed = false; expanded = false },
+                        contentPadding = PaddingValues(end = 12.dp)) {
+                        Text(if (review.kind == ReviewKind.REVIEW) "收起长评" else "隐藏剧透", color = muted, fontSize = 11.sp)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (showReplyCount && (review.replyCount ?: 0) > 0) {
+                        Text("${review.replyCount} 条回复", color = muted, fontSize = 11.sp,
+                            modifier = Modifier.padding(vertical = 10.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Ovio's saved Avatar pattern: initials remain underneath a lazy image, including on failure. */
+@Composable
+private fun CommentAvatar(review: MangaReview, foreground: Color) {
+    val context = LocalContext.current
+    var failed by remember(review.avatarUrl) { mutableStateOf(false) }
+    val initial = remember(review.author) {
+        review.author.trim().takeIf { it.isNotEmpty() }
+            ?.let { String(Character.toChars(it.codePointAt(0))).uppercase(Locale.ROOT) } ?: "·"
+    }
+    val request = remember(review.avatarUrl, context) {
+        ImageRequest.Builder(context).data(review.avatarUrl).size(96).crossfade(100).build()
+    }
+    Box(Modifier.size(32.dp).clip(CircleShape).background(foreground.copy(alpha = .075f))
+        .clearAndSetSemantics {}, contentAlignment = Alignment.Center) {
+        Text(initial, color = foreground.copy(alpha = .55f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        if (review.avatarUrl.isNotBlank() && !failed) {
+            AsyncImage(request, contentDescription = null, contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(), onError = { failed = true })
         }
     }
 }
@@ -479,13 +499,12 @@ private fun CommentContent(
 private fun DiscussionComment(
     source: ReviewSource,
     review: MangaReview,
-    openLink: (String) -> Unit,
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
 ) {
     Column(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
-        CommentContent(review, openLink, Modifier, CommunityWhite, CommunityMuted, showReplyCount = source.id != "copy")
+        CommentContent(review, Modifier, CommunityWhite, CommunityMuted, showReplyCount = source.id != "copy")
         if (source.id == "copy" && source.subjectId.isNotBlank() && (review.replyCount ?: 0) > 0) {
-            CommentReplies(source, review, openLink, loadReplies)
+            CommentReplies(source, review, loadReplies)
         }
     }
 }
@@ -494,7 +513,6 @@ private fun DiscussionComment(
 private fun CommentReplies(
     source: ReviewSource,
     review: MangaReview,
-    openLink: (String) -> Unit,
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -544,17 +562,17 @@ private fun CommentReplies(
             request?.cancel()
             busy = false
         }
-    }, contentPadding = PaddingValues(end = 10.dp)) {
+    }, modifier = Modifier.padding(start = 42.dp), contentPadding = PaddingValues(end = 10.dp)) {
         Text(if (expanded) "收起回复" else "${review.replyCount} 条回复", color = CommunityMuted, fontSize = 12.sp)
         Spacer(Modifier.width(4.dp))
         Icon(if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
             null, tint = CommunityMuted, modifier = Modifier.size(15.dp))
     }
     if (expanded) {
-        Column(Modifier.fillMaxWidth().padding(start = 14.dp)) {
+        Column(Modifier.fillMaxWidth().padding(start = 42.dp)) {
             rows.forEach { reply ->
                 key(source.subjectId, review.id, reply.id) {
-                    CommunityComment(reply, openLink, Modifier.padding(bottom = 10.dp), CommunityWhite, CommunityMuted)
+                    CommunityComment(reply, Modifier.padding(bottom = 10.dp), CommunityWhite, CommunityMuted)
                 }
             }
             if (error != null) CommentFailure(error.orEmpty(), busy) { load(failedPage) }

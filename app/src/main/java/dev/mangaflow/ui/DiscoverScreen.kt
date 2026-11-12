@@ -28,7 +28,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -46,6 +46,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -59,7 +60,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -108,30 +109,29 @@ fun DiscoverScreen(
     onPeriod: (RankPeriod) -> Unit,
     onAudience: (RankAudience) -> Unit,
 ) {
-    val grid = rememberLazyGridState()
     val keyboard = LocalSoftwareKeyboardController.current
-    val selectionKey = "${state.query}|${state.mode}|${state.period}|${state.audience}"
-    var previousQuery by rememberSaveable { mutableStateOf(selectionKey) }
-    LaunchedEffect(selectionKey) {
-        if (previousQuery != selectionKey) {
-            grid.scrollToItem(0)
-            previousQuery = selectionKey
-        }
+    val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
+    val retainedGrid = remember(state.cacheKey) {
+        val saved = positions.remove(state.cacheKey) ?: LazyGridState()
+        positions[state.cacheKey] = saved
+        while (positions.size > 24) positions.remove(positions.keys.first())
+        saved
     }
+    val loadingGrid = remember(state.cacheKey) { LazyGridState() }
+    // Let the disk snapshot hydrate before the short loading layout can clamp a saved position.
+    val grid = if (state.loading && state.items.isEmpty()) loadingGrid else retainedGrid
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(102.dp), state = grid,
+        columns = GridCells.Adaptive(144.dp), state = grid,
         contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(24.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(20.dp),
         modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding(),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }, key = "heading") {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("发现", style = MaterialTheme.typography.headlineLarge)
-                    Text("下一段故事，从这里开始", modifier = Modifier.padding(top = 4.dp),
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                IconButton(onClick = onRefresh, enabled = !state.loading) {
+                Text("发现", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                if (state.updatedAt > 0) Text(browseUpdatedAt(state.updatedAt),
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                IconButton(onClick = onRefresh, enabled = !state.loading && !state.refreshing) {
                     Icon(Icons.Outlined.Refresh, "刷新漫画", Modifier.size(21.dp))
                 }
             }
@@ -177,6 +177,11 @@ fun DiscoverScreen(
                                     fontWeight = if (state.mode == mode) FontWeight.SemiBold else FontWeight.Normal) })
                         }
                     }
+                    if (state.refreshing) LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth().height(1.dp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = .35f),
+                        trackColor = Color.Transparent,
+                    )
                     if (state.mode == DiscoveryMode.RANKING) {
                         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -221,10 +226,9 @@ fun DiscoverScreen(
                         state.mode == DiscoveryMode.RANKING -> "${state.period.label} · ${state.audience.label}"
                         state.mode == DiscoveryMode.LATEST -> "最近更新"
                         else -> "发现好故事"
-                    }, style = MaterialTheme.typography.titleLarge)
+                    }, style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.weight(1f))
-                    if (state.loading) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 1.5.dp)
-                    else Text(if (state.mode == DiscoveryMode.RANKING && state.query.isBlank()) when (state.period) {
+                    Text(if (state.mode == DiscoveryMode.RANKING && state.query.isBlank()) when (state.period) {
                         RankPeriod.DAY -> "上升最快"
                         RankPeriod.WEEK -> "最近 7 天"
                         RankPeriod.MONTH -> "最近 30 天"
@@ -234,7 +238,7 @@ fun DiscoverScreen(
             }
             if (state.query.isBlank() && state.mode == DiscoveryMode.RANKING) {
                 items(state.items, key = Manga::id, span = { GridItemSpan(maxLineSpan) }) { manga ->
-                    RankRow(manga, repository) { onOpen(manga) }
+                    RankRow(manga, repository, state.period) { onOpen(manga) }
                 }
             } else {
                 val visible = if (state.query.isBlank() && state.mode == DiscoveryMode.RECOMMENDED) state.items.drop(1) else state.items
@@ -261,7 +265,7 @@ fun DiscoverScreen(
 
 @Composable
 private fun FeaturedManga(manga: Manga, repository: MangaRepository, onOpen: (Manga) -> Unit) {
-    Box(Modifier.fillMaxWidth().height(280.dp).clip(RoundedCornerShape(22.dp))
+    Box(Modifier.fillMaxWidth().height(236.dp).clip(RoundedCornerShape(22.dp))
         .background(Color(0xFF242426)).clickable { onOpen(manga) }) {
         MangaCover(manga, repository, Modifier.fillMaxSize(), ContentScale.Crop)
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
@@ -270,10 +274,11 @@ private fun FeaturedManga(manga: Manga, repository: MangaRepository, onOpen: (Ma
         Text("拷贝推荐", color = Color.White.copy(alpha = 0.92f), style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(20.dp)
                 .clip(RoundedCornerShape(100)).background(Color.Black.copy(alpha = 0.23f)).padding(horizontal = 12.dp, vertical = 7.dp))
-        Column(Modifier.align(Alignment.BottomStart).padding(24.dp)) {
-            Text(manga.title, color = Color.White, style = MaterialTheme.typography.headlineMedium,
+        Column(Modifier.align(Alignment.BottomStart).padding(20.dp)) {
+            Text(manga.title, color = Color.White, fontSize = 24.sp, lineHeight = 31.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 9.dp), foreground = Color.White)
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(manga.authors.take(2).joinToString(" · ").ifBlank { "翻开，进入故事" },
                     color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -296,7 +301,7 @@ private fun DiscoveryFilter(label: String, selected: Boolean, onClick: () -> Uni
 }
 
 @Composable
-private fun RankRow(manga: Manga, repository: MangaRepository, onClick: () -> Unit) {
+private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPeriod, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
         .padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(manga.rank?.toString()?.padStart(2, '0') ?: "—", fontSize = 20.sp,
@@ -308,14 +313,12 @@ private fun RankRow(manga: Manga, repository: MangaRepository, onClick: () -> Un
             Text(manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(manga.authors.take(2).joinToString(" / "), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            manga.popularity?.let { value ->
-                val label = when {
-                    value >= 100_000_000 -> String.format(java.util.Locale.ROOT, "%.1f亿", value / 100_000_000.0)
-                    value >= 10_000 -> String.format(java.util.Locale.ROOT, "%.1f万", value / 10_000.0)
-                    else -> value.toString()
-                }
-                Text("热度 $label", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            MangaMetricBadges(manga, heatLabel = when (period) {
+                RankPeriod.DAY -> "日热"
+                RankPeriod.WEEK -> "周热"
+                RankPeriod.MONTH -> "月热"
+                RankPeriod.TOTAL -> "总热"
+            })
         }
         Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.padding(start = 8.dp).size(17.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .55f))
@@ -331,6 +334,7 @@ internal fun ContinueRow(progress: ReadingProgress, repository: MangaRepository,
         Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text("继续阅读", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(progress.manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            MangaMetricBadges(progress.manga)
             Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
@@ -347,7 +351,8 @@ internal fun CoverTile(manga: Manga, repository: MangaRepository, onClick: () ->
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)) {
         MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(0.7f).clip(RoundedCornerShape(12.dp)))
         Text(manga.title, modifier = Modifier.padding(top = 9.dp, start = 2.dp, end = 2.dp),
-            style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            style = MaterialTheme.typography.titleSmall, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 6.dp, start = 2.dp, end = 2.dp), compact = true)
         val secondary = manga.latestChapter.ifBlank { manga.authors.firstOrNull().orEmpty() }
         if (secondary.isNotBlank()) Text(secondary, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -390,3 +395,17 @@ internal fun EmptyMessage(title: String, description: String, action: String? = 
         if (action != null) TextButton(onClick = onAction) { Text(action) }
     }
 }
+
+private fun browseUpdatedAt(timestamp: Long): String =
+    java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(timestamp)) + " 更新"
+
+private val BrowsePositionsSaver = listSaver<LinkedHashMap<String, LazyGridState>, Any>(
+    save = { positions -> positions.entries.flatMap { (key, state) ->
+        listOf(key, state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset)
+    } },
+    restore = { saved -> LinkedHashMap<String, LazyGridState>().apply {
+        saved.chunked(3).forEach { entry ->
+            if (entry.size == 3) put(entry[0] as String, LazyGridState(entry[1] as Int, entry[2] as Int))
+        }
+    } },
+)

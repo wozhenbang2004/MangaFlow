@@ -47,6 +47,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +73,11 @@ import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.update.UpdateManager
 import dev.mangaflow.update.UpdatePhase
+import coil3.SingletonImageLoader
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -80,6 +87,10 @@ fun SettingsScreen(
     updateManager: UpdateManager,
     libraryStore: LibraryStore,
     onRequestNotifications: () -> Unit,
+    readBrowseCacheBytes: suspend () -> Long,
+    clearBrowseCache: suspend () -> Unit,
+    readMetadataCacheBytes: suspend () -> Long,
+    clearMetadataCache: suspend () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -91,6 +102,47 @@ fun SettingsScreen(
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
+    val cacheScope = rememberCoroutineScope()
+    val imageLoader = remember(context) { SingletonImageLoader.get(context) }
+    var cacheSizes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    var clearingCache by remember { mutableStateOf<String?>(null) }
+    var cacheNotice by remember { mutableStateOf<String?>(null) }
+
+    suspend fun readCacheSizes() {
+        cacheSizes = mapOf(
+            "browse" to readBrowseCacheBytes(),
+            "metadata" to readMetadataCacheBytes(),
+            "images" to withContext(Dispatchers.IO) { imageLoader.diskCache?.size ?: 0L },
+        )
+    }
+
+    LaunchedEffect(imageLoader) {
+        try { readCacheSizes() }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { cacheNotice = "暂时无法读取缓存大小" }
+    }
+
+    fun clearCache(key: String, label: String) {
+        if (clearingCache != null) return
+        clearingCache = key
+        cacheNotice = null
+        cacheScope.launch {
+            try {
+                when (key) {
+                    "browse" -> clearBrowseCache()
+                    "metadata" -> clearMetadataCache()
+                    "images" -> withContext(Dispatchers.IO) {
+                        imageLoader.memoryCache?.clear()
+                        imageLoader.diskCache?.clear()
+                    }
+                }
+                readCacheSizes()
+                cacheNotice = "$label 已清理"
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { cacheNotice = "清理未完成，请重试" }
+            finally { clearingCache = null }
+        }
+    }
 
     DisposableEffect(lifecycleOwner, context) {
         val observer = LifecycleEventObserver { _, event ->
@@ -152,6 +204,30 @@ fun SettingsScreen(
             SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn) { libraryStore.updatePreferences(preferences.copy(keepScreenOn = it)) }
             SettingsToggle("图片之间留白", preferences.pageGap) { libraryStore.updatePreferences(preferences.copy(pageGap = it)) }
             Spacer(Modifier.height(20.dp))
+            HorizontalDivider(color = colors.outlineVariant)
+            Spacer(Modifier.height(28.dp))
+            SettingsSectionLabel("缓存")
+            Spacer(Modifier.height(8.dp))
+            listOf("browse" to "推荐与热榜", "metadata" to "评分与评论", "images" to "图片与头像").forEach { (key, label) ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(label, style = MaterialTheme.typography.bodyLarge, color = foreground)
+                        Text(cacheSizes[key]?.let(::settingsBytes) ?: "正在统计…",
+                            style = MaterialTheme.typography.bodySmall, color = secondary,
+                            modifier = Modifier.padding(top = 3.dp))
+                    }
+                    TextButton(enabled = clearingCache == null && cacheSizes[key] != null,
+                        onClick = { clearCache(key, label) }) {
+                        if (clearingCache == key) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                        else Text("清理", color = secondary)
+                    }
+                }
+            }
+            Text("图片最多保留 256 MB；书架、阅读记录和已下载章节独立保存。",
+                style = MaterialTheme.typography.bodySmall, color = secondary, modifier = Modifier.padding(top = 8.dp))
+            cacheNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
+                modifier = Modifier.padding(top = 8.dp)) }
+            Spacer(Modifier.height(26.dp))
             HorizontalDivider(color = colors.outlineVariant)
             Spacer(Modifier.height(28.dp))
             SettingsSectionLabel("应用更新")

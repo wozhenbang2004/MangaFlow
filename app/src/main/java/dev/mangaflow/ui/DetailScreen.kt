@@ -48,7 +48,6 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FormatListNumbered
 import androidx.compose.material.icons.outlined.MenuBook
-import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Button
@@ -58,8 +57,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -88,7 +85,6 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -174,11 +170,7 @@ fun DetailScreen(
     }
     val haze = rememberHazeState()
     val scope = rememberCoroutineScope()
-    val uri = LocalUriHandler.current
-    val snackbars = remember { SnackbarHostState() }
-    val openLink: (String) -> Unit = { link ->
-        runCatching { uri.openUri(link) }.onFailure { scope.launch { snackbars.showSnackbar("暂时无法打开原文") } }
-    }
+
 
     Box(Modifier.fillMaxSize().background(DetailInk)) {
         LazyColumn(
@@ -186,12 +178,12 @@ fun DetailScreen(
             modifier = Modifier.fillMaxSize().hazeSource(haze),
             contentPadding = PaddingValues(bottom = 134.dp),
         ) {
-            item(key = "hero") { DetailHero(current, openLink) }
+            item(key = "hero") { DetailHero(current) }
             item(key = "synopsis") { DetailSynopsis(current.description, loading) }
             item(key = "reviews") {
                 CommunityOverview(
                     mangaId = current.id, mangaTitle = current.title,
-                    sources = reviews, loading = reviewsLoading, openLink = openLink,
+                    sources = reviews, loading = reviewsLoading,
                     onMore = onReviewMore, onRetry = onReviewRetry,
                     onMatch = onReviewMatch, onRelink = onReviewRelink, loadReplies = loadReplies,
                 )
@@ -242,11 +234,6 @@ fun DetailScreen(
                                     Icon(Icons.Outlined.Refresh, null, tint = DetailWhite, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(6.dp))
                                     Text("重新加载", color = DetailWhite, fontSize = 13.sp)
-                                }
-                                TextButton(onClick = { openLink(current.sourceUrl.ifBlank { "https://www.copy3000.com/comic/${current.id}" }) }) {
-                                    Text("打开来源", color = DetailSecondary, fontSize = 13.sp)
-                                    Spacer(Modifier.width(5.dp))
-                                    Icon(Icons.Outlined.OpenInNew, null, tint = DetailSecondary, modifier = Modifier.size(14.dp))
                                 }
                             }
                         }
@@ -327,12 +314,11 @@ fun DetailScreen(
                 Text("章节", color = DetailWhite, fontSize = 13.sp)
             }
         }
-        SnackbarHost(snackbars, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 90.dp))
     }
 }
 
 @Composable
-private fun DetailHero(manga: Manga, openLink: (String) -> Unit) {
+private fun DetailHero(manga: Manga) {
     val context = LocalContext.current
     var failed by remember(manga.coverUrl) { mutableStateOf(false) }
     var retry by remember(manga.coverUrl) { mutableIntStateOf(0) }
@@ -382,13 +368,8 @@ private fun DetailHero(manga: Manga, openLink: (String) -> Unit) {
                 Spacer(Modifier.height(12.dp))
                 Text(manga.tags.take(5).joinToString("  ·  "), color = DetailMuted, fontSize = 11.sp, lineHeight = 18.sp)
             }
-            Row(Modifier.heightIn(min = 44.dp).clickable(role = Role.Button) {
-                openLink(manga.sourceUrl.ifBlank { "https://www.copy3000.com/comic/${manga.id}" })
-            }, verticalAlignment = Alignment.CenterVertically) {
-                Text("拷贝漫画", color = DetailMuted, fontSize = 11.sp)
-                Spacer(Modifier.width(4.dp))
-                Icon(Icons.Outlined.OpenInNew, null, tint = DetailMuted, modifier = Modifier.size(11.dp))
-            }
+            MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 14.dp), foreground = DetailWhite)
+            Text("拷贝漫画", color = DetailMuted, fontSize = 10.sp, modifier = Modifier.padding(top = 7.dp))
         }
     }
 }

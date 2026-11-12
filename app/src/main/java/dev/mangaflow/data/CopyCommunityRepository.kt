@@ -4,6 +4,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -23,6 +25,9 @@ class CopyCommunityRepository(
     private val apiOrigin = checkedOrigin(config.apiOrigin)
     private val imageDomains = config.trustedImageDomains.map { it.lowercase().trim('.') }.toSet()
     private val http = SourceHttp()
+    private val commentCache = LinkedHashMap<String, CachedComments>()
+    private val commentRequests = List(16) { Mutex() }
+    @Volatile private var commentGeneration = 0L
 
     suspend fun browse(
         mode: DiscoveryMode,
@@ -83,8 +88,9 @@ class CopyCommunityRepository(
                     // A rank row's period heat differs from the comic's overall heat.
                     popularity = if (mode == DiscoveryMode.RANKING) row.nonNegativeLong("popular")
                         ?: comic.nonNegativeLong("popular") else comic.nonNegativeLong("popular"),
+                    totalPopularity = comic.nonNegativeLong("popular"),
                     rank = if (mode == DiscoveryMode.RANKING) row.nonNegativeInt("sort")
-                        ?.takeIf { it > 0 } else null,
+                        ?.takeIf { it > 0 } ?: (offset + index + 1) else null,
                 )
             } catch (_: IllegalArgumentException) { malformed++ }
               catch (_: SourceException) { malformed++ }
@@ -96,15 +102,15 @@ class CopyCommunityRepository(
         MangaPage(items.distinctBy(Manga::id), pagination.nextPage != null)
     }
 
-    suspend fun overview(manga: Manga): ReviewSource = withContext(Dispatchers.IO) {
+    suspend fun overview(manga: Manga, forceRefresh: Boolean = false): ReviewSource = withContext(Dispatchers.IO) {
         val subjectId = comicUuid(manga)
         val source = ReviewSource(
             id = "copy", name = "拷贝", status = ReviewStatus.READY,
             url = comicUrl(manga.id), matchedTitle = manga.title,
-            subjectId = subjectId, popularity = manga.popularity,
+            subjectId = subjectId, popularity = overallPopularity(manga),
         )
         try {
-            val first = comments(manga, source, 0)
+            val first = comments(manga, source, 0, forceRefresh)
             source.copy(reviews = first.items, reviewCount = first.total, nextPage = first.nextPage)
         } catch (cancel: CancellationException) {
             throw cancel
@@ -113,14 +119,27 @@ class CopyCommunityRepository(
         }
     }
 
-    suspend fun comments(manga: Manga, source: ReviewSource, page: Int): ReviewPage = withContext(Dispatchers.IO) {
+    /** Browse responses already include overall heat; never fetch a chapter catalog for a badge. */
+    fun metric(manga: Manga): ReviewSource = ReviewSource(
+        id = "copy", name = "拷贝", status = ReviewStatus.READY,
+        url = comicUrl(manga.id), matchedTitle = manga.title,
+        popularity = overallPopularity(manga), subjectId = manga.sourceUuid,
+    )
+
+    private fun overallPopularity(manga: Manga): Long? = manga.totalPopularity
+        ?: repository.cachedDetail(manga.id)?.manga?.let { it.totalPopularity ?: it.popularity }
+        ?: manga.popularity.takeIf { manga.rank == null }
+
+    suspend fun comments(manga: Manga, source: ReviewSource, page: Int, forceRefresh: Boolean = false): ReviewPage = withContext(Dispatchers.IO) {
         val publicUrl = comicUrl(manga.id)
         val subjectId = subjectId(manga, source, publicUrl)
         val url = apiOrigin.newBuilder().addPathSegments("api/v3/comments")
             .addQueryParameter("comic_id", subjectId)
             .addQueryParameter("limit", COMMENT_SIZE.toString())
             .addQueryParameter("offset", offset(page, COMMENT_SIZE).toString()).build()
-        readComments(apiJson(url, "拷贝作品评论", publicUrl), page, publicUrl)
+        commentPage("work:$subjectId:$page", forceRefresh) {
+            readComments(apiJson(url, "拷贝作品评论", publicUrl), page, publicUrl)
+        }
     }
 
     suspend fun replies(
@@ -142,7 +161,9 @@ class CopyCommunityRepository(
             .addQueryParameter("_update", "true")
             .addQueryParameter("limit", COMMENT_SIZE.toString())
             .addQueryParameter("offset", offset(page, COMMENT_SIZE).toString()).build()
-        readComments(apiJson(url, "拷贝评论回复", publicUrl), page, publicUrl)
+        commentPage("reply:$subjectId:$replyId:$page") {
+            readComments(apiJson(url, "拷贝评论回复", publicUrl), page, publicUrl)
+        }
     }
 
     suspend fun chapterComments(manga: Manga, chapter: Chapter, page: Int = 0): ReviewPage = withContext(Dispatchers.IO) {
@@ -154,8 +175,33 @@ class CopyCommunityRepository(
             .addQueryParameter("limit", COMMENT_SIZE.toString())
             .addQueryParameter("offset", offset(page, COMMENT_SIZE).toString()).build()
         // Chapter UUID is sufficient; do not make an extra work-detail request here.
-        readComments(apiJson(url, "拷贝本章讨论", publicUrl), page, publicUrl, chapterId)
+        commentPage("chapter:$chapterId:$page") {
+            readComments(apiJson(url, "拷贝本章讨论", publicUrl), page, publicUrl, chapterId)
+        }
     }
+
+    fun clearCache() = synchronized(commentCache) { commentGeneration++; commentCache.clear() }
+
+    private suspend fun commentPage(key: String, forceRefresh: Boolean = false, load: suspend () -> ReviewPage): ReviewPage {
+        val epoch = commentGeneration
+        return commentRequests[(key.hashCode() and Int.MAX_VALUE) % commentRequests.size].withLock {
+            if (!forceRefresh) synchronized(commentCache) { commentCache[key] }
+                ?.takeIf { System.currentTimeMillis() - it.fetchedAt in 0L until 3 * 60_000L }
+                ?.let { return@withLock it.page }
+            val page = load()
+            currentCoroutineContext().ensureActive()
+            synchronized(commentCache) {
+                if (epoch == commentGeneration) {
+                    commentCache.remove(key)
+                    commentCache[key] = CachedComments(System.currentTimeMillis(), page)
+                    while (commentCache.size > 64) commentCache.remove(commentCache.keys.first())
+                }
+            }
+            page
+        }
+    }
+
+    private data class CachedComments(val fetchedAt: Long, val page: ReviewPage)
 
     private suspend fun readComments(data: JSONObject, page: Int, publicUrl: String, chapterId: String? = null): ReviewPage {
         val list = list(data, "评论", publicUrl)
@@ -184,6 +230,7 @@ class CopyCommunityRepository(
                 replyCount = if (chapterId == null) row.nonNegativeInt("count") else null,
                 replyTo = if (chapterId == null) row.text("parent_user_name") else "",
                 kind = if (chapterId == null) ReviewKind.COMMENT else ReviewKind.CHAPTER,
+                avatarUrl = coverUrl(row.text("user_avatar")),
             )
         }
         return ReviewPage(reviews.distinctBy(MangaReview::id), pagination.total, pagination.nextPage)

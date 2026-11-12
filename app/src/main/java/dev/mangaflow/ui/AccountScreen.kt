@@ -130,7 +130,7 @@ fun AccountScreen(
     }
 
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(102.dp),
+        columns = GridCells.Adaptive(144.dp),
         modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding(),
         contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -381,6 +381,7 @@ private fun CloudContinueRow(entry: CloudHistoryEntry, repository: MangaReposito
             Text(if (entry.chapterId.isBlank()) "查看漫画" else "继续阅读", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(entry.manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            MangaMetricBadges(entry.manga)
             if (entry.chapterTitle.isNotBlank()) Text(entry.chapterTitle, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }

@@ -15,6 +15,7 @@ data class Manga(
     val sourceUuid: String = "",
     val popularity: Long? = null,
     val rank: Int? = null,
+    val totalPopularity: Long? = null,
 )
 
 data class Chapter(
@@ -60,6 +61,17 @@ data class MangaReview(
     val spoiler: Boolean = false,
     val kind: ReviewKind = ReviewKind.COMMENT,
     val authorUrl: String = "",
+    val avatarUrl: String = "",
+)
+
+/** Site-native values. A rank period's heat never enters this overall metadata record. */
+data class MangaMetric(
+    val sourceId: String,
+    val name: String,
+    val score: Double? = null,
+    val scoreScale: Int = 10,
+    val ratingCount: Int? = null,
+    val popularity: Long? = null,
 )
 
 data class ReviewSource(
