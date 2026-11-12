@@ -3,6 +3,7 @@ package dev.mangaflow.ui
 import android.view.accessibility.AccessibilityManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -46,10 +47,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.CloudOff
+import androidx.compose.material.icons.outlined.Female
+import androidx.compose.material.icons.outlined.Male
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -302,23 +304,19 @@ private fun RankingControls(
     val measurer = rememberTextMeasurer()
     val style = LocalTextStyle.current.copy(fontSize = 12.sp, fontWeight = FontWeight.Medium)
     val labelWidth = with(density) {
-        (RankPeriod.entries.map { it.label } + RankAudience.entries.map { it.label }).maxOf {
-            measurer.measure(it, style, maxLines = 1).size.width
+        RankPeriod.entries.maxOf {
+            measurer.measure(it.label, style, maxLines = 1).size.width
         }.toDp()
     }
     val choiceWidth = maxOf(44.dp, labelWidth + 16.dp)
     val periodWidth = choiceWidth * RankPeriod.entries.size
-    val audienceWidth = choiceWidth * RankAudience.entries.size
     BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-        val bothAudiences = maxWidth >= periodWidth + audienceWidth + 52.dp
-        val audienceSlot = if (bothAudiences) audienceWidth else maxOf(60.dp, labelWidth + 32.dp)
-        val shortPeriods = maxWidth < periodWidth + audienceSlot + 52.dp
-        // Keep every filter on one line. Narrow layouts disclose the other audience on tap.
+        val shortPeriods = maxWidth < periodWidth + 100.dp
+        // A fixed icon slot leaves all four periods room, including larger text sizes.
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             RankingPeriods(state.period, onPeriod, Modifier.weight(1f), shortPeriods)
             Spacer(Modifier.width(4.dp))
-            if (bothAudiences) RankingAudience(state.audience, onAudience, Modifier.width(audienceSlot))
-            else RankingAudienceToggle(state.audience, onAudience, Modifier.width(audienceSlot))
+            RankingAudienceToggle(state.audience, onAudience, Modifier.width(48.dp))
             Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh) }
         }
     }
@@ -339,30 +337,23 @@ private fun RankingPeriods(period: RankPeriod, onPeriod: (RankPeriod) -> Unit, m
 }
 
 @Composable
-private fun RankingAudience(audience: RankAudience, onAudience: (RankAudience) -> Unit, modifier: Modifier) {
-    MotionTabs(selected = audience.ordinal, labels = RankAudience.entries.map { it.label },
-        onSelect = { onAudience(RankAudience.entries[it]) }, role = Role.RadioButton,
-        modifier = modifier, fontSize = 12.sp, indicatorHeight = 30.dp,
-        track = MaterialTheme.colorScheme.onSurface.copy(alpha = .025f),
-        selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal)
-}
-
-@Composable
 private fun RankingAudienceToggle(audience: RankAudience, onAudience: (RankAudience) -> Unit, modifier: Modifier) {
     val next = RankAudience.entries[(audience.ordinal + 1) % RankAudience.entries.size]
     val interaction = remember { MutableInteractionSource() }
     Box(modifier.height(48.dp)
         .clickable(interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "切换到${next.label}", onClick = { onAudience(next) })
-        .semantics { stateDescription = audience.label }
-        .motionPress(interaction), contentAlignment = Alignment.Center) {
-        MotionSwap(audience, Modifier.clip(RoundedCornerShape(15.dp))
-            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .055f))) { shown ->
-            Row(Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
-                horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(shown.label, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-                Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(13.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        .semantics(mergeDescendants = true) {
+            contentDescription = "榜单分类"
+            stateDescription = audience.label
+        }, contentAlignment = Alignment.Center) {
+        Box(Modifier.size(34.dp).motionPress(interaction, pressedScale = .90f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .055f)),
+            contentAlignment = Alignment.Center) {
+            MotionSwap(audience, Modifier.size(24.dp)) { shown ->
+                Icon(if (shown == RankAudience.MALE) Icons.Outlined.Male else Icons.Outlined.Female,
+                    contentDescription = null, modifier = Modifier.size(22.dp))
             }
         }
     }
@@ -393,6 +384,16 @@ private fun DiscoveryPane(
         derivedStateOf { grid.layoutInfo.visibleItemsInfo.any { it.key == "hero" } }
     }
     val ranking = state.mode == DiscoveryMode.RANKING
+    val motion = LocalMotionEnabled.current
+    val hasItems = state.items.isNotEmpty()
+    val firstResult = remember(state.cacheKey) { Animatable(if (hasItems) 1f else 0f) }
+    val revealDistance = with(LocalDensity.current) { 10.dp.toPx() }
+    LaunchedEffect(state.cacheKey, hasItems, motion) {
+        if (hasItems) {
+            if (motion) firstResult.animateTo(1f, tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing))
+            else firstResult.snapTo(1f)
+        }
+    }
     val pull = rememberBottomPullLoadState(
         key = state.cacheKey,
         enabled = active && state.items.isNotEmpty() && state.hasMore && !state.loading &&
@@ -406,7 +407,13 @@ private fun DiscoveryPane(
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 0.dp, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(if (ranking) 8.dp else 16.dp),
-        modifier = Modifier.fillMaxSize().bottomPullLoad(pull),
+        modifier = Modifier.fillMaxSize().bottomPullLoad(pull).graphicsLayer {
+            // An uncached selection first enters as loading; reveal its real rows once they arrive.
+            // Refreshes, metrics and appended pages keep this value at one and do not replay.
+            val visibility = if (ranking && hasItems) firstResult.value else 1f
+            alpha = visibility
+            translationY = (1f - visibility) * revealDistance
+        },
     ) {
         if (state.loading && state.items.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "loading") { QuietLoading("正在翻开书页…") }
@@ -450,7 +457,8 @@ private fun DiscoveryPane(
                     Column(Modifier.fillMaxWidth().height(64.dp), horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterVertically)) {
                         if (state.hasMore || state.loadingMore) BottomPullLoadIndicator(pull, Modifier.size(24.dp))
-                        Text(if (state.loadingMore) "正在加载" else if (state.hasMore) "上拉加载" else "已经到底了",
+                        Text(if (state.loadingMore) "正在加载" else if (!state.hasMore) "已经到底了"
+                            else if (pull.progress >= 1f) "松手加载" else "上拉加载",
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }

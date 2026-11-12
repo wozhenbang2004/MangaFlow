@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
@@ -44,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -54,8 +56,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -90,7 +90,8 @@ internal fun DetailCatalog(
     progress: ReadingProgress?,
     loading: Boolean,
     error: String?,
-    scrolling: NestedScrollConnection,
+    active: Boolean,
+    onScrollTarget: (LazyGridState) -> Unit,
     onRetry: () -> Unit,
     onRead: (Chapter) -> Unit,
     onDownload: (Chapter) -> Unit,
@@ -151,23 +152,26 @@ internal fun DetailCatalog(
             contentKey = { if (it == null) "all" else "group:$it" },
             order = { if (it == null) 0 else groups.keys.indexOf(it) + 1 },
         ) { targetGroup ->
-            val active = targetGroup == group
+            val paneActive = active && targetGroup == group
             val grid = rememberLazyGridState()
+            SideEffect {
+                if (paneActive) onScrollTarget(grid)
+            }
             val visibleChapters = remember(chapters, targetGroup) {
                 if (targetGroup == null) chapters else chapters.filter { it.group == targetGroup }
             }
             // Comments/reader restoration keeps this visit; even a quick A→B→A is a new visit.
             var appliedVisit by rememberSaveable(mangaId) { mutableIntStateOf(groupVisit) }
-            LaunchedEffect(active, groupVisit) {
-                if (!active) grid.stopScroll()
+            LaunchedEffect(paneActive, groupVisit) {
+                if (!paneActive) grid.stopScroll()
                 else if (appliedVisit != groupVisit) {
                     grid.scrollToItem(0)
                     appliedVisit = groupVisit
                 }
             }
             if (visibleChapters.isEmpty()) {
-                Box(Modifier.fillMaxSize().nestedScroll(scrolling)
-                    .scrollable(rememberScrollableState { 0f }, Orientation.Vertical, enabled = active),
+                Box(Modifier.fillMaxSize()
+                    .scrollable(rememberScrollableState { 0f }, Orientation.Vertical, enabled = paneActive),
                     contentAlignment = Alignment.Center) {
                     Text(
                         when {
@@ -185,9 +189,9 @@ internal fun DetailCatalog(
                 val tileHeight = (if (showGroup) 58f else 47f).times(fontScale).dp
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = (74f * fontScale).dp),
-                    state = grid, userScrollEnabled = active,
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp).nestedScroll(scrolling),
-                    contentPadding = PaddingValues(top = 5.dp, bottom = 16.dp),
+                    state = grid, userScrollEnabled = paneActive,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {

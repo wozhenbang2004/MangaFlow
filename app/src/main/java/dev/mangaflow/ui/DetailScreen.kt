@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -176,6 +177,7 @@ fun DetailScreen(
     }
     val scope = rememberCoroutineScope()
     var contentsJump by remember { mutableStateOf<Job?>(null) }
+    var catalogGrid by remember(current.id) { mutableStateOf<LazyGridState?>(null) }
     val artworkBackdrop = rememberHazeState()
 
     BoxWithConstraints(
@@ -220,6 +222,7 @@ fun DetailScreen(
             // Consume exactly the header's movement, including reversal and fling frames.
             header.heightOffset - previous
         }
+        val emptyCatalogScroll = rememberScrollableState { 0f }
         val openContents: () -> Unit = {
             section = 0
             contentsJump?.cancel()
@@ -296,6 +299,12 @@ fun DetailScreen(
             Column(
                 Modifier.weight(1f).fillMaxWidth()
                     .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
+                    .nestedScroll(scrolling)
+                    // Share the grid's scroll mutex as well as its position: a new drag
+                    // on the surrounding surface must cancel an existing grid fling.
+                    .scrollable(catalogGrid ?: emptyCatalogScroll, Orientation.Vertical,
+                        reverseDirection = true,
+                        enabled = active && activeSection == 0)
                     .background(DetailBackground).padding(top = 8.dp),
             ) {
                 DetailSections(
@@ -308,14 +317,15 @@ fun DetailScreen(
                         when (targetSection) {
                             0 -> DetailCatalog(
                                 mangaId = current.id, chapters = chapters, downloaded = downloaded,
-                                progress = resume, loading = loading, error = error, scrolling = scrolling,
+                                progress = resume, loading = loading, error = error,
+                                active = active && targetSection == activeSection,
+                                onScrollTarget = { catalogGrid = it },
                                 onRetry = onRetry, onRead = onRead, onDownload = onDownload,
                             )
                             else -> CommunityPanel(
                                 mangaId = current.id, sources = reviews, loading = reviewsLoading,
                                 onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
                                 onRelink = onReviewRelink, loadReplies = loadReplies,
-                                modifier = Modifier.nestedScroll(scrolling),
                             )
                         }
                     }

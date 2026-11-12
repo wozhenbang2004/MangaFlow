@@ -42,6 +42,7 @@ import dev.mangaflow.data.Manga
 import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.data.ReviewRepository
 import dev.mangaflow.ui.CommunityDiscussionComment
+import dev.mangaflow.ui.CommentSourceBadge
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.rememberDelayedBusy
@@ -97,7 +98,7 @@ internal fun ChapterDiscussion(
         Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                DiscussionHeading(chapter, chapterCount, mixed.size, busy, foreground,
+                DiscussionHeading(chapterCount, mixed.size, busy, foreground,
                     modifier = Modifier.weight(1f), onRefresh = {
                         state.refresh(forceRefresh = true)
                         scope.launch { listState.scrollToItem(0) }
@@ -107,9 +108,9 @@ internal fun ChapterDiscussion(
                 }
             }
             LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp)) {
+                contentPadding = PaddingValues(horizontal = 16.dp)) {
                 items(mixed, key = ReaderDiscussionRow::key) { row ->
-                    CommunityDiscussionComment(row.source.source, row.review, state::replies, scopeLabel = "本话",
+                    CommunityDiscussionComment(row.source.source, row.review, state::replies,
                         foreground = foreground, muted = muted)
                     HorizontalDivider(color = foreground.copy(alpha = .06f), thickness = .5.dp)
                 }
@@ -123,10 +124,9 @@ internal fun ChapterDiscussion(
                         state.hasMore -> TextButton(onClick = state::loadNext, modifier = Modifier.fillMaxWidth()) {
                             Text("加载更多", color = foreground, fontSize = 12.sp)
                         }
-                        mixed.isEmpty() && notices.isEmpty() -> Text("本话暂时还没有评论", color = muted,
+                        mixed.isEmpty() && notices.isEmpty() -> Text("还没有评论", color = muted,
                             fontSize = 12.sp, modifier = Modifier.padding(vertical = 18.dp))
-                        mixed.isNotEmpty() -> Text("已显示当前可获取的本话评论", color = muted,
-                            fontSize = 11.sp, modifier = Modifier.padding(vertical = 16.dp))
+                        mixed.isNotEmpty() -> Spacer(Modifier.height(12.dp))
                     }
                 }
             }
@@ -136,7 +136,6 @@ internal fun ChapterDiscussion(
 
 @Composable
 private fun DiscussionHeading(
-    chapter: Chapter,
     chapterCount: Int?,
     loadedCount: Int,
     busy: Boolean,
@@ -146,15 +145,12 @@ private fun DiscussionHeading(
 ) {
     val muted = foreground.copy(alpha = .58f)
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("本话评论", color = foreground, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                val count = chapterCount?.toString() ?: "已加载 $loadedCount".takeIf { loadedCount > 0 }.orEmpty()
-                if (count.isNotEmpty()) Text(count, color = muted, fontSize = 10.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            Text("${chapter.title} · 最新优先", color = muted, fontSize = 11.sp, maxLines = 1,
-                overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp, bottom = 8.dp))
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("评论", color = foreground, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            val count = chapterCount?.toString() ?: "已加载 $loadedCount".takeIf { loadedCount > 0 }.orEmpty()
+            if (count.isNotEmpty()) Text(count, color = muted, fontSize = 11.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         MotionIconButton(onClick = onRefresh, enabled = !busy) {
             Icon(Icons.Outlined.Refresh, "刷新最新评论", tint = muted.copy(alpha = if (busy) .28f else .58f),
@@ -171,9 +167,11 @@ private fun DiscussionNotice(
     onRetry: () -> Unit,
 ) {
     val source = state.source
-    val message = source.reviewsError ?: source.message.ifBlank { "暂时无法读取本话评论" }
-    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("${source.name} · 本话  $message",
+    val message = source.reviewsError ?: source.message.ifBlank { "暂时无法读取评论" }
+    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        CommentSourceBadge(source.id)
+        Text(message,
             color = foreground.copy(alpha = .58f), fontSize = 11.sp, lineHeight = 17.sp,
             maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         MotionIconButton(onClick = onRetry, enabled = !busy) {

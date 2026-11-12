@@ -2,6 +2,20 @@
 
 Current detail contract: [Large artwork and scrolling](#large-artwork-and-scrolling--2026-11-12-current-contract). Older decisions below are retained with their superseding requirements.
 
+## Release gestures, dense comments and ranking icons · 2026-11-12
+
+User: “别弄成读者还是得保留拷贝二字以及上拉加载我希望做成松手释放” and “评论上浮我希望做成信息密度更高点现在太大了信息量太少了以及以及没必要标记什么本话还有最新优先这种字样啊以及章节那一块区域还是没办法识别到我的滑动啊这里的榜单切换也弄点动画啊男频女频这个很丑啊弄成男女图标吧点击切换切换动画也做好”. Before-state screenshots: `1000121369.jpg`–`1000121372.jpg`; no chat message ID was supplied. This replaces the neutral comment source in LABEL-01, immediate threshold execution in READER-END-01/BROWSE-LOAD-01, and text audience choices in RANK-02. Other search, download and chapter-only requirements remain in force.
+
+| ID | Implementation and reason | Observable requirement |
+| --- | --- | --- |
+| LABEL-02 | Use the shared source badge for detail, chapter sheet and floating previews; Copy source records and error state retain “拷贝”. | Source remains recognizable. “读者” does not replace Copy, and “本话” is not repeated as a scope badge. |
+| PULL-03 | Keep the AndroidX-derived nested-scroll distance and fixed ring. An unconsumed real pointer-up in the Initial pass commits the armed action; nested fling never requests it. Observe input without consuming taps or movement. | Pull progress follows the finger; a full ring says “松手加载” or “松手进入下一话”. Holding never executes, retreat below the threshold cancels, slow release works, synthetic cancel and multi-touch do not execute. Keep the accessible load action and request guards. |
+| COMMENTS-03 | One-line sheet header with count/refresh/close; compact metadata and 13sp/19sp body; expand long comments from the row with a small inline chevron. Reuse the current glass and staggered real-comment preview with up to three compact bubbles, 22dp preview avatars and two body lines. | More comment text fits in the same space without a separate “展开” row or “最新优先” subtitle. Keep source, author, short date, full-text expansion and spoiler protection. Floating previews pass scrolling through and stop with their existing chapter/sheet/lifecycle owner; large text retains one unobstructed preview. |
+| DETAIL-SCROLL-02 | Give the foreground one appbar nested-scroll ancestor and a Foundation vertical scroll surface sharing the active chapter grid's state. Move side padding into the grid's content padding. Leaving panes stop scrolling. | Dragging tiles, gaps, side whitespace, section tabs and chapter tools drives the same header/list. Preserve click, long-press, download and horizontal group interaction. Source confirms fixed-area/side-padding dead zones; the reported persistent tile blockage still needs user-device confirmation. |
+| RANK-03 | Replace the audience text selector with one 48dp icon control using ♂/♀, existing press/MotionSwap motion and explicit accessibility state. Keep the four Ovio period selectors and retained-position content transition; animate the first real result of an uncached selection when it arrives. | All periods, audience and refresh stay on one row. Both symbol change and actual ranking arrival animate; refreshing metrics or appending the same selection does not replay entry motion. |
+
+Evidence boundary: before-state screenshots and source/diff review only. No tests, lint, local builds, emulator or UI automation. Submit the integrated change directly to main and confirm its existing release workflow triggers; build success and device gesture/visual acceptance are separate, unverified results at this checkpoint.
+
 ## Search, discovery and chapter-end feedback · 2026-11-12
 
 User: “搜索这个条好丑啊我希望有那种舒服展开的效果以及怎么还在下面加条线了？弄个液态玻璃样的搜索框就行以及轮播图还是显示不全以及男频女频那个不要占一行啊。。。以及删掉所有拷贝漫画这样的字眼没必要暴露以及我希望滑倒本话最后也加一个上拉跳到下一话以及到这话底部时我希望左下有有个评论的图标同时那些评论悬浮上浮出一个个出现不知道你懂不懂我想要的东西以及我们现在的那个上拉加载那个加载条进度应该和上拉进度一致”. Supplied images: `1000121364.jpg`, `1000121365.jpg`, `1000121366.jpg`, `1000121368.jpg`. These show the reported before state; no chat message ID was supplied.

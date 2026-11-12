@@ -65,6 +65,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.MangaReview
@@ -250,7 +251,7 @@ internal fun CommentMatchChoice(source: ReviewSource, onMatch: (String, String) 
 }
 
 @Composable
-private fun CommentSourceBadge(sourceId: String, scopeLabel: String? = null) {
+internal fun CommentSourceBadge(sourceId: String) {
     val onLight = MaterialTheme.colorScheme.background.luminance() > .5f
     val accent = when (sourceId) {
         "copy" -> if (onLight) Color(0xFF815941) else Color(0xFFD5B7A0)
@@ -263,15 +264,12 @@ private fun CommentSourceBadge(sourceId: String, scopeLabel: String? = null) {
         else -> CommunityMuted
     }
     val name = when (sourceId) {
-        "copy" -> if (scopeLabel == null) "读者" else ""; "bangumi" -> "bgm"; "anilist" -> "AniList"
+        "copy" -> "拷贝"; "bangumi" -> "bgm"; "anilist" -> "AniList"
         else -> dev.mangaflow.data.ReviewProviders.find(sourceId)?.mark ?: providerName(sourceId)
     }
-    Text(listOfNotNull(name.takeIf(String::isNotBlank), scopeLabel).joinToString(" · "), modifier = Modifier.clip(RoundedCornerShape(5.dp))
-        .background(accent.copy(alpha = .12f)).padding(horizontal = 5.dp, vertical = 2.dp)
-        .semantics {
-            contentDescription = if (sourceId == "copy") "${scopeLabel ?: "读者"}评论"
-                else "评论来自" + providerName(sourceId) + scopeLabel.orEmpty()
-        },
+    Text(name, modifier = Modifier.clip(RoundedCornerShape(5.dp))
+        .background(accent.copy(alpha = .12f)).padding(horizontal = 4.dp, vertical = 1.dp)
+        .semantics { contentDescription = "评论来自" + providerName(sourceId) },
         color = accent, fontSize = 10.sp, lineHeight = 13.sp,
         fontWeight = FontWeight.Medium, maxLines = 1)
 }
@@ -300,10 +298,9 @@ fun CommunityComment(
     foreground: Color = MaterialTheme.colorScheme.onSurface,
     muted: Color = MaterialTheme.colorScheme.onSurfaceVariant,
     sourceId: String? = null,
-    scopeLabel: String? = null,
 ) {
     CommentContent(review, modifier, foreground, muted, showReplyCount = true,
-        sourceId = sourceId, scopeLabel = scopeLabel)
+        sourceId = sourceId)
 }
 
 @Composable
@@ -314,15 +311,17 @@ private fun CommentContent(
     muted: Color,
     showReplyCount: Boolean,
     sourceId: String? = null,
-    scopeLabel: String? = null,
 ) {
     val text = review.body.ifBlank { review.summary }.trim()
     val conceal = review.spoiler || review.kind == ReviewKind.REVIEW
     var revealed by rememberSaveable(review.id, review.url, conceal) { mutableStateOf(!conceal) }
     var expanded by rememberSaveable(review.id, review.url) { mutableStateOf(false) }
     var overflows by remember(text) { mutableStateOf(false) }
+    val expandable = revealed && (overflows || expanded)
     Row(modifier.fillMaxWidth().animateContentSize(
-        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap()),
+        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap())
+        .then(if (expandable) Modifier.clickable(role = Role.Button,
+            onClickLabel = if (expanded) "收起评论" else "展开评论") { expanded = !expanded } else Modifier),
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         CommentAvatar(review, foreground)
         Column(Modifier.weight(1f)) {
@@ -331,15 +330,18 @@ private fun CommentContent(
                 Text(review.author, color = foreground.copy(alpha = .87f), fontSize = 12.sp,
                     fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f))
-                if (sourceId != null) CommentSourceBadge(sourceId, scopeLabel)
+                if (sourceId != null) CommentSourceBadge(sourceId)
                 if (review.date.isNotBlank()) Text(compactCommentDate(review.date), color = muted, fontSize = 10.sp,
                     modifier = Modifier.widthIn(max = 76.dp).semantics { contentDescription = review.date },
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (expandable) Icon(
+                    if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
+                    null, tint = muted, modifier = Modifier.size(14.dp))
             }
-            Spacer(Modifier.height(3.dp))
+            Spacer(Modifier.height(2.dp))
             if (review.replyTo.isNotBlank()) {
                 Text("回复 ${review.replyTo}", color = muted, fontSize = 11.sp, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 5.dp))
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 3.dp))
             }
             if (!revealed) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(9.dp))
@@ -358,21 +360,18 @@ private fun CommentContent(
                         fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(bottom = 5.dp))
                 }
-                Text(text, color = foreground.copy(alpha = .92f), fontSize = 13.sp, lineHeight = 20.sp,
+                Text(text, color = foreground.copy(alpha = .92f), fontSize = 13.sp, lineHeight = 19.sp,
                     maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
                     onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
             }
             if (review.score != null || (review.upVotes ?: 0) > 0 || (review.downVotes ?: 0) > 0 ||
-                (revealed && (overflows || expanded || conceal)) ||
+                (revealed && conceal) ||
                 (showReplyCount && (review.replyCount ?: 0) > 0)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     review.score?.let {
                         Text("${communityScore(it)} / ${review.scoreScale}", color = muted, fontSize = 10.sp,
                             modifier = Modifier.padding(top = 3.dp, end = 8.dp))
                     }
-                    if (revealed && (overflows || expanded)) TextButton(
-                        onClick = { expanded = !expanded }, contentPadding = PaddingValues(end = 12.dp),
-                    ) { Text(if (expanded) "收起" else "展开", color = muted, fontSize = 11.sp) }
                     if (conceal && revealed) TextButton(onClick = { revealed = false; expanded = false },
                         contentPadding = PaddingValues(end = 12.dp)) {
                         Text(if (review.kind == ReviewKind.REVIEW) "收起长评" else "隐藏剧透", color = muted, fontSize = 11.sp)
@@ -398,7 +397,7 @@ private fun CommentContent(
 
 /** Ovio's saved Avatar pattern: initials remain underneath a lazy image, including on failure. */
 @Composable
-internal fun CommentAvatar(review: MangaReview, foreground: Color) {
+internal fun CommentAvatar(review: MangaReview, foreground: Color, size: Dp = 28.dp) {
     val context = LocalContext.current
     var failed by remember(review.avatarUrl) { mutableStateOf(false) }
     val initial = remember(review.author) {
@@ -408,7 +407,7 @@ internal fun CommentAvatar(review: MangaReview, foreground: Color) {
     val request = remember(review.avatarUrl, context) {
         ImageRequest.Builder(context).data(review.avatarUrl).size(88).crossfade(100).build()
     }
-    Box(Modifier.size(28.dp).clip(CircleShape).background(foreground.copy(alpha = .075f))
+    Box(Modifier.size(size).clip(CircleShape).background(foreground.copy(alpha = .075f))
         .clearAndSetSemantics {}, contentAlignment = Alignment.Center) {
         Text(initial, color = foreground.copy(alpha = .55f), fontSize = 13.sp, fontWeight = FontWeight.Medium)
         if (review.avatarUrl.isNotBlank() && !failed) {
@@ -423,15 +422,14 @@ internal fun CommunityDiscussionComment(
     source: ReviewSource,
     review: MangaReview,
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
-    scopeLabel: String? = null,
     foreground: Color = CommunityWhite,
     muted: Color = CommunityMuted,
 ) {
     val hasReplies = ((source.id == "copy" && review.kind == ReviewKind.COMMENT) || source.supportsReplies) &&
         source.subjectId.isNotBlank() && (review.replyCount ?: if (review.canLoadReplies) 1 else 0) > 0
-    Column(Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         CommentContent(review, Modifier, foreground, muted,
-            showReplyCount = !hasReplies, sourceId = source.id, scopeLabel = scopeLabel)
+            showReplyCount = !hasReplies, sourceId = source.id)
         if (hasReplies) {
             key(source.id, source.subjectId, review.id, source.externalIds) {
                 CommentReplies(source, review, loadReplies, foreground, muted)
@@ -509,7 +507,7 @@ private fun CommentReplies(
             rows.forEach { reply ->
                 key(source.subjectId, review.id, reply.id) {
                     CommunityComment(reply, Modifier.padding(bottom = 10.dp), foreground, muted,
-                        sourceId = source.id, scopeLabel = if (review.kind == ReviewKind.CHAPTER) "本话" else null)
+                        sourceId = source.id)
                 }
             }
             if (error != null) CommentFailure(error.orEmpty(), busy) { load(failedPage) }
@@ -526,7 +524,7 @@ private fun CommentReplies(
 }
 
 private fun providerName(id: String): String = when (id) {
-    "copy" -> "读者评论"
+    "copy" -> "拷贝"
     "bangumi" -> "Bangumi"
     "anilist" -> "AniList"
     "dantotsu" -> "Dantotsu"

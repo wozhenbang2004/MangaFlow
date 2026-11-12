@@ -139,9 +139,13 @@ AndroidX Material3 `1.3.2`, `commonMain/androidx/compose/material3/pulltorefresh
 in the [published source archive](https://dl.google.com/dl/android/maven2/androidx/compose/material3/material3/1.3.2/material3-1.3.2-sources.jar).
 The source file SHA-256 is `a46039a6805195abfc47accc103f1cf254ae451524f2e5eeb4dc4ee57479335d`.
 Copyright 2023 The Android Open Source Project, licensed under Apache-2.0.
-MangaFlow reverses the drag direction for the bottom edge, retains the half-distance resistance,
-fills a fixed footer ring, and requests the next page when full rather than waiting for release.
-A per-gesture guard prevents repeat requests; Foundation `1.8.2` owns drag/fling/cancel dispatch.
+MangaFlow reverses the drag direction for the bottom edge and fills a fixed footer ring directly
+from unused drag distance. A full ring arms the next-page action; a real pointer release commits it.
+A non-consuming Initial-pass observer distinguishes release from Compose's consumed synthetic
+cancellation event; fling alone never requests content. Foundation `1.8.2` owns scrolling and
+gesture arbitration. Pointer lifecycle references: AndroidX `SuspendingPointerInputFilter.kt`
+（`https://android.googlesource.com/platform/frameworks/support/+/5ef07889c9bc26965e52670d92c3560b3bf07c7c/compose/ui/ui/src/commonMain/kotlin/androidx/compose/ui/input/pointer/SuspendingPointerInputFilter.kt`）
+and the Foundation gesture API（`https://developer.android.com/reference/kotlin/androidx/compose/foundation/gestures/package-summary`）.
 The source header is retained. The complete Apache-2.0 text is already bundled in
 `app/src/main/assets/licenses/Mihon-APACHE-2.0.txt`.
 

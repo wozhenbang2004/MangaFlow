@@ -49,6 +49,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.MangaReview
 import dev.mangaflow.ui.CommentAvatar
+import dev.mangaflow.ui.CommentSourceBadge
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.motion.BottomPullLoadIndicator
 import dev.mangaflow.ui.motion.BottomPullLoadState
@@ -82,7 +83,12 @@ internal fun ChapterEndFooter(
             Icon(Icons.Outlined.ArrowUpward, null, Modifier.size(13.dp), tint = foreground.copy(alpha = .65f))
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(if (onNext != null) "上拉进入下一话" else unavailableMessage,
+            Text(when {
+                onNext == null -> unavailableMessage
+                pull.loading -> "正在打开下一话"
+                pull.progress >= 1f -> "松手进入下一话"
+                else -> "上拉进入下一话"
+            },
                 color = foreground.copy(alpha = .72f), fontSize = 12.sp,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (!nextTitle.isNullOrBlank()) Text(nextTitle, color = foreground.copy(alpha = .48f),
@@ -117,7 +123,9 @@ internal fun ChapterEndComments(
     val count = state.totalCount
     val candidates = remember(state.sources, chapterId) {
         mixedDiscussionRows(state.sources, chapterId).mapNotNull { row ->
-            floatingPreviewText(row.review)?.let { text -> FloatingComment(row.key, row.review, text) }
+            floatingPreviewText(row.review)?.let { text ->
+                FloatingComment(row.key, row.source.source.id, row.review, text)
+            }
         }
     }
     var bubbles by remember(chapterId) { mutableStateOf<List<FloatingComment>>(emptyList()) }
@@ -132,25 +140,25 @@ internal fun ChapterEndComments(
         if (motion && !touchExploration && candidates.isNotEmpty()) {
             lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 try {
-                    delay(450)
+                    delay(250)
                     // Larger text gets a single unobstructed preview instead of overlapping cards.
                     candidates.forEach { row ->
-                        bubbles = (bubbles + row).takeLast(if (largeText) 1 else 2)
-                        delay(if (largeText) 6_800L else 3_600L)
+                        bubbles = (bubbles + row).takeLast(if (largeText) 1 else 3)
+                        delay(if (largeText) 7_500L else FloatingCommentIntervalMillis.toLong())
                     }
-                    delay(6_500)
+                    delay(FloatingCommentLifetimeMillis.toLong())
                 } finally {
                     bubbles = emptyList()
                 }
             }
         }
     }
-    Box(modifier.fillMaxWidth().padding(bottom = bottom).height(260.dp)) {
+    Box(modifier.fillMaxWidth().padding(bottom = bottom).height(280.dp)) {
         bubbles.forEach { bubble ->
             key(bubble.key) {
                 FloatingCommentBubble(bubble, backdrop,
                     modifier = Modifier.align(Alignment.BottomStart).padding(bottom = 56.dp)
-                        .widthIn(max = 280.dp).fillMaxWidth(),
+                        .widthIn(max = 340.dp).fillMaxWidth(),
                     onFinished = { bubbles = bubbles.filterNot { it.key == bubble.key } })
             }
         }
@@ -160,14 +168,17 @@ internal fun ChapterEndComments(
             cornerRadius = 24.dp,
         ) {
             MotionIconButton(onClick = onOpen, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Outlined.Forum, count?.let { "本话评论，$it 条" } ?: "本话评论",
+                Icon(Icons.Outlined.Forum, count?.let { "评论，$it 条" } ?: "评论",
                     Modifier.size(22.dp), tint = colors.onSurface)
             }
         }
     }
 }
 
-private data class FloatingComment(val key: String, val review: MangaReview, val text: String)
+private data class FloatingComment(val key: String, val sourceId: String, val review: MangaReview, val text: String)
+
+private const val FloatingCommentLifetimeMillis = 7_200
+private const val FloatingCommentIntervalMillis = 2_300
 
 @Composable
 private fun FloatingCommentBubble(
@@ -179,8 +190,12 @@ private fun FloatingCommentBubble(
     val travel = remember(comment.key) { Animatable(0f) }
     val finished by rememberUpdatedState(onFinished)
     val foreground = MaterialTheme.colorScheme.onSurface
+    // Three readable lines plus padding and a gap keep successive previews separate at this font scale.
+    val risePx = with(LocalDensity.current) {
+        (47.sp.toPx() + 24.dp.toPx()) * FloatingCommentLifetimeMillis / FloatingCommentIntervalMillis
+    }
     LaunchedEffect(comment.key) {
-        travel.animateTo(1f, tween(6_500, easing = LinearEasing))
+        travel.animateTo(1f, tween(FloatingCommentLifetimeMillis, easing = LinearEasing))
         finished()
     }
     LiquidGlassSurface(
@@ -190,22 +205,26 @@ private fun FloatingCommentBubble(
             val enter = (progress / .08f).coerceIn(0f, 1f)
             val leave = ((1f - progress) / .23f).coerceIn(0f, 1f)
             alpha = minOf(enter, leave) * .96f
-            translationY = -(8.dp.toPx() + 176.dp.toPx() * progress)
+            translationY = -(8.dp.toPx() + risePx * progress)
             scaleX = .97f + .03f * enter
             scaleY = scaleX
         },
-        cornerRadius = 18.dp,
+        cornerRadius = 14.dp,
     ) {
         // The preview has no pointer handler; scrolling the artwork passes straight through it.
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            CommentAvatar(comment.review, foreground)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(comment.review.author, color = foreground.copy(alpha = .58f),
-                    fontSize = 10.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            CommentAvatar(comment.review, foreground, size = 22.dp)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(comment.review.author, color = foreground.copy(alpha = .58f),
+                        fontSize = 10.sp, lineHeight = 13.sp, fontWeight = FontWeight.Medium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    CommentSourceBadge(comment.sourceId)
+                }
                 Text(comment.text, color = foreground.copy(alpha = .9f), fontSize = 12.sp,
-                    lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
     }

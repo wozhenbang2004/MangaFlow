@@ -93,7 +93,7 @@ internal class ChapterDiscussionState(
     private fun initialSources(): List<ReaderDiscussionSource> {
         val cached = chapters.cachedChapterComments(chapter)
         val chapterSource = ReviewSource(
-            id = "copy", name = "读者", status = ReviewStatus.READY,
+            id = "copy", name = "拷贝", status = ReviewStatus.READY,
             url = cached?.items?.firstOrNull()?.url ?: manga.sourceUrl,
             matchedTitle = chapter.title, subjectId = chapter.id,
             reviews = cached?.items.orEmpty().filter { it.kind == ReviewKind.CHAPTER }, reviewCount = cached?.total,
@@ -170,7 +170,7 @@ internal class ChapterDiscussionState(
             check(current.source.subjectId == chapter.id) { "章节评论来源不匹配" }
             if (current.source.id != "copy" && page == 0) {
                 val incoming = reviews.chapterSources(manga, chapter).firstOrNull { it.id == current.source.id }
-                    ?: throw IllegalStateException("本话评论来源暂不可用")
+                    ?: throw IllegalStateException("评论来源暂不可用")
                 currentCoroutineContext().ensureActive()
                 if (version != generation) return
                 check(incoming.subjectId == chapter.id) { "章节评论归属不一致" }

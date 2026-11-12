@@ -20,6 +20,8 @@ package dev.mangaflow.ui.motion
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +45,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -78,7 +83,8 @@ internal class BottomPullLoadState private constructor(
     val actionLabel: String get() = inputs().actionLabel
 
     private var distancePulled = 0f
-    private var triggeredForGesture = false
+    private var pointerDown = false
+    private var consumeReleaseVelocity = false
     private var dispatchPending = false
     private var disposed = false
     private var settleJob: Job? = null
@@ -90,8 +96,8 @@ internal class BottomPullLoadState private constructor(
 
     internal val connection = object : NestedScrollConnection {
         override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-            if (source != NestedScrollSource.UserInput || !canRequest || available.y <= 0f ||
-                distancePulled <= 0f || loading || triggeredForGesture) return Offset.Zero
+            if (source != NestedScrollSource.UserInput || !pointerDown || !canRequest ||
+                available.y <= 0f || distancePulled <= 0f) return Offset.Zero
             // Reverse the unfinished pull before allowing the list to move back up.
             settleJob?.cancel()
             val consumed = minOf(available.y, distancePulled)
@@ -101,9 +107,8 @@ internal class BottomPullLoadState private constructor(
         }
 
         override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-            if (source != NestedScrollSource.UserInput || available.y >= 0f || !canRequest ||
-                triggeredForGesture || inputs().canScrollForward()) return Offset.Zero
-            if (settleJob?.isActive == true) distancePulled = progress * thresholdPx
+            if (source != NestedScrollSource.UserInput || !pointerDown || available.y >= 0f ||
+                !canRequest || inputs().canScrollForward()) return Offset.Zero
             settleJob?.cancel()
             // Bottom loading reverses Material3's pull direction; fling deltas never accumulate.
             val previous = distancePulled
@@ -111,24 +116,41 @@ internal class BottomPullLoadState private constructor(
             // The displayed fraction is this gesture's actual distance, without a trailing animation.
             progress = (distancePulled / thresholdPx).coerceIn(0f, 1f)
             val taken = distancePulled - previous
-            if (progress >= 1f) {
-                triggeredForGesture = true
-                requestMore()
-            }
             return Offset(0f, -taken)
         }
 
         override suspend fun onPreFling(available: Velocity): Velocity {
-            val hadPull = distancePulled > 0f || triggeredForGesture
-            distancePulled = 0f
-            triggeredForGesture = false
-            if (!loading) settle()
-            // Foundation also dispatches a zero-velocity fling on drag cancellation.
+            val hadPull = consumeReleaseVelocity || distancePulled > 0f
+            // A cancelled child scroll can dispatch a zero-velocity fling while still pressed.
+            // Only the pointer observer can confirm a real release; fling never loads content.
+            if (pointerDown) finishGesture(released = false)
+            consumeReleaseVelocity = false
             return Velocity(0f, if (hadPull) available.y else 0f)
         }
     }
 
-    internal fun accessibilityLoadMore(): Boolean = requestMore()
+    internal fun beginGesture() {
+        pointerDown = true
+        consumeReleaseVelocity = false
+        distancePulled = 0f
+        settleJob?.cancel()
+        if (!loading) progress = 0f
+    }
+
+    internal fun finishGesture(released: Boolean) {
+        if (!pointerDown) return
+        val ready = released && distancePulled >= thresholdPx && !inputs().canScrollForward()
+        consumeReleaseVelocity = distancePulled > 0f
+        pointerDown = false
+        distancePulled = 0f
+        if (ready && requestMore()) progress = 1f
+        else if (!loading) settle()
+    }
+
+    internal fun accessibilityLoadMore(): Boolean {
+        finishGesture(released = false)
+        return requestMore()
+    }
 
     private fun requestMore(): Boolean {
         if (!canRequest) return false
@@ -138,6 +160,7 @@ internal class BottomPullLoadState private constructor(
         dispatchJob = scope.launch {
             withFrameNanos { }
             dispatchPending = false
+            if (!loading && !pointerDown) settle()
         }
         inputs().onLoadMore()
         return true
@@ -148,7 +171,7 @@ internal class BottomPullLoadState private constructor(
             settleJob?.cancel()
             distancePulled = 0f
             progress = 1f
-        } else if (!inputs().enabled || triggeredForGesture || distancePulled == 0f) {
+        } else if (!inputs().enabled || distancePulled == 0f) {
             distancePulled = 0f
             settle()
         }
@@ -209,7 +232,26 @@ internal fun rememberBottomPullLoadState(
     key, enabled, loading, canScrollForward, onLoadMore, actionLabel)
 
 internal fun Modifier.bottomPullLoad(state: BottomPullLoadState): Modifier =
-    nestedScroll(state.connection).semantics {
+    nestedScroll(state.connection).pointerInput(state) {
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            state.beginGesture()
+            var released = false
+            try {
+                do {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    if (event.changes.count { it.pressed } > 1) state.finishGesture(released = false)
+                    if (event.changes.none { it.pressed }) {
+                        // Compose marks synthetic cancellation ups consumed before the Initial pass.
+                        // Observe the real up without consuming any taps or list drag events.
+                        released = event.changes.any { it.changedToUp() }
+                    }
+                } while (event.changes.any { it.pressed })
+            } finally {
+                state.finishGesture(released)
+            }
+        }
+    }.semantics {
         customActions = if (state.loadActionAvailable)
             listOf(CustomAccessibilityAction(state.actionLabel, state::accessibilityLoadMore)) else emptyList()
     }

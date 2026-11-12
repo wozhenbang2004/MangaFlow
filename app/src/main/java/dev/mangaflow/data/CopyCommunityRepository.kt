@@ -105,7 +105,7 @@ class CopyCommunityRepository(
     suspend fun overview(manga: Manga, forceRefresh: Boolean = false): ReviewSource = withContext(Dispatchers.IO) {
         val subjectId = comicUuid(manga)
         val source = ReviewSource(
-            id = "copy", name = "读者", status = ReviewStatus.READY,
+            id = "copy", name = "拷贝", status = ReviewStatus.READY,
             url = comicUrl(manga.id), matchedTitle = manga.title,
             subjectId = subjectId, popularity = overallPopularity(manga),
         )
@@ -121,7 +121,7 @@ class CopyCommunityRepository(
 
     /** Browse responses already include overall heat; never fetch a chapter catalog for a badge. */
     fun metric(manga: Manga): ReviewSource = ReviewSource(
-        id = "copy", name = "读者", status = ReviewStatus.READY,
+        id = "copy", name = "拷贝", status = ReviewStatus.READY,
         url = comicUrl(manga.id), matchedTitle = manga.title,
         popularity = overallPopularity(manga), subjectId = manga.sourceUuid,
     )
@@ -195,7 +195,7 @@ class CopyCommunityRepository(
             .addQueryParameter("offset", offset(page, COMMENT_SIZE).toString()).build()
         // Chapter UUID is sufficient; do not make an extra work-detail request here.
         commentPage("chapter:$chapterId:$page", forceRefresh) {
-            readComments(apiJson(url, "本话讨论", publicUrl), page, publicUrl, chapterId)
+            readComments(apiJson(url, "拷贝评论", publicUrl), page, publicUrl, chapterId)
         }
     }
 
