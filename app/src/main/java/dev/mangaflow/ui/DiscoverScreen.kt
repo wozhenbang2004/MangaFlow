@@ -2,8 +2,13 @@ package dev.mangaflow.ui
 
 import android.view.accessibility.AccessibilityManager
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -37,7 +42,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -53,9 +57,7 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -79,13 +81,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -106,6 +111,13 @@ import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.motionInputGate
+import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberDelayedBusy
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
@@ -126,10 +138,14 @@ fun DiscoverScreen(
     onOpen: (Manga) -> Unit,
     onPeriod: (RankPeriod) -> Unit,
     onAudience: (RankAudience) -> Unit,
+    active: Boolean = true,
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
     val searchFocus = remember { FocusRequester() }
-    BackHandler(searchExpanded) { keyboard?.hide(); onCloseSearch() }
+    val focus = LocalFocusManager.current
+    val motion = LocalMotionEnabled.current
+    val refreshing = rememberDelayedBusy(state.refreshing)
+    BackHandler(active && searchExpanded) { keyboard?.hide(); onCloseSearch() }
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
     val retainedGrid = remember(state.cacheKey) {
         val saved = positions.remove(state.cacheKey) ?: LazyGridState()
@@ -145,14 +161,21 @@ fun DiscoverScreen(
     }
     val ranking = state.query.isBlank() && state.mode == DiscoveryMode.RANKING
     Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
-        if (searchExpanded) {
-            LaunchedEffect(Unit) { searchFocus.requestFocus(); keyboard?.show() }
+        AnimatedVisibility(searchExpanded,
+            enter = expandVertically(tween(if (motion) MangaMotion.Enter else 0, easing = MangaMotion.EnterEasing)) + fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
+            exit = shrinkVertically(tween(if (motion) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) + fadeOut(tween(if (motion) 90 else 0)),
+        ) {
+            LaunchedEffect(searchExpanded, active) {
+                if (searchExpanded && active) { searchFocus.requestFocus(); keyboard?.show() }
+                else focus.clearFocus(force = true)
+            }
             OutlinedTextField(
-                value = state.query, onValueChange = onQuery, singleLine = true,
+                value = state.query, onValueChange = { if (searchExpanded && active) onQuery(it) }, singleLine = true,
+                readOnly = !searchExpanded || !active,
                 placeholder = { Text("搜索漫画、作者", style = MaterialTheme.typography.bodyMedium) },
                 leadingIcon = { Icon(Icons.Outlined.Search, null, Modifier.size(21.dp)) },
                 trailingIcon = {
-                    if (state.query.isNotEmpty()) IconButton(onClick = { onQuery(""); keyboard?.hide() }) {
+                    if (state.query.isNotEmpty()) MotionIconButton(onClick = { onQuery(""); keyboard?.hide() }) {
                         Icon(Icons.Outlined.Close, "清空搜索", Modifier.size(19.dp))
                     }
                 },
@@ -165,11 +188,12 @@ fun DiscoverScreen(
                     focusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
                     unfocusedBorderColor = Color.Transparent,
                 ),
-                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 12.dp).focusRequester(searchFocus),
+                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
+                    .motionInputGate(searchExpanded && active).focusRequester(searchFocus),
             )
         }
         Box(Modifier.fillMaxWidth().height(1.dp)) {
-            if (state.refreshing) LinearProgressIndicator(
+            if (refreshing) LinearProgressIndicator(
                 modifier = Modifier.fillMaxSize(),
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = .35f),
                 trackColor = Color.Transparent,
@@ -224,7 +248,7 @@ fun DiscoverScreen(
         } else {
             if (state.query.isBlank() && state.mode == DiscoveryMode.RECOMMENDED) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "hero") {
-                    FeaturedCarousel(state.items.take(6), repository, heroVisible && canAutoAdvance, onOpen)
+                    FeaturedCarousel(state.items.take(6), repository, heroVisible && canAutoAdvance && !grid.isScrollInProgress, onOpen)
                 }
             }
             if (!ranking) item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
@@ -255,8 +279,11 @@ fun DiscoverScreen(
                 }
             } else if (state.hasMore) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "more") {
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        if (state.loadingMore) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                    val showMoreBusy = rememberDelayedBusy(state.loadingMore)
+                    Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
+                        if (state.loadingMore) {
+                            if (showMoreBusy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                        }
                         else TextButton(onClick = onMore) { Text("再看一些"); Spacer(Modifier.width(8.dp)); Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.size(16.dp)) }
                     }
                 }
@@ -268,7 +295,7 @@ fun DiscoverScreen(
 
 @Composable
 private fun DiscoveryRefresh(state: BrowseState, onRefresh: () -> Unit) {
-    IconButton(onClick = onRefresh, enabled = !state.loading && !state.refreshing) {
+    MotionIconButton(onClick = onRefresh, enabled = !state.loading && !state.refreshing) {
         Icon(Icons.Outlined.Refresh,
             if (state.updatedAt > 0) "刷新漫画，${browseUpdatedAt(state.updatedAt)}" else "刷新漫画",
             Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -283,13 +310,15 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
     val pressed by interaction.collectIsPressedAsState()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val accessibility = LocalContext.current.getSystemService(AccessibilityManager::class.java)
-    val autoAdvance = manga.size > 1 && visible && !dragged && !pressed &&
+    val motion = LocalMotionEnabled.current
+    val autoAdvance = motion && manga.size > 1 && visible && !dragged && !pressed &&
         accessibility?.isTouchExplorationEnabled != true
     LaunchedEffect(autoAdvance, pager, manga.map { it.id }, lifecycle) {
         if (autoAdvance) lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             while (true) {
                 delay(6_000)
-                pager.animateScrollToPage((pager.currentPage + 1) % manga.size)
+                if (!pager.isScrollInProgress) pager.animateScrollToPage((pager.currentPage + 1) % manga.size,
+                    animationSpec = tween(420, easing = MangaMotion.EnterEasing))
             }
         }
     }
@@ -299,12 +328,17 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
             pageSpacing = 10.dp, beyondViewportPageCount = 1,
             modifier = Modifier.fillMaxWidth().semantics { stateDescription = "推荐 ${pager.currentPage + 1} / ${manga.size}" },
         ) { page -> FeaturedManga(manga[page], repository, interaction, onOpen) }
-        if (manga.size > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically) {
-            repeat(manga.size) { index ->
-                Box(Modifier.padding(horizontal = 3.dp).width(if (pager.currentPage == index) 14.dp else 4.dp)
-                    .height(4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.onSurface.copy(
-                        alpha = if (pager.currentPage == index) .65f else .15f)))
+        if (manga.size > 1) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            val color = MaterialTheme.colorScheme.onSurface
+            Canvas(Modifier.size(width = (manga.size * 18).dp, height = 4.dp)) {
+                val position = if (motion) pager.currentPage + pager.currentPageOffsetFraction else pager.currentPage.toFloat()
+                repeat(manga.size) { index ->
+                    val emphasis = (1f - kotlin.math.abs(position - index)).coerceIn(0f, 1f)
+                    val width = (4f + 10f * emphasis).dp.toPx()
+                    drawRoundRect(color.copy(alpha = .15f + .5f * emphasis),
+                        topLeft = Offset((index * 18 + 9).dp.toPx() - width / 2f, 0f),
+                        size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
+                }
             }
         }
     }
@@ -346,7 +380,10 @@ private fun DiscoveryFilter(label: String, selected: Boolean, onClick: () -> Uni
 
 @Composable
 private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPeriod, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
+    val interaction = remember { MutableInteractionSource() }
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+        .motionPress(interaction, pressedScale = .985f)
         .padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(manga.rank?.toString()?.padStart(2, '0') ?: "—", fontSize = 17.sp,
             fontWeight = if ((manga.rank ?: 99) <= 3) FontWeight.SemiBold else FontWeight.Normal,
@@ -369,8 +406,10 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
 
 @Composable
 internal fun ContinueRow(progress: ReadingProgress, repository: MangaRepository, onContinue: (ReadingProgress) -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-        .clickable(onClickLabel = "继续阅读") { onContinue(progress) }.padding(vertical = 6.dp),
+        .clickable(interactionSource = interaction, indication = null, onClickLabel = "继续阅读") { onContinue(progress) }
+        .motionPress(interaction, pressedScale = .985f).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically) {
         MangaCover(progress.manga, repository, Modifier.width(46.dp).height(64.dp).clip(RoundedCornerShape(7.dp)))
         Column(Modifier.weight(1f).padding(start = 12.dp, end = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -391,15 +430,14 @@ internal fun RecentReadingSheet(
     onDismiss: () -> Unit,
     onContinue: (ReadingProgress) -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background,
-        tonalElevation = 0.dp) {
+    MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background) { dismiss ->
         Text("最近阅读", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(start = 24.dp, bottom = 16.dp))
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
             items(history, key = { it.manga.id }) { progress ->
                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                    .clickable { onContinue(progress) }.padding(horizontal = 4.dp, vertical = 10.dp),
+                    .clickable { onContinue(progress); dismiss() }.padding(horizontal = 4.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     MangaCover(progress.manga, repository, Modifier.width(36.dp).height(50.dp).clip(RoundedCornerShape(6.dp)))
                     Column(Modifier.weight(1f).padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -419,10 +457,9 @@ internal fun RecentReadingSheet(
 @Composable
 internal fun CoverTile(manga: Manga, repository: MangaRepository, dense: Boolean = false, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.965f else 1f, spring(dampingRatio = 0.8f, stiffness = 550f), label = "cover-press")
-    Column(Modifier.scale(scale).clip(RoundedCornerShape(12.dp))
-        .clickable(interactionSource = interaction, indication = null, onClick = onClick)) {
+    Column(Modifier.clip(RoundedCornerShape(12.dp))
+        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+        .motionPress(interaction)) {
         MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(0.7f).clip(RoundedCornerShape(12.dp)))
         Text(manga.title, modifier = Modifier.padding(top = 9.dp, start = 2.dp, end = 2.dp),
             style = if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
@@ -438,11 +475,12 @@ internal fun CoverTile(manga: Manga, repository: MangaRepository, dense: Boolean
 @Composable
 internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Modifier, scale: ContentScale = ContentScale.Crop) {
     val context = LocalContext.current
-    val request = remember(manga.id, manga.coverUrl) {
+    val motion = LocalMotionEnabled.current
+    val request = remember(manga.id, manga.coverUrl, motion) {
         ImageRequest.Builder(context).data(manga.coverUrl)
             .httpHeaders(NetworkHeaders.Builder().apply {
                 repository.imageHeaders(manga.id, "").forEach { (name, value) -> set(name, value) }
-            }.build()).crossfade(180).build()
+            }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
     }
     Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
         Icon(Icons.Outlined.MenuBook, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(25.dp))
@@ -452,9 +490,12 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
 
 @Composable
 internal fun QuietLoading(message: String) {
+    val visible = rememberDelayedBusy(true)
     Column(Modifier.fillMaxWidth().padding(vertical = 64.dp), horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(18.dp)) {
-        CircularProgressIndicator(Modifier.size(25.dp), strokeWidth = 1.5.dp)
+        Box(Modifier.size(25.dp)) {
+            if (visible) CircularProgressIndicator(Modifier.fillMaxSize(), strokeWidth = 1.5.dp)
+        }
         Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

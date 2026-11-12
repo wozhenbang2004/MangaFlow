@@ -6,9 +6,11 @@ import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -41,7 +43,6 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -67,7 +68,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -81,6 +86,11 @@ import dev.mangaflow.MangaViewModel
 import dev.mangaflow.ReadingSession
 import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.reader.ReaderScreen
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.update.UpdatePhase
 import kotlinx.coroutines.launch
 
@@ -94,6 +104,12 @@ private sealed interface Frame {
     data class Root(val section: Section) : Frame { override val key = "root-${section.name}" }
     data class Detail(val state: DetailState) : Frame { override val key = "detail-${state.manga.id}" }
     data class Reader(val session: ReadingSession) : Frame { override val key = "reader-${session.manga.id}-${session.chapterId}" }
+}
+
+private val Frame.depth: Int get() = when (this) {
+    is Frame.Root -> 0
+    is Frame.Detail -> 1
+    is Frame.Reader -> 2
 }
 
 @Composable
@@ -144,10 +160,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)
-    if (recentReadingOpen && frame is Frame.Root && section == Section.DISCOVER) {
+    val focus = LocalFocusManager.current
+    LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
+    if (recentReadingOpen) {
         RecentReadingSheet(history, model.repository,
             onDismiss = { recentReadingOpen = false },
-            onContinue = { recentReadingOpen = false; model.continueReading(it) })
+            onContinue = { model.continueReading(it) })
     }
     val activity = LocalContext.current.activityOrNull()
     val darkSystem = isSystemInDarkTheme()
@@ -160,8 +178,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
 
+    val motion = LocalMotionEnabled.current
+    val density = LocalDensity.current
+    val drawerWidthPx = with(density) { 296.dp.toPx() }
+    val routeTravel = with(density) { 24.dp.roundToPx() }
     CompositionLocalProvider(LocalMangaMetrics provides MangaMetricState(metrics, model::retainMetrics, model::releaseMetrics)) {
     ModalNavigationDrawer(
+        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant),
         drawerState = drawer,
         gesturesEnabled = frame is Frame.Root,
         scrimColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.22f),
@@ -205,16 +228,41 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         },
     ) {
         Scaffold(
+            modifier = Modifier.graphicsLayer {
+                // Vaul's backdrop relationship follows the actual drag, without a second spring.
+                val offset = drawer.currentOffset
+                val progress = if (motion && frame is Frame.Root && offset.isFinite())
+                    (1f + offset / drawerWidthPx).coerceIn(0f, 1f) else 0f
+                transformOrigin = TransformOrigin(1f, .5f)
+                scaleX = 1f - .035f * progress
+                scaleY = scaleX
+                translationX = 8.dp.toPx() * progress
+                shape = RoundedCornerShape((20f * progress).dp)
+                clip = progress > 0f
+            },
             containerColor = MaterialTheme.colorScheme.background,
             snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
         ) { _ ->
             AnimatedContent(
                 targetState = frame,
                 contentKey = { it.key },
-                transitionSpec = { (fadeIn(tween(180)) + slideInHorizontally(tween(220)) { it / 24 }) togetherWith fadeOut(tween(100)) },
+                transitionSpec = {
+                    if (!motion) (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
+                    else {
+                        val forward = targetState.depth >= initialState.depth
+                        val direction = if (forward) 1 else -1
+                        ((fadeIn(tween(MangaMotion.Content)) +
+                            slideInHorizontally(tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing)) { direction * routeTravel }) togetherWith
+                            (fadeOut(tween(MangaMotion.Quick)) +
+                                slideOutHorizontally(tween(MangaMotion.Exit, easing = MangaMotion.EnterEasing)) { -direction * routeTravel / 2 }))
+                            .using(null)
+                    }
+                },
+                contentAlignment = Alignment.TopStart,
                 label = "page",
                 modifier = Modifier.fillMaxSize(),
             ) { current ->
+                Box(Modifier.fillMaxSize().motionInputGate(current.key == frame.key)) {
                 when (current) {
                     is Frame.Reader -> ReaderScreen(
                         manga = current.session.manga, chapters = current.session.chapters,
@@ -227,6 +275,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         chaptersLoading = current.session.chaptersLoading,
                         chaptersError = current.session.chaptersError,
                         onRetryChapters = model::retryReadingChapters,
+                        active = current.key == frame.key,
                     )
                     is Frame.Detail -> savedState.SaveableStateProvider(current.key) {
                         DetailScreen(
@@ -254,7 +303,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 verticalAlignment = Alignment.CenterVertically) {
                                 val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
                                 Box {
-                                    IconButton(onClick = { scope.launch { drawer.open() } }) {
+                                    MotionIconButton(onClick = { scope.launch { drawer.open() } }) {
                                         Icon(Icons.Outlined.Menu, if (hasUpdate) "打开导航，有新版本" else "打开导航", Modifier.size(22.dp))
                                     }
                                     if (hasUpdate && current.section == Section.DISCOVER) Box(
@@ -279,15 +328,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     TextButton(onClick = { sectionName = Section.ACCOUNT.name }) { Text("云端书架") }
                                 }
                                 if (current.section == Section.DISCOVER) {
-                                    if (history.isNotEmpty()) IconButton(onClick = { keyboard?.hide(); recentReadingOpen = true }) {
+                                    if (history.isNotEmpty()) MotionIconButton(onClick = { keyboard?.hide(); recentReadingOpen = true }) {
                                         Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
                                     }
-                                    IconButton(onClick = {
+                                    MotionIconButton(onClick = {
                                         searchExpanded = !searchExpanded
                                         if (!searchExpanded) { keyboard?.hide(); model.setQuery("") }
                                     }) {
-                                        Icon(if (searchExpanded) Icons.Outlined.Close else Icons.Outlined.Search,
-                                            if (searchExpanded) "关闭搜索" else "搜索漫画、作者", Modifier.size(22.dp))
+                                        MotionSwap(searchExpanded, Modifier.size(22.dp)) { expanded ->
+                                            Icon(if (expanded) Icons.Outlined.Close else Icons.Outlined.Search,
+                                                if (expanded) "关闭搜索" else "搜索漫画、作者", Modifier.size(22.dp))
+                                        }
                                     }
                                 }
                             }
@@ -296,7 +347,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
                                         searchExpanded = searchExpanded,
-                                        canAutoAdvance = !drawer.isOpen && !recentReadingOpen && !searchExpanded && frame is Frame.Root,
+                                        active = current.key == frame.key,
+                                        canAutoAdvance = !drawer.isOpen && !recentReadingOpen && !searchExpanded && current.key == frame.key,
                                         onCloseSearch = { searchExpanded = false; model.setQuery("") },
                                         onQuery = model::setQuery, onRefresh = model::refresh,
                                         onRetry = model::retryBrowse, onMore = model::loadMore,
@@ -328,6 +380,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             }
                         }
                     }
+                }
                 }
             }
         }

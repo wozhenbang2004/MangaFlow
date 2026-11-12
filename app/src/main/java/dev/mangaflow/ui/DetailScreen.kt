@@ -1,14 +1,9 @@
 package dev.mangaflow.ui
 
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -27,8 +22,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -42,8 +35,6 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -59,12 +50,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -88,6 +74,13 @@ import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberDelayedBusy
 
 internal val DetailInk = Color(0xFF121213)
 internal val DetailSurface = Color(0xFF202022)
@@ -243,11 +236,10 @@ private fun CompactBookHeader(manga: Manga) {
         }
     }
     if (fullIntroduction) {
-        ModalBottomSheet(
+        MotionBottomSheet(
             onDismissRequest = { fullIntroduction = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = DetailSurface, contentColor = DetailWhite,
-        ) {
+        ) { _ ->
             SelectionContainer {
                 Column(
                     Modifier.fillMaxWidth().heightIn(max = 480.dp)
@@ -288,11 +280,12 @@ private fun DetailCover(manga: Manga) {
     val context = LocalContext.current
     var failed by remember(manga.coverUrl) { mutableStateOf(false) }
     var retry by remember(manga.coverUrl) { mutableIntStateOf(0) }
-    val request = remember(manga.coverUrl, manga.id, retry) {
+    val motion = LocalMotionEnabled.current
+    val request = remember(manga.coverUrl, manga.id, retry, motion) {
         ImageRequest.Builder(context).data(manga.coverUrl)
             .httpHeaders(NetworkHeaders.Builder().set("User-Agent", "Mozilla/5.0")
                 .set("Referer", manga.sourceUrl.ifBlank { "https://www.copy3000.com/comic/" + manga.id }).build())
-            .crossfade(160).memoryCacheKey("detail-cover:" + manga.coverUrl + ":" + retry).build()
+            .crossfade(if (motion) MangaMotion.Quick else 0).memoryCacheKey("detail-cover:" + manga.coverUrl + ":" + retry).build()
     }
     Box(Modifier.size(width = 78.dp, height = 104.dp).clip(RoundedCornerShape(10.dp)).background(DetailSurface),
         contentAlignment = Alignment.Center) {
@@ -307,37 +300,13 @@ private fun DetailCover(manga: Manga) {
     }
 }
 
-/** Quiet text tabs: the synopsis belongs to the header, not another route. */
+/** Ovio edge motion adapted to the current compact text-tab layout. */
 @Composable
 private fun DetailSections(selected: Int, labels: List<String>, onSelect: (Int) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 2.dp)
-            .selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(22.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        labels.forEachIndexed { index, label ->
-            Column(
-                Modifier.height(38.dp).selectable(
-                    selected = selected == index, role = Role.Tab, onClick = { onSelect(index) },
-                ).padding(horizontal = 3.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    Text(
-                        label, color = if (selected == index) DetailWhite else DetailMuted,
-                        fontSize = 13.sp,
-                        fontWeight = if (selected == index) FontWeight.SemiBold else FontWeight.Normal,
-                    )
-                }
-                Box(
-                    Modifier.width(32.dp).height(2.dp)
-                        .background(if (selected == index) DetailWhite else Color.Transparent,
-                            RoundedCornerShape(2.dp)),
-                )
-            }
-        }
-    }
+    MotionTabs(selected, labels, onSelect,
+        modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 2.dp),
+        foreground = DetailWhite, muted = DetailMuted,
+        indicator = DetailWhite, underline = true, compact = true)
 }
 
 @Composable
@@ -349,6 +318,8 @@ private fun DetailReadAction(
     onRead: (Chapter) -> Unit,
 ) {
     val canRead = resume != null || firstChapter != null
+    val interaction = remember { MutableInteractionSource() }
+    val busy = rememberDelayedBusy(loading && !canRead)
     val label = when {
         resume != null -> "继续阅读 · " + resume.chapterTitle
         firstChapter != null -> "开始阅读 · " + firstChapter.title
@@ -358,6 +329,7 @@ private fun DetailReadAction(
     Button(
         onClick = { if (resume != null) onContinue(resume) else firstChapter?.let(onRead) },
         enabled = canRead,
+        interactionSource = interaction,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
             .heightIn(min = 50.dp),
         shape = RoundedCornerShape(14.dp),
@@ -367,9 +339,13 @@ private fun DetailReadAction(
         ),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
     ) {
-        if (loading && !canRead) CircularProgressIndicator(
-            Modifier.size(18.dp), color = DetailMuted, strokeWidth = 1.5.dp)
-        else Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(22.dp))
+        Row(Modifier.fillMaxWidth().motionPress(interaction, enabled = canRead, pressedScale = .985f),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+            if (loading && !canRead) {
+                if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = DetailMuted, strokeWidth = 1.5.dp)
+            } else Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(22.dp))
+        }
         Spacer(Modifier.width(8.dp))
         Text(
             label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
@@ -380,6 +356,7 @@ private fun DetailReadAction(
             color = DetailInk.copy(alpha = .65f), fontSize = 11.sp,
             maxLines = 1,
         )
+        }
     }
 }
 
@@ -392,18 +369,19 @@ internal fun DetailAction(
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale = animateFloatAsState(if (pressed) .94f else 1f,
-        spring(dampingRatio = .8f, stiffness = 550f), label = "detail-action")
     Box(
-        Modifier.size(48.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value }
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) Color.White.copy(alpha = .10f) else Color.Transparent)
+        Modifier.size(48.dp)
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
-                enabled = enabled, onClick = onClick),
+                enabled = enabled, onClick = onClick)
+            .motionPress(interaction, enabled = enabled, pressedScale = .94f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) Color.White.copy(alpha = .10f) else Color.Transparent),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, description, tint = if (!enabled) DetailMuted.copy(alpha = .3f) else if (selected) DetailWhite else DetailSecondary,
-            modifier = Modifier.size(21.dp))
+        MotionSwap(icon, Modifier.size(21.dp)) { currentIcon ->
+            Icon(currentIcon, description,
+                tint = if (!enabled) DetailMuted.copy(alpha = .3f) else if (selected) DetailWhite else DetailSecondary,
+                modifier = Modifier.size(21.dp))
+        }
     }
 }

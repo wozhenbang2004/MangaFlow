@@ -5,7 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -40,19 +39,18 @@ import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,7 +64,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -85,6 +82,10 @@ import dev.mangaflow.data.Chapter
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.launch
 
 /**
@@ -111,14 +112,16 @@ internal fun DetailCatalog(
     var query by rememberSaveable(mangaId) { mutableStateOf("") }
     var anchorId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var downloadMode by rememberSaveable(mangaId) { mutableStateOf(false) }
-    var showError by remember { mutableStateOf(false) }
+    var shownError by remember { mutableStateOf<String?>(null) }
     var selectedChapterId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
+    var closingChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
 
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val grid = rememberLazyGridState()
+    val showBusy = rememberDelayedBusy(loading)
     val shown = remember(chapters, group, query, descending) {
         chapters.filter {
             (group.isEmpty() || it.group == group) &&
@@ -220,7 +223,7 @@ internal fun DetailCatalog(
                     fontSize = 12.sp, modifier = Modifier.weight(1f),
                 )
                 if (error != null) {
-                    DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { showError = true })
+                    DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { shownError = error })
                     DetailAction(Icons.Outlined.Refresh, "重新加载目录",
                         enabled = !loading, onClick = onRetry)
                 }
@@ -235,7 +238,7 @@ internal fun DetailCatalog(
                 )
             }
             Box(Modifier.fillMaxWidth().height(2.dp).padding(horizontal = 16.dp)) {
-                if (loading) LinearProgressIndicator(
+                if (showBusy) LinearProgressIndicator(
                     modifier = Modifier.fillMaxSize(), color = DetailSecondary, trackColor = Color.Transparent)
             }
             if (shown.isEmpty()) {
@@ -281,30 +284,35 @@ internal fun DetailCatalog(
         }
     }
 
-    if (showError && error != null) {
-        ModalBottomSheet(
-            onDismissRequest = { showError = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    // Keep the opened message until dismissal finishes, even when retry clears the source error.
+    shownError?.let { message ->
+        MotionBottomSheet(
+            onDismissRequest = { shownError = null },
             containerColor = DetailSurface, contentColor = DetailWhite,
-        ) {
+        ) { dismiss ->
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
                 Text("目录加载提示", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text(error, color = DetailSecondary, fontSize = 14.sp, lineHeight = 23.sp,
+                Text(message, color = DetailSecondary, fontSize = 14.sp, lineHeight = 23.sp,
                     modifier = Modifier.padding(vertical = 16.dp))
-                TextButton(onClick = { showError = false; onRetry() }, enabled = !loading) {
+                TextButton(onClick = { dismiss(); onRetry() }, enabled = !loading) {
                     Text("重新加载", color = DetailWhite)
                 }
             }
         }
     }
-    chapters.firstOrNull { it.id == selectedChapterId }?.let { chapter ->
+    (chapters.firstOrNull { it.id == selectedChapterId } ?: closingChapter)?.let { chapter ->
         val entry = downloaded[chapter.id]
-        ModalBottomSheet(
-            onDismissRequest = { selectedChapterId = null },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        MotionBottomSheet(
+            onDismissRequest = { selectedChapterId = null; closingChapter = null },
             containerColor = DetailSurface, contentColor = DetailWhite,
-        ) {
+        ) { dismiss ->
+            val dismissActions = {
+                // A route change can cancel hide(); never restore the already-dismissed menu.
+                closingChapter = chapter
+                selectedChapterId = null
+                dismiss()
+            }
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
                 Text(chapter.title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 26.sp)
@@ -315,11 +323,11 @@ internal fun DetailCatalog(
                     color = DetailMuted, fontSize = 12.sp,
                     modifier = Modifier.padding(vertical = 10.dp),
                 )
-                TextButton(onClick = { selectedChapterId = null; openChapter(chapter) },
+                TextButton(onClick = { dismissActions(); openChapter(chapter) },
                     modifier = Modifier.fillMaxWidth()) {
                     Text("阅读这一章", color = DetailWhite)
                 }
-                TextButton(onClick = { selectedChapterId = null; onDownload(chapter) },
+                TextButton(onClick = { dismissActions(); onDownload(chapter) },
                     enabled = canDownload(entry), modifier = Modifier.fillMaxWidth()) {
                     Text(if (entry?.status == DownloadStatus.COMPLETED) "已下载" else "下载这一章",
                         color = if (canDownload(entry)) DetailWhite else DetailMuted)
@@ -337,11 +345,14 @@ private fun DrawerChoice(
     count: Int? = null,
     icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
 ) {
+    val interaction = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)
-            .heightIn(min = 42.dp).clip(RoundedCornerShape(11.dp))
+            .heightIn(min = 42.dp)
+            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+            .motionPress(interaction)
+            .clip(RoundedCornerShape(11.dp))
             .background(if (selected) Color.White.copy(alpha = .09f) else Color.Transparent)
-            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -369,18 +380,9 @@ private fun ChapterTile(
     onActions: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale = androidx.compose.animation.core.animateFloatAsState(
-        if (pressed) .97f else 1f,
-        androidx.compose.animation.core.spring(dampingRatio = .85f, stiffness = 550f),
-        label = "chapter-press",
-    )
     val enabled = !downloadMode || canDownload(entry)
     Column(
         Modifier.fillMaxWidth().height(height)
-            .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
-            .clip(RoundedCornerShape(9.dp))
-            .background(Color.White.copy(alpha = if (progress != null) .12f else .055f))
             .combinedClickable(
                 interactionSource = interaction, indication = null, enabled = enabled,
                 role = Role.Button,
@@ -389,6 +391,9 @@ private fun ChapterTile(
                 onClick = if (downloadMode) onDownload else onRead,
                 onLongClick = onActions,
             )
+            .motionPress(interaction, enabled = enabled)
+            .clip(RoundedCornerShape(9.dp))
+            .background(Color.White.copy(alpha = if (progress != null) .12f else .055f))
             .semantics {
                 contentDescription = chapter.title + if (showGroup) "，" + chapter.group else ""
                 stateDescription = chapterStatus(entry, progress)
@@ -406,17 +411,23 @@ private fun ChapterTile(
             )
             Spacer(Modifier.width(3.dp))
             // Reserve the icon's space even before download: no resizing when a job starts.
-            Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
-                when (entry?.status) {
-                    DownloadStatus.RUNNING, DownloadStatus.QUEUED -> CircularProgressIndicator(
-                        Modifier.size(12.dp), color = DetailSecondary, strokeWidth = 1.dp)
+            MotionSwap(entry?.status to (downloadMode && entry == null), Modifier.size(14.dp)) { (status, showDownload) ->
+                when (status) {
+                    DownloadStatus.RUNNING -> if (entry != null && entry.totalPages > 0) {
+                        CircularProgressIndicator(
+                            progress = { (entry.completedPages.toFloat() / entry.totalPages).coerceIn(0f, 1f) },
+                            modifier = Modifier.size(12.dp), color = DetailSecondary, strokeWidth = 1.dp)
+                    } else Icon(Icons.Outlined.Download, "正在准备下载",
+                        tint = DetailMuted, modifier = Modifier.size(14.dp))
+                    DownloadStatus.QUEUED -> Icon(Icons.Outlined.Schedule, "等待下载",
+                        tint = DetailMuted, modifier = Modifier.size(14.dp))
                     DownloadStatus.COMPLETED -> Icon(Icons.Outlined.Check, "已下载",
                         tint = Color(0xFFB5C8E2), modifier = Modifier.size(14.dp))
                     DownloadStatus.PAUSED, DownloadStatus.WAITING -> Icon(Icons.Outlined.Pause,
                         "下载暂停", tint = DetailMuted, modifier = Modifier.size(14.dp))
                     DownloadStatus.FAILED -> Icon(Icons.Outlined.Refresh, "下载失败",
                         tint = Color(0xFFDBB0A8), modifier = Modifier.size(14.dp))
-                    else -> if (downloadMode) Icon(Icons.Outlined.Download, "下载",
+                    else -> if (showDownload) Icon(Icons.Outlined.Download, "下载",
                         tint = DetailMuted, modifier = Modifier.size(14.dp))
                 }
             }

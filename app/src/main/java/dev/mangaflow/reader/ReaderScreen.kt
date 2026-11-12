@@ -4,13 +4,21 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.SnapSpec
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -18,15 +26,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -47,7 +58,6 @@ import androidx.compose.material.icons.rounded.MenuBook
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -78,6 +88,7 @@ import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
@@ -94,7 +105,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -121,8 +131,14 @@ import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionDialog
+import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.rememberDelayedBusy
 import java.io.File
 import java.net.URI
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -156,6 +172,7 @@ fun ReaderScreen(
     chaptersLoading: Boolean = false,
     chaptersError: String? = null,
     onRetryChapters: () -> Unit = {},
+    active: Boolean = true,
 ) {
     val preferences by libraryStore.preferences.collectAsState()
     val downloads by downloadStore.entries.collectAsState()
@@ -183,6 +200,9 @@ fun ReaderScreen(
     }
     var showChapters by rememberSaveable { mutableStateOf(false) }
     var downloadMessage by remember(chapterId) { mutableStateOf<String?>(null) }
+    var displayedDownloadMessage by remember(chapterId) { mutableStateOf("") }
+    var progressInteracting by remember(chapterId) { mutableStateOf(false) }
+    val dimPreview = remember { mutableStateOf<Float?>(null) }
     var chapterVisibilityReported by rememberSaveable(manga.id, chapterId) { mutableStateOf(false) }
     var nextChapterPrefetched by remember(manga.id, chapterId) { mutableStateOf(false) }
     var leavingReader by remember { mutableStateOf(false) }
@@ -192,10 +212,15 @@ fun ReaderScreen(
     val headers = remember(manga.id, chapterId, repository) { repository.imageHeaders(manga.id, chapterId) }
     val activeDownload = downloads.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
     val background = preferences.theme.background()
+    val motionEnabled = LocalMotionEnabled.current
+    val toolbarTravel = with(LocalDensity.current) { 12.dp.roundToPx() }
+    val touchExploration = rememberReaderTouchExploration()
+    val delayedLoading = rememberDelayedBusy(loading)
 
-    ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showChapters || showSpreadAdjustment)
+    if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showChapters || showSpreadAdjustment)
     val leaveReader = { leavingReader = true; onBack() }
-    BackHandler(onBack = leaveReader)
+    BackHandler(enabled = active, onBack = leaveReader)
+    LaunchedEffect(active) { leavingReader = !active }
 
     LaunchedEffect(chapterId, retry) {
         loading = true
@@ -217,17 +242,26 @@ fun ReaderScreen(
         } finally { loading = false }
     }
 
-    LaunchedEffect(controlsVisible, showSettings, showChapters, showSpreadAdjustment, loading, error) {
-        if (controlsVisible && !showSettings && !showChapters && !showSpreadAdjustment && !loading && error == null) {
+    LaunchedEffect(controlsVisible, showSettings, showChapters, showSpreadAdjustment, loading, error, progressInteracting, touchExploration) {
+        if (controlsVisible && !showSettings && !showChapters && !showSpreadAdjustment &&
+            !loading && error == null && !progressInteracting && !touchExploration) {
             delay(5000)
             controlsVisible = false
         }
     }
-    LaunchedEffect(downloadMessage) { if (downloadMessage != null) { delay(4500); downloadMessage = null } }
+    LaunchedEffect(downloadMessage) {
+        downloadMessage?.let {
+            displayedDownloadMessage = it
+            delay(4500)
+            downloadMessage = null
+        }
+    }
+    LaunchedEffect(preferences.dimAmount) { dimPreview.value = null }
+    LaunchedEffect(touchExploration) { if (touchExploration) controlsVisible = true }
 
     Box(Modifier.fillMaxSize().background(background)) {
         when {
-            loading -> Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+            loading -> if (delayedLoading) Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(Modifier.size(28.dp), color = preferences.theme.foreground(), strokeWidth = 2.dp)
                 Spacer(Modifier.height(16.dp))
                 Text("正在打开章节", color = preferences.theme.foreground().copy(alpha = .6f), fontSize = 13.sp)
@@ -254,14 +288,14 @@ fun ReaderScreen(
                     longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
                     onSaveLongImagePosition = { index, position -> libraryStore.saveLongImagePosition(manga.id, chapter.id, index, position) },
                     onVisibleImageLoaded = {
-                        if (!leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
+                        if (active && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
                             chapterVisibilityReported = true
                             chapterVisible(manga, chapter)
                         }
                     },
                     onNearEnd = {
                         val next = siblings.getOrNull(chapterIndex + 1)
-                        if (!leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
+                        if (active && !leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
                             nextChapterPrefetched = true
                             nearChapterEnd(manga, next)
                         }
@@ -277,15 +311,23 @@ fun ReaderScreen(
             }
         }
 
-        if (preferences.dimAmount > 0) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = preferences.dimAmount)))
+        // Read the live dim preview during drawing; dragging does not publish or persist preferences.
+        Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
 
-        AnimatedVisibility(controlsVisible, Modifier.align(Alignment.TopCenter), enter = fadeIn(), exit = fadeOut()) {
+        AnimatedVisibility(
+            controlsVisible, Modifier.align(Alignment.TopCenter),
+            enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)) +
+                slideInVertically(tween(if (motionEnabled) MangaMotion.Enter else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
+            exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
+                slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
+        ) {
             Row(
                 Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .88f), Color.Transparent)))
-                    .statusBarsPadding().padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 30.dp),
+                    .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
+                    .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 30.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回", onClick = leaveReader)
+                ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回", interactive = controlsVisible, onClick = leaveReader)
                 Column(Modifier.weight(1f).padding(start = 4.dp)) {
                     Text(manga.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
@@ -294,49 +336,52 @@ fun ReaderScreen(
                     )
                 }
                 if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
-                    TextButton(onClick = {
+                    TextButton(enabled = controlsVisible, onClick = {
                         cursor.scrollOffset = 0
                         libraryStore.updatePreferences(preferences.copy(doublePage = !preferences.doublePage))
                     }) {
                         Text(if (preferences.doublePage) "双页" else "单页", color = Color.White, fontSize = 12.sp)
                     }
                 }
-                ReaderIcon(Icons.Rounded.Tune, "阅读设置") { showSettings = true }
+                ReaderIcon(Icons.Rounded.Tune, "阅读设置", interactive = controlsVisible) { showSettings = true }
             }
         }
 
-        AnimatedVisibility(controlsVisible, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = fadeOut()) {
+        AnimatedVisibility(
+            controlsVisible, Modifier.align(Alignment.BottomCenter),
+            enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)) +
+                slideInVertically(tween(if (motionEnabled) MangaMotion.Enter else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
+            exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
+                slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
+        ) {
             Column(
                 Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .9f))))
-                    .navigationBarsPadding().padding(start = 20.dp, end = 20.dp, top = 32.dp, bottom = 14.dp),
+                    .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+                    .padding(start = 20.dp, end = 20.dp, top = 32.dp, bottom = 14.dp),
             ) {
                 if (pages.isNotEmpty()) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("${pageIndex + 1}", color = Color.White, fontSize = 12.sp)
-                        Slider(
-                            value = pageIndex.toFloat(),
-                            onValueChange = { targetPage = it.toInt().coerceIn(0, pages.lastIndex) },
-                            valueRange = 0f..pages.lastIndex.coerceAtLeast(1).toFloat(),
-                            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
-                            enabled = pages.size > 1,
-                            colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = .18f)),
+                    key(chapterId) {
+                        ReaderProgressSlider(
+                            pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
+                            enabled = controlsVisible,
+                            onSeek = { targetPage = it },
+                            onInteractionChanged = { progressInteracting = it },
                         )
-                        Text("${pages.size}", color = Color.White.copy(alpha = .6f), fontSize = 12.sp)
                     }
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                    ReaderIcon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章", enabled = chapterIndex > 0) {
+                    ReaderIcon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章", enabled = chapterIndex > 0, interactive = controlsVisible) {
                         siblings.getOrNull(chapterIndex - 1)?.let { chapterId = it.id }
                     }
-                    TextButton(onClick = { showChapters = true }) { Text("目录", color = Color.White, fontSize = 13.sp) }
+                    TextButton(onClick = { showChapters = true }, enabled = controlsVisible) { Text("目录", color = Color.White, fontSize = 13.sp) }
                     if (preferences.doublePage && (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT)) {
-                        TextButton(onClick = { showSpreadAdjustment = true }) {
+                        TextButton(onClick = { showSpreadAdjustment = true }, enabled = controlsVisible) {
                             Text("错页校正", color = Color.White, fontSize = 12.sp)
                         }
                     }
                     val downloaded = activeDownload?.status == DownloadStatus.COMPLETED
                     val downloading = activeDownload?.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
-                    ReaderIcon(if (downloaded) Icons.Rounded.Check else Icons.Rounded.Download, if (downloaded) "本章已下载" else "下载本章", enabled = pages.isNotEmpty() && !downloaded && !downloading) {
+                    ReaderIcon(if (downloaded) Icons.Rounded.Check else Icons.Rounded.Download, if (downloaded) "本章已下载" else "下载本章", enabled = pages.isNotEmpty() && !downloaded && !downloading, interactive = controlsVisible) {
                         onRequestNotificationPermission()
                         scope.launch {
                             try {
@@ -346,7 +391,7 @@ fun ReaderScreen(
                             catch (failure: Exception) { downloadMessage = failure.message ?: "无法加入下载" }
                         }
                     }
-                    ReaderIcon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章", enabled = chapterIndex >= 0 && chapterIndex < siblings.lastIndex) {
+                    ReaderIcon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章", enabled = chapterIndex >= 0 && chapterIndex < siblings.lastIndex, interactive = controlsVisible) {
                         siblings.getOrNull(chapterIndex + 1)?.let { chapterId = it.id }
                     }
                 }
@@ -355,42 +400,51 @@ fun ReaderScreen(
 
         if (!controlsVisible && pages.isNotEmpty()) Text(
             "${pageIndex + 1} / ${pages.size}", color = Color.White.copy(alpha = .72f), fontSize = 11.sp,
-            modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(12.dp)
+            modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility).padding(12.dp)
                 .clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = .35f)).padding(horizontal = 8.dp, vertical = 4.dp)
                 .clickable { controlsVisible = true },
         )
-        downloadMessage?.let {
-            Surface(Modifier.align(Alignment.Center).padding(32.dp), color = Color(0xEE252527), shape = RoundedCornerShape(16.dp)) {
-                Text(it, Modifier.padding(horizontal = 20.dp, vertical = 14.dp), color = Color.White, fontSize = 13.sp)
+        AnimatedVisibility(
+            visible = downloadMessage != null,
+            modifier = Modifier.align(Alignment.Center),
+            enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)),
+            exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)),
+        ) {
+            Surface(Modifier.padding(32.dp), color = Color(0xEE252527), shape = RoundedCornerShape(16.dp)) {
+                Text(downloadMessage ?: displayedDownloadMessage, Modifier.padding(horizontal = 20.dp, vertical = 14.dp), color = Color.White, fontSize = 13.sp)
             }
         }
     }
-    if (showSettings) ReaderSettingsDialog(preferences, { next ->
+    ReaderSettingsDialog(visible = showSettings, preferences = preferences, onDimPreview = { dimPreview.value = it }, update = { next ->
         if (next.mode != preferences.mode || next.doublePage != preferences.doublePage || next.coverAlone != preferences.coverAlone) {
             cursor.scrollOffset = 0
         }
         libraryStore.updatePreferences(next)
-    }) { showSettings = false }
-    if (showSpreadAdjustment && pages.isNotEmpty()) {
-        ReaderSpreadDialog(
-            pages = pages,
-            currentPage = pageIndex,
-            preferences = preferences,
-            manualSingles = manualSingles,
-            onCoverChange = { cover ->
-                cursor.scrollOffset = 0
-                libraryStore.updatePreferences(preferences.copy(coverAlone = cover))
-            },
-            onCorrection = { next ->
-                cursor.scrollOffset = 0
-                manualSingles = next
-                libraryStore.saveSpreadSingles(manga.id, chapterId, next)
-            },
-            onDismiss = { showSpreadAdjustment = false },
-        )
+    }) {
+        dimPreview.value?.takeIf { it != preferences.dimAmount }?.let { amount ->
+            libraryStore.updatePreferences(preferences.copy(dimAmount = amount))
+        }
+        showSettings = false
     }
-    if (showChapters) ReaderChaptersDialog(
-        chapters, chapterId,
+    ReaderSpreadDialog(
+        visible = showSpreadAdjustment && pages.isNotEmpty(),
+        pages = pages,
+        currentPage = pageIndex,
+        preferences = preferences,
+        manualSingles = manualSingles,
+        onCoverChange = { cover ->
+            cursor.scrollOffset = 0
+            libraryStore.updatePreferences(preferences.copy(coverAlone = cover))
+        },
+        onCorrection = { next ->
+            cursor.scrollOffset = 0
+            manualSingles = next
+            libraryStore.saveSpreadSingles(manga.id, chapterId, next)
+        },
+        onDismiss = { showSpreadAdjustment = false },
+    )
+    ReaderChaptersDialog(
+        visible = showChapters, chapters = chapters, currentId = chapterId,
         loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
         onSelect = { chapterId = it; showChapters = false; controlsVisible = true },
         onDismiss = { showChapters = false },
@@ -440,7 +494,7 @@ private fun ChapterPages(
         LaunchedEffect(list) {
             snapshotFlow { list.isScrollInProgress }.collect { moving -> if (moving && !targetMeasured) restoring = false }
         }
-        LaunchedEffect(list, onNearEnd) {
+        LaunchedEffect(list) {
             snapshotFlow {
                 val layout = list.layoutInfo
                 if (restoring) -1 else layout.visibleItemsInfo.lastOrNull { item ->
@@ -506,7 +560,11 @@ private fun ChapterPages(
         val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size + 1 })
         LaunchedEffect(pager, groups) {
             snapshotFlow { groups.getOrNull(pager.currentPage)?.first ?: pages.lastIndex }
-                .distinctUntilChanged().collect { index -> location(index, 0); save(index, 0) }
+                .distinctUntilChanged().collect { index -> location(index, 0) }
+        }
+        LaunchedEffect(pager, groups) {
+            snapshotFlow { groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex }
+                .distinctUntilChanged().collect { index -> save(index, 0) }
         }
         LaunchedEffect(pager, groups) {
             snapshotFlow {
@@ -529,7 +587,7 @@ private fun ChapterPages(
             }
         }
         DisposableEffect(pager, groups) {
-            onDispose { save(groups.getOrNull(pager.currentPage)?.first ?: pages.lastIndex, 0) }
+            onDispose { save(groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex, 0) }
         }
         AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests) {
             val shown = groups.getOrNull(pager.currentPage)
@@ -700,6 +758,7 @@ private fun ReaderPage(
     var error by remember(page.url) { mutableStateOf<String?>(null) }
     var loading by remember(page.url) { mutableStateOf(true) }
     var reload by remember(page.url) { mutableIntStateOf(0) }
+    val delayedLoading = rememberDelayedBusy(loading)
     var waitingForPrefetch by remember(page.url, prefetch) { mutableStateOf(prefetch != null && !prefetch.job.isCompleted) }
     LaunchedEffect(prefetch) {
         // Coil 3.2 does not deduplicate cache misses in flight. Join the same original
@@ -726,7 +785,11 @@ private fun ReaderPage(
                     onSuccess = { _, result ->
                         val width = result.image.width
                         val height = result.image.height
-                        if (width > 0 && height > 0) aspect = (width.toFloat() / height).coerceAtLeast(.005f)
+                        // Original dimensions keep the lazy item's height stable. A decoded preview
+                        // may have been rounded while fitting the viewport and is only a fallback.
+                        if ((page.width <= 0 || page.height <= 0) && width > 0 && height > 0) {
+                            aspect = (width.toFloat() / height).coerceAtLeast(.005f)
+                        }
                         loading = false
                         measured()
                     },
@@ -781,7 +844,7 @@ private fun ReaderPage(
                     onClick = { onTap() },
                 )
             }
-            if (loading) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
+            if (delayedLoading) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
             if (longImage && !loading && error == null) Text(
                 "长图可在页内上下拖动",
                 color = Color.White.copy(alpha = .9f), fontSize = 11.sp,
@@ -838,6 +901,67 @@ private suspend fun ZoomableState.restoreLongImagePosition(position: Float) {
 }
 
 @Composable
+private fun ReaderProgressSlider(
+    pageIndex: Int,
+    pageCount: Int,
+    pendingPage: Int?,
+    enabled: Boolean,
+    onSeek: (Int) -> Unit,
+    onInteractionChanged: (Boolean) -> Unit,
+) {
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val dragged by interactions.collectIsDraggedAsState()
+    val interactionChanged by rememberUpdatedState(onInteractionChanged)
+    var preview by remember { mutableStateOf<Float?>(null) }
+    val lastPage = (pageCount - 1).coerceAtLeast(0)
+    val shown = (preview ?: pendingPage?.toFloat() ?: pageIndex.toFloat()).coerceIn(0f, lastPage.toFloat())
+    val numberWidth = with(LocalDensity.current) { 12.sp.toDp() * (pageCount.toString().length + 1) * .65f }
+
+    LaunchedEffect(pressed, dragged, enabled) {
+        interactionChanged(enabled && (pressed || dragged))
+        if (!enabled) preview = null
+    }
+    LaunchedEffect(interactions) {
+        interactions.interactions.collect { interaction ->
+            if (interaction is DragInteraction.Cancel) preview = null
+        }
+    }
+    DisposableEffect(interactions) { onDispose { interactionChanged(false) } }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("${shown.roundToInt() + 1}", Modifier.width(numberWidth), color = Color.White, fontSize = 12.sp)
+        Slider(
+            value = shown,
+            onValueChange = { preview = it },
+            onValueChangeFinished = {
+                preview?.let { onSeek(it.roundToInt().coerceIn(0, lastPage)) }
+                preview = null
+            },
+            valueRange = 0f..lastPage.coerceAtLeast(1).toFloat(),
+            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+            enabled = enabled && pageCount > 1,
+            interactionSource = interactions,
+            colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = .18f)),
+        )
+        Text("$pageCount", Modifier.width(numberWidth), color = Color.White.copy(alpha = .6f), fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun rememberReaderTouchExploration(): Boolean {
+    val context = LocalContext.current
+    val manager = remember(context) { context.getSystemService(AccessibilityManager::class.java) }
+    var enabled by remember(manager) { mutableStateOf(manager?.isTouchExplorationEnabled == true) }
+    DisposableEffect(manager) {
+        val listener = AccessibilityManager.TouchExplorationStateChangeListener { enabled = it }
+        manager?.addTouchExplorationStateChangeListener(listener)
+        onDispose { manager?.removeTouchExplorationStateChangeListener(listener) }
+    }
+    return enabled
+}
+
+@Composable
 private fun ReaderWindow(keepScreenOn: Boolean, controlsVisible: Boolean) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -877,8 +1001,16 @@ private fun ReaderWindow(keepScreenOn: Boolean, controlsVisible: Boolean) {
 }
 
 @Composable
-private fun ReaderSettingsDialog(preferences: ReaderPreferences, update: (ReaderPreferences) -> Unit, onDismiss: () -> Unit) {
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+private fun ReaderSettingsDialog(
+    visible: Boolean,
+    preferences: ReaderPreferences,
+    onDimPreview: (Float) -> Unit,
+    update: (ReaderPreferences) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var dimAmount by remember { mutableFloatStateOf(preferences.dimAmount) }
+    LaunchedEffect(visible, preferences.dimAmount) { if (visible) dimAmount = preferences.dimAmount }
+    MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth().padding(20.dp), color = Color(0xFF202022), contentColor = Color.White, shape = RoundedCornerShape(24.dp)) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -919,7 +1051,8 @@ private fun ReaderSettingsDialog(preferences: ReaderPreferences, update: (Reader
                 }
                 Column {
                     Text("降低亮度", fontSize = 14.sp)
-                    Slider(value = preferences.dimAmount, onValueChange = { update(preferences.copy(dimAmount = it)) }, valueRange = 0f..0.65f,
+                    Slider(value = dimAmount, onValueChange = { dimAmount = it; onDimPreview(it) },
+                        onValueChangeFinished = { update(preferences.copy(dimAmount = dimAmount)) }, valueRange = 0f..0.65f,
                         colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = .15f)))
                 }
             }
@@ -929,6 +1062,7 @@ private fun ReaderSettingsDialog(preferences: ReaderPreferences, update: (Reader
 
 @Composable
 private fun ReaderSpreadDialog(
+    visible: Boolean,
     pages: List<Page>,
     currentPage: Int,
     preferences: ReaderPreferences,
@@ -937,11 +1071,11 @@ private fun ReaderSpreadDialog(
     onCorrection: (Set<Int>) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val first = currentPage.coerceIn(0, pages.lastIndex)
-    val original = pages[first]
-    val wide = original.width > 0 && original.height > 0 &&
+    val first = currentPage.coerceIn(0, pages.lastIndex.coerceAtLeast(0))
+    val original = pages.getOrNull(first)
+    val wide = original != null && original.width > 0 && original.height > 0 &&
         original.width.toFloat() / original.height >= 1.25f
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth().padding(20.dp), color = Color(0xFF202022), contentColor = Color.White, shape = RoundedCornerShape(24.dp)) {
             Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -983,6 +1117,7 @@ private fun ReaderSpreadDialog(
 
 @Composable
 private fun ReaderChaptersDialog(
+    visible: Boolean,
     chapters: List<Chapter>,
     currentId: String,
     loading: Boolean,
@@ -992,22 +1127,27 @@ private fun ReaderChaptersDialog(
     onDismiss: () -> Unit,
 ) {
     val hasMultipleGroups = remember(chapters) { chapters.map(Chapter::group).distinct().size > 1 }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    val catalogBusy = rememberDelayedBusy(visible && loading)
+    val availableHeight = (LocalConfiguration.current.screenHeightDp - 176).coerceAtLeast(112).dp
+    MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth().padding(20.dp), color = Color(0xFF202022), contentColor = Color.White, shape = RoundedCornerShape(24.dp)) {
             Column(Modifier.padding(20.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", Modifier.weight(1f), fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                    Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                        if (catalogBusy) CircularProgressIndicator(
+                            Modifier.size(14.dp).semantics { contentDescription = "正在补全章节目录" },
+                            color = Color.White.copy(alpha = .6f), strokeWidth = 1.5.dp,
+                        )
+                    }
                     ReaderIcon(Icons.Rounded.Close, "关闭目录", onClick = onDismiss)
                 }
-                if (loading) Row(Modifier.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(14.dp), color = Color.White.copy(alpha = .6f), strokeWidth = 1.5.dp)
-                    Text("正在补全章节目录", Modifier.padding(start = 10.dp), color = Color.White.copy(alpha = .6f), fontSize = 12.sp)
-                } else if (error != null) {
+                if (!loading && error != null) {
                     Text(error, Modifier.padding(top = 8.dp), color = Color.White.copy(alpha = .65f), fontSize = 12.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
                     TextButton(onClick = onRetry) { Text("重试目录", color = Color.White, fontSize = 12.sp) }
                 }
                 val state = rememberLazyListState(initialFirstVisibleItemIndex = chapters.indexOfFirst { it.id == currentId }.coerceAtLeast(0))
-                LazyColumn(state = state, modifier = Modifier.height(420.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                LazyColumn(state = state, modifier = Modifier.heightIn(max = minOf(420.dp, availableHeight)), contentPadding = PaddingValues(vertical = 8.dp)) {
                     itemsIndexed(chapters, key = { _, chapter -> chapter.id }) { _, chapter ->
                         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (chapter.id == currentId) Color.White.copy(alpha = .08f) else Color.Transparent)
                             .clickable { onSelect(chapter.id) }.padding(horizontal = 12.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1033,8 +1173,8 @@ private fun ReaderToggle(label: String, value: Boolean, update: (Boolean) -> Uni
 }
 
 @Composable
-private fun ReaderIcon(icon: ImageVector, label: String, enabled: Boolean = true, onClick: () -> Unit) {
-    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(48.dp)) {
+private fun ReaderIcon(icon: ImageVector, label: String, enabled: Boolean = true, interactive: Boolean = true, onClick: () -> Unit) {
+    MotionIconButton(onClick = onClick, enabled = enabled && interactive, modifier = Modifier.size(48.dp)) {
         Icon(icon, label, Modifier.size(22.dp), tint = Color.White.copy(alpha = if (enabled) .92f else .25f))
     }
 }
