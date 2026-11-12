@@ -387,9 +387,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             val labelSlot = maxOf(52.dp, 14.sp.toDp() * 2 + 24.dp)
                             val mainWidth = labelSlot * DiscoveryMode.entries.size +
                                 (if (history.isEmpty()) 44.dp else 88.dp) + 16.dp
-                            if (rankingPresence.currentState || rankingPresence.targetState)
-                                maxOf(mainWidth, maxOf(44.dp, 12.sp.toDp() * 2 + 16.dp) * 4 + 116.dp)
-                            else mainWidth
+                            maxOf(mainWidth, maxOf(44.dp, 12.sp.toDp() * 2 + 16.dp) * 4 + 108.dp)
                         }
                         var searchPresent by remember { mutableStateOf(searchExpanded) }
                         val searchVisible = searchExpanded || searchPresent

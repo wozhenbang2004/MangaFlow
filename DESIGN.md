@@ -1,5 +1,19 @@
 # MangaFlow detail · 2026-11-12
 
+## Cover-shadow trial and screenshot follow-ups · 2026-11-12 (current)
+
+User: “我们要不要给每个图片卡片都做这样的阴影？试下？”; “另外随便把应用卡片里的那些信息视觉层级用格式塔修好”; “另外这个长度一定得变吗？如果一定得变现在的变化动画很卡”; “而且这个搜索怎么还有两个叉”. Screenshots show the application-settings group, differently sized discovery bars and simultaneous clear/close icons. This is an authorized trial, not visual approval. Preserve main's current header compaction, per-chapter history and body-identity fixes.
+
+| ID | Implementation and reuse | Acceptance boundary |
+| --- | --- | --- |
+| COVER-SHADOW-01 | Share mangaCoverCard across discovery/author/cloud cover grids, ranking/search/history/recent/statistics/download thumbnails, bookshelf books, volume cards, page-collection previews and the featured-card wrapper. Reuse Backdrop's cached softSurfaceShadow at .65 strength, with blur/offset proportional to the existing corner radius (ordinary covers: 18dp broad blur). Keep the shadow before the image clip, clear its center and retain actual artwork. | One shadow for the cover, with title/metrics outside it. No new card around text, border, tint of artwork, extra network work or change of geometry/density. The existing carousel still owns its animated mask and may clip shadows on compressed previews. Wallpaper, avatars, full-reader images and detail backdrop are separate roles. Device appearance and scroll cost remain unmeasured. |
+| COVER-CLIP-01 | Remove redundant full-tile/flat-row clips that cropped the cover's outer shadow. Swipe-to-remove clips its row only during the actual drag/return; bookshelf opacity uses ModulateAlpha. | Keep source image clips, original clickable/swipe/drag regions, deliberate release thresholds and deletion; no overflow of a translated deletion row. |
+| SETTINGS-APP-07 | Within the existing Application surface, group current version/check/release/progress/last-check together, place automatic update and notification rows in a second group, then separate the project link with whitespace. Put routine checking beside the version; only available download/install stages need a full action. Hide the idle invitation text. Align preference labels, give notification status a trailing secondary value, use one title/body hierarchy and remove the repeated app-name subtitle. | Preserve every update state, error/retry, pause, install, notes reveal, notification handoff and actual callback. No nested cards/dividers or extra permanent labels. |
+| HEADER-09 | Recommendation, ranking and latest now reserve the same font-scaled right-bar width, including room for all ranking controls. Tighten ranking row insets to 8dp. The mode/presence state no longer changes the width. | Keep right alignment, available-width constraint, all period/audience/refresh/history/search actions and current conditional ranking-row reveal. Do not animate a width that does not need to change. |
+| SEARCH-07 | Remove the separate clear X and its 40dp slot from the input. Retain the single fixed search/close trigger and existing root close behavior, which clears query and releases focus/keyboard. | One visible cross while open; closing, reopening, Back, outside dismissal, editable input and keyboard search preserve their original owner/lifecycle. |
+
+Only source/diff and file-integrity review. No tests, local build, emulator, API probe or UI automation; direct main and existing CI packaging, followed by user device feedback.
+
 ## Compact headers across destinations · 2026-11-12 (current)
 
 User: “不光是发现页都顶栏间距缩小其他的也一样啊”. Apply HEADER-07's content-fitting behavior to the other destinations as well; keep the latest borderless captured-glass/shadow material and independent navigation button.

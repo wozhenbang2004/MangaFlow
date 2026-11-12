@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.sin
 
 /** Physical left swipe, committed on release by distance; a short fast fling cannot delete. */
@@ -98,7 +99,8 @@ internal fun SwipeToRemove(
         )
     } else Modifier
     Box(modifier.fillMaxWidth().onSizeChanged { width = it.width }
-        .then(if (enabled) Modifier.clip(RoundedCornerShape(12.dp)) else Modifier)
+        .then(if (enabled && (dragging || offset < 0f || abs(position.value) > .5f))
+            Modifier.clip(RoundedCornerShape(12.dp)) else Modifier)
         .semantics {
             customActions = if (enabled) listOf(CustomAccessibilityAction(label) { remove(); true }) else emptyList()
         }

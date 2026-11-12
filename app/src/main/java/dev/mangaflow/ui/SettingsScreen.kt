@@ -53,6 +53,7 @@ import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -98,6 +99,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -425,81 +427,100 @@ fun SettingsScreen(
                         modifier = Modifier.padding(vertical = 6.dp)) }
                 }
                 SettingsSection("应用") {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("当前版本", style = MaterialTheme.typography.bodyLarge, color = foreground,
-                            modifier = Modifier.weight(1f))
-                        Text(BuildConfig.VERSION_NAME, style = MaterialTheme.typography.bodyMedium, color = secondary)
-                    }
-                    update.release?.let { release ->
-                        Text("新版本 ${release.versionName}", style = MaterialTheme.typography.titleSmall, color = foreground)
-                        if (release.notes.isNotBlank()) {
-                            Text(
-                                release.notes,
-                                modifier = Modifier.clickable { expandedNotes = !expandedNotes },
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = secondary,
-                                maxLines = if (expandedNotes) Int.MAX_VALUE else 3,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                    Text(update.message, style = MaterialTheme.typography.bodyMedium, color = if (update.phase == UpdatePhase.ERROR) MaterialTheme.colorScheme.error else secondary)
-                    when (update.phase) {
-                        UpdatePhase.DOWNLOADING -> {
-                            LinearProgressIndicator(progress = { update.progress }, modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape), color = colors.primary, trackColor = colors.outlineVariant)
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text("${settingsBytes(update.downloaded)} / ${settingsBytes(update.total)}", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = secondary)
-                                SettingsTextAction(onClick = updateManager::cancelDownload) {
-                                    Icon(Icons.Outlined.Pause, contentDescription = null, tint = foreground, modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("暂停", color = foreground)
+                    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("当前版本", style = MaterialTheme.typography.bodySmall, color = secondary)
+                                Text(BuildConfig.VERSION_NAME, style = MaterialTheme.typography.titleMedium,
+                                    color = foreground, fontWeight = FontWeight.Medium)
+                            }
+                            if (update.phase in setOf(UpdatePhase.IDLE, UpdatePhase.CURRENT, UpdatePhase.ERROR)) {
+                                SettingsTextAction(onClick = { updateManager.check() }) {
+                                    Icon(Icons.Outlined.Refresh, null, Modifier.size(17.dp), tint = foreground)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (update.phase == UpdatePhase.ERROR) "重试" else "检查更新", color = foreground)
                                 }
                             }
                         }
-                        UpdatePhase.CHECKING, UpdatePhase.VERIFYING -> {
-                            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                                CircularProgressIndicator(Modifier.size(18.dp), color = foreground, strokeWidth = 1.8.dp)
-                                Spacer(Modifier.width(10.dp))
-                                Text(if (update.phase == UpdatePhase.CHECKING) "正在检查" else "正在核对安装包", style = MaterialTheme.typography.labelLarge, color = foreground)
+                        update.release?.let { release ->
+                            Text("新版本 ${release.versionName}", style = MaterialTheme.typography.titleSmall, color = foreground)
+                            if (release.notes.isNotBlank()) {
+                                Text(
+                                    release.notes,
+                                    modifier = Modifier.clickable { expandedNotes = !expandedNotes },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = secondary,
+                                    maxLines = if (expandedNotes) Int.MAX_VALUE else 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             }
                         }
-                        UpdatePhase.AVAILABLE -> {
-                            SettingsAction(onClick = updateManager::download) {
-                                Icon(Icons.Outlined.ArrowDownward, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text(if (update.downloaded > 0) "继续下载" else "下载更新 · ${settingsBytes(update.release?.bytes ?: 0)}")
+                        if (update.phase in setOf(UpdatePhase.CURRENT, UpdatePhase.ERROR, UpdatePhase.AVAILABLE, UpdatePhase.READY))
+                            Text(update.message, style = MaterialTheme.typography.bodySmall,
+                                color = if (update.phase == UpdatePhase.ERROR) colors.error else secondary)
+                        when (update.phase) {
+                            UpdatePhase.DOWNLOADING -> {
+                                LinearProgressIndicator(progress = { update.progress }, modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape), color = colors.primary, trackColor = colors.outlineVariant)
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Text("${settingsBytes(update.downloaded)} / ${settingsBytes(update.total)}", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = secondary)
+                                    SettingsTextAction(onClick = updateManager::cancelDownload) {
+                                        Icon(Icons.Outlined.Pause, contentDescription = null, tint = foreground, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("暂停", color = foreground)
+                                    }
+                                }
                             }
+                            UpdatePhase.CHECKING, UpdatePhase.VERIFYING -> {
+                                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                                    CircularProgressIndicator(Modifier.size(18.dp), color = foreground, strokeWidth = 1.8.dp)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(if (update.phase == UpdatePhase.CHECKING) "正在检查" else "正在核对安装包", style = MaterialTheme.typography.labelLarge, color = foreground)
+                                }
+                            }
+                            UpdatePhase.AVAILABLE -> {
+                                SettingsAction(onClick = updateManager::download) {
+                                    Icon(Icons.Outlined.ArrowDownward, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(if (update.downloaded > 0) "继续下载" else "下载更新 · ${settingsBytes(update.release?.bytes ?: 0)}")
+                                }
+                            }
+                            UpdatePhase.READY -> {
+                                val activity = context.settingsActivity()
+                                SettingsAction(enabled = activity != null, onClick = { activity?.let(updateManager::install) }) { Text("安装新版本") }
+                            }
+                            else -> Unit
                         }
-                        UpdatePhase.READY -> {
-                            val activity = context.settingsActivity()
-                            SettingsAction(enabled = activity != null, onClick = { activity?.let(updateManager::install) }) { Text("安装新版本") }
+                        if (update.lastChecked > 0) {
+                            Text(
+                                "上次检查 ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()).format(Date(update.lastChecked))}",
+                                style = MaterialTheme.typography.bodySmall, color = secondary,
+                            )
                         }
-                        else -> SettingsAction(onClick = { updateManager.check() }) { Text("检查更新") }
                     }
-                    if (update.lastChecked > 0) {
-                        Text(
-                            "上次检查 ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()).format(Date(update.lastChecked))}",
-                            style = MaterialTheme.typography.labelSmall, color = secondary,
+                    Spacer(Modifier.height(12.dp))
+                    Column(Modifier.fillMaxWidth()) {
+                        SettingsToggle("自动检查更新", automatic, leadingInset = 0.dp) {
+                            automatic = it
+                            updateManager.setAutomatic(it)
+                        }
+                        SettingsLinkRow(
+                            title = "更新提醒",
+                            detail = if (notifications) "已开启" else "未开启",
+                            inlineDetail = true,
+                            onClick = {
+                                if (notifications) {
+                                    runCatching {
+                                        context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                                    }.onFailure { Toast.makeText(context, "暂时无法打开通知设置", Toast.LENGTH_SHORT).show() }
+                                } else onRequestNotifications()
+                            },
                         )
                     }
-                    SettingsToggle("自动检查更新", automatic) {
-                        automatic = it
-                        updateManager.setAutomatic(it)
-                    }
-                    SettingsLinkRow(
-                        title = "更新提醒",
-                        detail = if (notifications) "已开启" else "未开启",
-                        onClick = {
-                            if (notifications) {
-                                runCatching {
-                                    context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                                        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
-                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                                }.onFailure { Toast.makeText(context, "暂时无法打开通知设置", Toast.LENGTH_SHORT).show() }
-                            } else onRequestNotifications()
-                        },
-                    )
-                    SettingsLinkRow("项目主页", "MangaFlow", external = true) { context.openProjectPage() }
+                    Spacer(Modifier.height(10.dp))
+                    SettingsLinkRow("项目主页", "", external = true) { context.openProjectPage() }
                 }
             }
         }
@@ -859,7 +880,7 @@ private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onS
 }
 
 @Composable
-private fun SettingsToggle(title: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+private fun SettingsToggle(title: String, checked: Boolean, leadingInset: Dp = 31.dp, onCheckedChange: (Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -875,7 +896,7 @@ private fun SettingsToggle(title: String, checked: Boolean, onCheckedChange: (Bo
                 role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 54.dp).padding(vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, Modifier.weight(1f).padding(start = 31.dp, end = 12.dp),
+        Text(title, Modifier.weight(1f).padding(start = leadingInset, end = 12.dp),
             style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
         Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
             Box(Modifier.width(36.dp).height(22.dp).drawBehind {
@@ -894,7 +915,7 @@ private fun SettingsToggle(title: String, checked: Boolean, onCheckedChange: (Bo
 }
 
 @Composable
-private fun SettingsLinkRow(title: String, detail: String, external: Boolean = false, onClick: () -> Unit) {
+private fun SettingsLinkRow(title: String, detail: String, external: Boolean = false, inlineDetail: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
@@ -902,10 +923,12 @@ private fun SettingsLinkRow(title: String, detail: String, external: Boolean = f
         .motionPress(interaction, pressedScale = .99f).heightIn(min = 56.dp).padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-            if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
+            Text(title, style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+            if (!inlineDetail && detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant)
         }
+        if (inlineDetail && detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant)
         Icon(if (external) Icons.Outlined.OpenInNew else Icons.Outlined.ChevronRight,
             contentDescription = null, tint = colors.onSurfaceVariant.copy(alpha = .7f), modifier = Modifier.size(18.dp))
     }

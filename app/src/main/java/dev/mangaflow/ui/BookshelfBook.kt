@@ -25,10 +25,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -112,6 +112,7 @@ internal fun BookshelfBook(
             )
         }
         .graphicsLayer {
+            compositingStrategy = CompositingStrategy.ModulateAlpha
             translationX = dragOffset.x
             translationY = dragOffset.y
             scaleX = scale.value
@@ -126,7 +127,7 @@ internal fun BookshelfBook(
         .clickable(interactionSource = interaction, indication = null, enabled = !dragging,
             role = Role.Button, onClickLabel = if (progress == null) "开始阅读" else "继续阅读",
             onClick = onOpen)) {
-        MangaCover(manga, repository, Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)),
+        MangaCover(manga, repository, Modifier.fillMaxSize().mangaCoverCard(),
             scale = ContentScale.Fit)
         if (opening) Box(Modifier.align(Alignment.BottomEnd).padding(7.dp).size(22.dp)
             .background(colors.surface.copy(alpha = .94f), RoundedCornerShape(11.dp)),

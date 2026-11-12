@@ -26,7 +26,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Cancel
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
@@ -271,13 +270,6 @@ internal fun ExpandingSearchBar(
                         }
                     },
                 )
-                Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                    if (displayedQuery.isNotEmpty()) MotionIconButton(
-                        onClick = { onQuery("") }, enabled = expanded && active,
-                        modifier = Modifier.size(40.dp),
-                    ) { Icon(Icons.Outlined.Cancel, "清空搜索", Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant) }
-                }
             }
             results(if (present) resultsRoom else 0.dp, expanded && active)
         }

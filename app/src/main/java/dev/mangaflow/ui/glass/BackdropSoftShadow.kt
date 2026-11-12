@@ -34,11 +34,11 @@ import kotlin.math.ceil
 import kotlin.math.roundToInt
 
 /** The shadow is outside the surface; its cleared center never darkens captured glass. */
-internal fun Modifier.softSurfaceShadow(shape: Shape, light: Boolean, strength: Float = 1f): Modifier {
+internal fun Modifier.softSurfaceShadow(shape: Shape, light: Boolean, strength: Float = 1f, radius: Dp = 24.dp): Modifier {
     if (strength <= 0f) return this
     return this
-        .then(SoftShadowElement(shape, 24.dp, 6.dp, Color.Black.copy(alpha = (if (light) .10f else .28f) * strength)))
-        .then(SoftShadowElement(shape, 5.dp, 2.dp, Color.Black.copy(alpha = (if (light) .025f else .12f) * strength)))
+        .then(SoftShadowElement(shape, radius, radius / 4f, Color.Black.copy(alpha = (if (light) .10f else .28f) * strength)))
+        .then(SoftShadowElement(shape, radius * (5f / 24f), radius / 12f, Color.Black.copy(alpha = (if (light) .025f else .12f) * strength)))
 }
 
 private data class SoftShadowElement(

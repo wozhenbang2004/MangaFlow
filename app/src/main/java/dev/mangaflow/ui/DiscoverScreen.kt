@@ -310,7 +310,7 @@ internal fun RankingControls(
     }
     val choiceWidth = maxOf(44.dp, labelWidth + 16.dp)
     val periodWidth = choiceWidth * RankPeriod.entries.size
-    BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+    BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
         val shortPeriods = maxWidth < periodWidth + 92.dp
         // A fixed icon slot leaves all four periods room, including larger text sizes.
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -489,13 +489,13 @@ private fun DiscoveryPane(
 private fun SearchResultRow(manga: Manga, repository: MangaRepository, onOpen: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        Modifier.fillMaxWidth()
             .clickable(interactionSource = interaction, indication = null, onClick = onOpen)
             .motionPress(interaction, pressedScale = .985f)
             .padding(horizontal = 6.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).clip(RoundedCornerShape(7.dp)))
+        MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).mangaCoverCard(7.dp))
         Column(Modifier.weight(1f).padding(start = 11.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(manga.title, style = MaterialTheme.typography.titleSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -585,7 +585,7 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
                     onDispose { if (items[index] === info) items.remove(index) }
                 }
                 FeaturedManga(manga[index], repository,
-                    modifier = Modifier.fillMaxWidth().height(itemHeight).maskClip(RoundedCornerShape(24.dp)),
+                    modifier = Modifier.fillMaxWidth().height(itemHeight).mangaCoverCard(24.dp).maskClip(RoundedCornerShape(24.dp)),
                     emphasis = { ((info.size / info.maxSize.coerceAtLeast(1f) - .35f) / .65f).coerceIn(0f, 1f) },
                     onOpen = onOpen)
             }
@@ -649,7 +649,7 @@ private fun FeaturedManga(
 @Composable
 private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPeriod, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+    Row(Modifier.fillMaxWidth()
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)
         .motionPress(interaction, pressedScale = .985f)
         .padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -657,7 +657,7 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
             fontWeight = if ((manga.rank ?: 99) <= 3) FontWeight.SemiBold else FontWeight.Normal,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = if ((manga.rank ?: 99) <= 3) .92f else .4f),
             maxLines = 1, modifier = Modifier.widthIn(min = 30.dp))
-        MangaCover(manga, repository, Modifier.width(54.dp).height(76.dp).clip(RoundedCornerShape(8.dp)))
+        MangaCover(manga, repository, Modifier.width(54.dp).height(76.dp).mangaCoverCard(8.dp))
         Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "), style = MaterialTheme.typography.bodySmall,
@@ -680,14 +680,14 @@ internal fun ContinueRow(
     onHistory: (() -> Unit)? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+    Row(Modifier.fillMaxWidth()
         .combinedClickable(interactionSource = interaction, indication = null,
             onClickLabel = "继续阅读", onClick = { onContinue(progress) },
             onLongClickLabel = if (onManage != null) "管理阅读记录" else null,
             onLongClick = onManage)
         .motionPress(interaction, pressedScale = .985f).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        MangaCover(progress.manga, repository, Modifier.width(46.dp).height(64.dp).clip(RoundedCornerShape(7.dp)))
+        MangaCover(progress.manga, repository, Modifier.width(46.dp).height(64.dp).mangaCoverCard(7.dp))
         Column(Modifier.weight(1f).padding(start = 12.dp, end = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(progress.manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页", style = MaterialTheme.typography.bodySmall,
@@ -730,11 +730,11 @@ internal fun RecentReadingSheet(
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     items(history, key = { it.manga.id }) { progress ->
                         SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
-                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                            Row(Modifier.fillMaxWidth()
                                 .clickable(onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() })
                                 .padding(horizontal = 4.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                MangaCover(progress.manga, repository, Modifier.width(32.dp).height(44.dp).clip(RoundedCornerShape(5.dp)))
+                                MangaCover(progress.manga, repository, Modifier.width(32.dp).height(44.dp).mangaCoverCard(5.dp))
                                 Column(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                                     Text(progress.manga.title, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -757,10 +757,10 @@ internal fun RecentReadingSheet(
 @Composable
 internal fun CoverTile(manga: Manga, repository: MangaRepository, dense: Boolean = false, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
-    Column(Modifier.clip(RoundedCornerShape(12.dp))
+    Column(Modifier
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)
         .motionPress(interaction)) {
-        MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(0.7f).clip(RoundedCornerShape(12.dp)))
+        MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(0.7f).mangaCoverCard())
         Text(manga.title, modifier = Modifier.padding(top = 9.dp, start = 2.dp, end = 2.dp),
             style = if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)

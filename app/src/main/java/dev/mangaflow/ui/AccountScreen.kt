@@ -411,7 +411,7 @@ private fun CloudContinueRow(entry: CloudHistoryEntry, repository: MangaReposito
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
         .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)).clickable(onClick = onContinue).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        MangaCover(entry.manga, repository, Modifier.width(45.dp).height(62.dp).clip(RoundedCornerShape(8.dp)))
+        MangaCover(entry.manga, repository, Modifier.width(45.dp).height(62.dp).mangaCoverCard(8.dp))
         Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(if (entry.chapterId.isBlank()) "查看漫画" else "继续阅读", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -573,7 +573,7 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
         DownloadStatus.FAILED -> if (localImport) "文件损坏" else "未完成"
     }
     Box {
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(
+        Column(Modifier.fillMaxWidth().clickable(
             interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "阅读 ${entry.chapter.title}", onClick = onRead,
         )) {
@@ -582,7 +582,7 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
                 AsyncImage(
                     model = entry.manga.coverUrl,
                     contentDescription = null,
-                    modifier = Modifier.size(width = 48.dp, height = 68.dp).clip(RoundedCornerShape(8.dp)).background(colors.surfaceVariant),
+                    modifier = Modifier.size(width = 48.dp, height = 68.dp).mangaCoverCard(8.dp).background(colors.surfaceVariant),
                     contentScale = ContentScale.Crop,
                 )
                 Spacer(Modifier.width(12.dp))

@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
@@ -33,7 +32,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -112,14 +110,14 @@ private fun PageCollectionRow(collection: PageCollection, repository: MangaRepos
         else "第 ${collection.firstPage + 1} 页"
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val previewWidth = (maxWidth * .34f).coerceIn(76.dp, 120.dp)
-        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        Row(Modifier.fillMaxWidth()
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = "阅读收藏画面", onClick = onClick)
             .motionPress(interaction, pressedScale = .99f)
             .padding(horizontal = 4.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
             CollectionPreview(collection, repository,
-                Modifier.width(previewWidth).height(84.dp).clip(RoundedCornerShape(6.dp))
+                Modifier.width(previewWidth).height(84.dp).mangaCoverCard(6.dp)
                     .background(colors.onSurface.copy(alpha = .035f)))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
