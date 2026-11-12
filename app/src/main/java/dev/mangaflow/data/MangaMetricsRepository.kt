@@ -151,7 +151,8 @@ class MangaMetricsRepository(
                 ReviewStatus.NO_MATCH -> null
                 ReviewStatus.READY -> MangaMetric(source.id, source.name,
                     source.score?.takeIf { it.isFinite() && it in 0.0..source.scoreScale.toDouble() },
-                    source.scoreScale, source.ratingCount?.takeIf { it >= 0 }, source.popularity?.takeIf { it >= 0 })
+                    source.scoreScale, source.ratingCount?.takeIf { it >= 0 }, source.popularity?.takeIf { it >= 0 },
+                    source.scoreLabel)
                     .takeIf { it.score != null || it.popularity != null }
             }
             if (preserveUnchangedTime && previous != null && previous.metric == metric) return@synchronized false
@@ -177,7 +178,7 @@ class MangaMetricsRepository(
                     input.readBytes()
                 }
                 val root = JSONObject(String(bytes, Charsets.UTF_8))
-                if (root.optInt("version") == 1) {
+                if (root.optInt("version") in 1..2) {
                     val rows = root.optJSONArray("items") ?: JSONArray()
                     val now = System.currentTimeMillis()
                     for (index in 0 until minOf(rows.length(), MAX_ITEMS)) {
@@ -195,11 +196,12 @@ class MangaMetricsRepository(
                             val checked = value.optLong("checkedAt")
                             val next = value.optLong("nextFetchAt")
                             if (source !in SOURCE_IDS || checked <= 0 || checked > now + RETRY_TTL || now - checked > MAX_AGE) continue
-                            val scale = if (source == "anilist") 100 else 10
+                            val scale = ReviewProviders.find(source)?.scoreScale ?: 10
                             val score = value.number("score")?.takeIf { it.isFinite() && it in 0.0..scale.toDouble() }
                             val heat = value.nonNegativeLong("popularity")?.takeIf { source == "copy" }
                             val count = value.nonNegativeLong("ratingCount")?.takeIf { it <= Int.MAX_VALUE }?.toInt()
-                            val metric = if (score != null || heat != null) MangaMetric(source, sourceName(source), score, scale, count, heat) else null
+                            val label = value.optString("scoreLabel").take(40)
+                            val metric = if (score != null || heat != null) MangaMetric(source, sourceName(source), score, scale, count, heat, label) else null
                             sources[source] = CachedMetric(metric, checked, next.takeIf { it in checked..(now + SCORE_TTL) } ?: 0)
                         }
                         restored[id] = CachedManga(identity, accessed, sources)
@@ -228,11 +230,11 @@ class MangaMetricsRepository(
                             entry.sources.forEach { (source, value) -> put(JSONObject().put("source", source)
                                 .put("checkedAt", value.checkedAt).put("nextFetchAt", value.nextFetchAt)
                                 .put("score", value.metric?.score).put("ratingCount", value.metric?.ratingCount)
-                                .put("popularity", value.metric?.popularity)) }
+                                .put("popularity", value.metric?.popularity).put("scoreLabel", value.metric?.scoreLabel)) }
                         })) }
                 }
             }
-            val bytes = JSONObject().put("version", 1).put("items", rows).toString().toByteArray(Charsets.UTF_8)
+            val bytes = JSONObject().put("version", 2).put("items", rows).toString().toByteArray(Charsets.UTF_8)
             if (bytes.size > MAX_BYTES || epoch != generation) return@withLock
             var output: java.io.FileOutputStream? = null
             try {
@@ -267,7 +269,7 @@ class MangaMetricsRepository(
         const val SCORE_TTL = 6 * 60 * 60_000L
         const val RETRY_TTL = 5 * 60_000L
         const val MAX_AGE = 7 * 24 * 60 * 60_000L
-        val SOURCE_IDS = listOf("copy", "bangumi", "anilist")
-        fun sourceName(id: String) = when (id) { "copy" -> "热度"; "bangumi" -> "Bangumi"; else -> "AniList" }
+        val SOURCE_IDS = listOf("copy") + ReviewProviders.metricIds
+        fun sourceName(id: String) = if (id == "copy") "热度" else ReviewProviders.find(id)?.name ?: id
     }
 }

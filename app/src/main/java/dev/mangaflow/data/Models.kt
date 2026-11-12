@@ -62,6 +62,10 @@ data class MangaReview(
     val kind: ReviewKind = ReviewKind.COMMENT,
     val authorUrl: String = "",
     val avatarUrl: String = "",
+    val upVotes: Int? = null,
+    val downVotes: Int? = null,
+    val positiveVoteLabel: String = "赞",
+    val canLoadReplies: Boolean = false,
 )
 
 /** Site-native values. A rank period's heat never enters this overall metadata record. */
@@ -72,6 +76,7 @@ data class MangaMetric(
     val scoreScale: Int = 10,
     val ratingCount: Int? = null,
     val popularity: Long? = null,
+    val scoreLabel: String = "",
 )
 
 data class ReviewSource(
@@ -92,6 +97,10 @@ data class ReviewSource(
     val reviewsError: String? = null,
     val loadingMore: Boolean = false,
     val candidates: List<ReviewMatch> = emptyList(),
+    val aliases: List<String> = emptyList(),
+    val externalIds: Map<String, String> = emptyMap(),
+    val supportsReplies: Boolean = false,
+    val scoreLabel: String = "",
 )
 
 enum class ReviewKind { COMMENT, REVIEW, CHAPTER }
@@ -102,6 +111,7 @@ data class ReviewPage(
     val items: List<MangaReview>,
     val total: Int? = null,
     val nextPage: Int? = null,
+    val error: String? = null,
 )
 
 enum class DiscoveryMode(val label: String) {

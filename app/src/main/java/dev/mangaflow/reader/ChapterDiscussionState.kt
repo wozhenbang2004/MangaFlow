@@ -9,6 +9,8 @@ import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaReview
 import dev.mangaflow.data.ReviewKind
+import dev.mangaflow.data.ReviewRepository
+import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
 import kotlinx.coroutines.CancellationException
@@ -62,6 +64,7 @@ internal class ChapterDiscussionState(
     private val manga: Manga,
     private val chapter: Chapter,
     private val chapters: CopyCommunityRepository,
+    private val reviews: ReviewRepository,
     parentScope: CoroutineScope,
 ) {
     private val lifetime = SupervisorJob(parentScope.coroutineContext[Job])
@@ -80,6 +83,13 @@ internal class ChapterDiscussionState(
 
     val hasMore: Boolean get() = sources.any(::canLoadMore)
 
+    val totalCount: Int? get() {
+        if (sources.any { !it.loaded || it.source.status == ReviewStatus.UNAVAILABLE || it.source.reviewsError != null }) return null
+        val ready = sources.filter { it.source.status == ReviewStatus.READY }
+        if (ready.isEmpty() || ready.any { it.source.reviewCount == null }) return null
+        return ready.sumOf { it.source.reviewCount!!.toLong() }.takeIf { it <= Int.MAX_VALUE }?.toInt()
+    }
+
     private fun initialSources(): List<ReaderDiscussionSource> {
         val cached = chapters.cachedChapterComments(chapter)
         val chapterSource = ReviewSource(
@@ -89,7 +99,11 @@ internal class ChapterDiscussionState(
             reviews = cached?.items.orEmpty().filter { it.kind == ReviewKind.CHAPTER }, reviewCount = cached?.total,
             nextPage = if (cached == null) 0 else cached.nextPage,
         )
-        return listOf(ReaderDiscussionSource(chapterSource, loaded = cached != null))
+        return listOf(ReaderDiscussionSource(chapterSource, loaded = cached != null)) +
+            reviews.chapterProviderIds.map { id -> ReaderDiscussionSource(ReviewSource(
+                id = id, name = "Dantotsu", status = ReviewStatus.NO_MATCH, url = "https://api.dantotsu.app",
+                matchedTitle = chapter.title, subjectId = chapter.id,
+            )) }
     }
 
     /** The chapter end and toolbar share one lifetime, but neither starts work until displayed. */
@@ -153,8 +167,24 @@ internal class ChapterDiscussionState(
     private suspend fun fetchPage(sourceKey: String, page: Int, version: Long, forceRefresh: Boolean) {
         val current = sources.firstOrNull { it.key == sourceKey } ?: return
         try {
-            check(current.source.id == "copy" && current.source.subjectId == chapter.id) { "章节评论来源不匹配" }
-            val result = chapters.chapterComments(manga, chapter, page, forceRefresh)
+            check(current.source.subjectId == chapter.id) { "章节评论来源不匹配" }
+            if (current.source.id != "copy" && page == 0) {
+                val incoming = reviews.chapterSources(manga, chapter).firstOrNull { it.id == current.source.id }
+                    ?: throw IllegalStateException("本话评论来源暂不可用")
+                currentCoroutineContext().ensureActive()
+                if (version != generation) return
+                check(incoming.subjectId == chapter.id) { "章节评论归属不一致" }
+                updateSource(sourceKey) { state ->
+                    val retained = if (incoming.status == ReviewStatus.UNAVAILABLE && state.source.reviews.isNotEmpty())
+                        state.source.copy(reviewsError = incoming.message)
+                    else incoming.copy(reviews = incoming.reviews.filter { it.kind == ReviewKind.CHAPTER })
+                    state.copy(source = retained, loaded = true, busy = false,
+                        failedPage = if (incoming.status == ReviewStatus.UNAVAILABLE || incoming.reviewsError != null) 0 else null)
+                }
+                return
+            }
+            val result = if (current.source.id == "copy") chapters.chapterComments(manga, chapter, page, forceRefresh)
+                else reviews.chapterPage(manga, chapter, current.source, page)
             currentCoroutineContext().ensureActive()
             if (version != generation) return
             updateSource(sourceKey) { state ->
@@ -163,7 +193,7 @@ internal class ChapterDiscussionState(
                         reviews = (if (page == 0) result.items else state.source.reviews + result.items)
                             .filter { it.kind == ReviewKind.CHAPTER }.distinctBy(MangaReview::id),
                         reviewCount = result.total ?: state.source.reviewCount,
-                        nextPage = result.nextPage, reviewsError = null,
+                        nextPage = result.nextPage, reviewsError = result.error,
                     ))
             }
         } catch (cancel: CancellationException) {
@@ -182,6 +212,12 @@ internal class ChapterDiscussionState(
 
     private fun canLoadMore(source: ReaderDiscussionSource): Boolean = source.loaded && !source.busy &&
         source.source.status == ReviewStatus.READY && source.source.reviewsError == null && source.source.nextPage != null
+
+    suspend fun replies(source: ReviewSource, review: MangaReview, page: Int): ReviewPage {
+        if (source.subjectId != chapter.id || review.kind != ReviewKind.CHAPTER)
+            throw IllegalStateException("这条评论不属于当前章节")
+        return reviews.chapterReplies(manga, chapter, source, review, page)
+    }
 
     fun dispose() {
         generation++

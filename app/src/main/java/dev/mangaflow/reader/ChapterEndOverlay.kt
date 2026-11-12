@@ -114,7 +114,7 @@ internal fun ChapterEndComments(
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val colors = MaterialTheme.colorScheme
     val largeText = LocalDensity.current.fontScale > 1.3f
-    val count = state.sources.firstOrNull { it.source.subjectId == chapterId }?.source?.reviewCount
+    val count = state.totalCount
     val candidates = remember(state.sources, chapterId) {
         mixedDiscussionRows(state.sources, chapterId).mapNotNull { row ->
             floatingPreviewText(row.review)?.let { text -> FloatingComment(row.key, row.review, text) }

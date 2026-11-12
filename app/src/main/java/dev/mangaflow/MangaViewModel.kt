@@ -18,6 +18,7 @@ import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.data.MangaMetric
 import dev.mangaflow.data.MangaMetricsRepository
 import dev.mangaflow.data.ReviewRepository
+import dev.mangaflow.data.ReviewProviders
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.data.ReviewPage
@@ -463,10 +464,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         } }
                         catch (cancel: CancellationException) { throw cancel }
                         catch (_: Exception) {
-                            listOf("bangumi" to "Bangumi", "anilist" to "AniList").forEach { (id, name) ->
+                            ReviewProviders.all.forEach { provider ->
+                                val id = provider.id
+                                val name = provider.name
                                 if (id !in reviewOverrides && _detail.value?.reviews?.none { it.id == id } == true)
                                     publishReview(manga.id, requestId, ReviewSource(id, name, ReviewStatus.UNAVAILABLE,
-                                        if (id == "bangumi") "https://bgm.tv" else "https://anilist.co",
+                                        provider.homeUrl,
                                         message = "$name 暂时无法读取"))
                             }
                         }
@@ -486,7 +489,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             if (current?.manga?.id != mangaId || requestId != detailRequestId) current
             else current.copy(reviews = (current.reviews.filterNot { it.id == source.id } +
                 if (source.id == "copy") source.copy(popularity = current.manga.totalHeat() ?: source.popularity) else source)
-                .sortedBy { when (it.id) { "copy" -> 0; "bangumi" -> 1; else -> 2 } })
+                .sortedBy { ReviewProviders.order(it.id) })
         }
         recordDetailMetrics(mangaId, requestId)
     }
@@ -508,7 +511,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 publishReview(state.manga.id, requestId, source.copy(
                     reviews = (source.reviews + result.items).distinctBy(MangaReview::id),
                     reviewCount = result.total ?: source.reviewCount, nextPage = result.nextPage,
-                    loadingMore = false, reviewsError = null))
+                    loadingMore = false, reviewsError = result.error))
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 publishReview(state.manga.id, requestId, source.copy(loadingMore = false,
@@ -547,10 +550,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     subjectId != null -> reviews.choose(state.manga, sourceId, subjectId)
                     source.subjectId.isNotBlank() && source.status == ReviewStatus.READY -> {
                         val page = reviews.loadMore(state.manga, source, 0)
-                        source.copy(reviews = page.items, reviewCount = page.total, nextPage = page.nextPage,
-                            loadingMore = false, reviewsError = null)
+                        val retained = if (page.error == null) page.items
+                            else (page.items + source.reviews).distinctBy(MangaReview::id)
+                        source.copy(reviews = retained, reviewCount = page.total ?: source.reviewCount, nextPage = page.nextPage,
+                            loadingMore = false, reviewsError = page.error)
                     }
-                    else -> reviews.lookup(state.manga, forceRefresh = true).first { it.id == sourceId }
+                    else -> reviews.lookupSource(state.manga, sourceId)
                 }
                 publishReview(state.manga.id, requestId, result)
             } catch (cancel: CancellationException) { throw cancel }
@@ -563,8 +568,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun reviewReplies(source: ReviewSource, review: MangaReview, page: Int): ReviewPage {
         val manga = _detail.value?.manga ?: return ReviewPage(emptyList())
-        if (source.id != "copy") return ReviewPage(emptyList())
-        return community.replies(manga, source, review, page)
+        return if (source.id == "copy") community.replies(manga, source, review, page)
+            else reviews.replies(manga, source, review, page)
     }
 
     fun retryDetail() { _detail.value?.manga?.let { openManga(it) } }

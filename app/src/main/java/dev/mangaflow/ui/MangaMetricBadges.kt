@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaMetric
+import dev.mangaflow.data.ReviewProviders
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.awaitCancellation
 import java.util.Locale
@@ -67,13 +68,22 @@ internal fun MangaMetricBadges(
             MetricBadge(if (compact) "热" else heatLabel, metricCount(value),
                 "$heatLabel $value", foreground, compact, "copy")
         }
-        listOf("bangumi", "anilist").forEach { id ->
-            val metric = metrics.firstOrNull { it.sourceId == id }
-            metric?.score?.takeIf { it.isFinite() && it > 0 }?.let { score ->
-                MetricBadge(if (id == "bangumi") "bgm" else "AL", metricScore(score),
-                    "${metric.name}，${metricScore(score)} 分，满分 ${metric.scoreScale}" +
-                        (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact, id)
+        val scores = metrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
+            .sortedBy { ReviewProviders.order(it.sourceId) }
+        val visible = if (compact) scores.take(2) else scores
+        visible.forEach { metric ->
+            metric.score?.let { score ->
+                val provider = ReviewProviders.find(metric.sourceId)
+                val value = if (!compact && metric.scoreLabel.isNotBlank())
+                    "${metricScore(score)} · ${metric.scoreLabel}" else metricScore(score)
+                MetricBadge(provider?.mark ?: metric.sourceId, value,
+                    "${metric.name}，${metric.scoreLabel}${metricScore(score)} 分，满分 ${metric.scoreScale}" +
+                        (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact, metric.sourceId)
             }
+        }
+        if (compact && scores.size > visible.size) {
+            MetricBadge("+${scores.size - visible.size}", "评分", "更多来源评分可在漫画详情查看",
+                foreground, compact, "more")
         }
     }
 }
@@ -92,6 +102,9 @@ private fun MetricBadge(
         "copy" -> if (onDark) Color(0xFFD8B79E) else Color(0xFF855B43)
         "bangumi" -> if (onDark) Color(0xFFAFC5E4) else Color(0xFF526D92)
         "anilist" -> if (onDark) Color(0xFFC8B4DC) else Color(0xFF745C91)
+        "mangaupdates", "mangadex" -> if (onDark) Color(0xFFD8BE96) else Color(0xFF806132)
+        "myanimelist" -> if (onDark) Color(0xFFAAC5DF) else Color(0xFF426589)
+        "kitsu" -> if (onDark) Color(0xFFD9AAA3) else Color(0xFF8B5148)
         else -> foreground
     }
     Row(

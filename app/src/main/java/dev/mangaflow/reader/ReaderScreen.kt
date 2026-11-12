@@ -179,6 +179,7 @@ fun ReaderScreen(
     libraryStore: LibraryStore,
     downloadStore: DownloadStore,
     communityRepository: CopyCommunityRepository,
+    reviewRepository: dev.mangaflow.data.ReviewRepository,
     onBack: () -> Unit,
     onRequestNotificationPermission: () -> Unit = {},
     onChapterVisible: (Manga, Chapter) -> Unit = { _, _ -> },
@@ -193,7 +194,7 @@ fun ReaderScreen(
     var chapterId by rememberSaveable(manga.id) { mutableStateOf(initialChapterId) }
     val chapter = chapters.firstOrNull { it.id == chapterId }
         ?: Chapter(chapterId, libraryStore.progressFor(manga.id)?.takeIf { it.chapterId == chapterId }?.chapterTitle ?: "正在阅读", 0)
-    val discussionState = rememberChapterDiscussionState(manga, chapter, communityRepository)
+    val discussionState = rememberChapterDiscussionState(manga, chapter, communityRepository, reviewRepository)
     val siblings = remember(chapters, chapter.group) { chapters.filter { it.group == chapter.group }.sortedBy(Chapter::index) }
     val hasMultipleGroups = remember(chapters) { chapters.map(Chapter::group).distinct().size > 1 }
     val chapterIndex = siblings.indexOfFirst { it.id == chapterId }

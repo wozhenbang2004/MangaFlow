@@ -9,6 +9,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -26,6 +28,15 @@ import java.util.Locale
 /** Anonymous, attributed reviews. Each provider keeps its own scale and identity. */
 class ReviewRepository(context: Context) {
     private val http = SourceHttp()
+    private val providerHttp = ReviewProviderHttp(http)
+    private val externalProviders: List<ExternalReviewProvider> = listOf(
+        MangaUpdatesReviewProvider(providerHttp), MyAnimeListReviewProvider(providerHttp),
+        KitsuReviewProvider(providerHttp), MangaDexReviewProvider(providerHttp),
+        ShikimoriReviewProvider(providerHttp),
+    )
+    private val providerSlots = Semaphore(3)
+    private val chapterProviders = ChapterReviewProviders(providerHttp)
+    private val chapterIdentityCache = LinkedHashMap<String, ChapterIdentitySnapshot>()
     private val associations = context.applicationContext.getSharedPreferences("review_associations", Context.MODE_PRIVATE)
     private val cache = LinkedHashMap<String, CachedSource>()
     private val confirmedNames = LinkedHashMap<String, List<String>>()
@@ -41,19 +52,33 @@ class ReviewRepository(context: Context) {
             val bgm = async {
                 (savedBangumi?.let { BangumiMatch(it.source, it.names) } ?: bangumi(manga)
                     .let { match -> match.copy(source = rememberSource(key, match.source, match.names, epoch)) })
-                    .also { onSource(it.source) }
+                    .also { if (epoch == cacheGeneration && key == identityKey(manga)) onSource(it.source) }
             }
             val ani = async {
-                (savedAniList?.source ?: rememberSource(key, aniList(manga, listOf(manga.title)), epoch = epoch)).also(onSource)
+                (savedAniList?.source ?: rememberSource(key, aniList(manga, listOf(manga.title)), epoch = epoch))
+                    .also { if (epoch == cacheGeneration && key == identityKey(manga)) onSource(it) }
             }
             val bangumi = bgm.await()
             var anilist = ani.await()
             // Only a confirmed manga may supply aliases for a second, bounded search.
             if (savedAniList == null && anilist.status == ReviewStatus.NO_MATCH && bangumi.source.status == ReviewStatus.READY &&
                 bangumi.names.any { normalize(it) != normalize(manga.title) }) {
-                anilist = rememberSource(key, aniList(manga, bangumi.names + manga.title), epoch = epoch).also(onSource)
+                anilist = rememberSource(key, aniList(manga, bangumi.names + manga.title), epoch = epoch)
+                    .also { if (epoch == cacheGeneration && key == identityKey(manga)) onSource(it) }
             }
-            listOf(bangumi.source, anilist)
+            val primary = listOf(bangumi.source, anilist)
+            val aliases = confirmedAliases(manga, primary)
+            val ids = confirmedIds(primary)
+            val expanded = externalProviders.map { provider -> async {
+                val cached = if (forceRefresh) null else cachedSource(key, provider.id)
+                val source = cached?.source ?: providerSlots.withPermit {
+                    externalLookup(manga, provider, aliases, ids).let { rememberSource(key, it, epoch = epoch) }
+                }
+                currentCoroutineContext().ensureActive()
+                if (epoch == cacheGeneration && key == identityKey(manga)) onSource(source)
+                source
+            } }.map { it.await() }
+            primary + expanded
         }
     }
 
@@ -87,25 +112,91 @@ class ReviewRepository(context: Context) {
                 currentCoroutineContext().ensureActive()
                 if (epoch == cacheGeneration && key == identityKey(manga)) onSource(source)
             }
+            // Additional providers are resolved on detail. Card requests can reuse their
+            // saved association without turning every passing cover into a multi-site search.
+            externalProviders.filter { it.id in sourceIds }.forEach { provider ->
+                val source = externalLookup(manga, provider, names + manga.title,
+                    confirmedIds(cachedSources(manga)), includeComments = false)
+                currentCoroutineContext().ensureActive()
+                if (epoch == cacheGeneration && key == identityKey(manga)) onSource(source)
+            }
         }
 
-    internal fun identityKey(manga: Manga): String = listOf(manga.id, manga.title, manga.authors.joinToString("|"),
-        savedId(manga, "bangumi"), savedId(manga, "anilist")).joinToString("\u0000")
+    internal fun identityKey(manga: Manga): String = (listOf(manga.id, manga.title, manga.authors.joinToString("|")) +
+        ReviewProviders.ids.map { savedId(manga, it) }).joinToString("\u0000")
 
-    internal fun metricIdentityKey(manga: Manga): String = listOf(manga.id,
-        savedId(manga, "bangumi"), savedId(manga, "anilist")).joinToString("\u0000")
+    internal fun metricIdentityKey(manga: Manga): String = (listOf(manga.id) +
+        ReviewProviders.ids.map { savedId(manga, it) }).joinToString("\u0000")
 
     /** Retain the last known snapshot while a reader refreshes; never cross saved associations. */
     fun cachedSources(manga: Manga): List<ReviewSource> {
         val key = identityKey(manga)
         return synchronized(cache) {
-            listOf("bangumi", "anilist").mapNotNull { cache["$key\u0000$it"]?.source }
+            ReviewProviders.ids.mapNotNull { cache["$key\u0000$it"]?.source }
         }
     }
 
     fun clearCache() {
         synchronized(cache) { cacheGeneration++; cache.clear() }
         synchronized(confirmedNames) { confirmedNames.clear() }
+        synchronized(chapterIdentityCache) { chapterIdentityCache.clear() }
+        externalProviders.forEach(ExternalReviewProvider::clearCache)
+    }
+
+    val chapterProviderIds: List<String> get() = chapterProviders.providerIds
+
+    /** Only metadata is resolved here; work-review endpoints never enter the chapter path. */
+    suspend fun chapterSources(manga: Manga, chapter: Chapter): List<ReviewSource> = withContext(Dispatchers.IO) {
+        val key = identityKey(manga)
+        val epoch = cacheGeneration
+        var ids = confirmedIds(cachedSources(manga))
+        val stored = synchronized(chapterIdentityCache) { chapterIdentityCache[key] }
+            ?.takeIf { System.currentTimeMillis() - it.time in 0 until 6 * 60 * 60_000L }
+        if (stored != null) ids = stored.ids + ids
+        val selectedAniList = savedId(manga, "anilist")
+        if (selectedAniList.isNotBlank()) ids = ids + ("anilist" to selectedAniList)
+        if (ids["anilist"].isNullOrBlank()) {
+            val aliases = preferredAniListAliases(manga, confirmedAliases(manga, cachedSources(manga)))
+            var source = aniList(manga, aliases, includeComments = false)
+            if (source.status == ReviewStatus.NO_MATCH) {
+                val matched = bangumi(manga, includeComments = false)
+                if (matched.source.status == ReviewStatus.READY && matched.names.any { normalize(it) != normalize(manga.title) })
+                    source = aniList(manga, matched.names + manga.title, includeComments = false)
+            }
+            currentCoroutineContext().ensureActive()
+            if (source.status == ReviewStatus.UNAVAILABLE) {
+                return@withContext chapterProviderIds.map { id -> ReviewSource(id, "Dantotsu", ReviewStatus.UNAVAILABLE,
+                    "https://api.dantotsu.app", subjectId = chapter.id,
+                    message = "本话关联暂时无法确认：${source.message}", nextPage = 0) }
+            }
+            if (source.status == ReviewStatus.READY) ids = ids + confirmedIds(listOf(source))
+        }
+        currentCoroutineContext().ensureActive()
+        if (epoch != cacheGeneration || key != identityKey(manga))
+            throw SourceException("作品关联已更改，请重新读取本话评论。")
+        if (ids.isNotEmpty()) synchronized(chapterIdentityCache) {
+            chapterIdentityCache[key] = ChapterIdentitySnapshot(System.currentTimeMillis(), ids)
+            while (chapterIdentityCache.size > 96) chapterIdentityCache.remove(chapterIdentityCache.keys.first())
+        }
+        chapterProviders.lookup(manga, chapter, ids)
+    }
+
+    suspend fun chapterPage(manga: Manga, chapter: Chapter, source: ReviewSource, page: Int): ReviewPage =
+        withContext(Dispatchers.IO) {
+            requireChapterAssociation(manga, source)
+            chapterProviders.page(manga, chapter, source, page)
+        }
+
+    suspend fun chapterReplies(manga: Manga, chapter: Chapter, source: ReviewSource, review: MangaReview, page: Int): ReviewPage =
+        withContext(Dispatchers.IO) {
+            requireChapterAssociation(manga, source)
+            chapterProviders.replies(manga, chapter, source, review, page)
+        }
+
+    private fun requireChapterAssociation(manga: Manga, source: ReviewSource) {
+        val selected = savedId(manga, "anilist")
+        if (selected.isNotBlank() && source.externalIds["anilist"] != selected)
+            throw SourceException("作品关联已更改，请刷新本话评论。", source.url)
     }
 
     private fun cachedSource(key: String, sourceId: String): CachedSource? = synchronized(cache) {
@@ -122,12 +213,12 @@ class ReviewRepository(context: Context) {
         val retained = when {
             source.status == ReviewStatus.UNAVAILABLE && previous != null -> previous.copy(reviewsError = source.message)
             source.reviewsError != null && previous != null && source.subjectId == previous.subjectId && previous.reviews.isNotEmpty() ->
-                source.copy(reviews = previous.reviews, nextPage = previous.nextPage)
+                source.copy(reviews = (source.reviews + previous.reviews).distinctBy(MangaReview::id))
             else -> source
         }
         cache.remove(sourceKey)
         cache[sourceKey] = CachedSource(System.currentTimeMillis(), retained, names)
-        while (cache.size > 96) cache.remove(cache.keys.first())
+        while (cache.size > 256) cache.remove(cache.keys.first())
         retained
     }
 
@@ -136,7 +227,8 @@ class ReviewRepository(context: Context) {
         val key = identityKey(manga)
         val epoch = cacheGeneration
         requireSource(source.id)
-        val id = requireSubjectId(source.subjectId)
+        val id = source.subjectId.takeIf(String::isNotBlank)
+            ?: throw SourceException("作品条目标识无效，请重新选择。")
         if (source.status != ReviewStatus.READY || page < 0 || page > Int.MAX_VALUE / PAGE_SIZE - 1) {
             throw SourceException("评论分页信息无效，请重新加载作品。")
         }
@@ -145,15 +237,15 @@ class ReviewRepository(context: Context) {
             throw SourceException("作品关联已更改，请重新加载评论。")
         }
         val result = when (source.id) {
-            "bangumi" -> bangumiComments(id, page)
-            "anilist" -> aniListReviews(id, page)
-            else -> throw SourceException("不支持这个评价来源。")
+            "bangumi" -> bangumiComments(requireSubjectId(id), page)
+            "anilist" -> aniListReviews(requireSubjectId(id), page)
+            else -> externalProvider(source.id).page(id, page)
         }
         currentCoroutineContext().ensureActive()
         if (page == 0 && epoch == cacheGeneration && key == identityKey(manga)) {
             val names = synchronized(cache) { cache["$key\u0000${source.id}"]?.names }.orEmpty()
             rememberSource(key, source.copy(reviews = result.items, reviewCount = result.total,
-                nextPage = result.nextPage, reviewsError = null, loadingMore = false), names, epoch)
+                nextPage = result.nextPage, reviewsError = result.error, loadingMore = false), names, epoch)
         }
         result
     }
@@ -161,13 +253,16 @@ class ReviewRepository(context: Context) {
     /** Persist only an explicitly chosen, fetched and format-checked provider identity. */
     suspend fun choose(manga: Manga, sourceId: String, subjectId: String): ReviewSource = withContext(Dispatchers.IO) {
         requireSource(sourceId)
-        val id = requireSubjectId(subjectId)
+        val id = subjectId.trim().takeIf(String::isNotBlank)
+            ?: throw SourceException("作品条目标识无效，请重新选择。")
         val source = when (sourceId) {
-            "bangumi" -> bangumiSubject(id).source
-            "anilist" -> aniListSubject(id)
-            else -> throw SourceException("不支持这个评价来源。")
+            "bangumi" -> bangumiSubject(requireSubjectId(id)).source
+            "anilist" -> aniListSubject(requireSubjectId(id))
+            else -> externalProvider(sourceId).subject(id)
         }
-        if (!associations.edit().putString(associationKey(manga, sourceId), id.toString()).commit()) {
+        if (source.id != sourceId || source.subjectId != id || source.status != ReviewStatus.READY)
+            throw SourceException("来源未能确认这部漫画，请重新选择。", source.url)
+        if (!associations.edit().putString(associationKey(manga, sourceId), id).commit()) {
             throw SourceException("作品已确认，但关联未能保存，请重试。", source.url)
         }
         clearCache()
@@ -192,7 +287,99 @@ class ReviewRepository(context: Context) {
                     aniList(manga, confirmed.names + manga.title)
                 } else source
             }
-            else -> throw SourceException("不支持这个评价来源。")
+            else -> lookupSource(manga, sourceId)
+        }
+    }
+
+    /** Refresh only the requested provider; a retry must not reload every other site. */
+    suspend fun lookupSource(manga: Manga, sourceId: String): ReviewSource = withContext(Dispatchers.IO) {
+        requireSource(sourceId)
+        val key = identityKey(manga)
+        val epoch = cacheGeneration
+        val source = when (sourceId) {
+            "bangumi" -> bangumi(manga).source
+            "anilist" -> {
+                val known = cachedSources(manga)
+                val aliases = preferredAniListAliases(manga, confirmedAliases(manga, known))
+                val first = aniList(manga, aliases)
+                if (first.status == ReviewStatus.NO_MATCH && aliases.none { normalize(it) != normalize(manga.title) }) {
+                    val matched = bangumi(manga, includeComments = false)
+                    if (matched.source.status == ReviewStatus.READY && matched.names.any { normalize(it) != normalize(manga.title) })
+                        aniList(manga, preferredAniListAliases(manga, matched.names + manga.title))
+                    else first
+                } else first
+            }
+            else -> {
+                val known = cachedSources(manga)
+                externalLookup(manga, externalProvider(sourceId), confirmedAliases(manga, known), confirmedIds(known))
+            }
+        }
+        rememberSource(key, source, epoch = epoch)
+    }
+
+    suspend fun replies(manga: Manga, source: ReviewSource, review: MangaReview, page: Int): ReviewPage =
+        withContext(Dispatchers.IO) {
+            requireSource(source.id)
+            if (!source.supportsReplies || source.status != ReviewStatus.READY || source.subjectId.isBlank() ||
+                page !in 0..100_000 || review.kind == ReviewKind.CHAPTER ||
+                source.reviews.none { it.id == review.id && it.kind == review.kind }) {
+                throw SourceException("回复信息已失效，请重新打开评论。", source.url)
+            }
+            val saved = savedId(manga, source.id)
+            if (saved.isNotBlank() && saved != source.subjectId)
+                throw SourceException("作品关联已更改，请重新加载评论。", source.url)
+            externalProvider(source.id).replies(source.subjectId, review, page)
+        }
+
+    private fun externalProvider(id: String): ExternalReviewProvider = externalProviders.firstOrNull { it.id == id }
+        ?: throw SourceException("不支持这个评价来源。")
+
+    private fun confirmedAliases(manga: Manga, sources: List<ReviewSource>): List<String> =
+        (listOf(manga.title) + sources.filter { it.status == ReviewStatus.READY }
+            .flatMap { it.aliases + it.matchedTitle }).filter(String::isNotBlank).distinct()
+
+    private fun preferredAniListAliases(manga: Manga, names: List<String>): List<String> =
+        names.filter { normalize(it) != normalize(manga.title) } + names.filter { normalize(it) == normalize(manga.title) }
+
+    private fun confirmedIds(sources: List<ReviewSource>): Map<String, String> {
+        val candidates = sources.filter { it.status == ReviewStatus.READY && it.subjectId.isNotBlank() }
+            .flatMap { listOf(it.id to it.subjectId) + it.externalIds.toList() }
+            .filter { it.second.isNotBlank() }.groupBy({ it.first }, { it.second })
+        // Conflicting cross-links never silently choose an upstream identity.
+        return candidates.mapNotNull { (id, values) -> values.distinct().singleOrNull()?.let { id to it } }.toMap()
+    }
+
+    private suspend fun externalLookup(
+        manga: Manga, provider: ExternalReviewProvider, aliases: List<String>,
+        externalIds: Map<String, String>, includeComments: Boolean = true,
+    ): ReviewSource {
+        try {
+            val linked = savedId(manga, provider.id).ifBlank { externalIds[provider.id].orEmpty() }
+            if (linked.isNotBlank()) return provider.subject(linked, includeComments)
+            val names = aliases.filter(String::isNotBlank).distinctBy(::normalize)
+            val known = names.map(::normalize).filter(String::isNotBlank).toSet()
+            val candidates = LinkedHashMap<String, ProviderCandidate>()
+            for (query in names.take(3)) {
+                provider.search(query).forEach { candidate ->
+                    if (candidate.match.id.isNotBlank() && candidate.match.title.isNotBlank())
+                        candidates[candidate.match.id] = candidate
+                }
+                val exact = candidates.values.filter { item -> item.titles.any { normalize(it) in known } }
+                val knownAuthors = manga.authors.flatMap(::authorNames).toSet()
+                val byAuthor = exact.filter { it.authors.flatMap(::authorNames).any { name -> name in knownAuthors } }
+                val compatible = exact.filter { knownAuthors.isEmpty() || it.authors.isEmpty() || it in byAuthor }
+                val selected = byAuthor.singleOrNull() ?: compatible.singleOrNull()
+                if (selected != null) return provider.subject(selected.match.id, includeComments)
+            }
+            val exact = candidates.values.filter { item -> item.titles.any { normalize(it) in known } }
+            val choices = (exact.ifEmpty { candidates.values.toList() }).take(12).map(ProviderCandidate::match)
+            return ReviewSource(provider.id, provider.name, ReviewStatus.NO_MATCH, provider.homeUrl,
+                message = if (choices.isEmpty()) "尚未找到对应漫画" else "请确认对应的漫画条目，选择后会记住关联",
+                candidates = choices)
+        } catch (cancel: CancellationException) { throw cancel }
+          catch (failure: Exception) {
+            return ReviewSource(provider.id, provider.name, ReviewStatus.UNAVAILABLE, provider.homeUrl,
+                message = failure.reviewMessage("${provider.name} 暂时无法连接，请稍后重试"))
         }
     }
 
@@ -238,7 +425,8 @@ class ReviewRepository(context: Context) {
         val base = ReviewSource("bangumi", "Bangumi", ReviewStatus.READY, "$url/comments",
             matchedTitle = subject.text("name_cn").ifBlank { subject.text("name") },
             score = rating?.nullableScore("score", 10)?.takeIf { total != 0 }, scoreScale = 10,
-            ratingCount = total, subjectId = id.toString(), message = "中文短评 · 最新动态")
+            ratingCount = total, subjectId = id.toString(), message = "中文短评 · 最新动态",
+            aliases = bangumiNames(subject))
         return BangumiMatch(if (includeComments) withFirstPage(base) { bangumiComments(id, 0) } else base, bangumiNames(subject))
     }
 
@@ -318,7 +506,7 @@ class ReviewRepository(context: Context) {
         val query = """
             query MangaRating(${'$'}id: Int!) {
               Media(id: ${'$'}id, type: MANGA) {
-                id type format title { native romaji english } averageScore
+                id idMal type format title { native romaji english } synonyms averageScore
                 stats { scoreDistribution { amount } }
               }
             }
@@ -335,7 +523,9 @@ class ReviewRepository(context: Context) {
         val base = ReviewSource("anilist", "AniList", ReviewStatus.READY, url,
             matchedTitle = mediaNames(media).firstOrNull().orEmpty(),
             score = media.nullableScore("averageScore", 100), scoreScale = 100,
-            ratingCount = total, subjectId = id.toString(), message = "作品长评 · 最新发布 · 可能涉及后续剧情")
+            ratingCount = total, subjectId = id.toString(), message = "作品长评 · 最新发布 · 可能涉及后续剧情",
+            aliases = mediaNames(media), externalIds = media.nonNegativeInt("idMal")?.takeIf { it > 0 }
+                ?.let { mapOf("myanimelist" to it.toString()) }.orEmpty())
         return if (includeComments) withFirstPage(base) { aniListReviews(id, 0) } else base
     }
 
@@ -433,7 +623,7 @@ class ReviewRepository(context: Context) {
     private fun JSONObject.isBangumiComic(): Boolean = optInt("type") == 1 && normalize(text("platform")) in setOf("漫画", "comic", "manga")
     private fun JSONObject.isAniListComic(): Boolean = text("type") == "MANGA" && text("format") in setOf("MANGA", "ONE_SHOT")
     private fun requireSource(sourceId: String) {
-        if (sourceId != "bangumi" && sourceId != "anilist") throw SourceException("不支持这个评价来源。")
+        if (sourceId !in ReviewProviders.ids) throw SourceException("不支持这个评价来源。")
     }
     private fun requireSubjectId(value: String): Int = value.takeIf { it.matches(Regex("[1-9][0-9]{0,9}")) }
         ?.toIntOrNull()?.takeIf { it > 0 } ?: throw SourceException("作品条目标识无效，请重新选择。")
@@ -517,6 +707,7 @@ class ReviewRepository(context: Context) {
     private fun Exception.userMessage(fallback: String) = if (this is SourceException) message.orEmpty().ifBlank { fallback } else fallback
     private data class BangumiMatch(val source: ReviewSource, val names: List<String> = emptyList())
     private data class CachedSource(val time: Long, val source: ReviewSource, val names: List<String> = emptyList())
+    private data class ChapterIdentitySnapshot(val time: Long, val ids: Map<String, String>)
 
     private companion object { const val PAGE_SIZE = 20 }
 }

@@ -86,7 +86,7 @@ import kotlinx.coroutines.launch
 private val CommunityWhite: Color @Composable get() = MaterialTheme.colorScheme.onSurface
 private val CommunityMuted: Color @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
 private val CommunityLine: Color @Composable get() = MaterialTheme.colorScheme.onSurface.copy(alpha = .07f)
-private val CommunityProviders = listOf("copy", "bangumi", "anilist")
+private val CommunityProviders = dev.mangaflow.data.ReviewProviders.displayOrder
 
 /** Mix only confirmed reviews, keeping each source's native ID and pagination. */
 private data class MixedReview(val source: ReviewSource, val review: MangaReview, val order: Int)
@@ -256,11 +256,15 @@ private fun CommentSourceBadge(sourceId: String, scopeLabel: String? = null) {
         "copy" -> if (onLight) Color(0xFF815941) else Color(0xFFD5B7A0)
         "bangumi" -> if (onLight) Color(0xFF506B92) else Color(0xFFB5C8E4)
         "anilist" -> if (onLight) Color(0xFF725B8C) else Color(0xFFC7B2DD)
+        "mangaupdates", "mangadex" -> if (onLight) Color(0xFF806132) else Color(0xFFD8BE96)
+        "myanimelist" -> if (onLight) Color(0xFF426589) else Color(0xFFAAC5DF)
+        "kitsu" -> if (onLight) Color(0xFF8B5148) else Color(0xFFD9AAA3)
+        "shikimori", "dantotsu" -> if (onLight) Color(0xFF4F7167) else Color(0xFFA9CBC0)
         else -> CommunityMuted
     }
     val name = when (sourceId) {
         "copy" -> if (scopeLabel == null) "读者" else ""; "bangumi" -> "bgm"; "anilist" -> "AniList"
-        else -> providerName(sourceId)
+        else -> dev.mangaflow.data.ReviewProviders.find(sourceId)?.mark ?: providerName(sourceId)
     }
     Text(listOfNotNull(name.takeIf(String::isNotBlank), scopeLabel).joinToString(" · "), modifier = Modifier.clip(RoundedCornerShape(5.dp))
         .background(accent.copy(alpha = .12f)).padding(horizontal = 5.dp, vertical = 2.dp)
@@ -358,7 +362,8 @@ private fun CommentContent(
                     maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
                     onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
             }
-            if (review.score != null || (revealed && (overflows || expanded || conceal)) ||
+            if (review.score != null || (review.upVotes ?: 0) > 0 || (review.downVotes ?: 0) > 0 ||
+                (revealed && (overflows || expanded || conceal)) ||
                 (showReplyCount && (review.replyCount ?: 0) > 0)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     review.score?.let {
@@ -373,6 +378,14 @@ private fun CommentContent(
                         Text(if (review.kind == ReviewKind.REVIEW) "收起长评" else "隐藏剧透", color = muted, fontSize = 11.sp)
                     }
                     Spacer(Modifier.weight(1f))
+                    review.upVotes?.takeIf { it > 0 }?.let {
+                        Text("${review.positiveVoteLabel} $it", color = muted, fontSize = 10.sp,
+                            modifier = Modifier.padding(end = 8.dp))
+                    }
+                    review.downVotes?.takeIf { it > 0 }?.let {
+                        Text("踩 $it", color = muted, fontSize = 10.sp,
+                            modifier = Modifier.padding(end = 8.dp))
+                    }
                     if (showReplyCount && (review.replyCount ?: 0) > 0) {
                         Text("${review.replyCount} 条回复", color = muted, fontSize = 11.sp,
                             modifier = Modifier.padding(vertical = 10.dp))
@@ -411,14 +424,18 @@ internal fun CommunityDiscussionComment(
     review: MangaReview,
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
     scopeLabel: String? = null,
+    foreground: Color = CommunityWhite,
+    muted: Color = CommunityMuted,
 ) {
-    val hasReplies = source.id == "copy" && review.kind == ReviewKind.COMMENT &&
-        source.subjectId.isNotBlank() && (review.replyCount ?: 0) > 0
+    val hasReplies = ((source.id == "copy" && review.kind == ReviewKind.COMMENT) || source.supportsReplies) &&
+        source.subjectId.isNotBlank() && (review.replyCount ?: if (review.canLoadReplies) 1 else 0) > 0
     Column(Modifier.fillMaxWidth().padding(vertical = 7.dp)) {
-        CommentContent(review, Modifier, CommunityWhite, CommunityMuted,
+        CommentContent(review, Modifier, foreground, muted,
             showReplyCount = !hasReplies, sourceId = source.id, scopeLabel = scopeLabel)
         if (hasReplies) {
-            CommentReplies(source, review, loadReplies)
+            key(source.id, source.subjectId, review.id, source.externalIds) {
+                CommentReplies(source, review, loadReplies, foreground, muted)
+            }
         }
     }
 }
@@ -428,6 +445,8 @@ private fun CommentReplies(
     source: ReviewSource,
     review: MangaReview,
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
+    foreground: Color,
+    muted: Color,
 ) {
     var expanded by remember { mutableStateOf(false) }
     var rows by remember { mutableStateOf<List<MangaReview>>(emptyList()) }
@@ -453,6 +472,8 @@ private fun CommentReplies(
                 if (version == requestVersion) {
                     rows = (if (page == 0) result.items else rows + result.items).distinctBy { it.id }
                     nextPage = result.nextPage
+                    error = result.error
+                    if (result.error != null) failedPage = page
                     loaded = true
                 }
             } catch (cancel: CancellationException) {
@@ -477,26 +498,28 @@ private fun CommentReplies(
             busy = false
         }
     }, modifier = Modifier.padding(start = 36.dp), contentPadding = PaddingValues(end = 10.dp)) {
-        Text(if (expanded) "收起回复" else "${review.replyCount} 条回复", color = CommunityMuted, fontSize = 12.sp)
+        Text(if (expanded) "收起回复" else review.replyCount?.let { "$it 条回复" } ?: "查看回复",
+            color = muted, fontSize = 12.sp)
         Spacer(Modifier.width(4.dp))
         Icon(if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
-            null, tint = CommunityMuted, modifier = Modifier.size(15.dp))
+            null, tint = muted, modifier = Modifier.size(15.dp))
     }
     if (expanded) {
         Column(Modifier.fillMaxWidth().padding(start = 36.dp)) {
             rows.forEach { reply ->
                 key(source.subjectId, review.id, reply.id) {
-                    CommunityComment(reply, Modifier.padding(bottom = 10.dp), CommunityWhite, CommunityMuted)
+                    CommunityComment(reply, Modifier.padding(bottom = 10.dp), foreground, muted,
+                        sourceId = source.id, scopeLabel = if (review.kind == ReviewKind.CHAPTER) "本话" else null)
                 }
             }
             if (error != null) CommentFailure(error.orEmpty(), busy) { load(failedPage) }
             if (busy) SmallLoading()
             else if (loaded && rows.isEmpty() && error == null) {
-                Text("暂无可展示的回复", color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
+                Text("暂无可展示的回复", color = muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
             }
             if (!busy && error == null && nextPage != null) TextButton(onClick = { nextPage?.let(::load) },
                 contentPadding = PaddingValues(end = 10.dp)) {
-                Text("更多回复", color = CommunityMuted, fontSize = 12.sp)
+                Text("更多回复", color = muted, fontSize = 12.sp)
             }
         }
     }
@@ -506,7 +529,8 @@ private fun providerName(id: String): String = when (id) {
     "copy" -> "读者评论"
     "bangumi" -> "Bangumi"
     "anilist" -> "AniList"
-    else -> id
+    "dantotsu" -> "Dantotsu"
+    else -> dev.mangaflow.data.ReviewProviders.find(id)?.name ?: id
 }
 
 private fun compactCommentDate(date: String): String {

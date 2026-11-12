@@ -1,5 +1,44 @@
 # Third-party notices
 
+## Public rating and comment contracts · 2026-11-12
+
+MangaFlow's additional adapters are independently implemented against public documentation
+and readable protocol/model definitions. No third-party client implementation or user review
+text is bundled. Retrieved content keeps its source, author and original identifiers; these
+references do not grant a new license over upstream users' content.
+
+- MangaUpdates: official documentation `https://mangaupdates.apidocumentation.com/`.
+  The v1 series/comments/reviews field shapes were also checked in the non-official SDK's
+  saved OpenAPI specification, `https://github.com/FiliArrochada/MangaUpdates.NET/blob/fd4d68c0b0d01bdcbf1dcc26f838b051c1db6f96/api/openapi-1.0.0.yaml`.
+  That snapshot is supporting protocol evidence, not an official SDK or a live-service result.
+- Kitsu: official API documentation `https://kitsu.docs.apiary.io/` and server definitions
+  `https://github.com/hummingbird-me/kitsu-server/tree/the-future` (`media_reaction_resource.rb`,
+  `media_staff_resource.rb`, `mapping_resource.rb`, `jsonapi-resources.rb`). Current public
+  host configuration: `https://github.com/hummingbird-me/kitsu-mobile/blob/2f2a5524c960cb6dcf6a0c7bbb1e12e0ff0e1213/src/config/kitsu.ts`.
+- MyAnimeList through Tenrai: `https://api.tenrai.org/llms.txt`. Tenrai is a third-party beta
+  transport, not an additional original rating site. The public interface needs no user key.
+  MangaFlow does not use the retired public Jikan service or treat forum topic metadata as replies.
+- MangaDex: official API documentation `https://api.mangadex.org/docs/` and OpenAPI
+  `https://api.mangadex.org/docs/swagger.yaml`. This adapter uses manga identity and statistics;
+  forum thread IDs and reply counts are not presented as fetched discussion bodies.
+- Shikimori: official project definitions `https://github.com/shikimori/shikimori`, including
+  `config/initializers/apipie.rb`, `app/graphql/queries/mangas_query.rb`,
+  `app/graphql/types/concerns/db_entry_fields.rb`, `app/query_objects/comments/api_query.rb`
+  and `app/serializers/comment_serializer.rb`. MangaFlow uses its own truthful User-Agent;
+  it does not impersonate a registered application. Local comments are distinct from its
+  MAL-imported score, which is not duplicated in the app's metrics.
+- Dantotsu: public contributor integration documentation
+  `https://github.com/itsmechinmoy/dantotsu-comment-db/blob/main/docs.html`
+  (read document blob `653bcfc82315a9835150a58e656cac3336d8f9c3`) and the public client protocol
+  at commit `c647f715dbfba08d0752cce33ed0b7b473067ba9`. This is contributor documentation,
+  not a service-operator availability guarantee. The documented fixed public `appauth`
+  handshake carries no MangaFlow user's account credential. Rejections and rate limits are
+  returned normally; there is no key/identity rotation or private-service fallback.
+
+These additions were checked by reading contracts and implementation only. No current
+service response, compilation, device appearance or runtime reliability is claimed from
+that review. Existing license notices below remain unchanged.
+
 ## Ovio avatar and Liquid Tabs patterns
 
 The comment avatar's initials-under-photo fallback is adapted for Compose and Coil from

@@ -40,7 +40,8 @@ import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.ReviewStatus
-import dev.mangaflow.ui.CommunityComment
+import dev.mangaflow.data.ReviewRepository
+import dev.mangaflow.ui.CommunityDiscussionComment
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.rememberDelayedBusy
@@ -51,10 +52,11 @@ internal fun rememberChapterDiscussionState(
     manga: Manga,
     chapter: Chapter,
     repository: CopyCommunityRepository,
+    reviews: ReviewRepository,
 ): ChapterDiscussionState {
     val scope = rememberCoroutineScope()
-    val state = remember(manga.id, manga.title, manga.sourceUuid, chapter.id, repository) {
-        ChapterDiscussionState(manga, chapter, repository, scope)
+    val state = remember(manga.id, manga.title, manga.sourceUuid, chapter.id, chapter.title, chapter.group, repository, reviews) {
+        ChapterDiscussionState(manga, chapter, repository, reviews, scope)
     }
     DisposableEffect(state) { onDispose { state.dispose() } }
     return state
@@ -72,7 +74,7 @@ internal fun ChapterDiscussion(
     val scope = rememberCoroutineScope()
     LaunchedEffect(state) { state.ensureLoaded() }
     val mixed = remember(state.sources, chapter.id) { mixedDiscussionRows(state.sources, chapter.id) }
-    val chapterCount = state.sources.firstOrNull { it.source.subjectId == chapter.id }?.source?.reviewCount
+    val chapterCount = state.totalCount
     val muted = foreground.copy(alpha = .58f)
     val busy = state.refreshing || state.paging
     val delayedBusy = rememberDelayedBusy(busy)
@@ -107,7 +109,8 @@ internal fun ChapterDiscussion(
             LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 2.dp)) {
                 items(mixed, key = ReaderDiscussionRow::key) { row ->
-                    DiscussionRow(row, foreground)
+                    CommunityDiscussionComment(row.source.source, row.review, state::replies, scopeLabel = "本话",
+                        foreground = foreground, muted = muted)
                     HorizontalDivider(color = foreground.copy(alpha = .06f), thickness = .5.dp)
                 }
                 items(notices, key = { "notice:${it.key}" }) { source ->
@@ -158,13 +161,6 @@ private fun DiscussionHeading(
                 modifier = Modifier.size(18.dp))
         }
     }
-}
-
-@Composable
-private fun DiscussionRow(row: ReaderDiscussionRow, foreground: Color) {
-    CommunityComment(row.review, modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
-        foreground = foreground, muted = foreground.copy(alpha = .58f),
-        sourceId = row.source.source.id, scopeLabel = "本话")
 }
 
 @Composable
