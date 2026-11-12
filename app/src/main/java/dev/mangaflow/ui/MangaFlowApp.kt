@@ -170,7 +170,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val activity = LocalContext.current.activityOrNull()
     val darkSystem = isSystemInDarkTheme()
     SideEffect {
-        if (frame !is Frame.Reader && activity != null) {
+        if (frame is Frame.Root && activity != null) {
             WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
                 isAppearanceLightStatusBars = !darkSystem
                 isAppearanceLightNavigationBars = !darkSystem
@@ -293,6 +293,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                             onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
                             loadReplies = model::reviewReplies,
+                            active = current.key == frame.key,
                         )
                     }
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
@@ -388,7 +389,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
 }
 }
 
-private tailrec fun Context.activityOrNull(): Activity? = when (this) {
+internal tailrec fun Context.activityOrNull(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.activityOrNull()
     else -> null

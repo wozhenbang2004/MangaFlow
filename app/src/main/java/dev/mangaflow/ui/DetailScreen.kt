@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,8 +49,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.TopAppBarState
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -64,6 +69,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -78,6 +86,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
@@ -98,6 +107,8 @@ import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabContent
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.Job
@@ -134,6 +145,7 @@ fun DetailScreen(
     onReviewMatch: (String, String) -> Unit = { _, _ -> },
     onReviewRelink: (String) -> Unit = {},
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage = { _, _, _ -> ReviewPage(emptyList()) },
+    active: Boolean = true,
 ) {
     val current = detail?.manga ?: manga
     val downloaded = remember(downloadEntries, manga.id) {
@@ -165,15 +177,17 @@ fun DetailScreen(
 
     BoxWithConstraints(
         Modifier.fillMaxSize().background(DetailBackground)
-            .statusBarsPadding().navigationBarsPadding().imePadding(),
+            .navigationBarsPadding().imePadding(),
     ) {
         val density = LocalDensity.current
-        val landscape = maxWidth > maxHeight
-        val compactHero = maxHeight < 600.dp || density.fontScale >= 1.5f
+        val statusInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
+        val landscape = maxWidth > availableHeight
+        val compactHero = availableHeight < 600.dp || density.fontScale >= 1.5f
         val heroHeight = if (compactHero) {
-            (maxHeight * .32f).coerceAtMost((maxHeight - 250.dp).coerceAtLeast(0.dp))
+            (availableHeight * .32f).coerceAtMost((availableHeight - 250.dp).coerceAtLeast(0.dp))
         } else {
-            (maxHeight * .60f).coerceAtMost(560.dp).coerceAtMost(maxHeight - 280.dp)
+            (availableHeight * .60f).coerceAtMost(560.dp).coerceAtMost(availableHeight - 280.dp)
         }
         val heroPixels = with(density) { heroHeight.toPx() }
         val header = rememberTopAppBarState(initialHeightOffsetLimit = -heroPixels)
@@ -205,14 +219,10 @@ fun DetailScreen(
                 }
             }
         }
-        val showToolbarTitle by remember(header, compactHero) {
-            derivedStateOf { compactHero || header.collapsedFraction > .8f }
-        }
-
         // Sakurairo's fixed-background relationship: only the foreground moves.
         // Keep this image's bounds independent of heightOffset to avoid recropping each frame.
         Box(
-            Modifier.fillMaxWidth().height(heroHeight + 48.dp).background(DetailSurface),
+            Modifier.fillMaxWidth().height(heroHeight + 48.dp + statusInset).background(DetailSurface),
             contentAlignment = Alignment.TopCenter,
         ) {
             Icon(Icons.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
@@ -223,34 +233,19 @@ fun DetailScreen(
                 alignment = Alignment.TopCenter,
                 onError = { coverFailed = true }, onSuccess = { coverFailed = false },
             )
+            Box(Modifier.fillMaxWidth().height(statusInset + 96.dp)
+                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .46f), Color.Transparent))))
         }
         Column(Modifier.fillMaxSize()) {
-            Row(
-                Modifier.fillMaxWidth().height(48.dp)
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = .94f))
-                    .padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                DetailAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", onClick = onBack)
-                Text(
-                    if (showToolbarTitle) current.title else "拷贝漫画",
-                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(8.dp))
-                        .clickable(role = Role.Button, onClickLabel = "漫画信息与完整简介") {
-                            fullIntroduction = true
-                        }.padding(horizontal = 8.dp, vertical = 10.dp),
-                    color = DetailForeground, fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
-                if (coverFailed) DetailAction(Icons.Outlined.Refresh, "重新加载封面", onClick = {
+            ArtworkToolbar(
+                header = header, compact = compactHero, title = current.title,
+                favorite = isFavorite, coverFailed = coverFailed, active = active,
+                onBack = onBack, onIntroduction = { fullIntroduction = true },
+                onToggleFavorite = onToggleFavorite, onRetryCover = {
                     coverFailed = false
                     coverRetry++
-                })
-                DetailAction(
-                    if (isFavorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                    if (isFavorite) "从书架移除" else "加入书架", selected = isFavorite,
-                    onClick = onToggleFavorite,
-                )
-            }
+                },
+            )
             Box(
                 Modifier.fillMaxWidth().clipToBounds().nestedScroll(scrolling)
                     .scrollable(rememberScrollableState { 0f }, Orientation.Vertical)
@@ -293,9 +288,9 @@ fun DetailScreen(
                     labels = listOf(if (chapters.isEmpty()) "章节" else "章节 " + chapters.size, "评论"),
                     onSelect = { section = it },
                 )
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    sections.SaveableStateProvider(activeSection) {
-                        when (activeSection) {
+                MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth()) { targetSection ->
+                    sections.SaveableStateProvider(targetSection) {
+                        when (targetSection) {
                             0 -> DetailCatalog(
                                 mangaId = current.id, chapters = chapters, downloaded = downloaded,
                                 progress = resume, loading = loading, error = error, scrolling = scrolling,
@@ -318,6 +313,68 @@ fun DetailScreen(
         }
     }
     if (fullIntroduction) DetailIntroduction(current) { fullIntroduction = false }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ArtworkToolbar(
+    header: TopAppBarState,
+    compact: Boolean,
+    title: String,
+    favorite: Boolean,
+    coverFailed: Boolean,
+    active: Boolean,
+    onBack: () -> Unit,
+    onIntroduction: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onRetryCover: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val progress = header.collapsedFraction.coerceIn(0f, 1f)
+    val tint = lerp(Color.White, colors.onSurface, progress)
+    val plate = Color.Black.copy(alpha = .24f * (1f - progress))
+    val titleAlpha = if (compact) 1f else ((progress - .35f) / .65f).coerceIn(0f, 1f)
+    val titleInteraction = remember { MutableInteractionSource() }
+    val activity = LocalContext.current.activityOrNull()
+    val lightSurface = colors.surface.luminance() > .5f
+    val lightStatusBars by remember(header, lightSurface) {
+        derivedStateOf { lightSurface && header.collapsedFraction > .7f }
+    }
+    LaunchedEffect(active, activity, lightStatusBars, lightSurface) {
+        if (active) activity?.let {
+            WindowCompat.getInsetsController(it.window, it.window.decorView).apply {
+                isAppearanceLightStatusBars = lightStatusBars
+                isAppearanceLightNavigationBars = lightSurface
+            }
+        }
+    }
+    Row(Modifier.fillMaxWidth().background(colors.surface.copy(alpha = progress))
+        .statusBarsPadding().height(48.dp).padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", tint, plate, onBack)
+        Box(Modifier.weight(1f).padding(horizontal = 4.dp).graphicsLayer { alpha = titleAlpha }
+            .motionInputGate(titleAlpha > .1f)
+            .clickable(interactionSource = titleInteraction, indication = null, role = Role.Button,
+                onClickLabel = "漫画信息与完整简介", onClick = onIntroduction)
+            .clip(RoundedCornerShape(12.dp)).background(if (compact) plate else Color.Transparent)
+            .padding(horizontal = 10.dp, vertical = 10.dp)) {
+            Text(title, modifier = Modifier.motionPress(titleInteraction, pressedScale = .985f),
+                color = tint, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", tint, plate, onRetryCover)
+        ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+            if (favorite) "从书架移除" else "加入书架", tint, plate, onToggleFavorite)
+    }
+}
+
+@Composable
+private fun ArtworkAction(icon: ImageVector, description: String, tint: Color, plate: Color, onClick: () -> Unit) {
+    MotionIconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
+        Box(Modifier.size(36.dp).clip(RoundedCornerShape(14.dp)).background(plate), contentAlignment = Alignment.Center) {
+            MotionSwap(icon, Modifier.size(21.dp)) { shown -> Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp)) }
+        }
+    }
 }
 
 @Composable

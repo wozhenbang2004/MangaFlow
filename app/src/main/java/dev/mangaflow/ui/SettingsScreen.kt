@@ -10,11 +10,13 @@ import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,8 +25,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -71,6 +71,10 @@ import dev.mangaflow.data.CopyMangaConfig
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
+import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberDelayedBusy
 import dev.mangaflow.update.UpdateManager
 import dev.mangaflow.update.UpdatePhase
 import coil3.SingletonImageLoader
@@ -170,35 +174,16 @@ fun SettingsScreen(
             Text("翻页方式", style = MaterialTheme.typography.bodyLarge, color = foreground)
             Spacer(Modifier.height(12.dp))
             SettingsChoices(
-                choices = listOf(ReadingMode.VERTICAL to "纵向滚动", ReadingMode.LEFT_TO_RIGHT to "从左至右", ReadingMode.RIGHT_TO_LEFT to "从右至左"),
+                choices = listOf(ReadingMode.VERTICAL to "纵向", ReadingMode.WEBTOON to "条漫",
+                    ReadingMode.LEFT_TO_RIGHT to "左至右", ReadingMode.RIGHT_TO_LEFT to "右至左"),
                 selected = preferences.mode,
                 onSelected = { libraryStore.updatePreferences(preferences.copy(mode = it)) },
             )
             Spacer(Modifier.height(24.dp))
             Text("阅读底色", style = MaterialTheme.typography.bodyLarge, color = foreground)
             Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                listOf(
-                    Triple(ReaderTheme.INK, "墨黑", Color(0xFF171719)),
-                    Triple(ReaderTheme.PAPER, "纸白", Color(0xFFFAFAF8)),
-                    Triple(ReaderTheme.SEPIA, "暖纸", Color(0xFFEADFC8)),
-                ).forEach { (theme, label, color) ->
-                    val selected = theme == preferences.theme
-                    Row(
-                        modifier = Modifier.weight(1f).clip(RoundedCornerShape(14.dp))
-                            .background(if (selected) colors.surfaceContainerHigh else Color.Transparent)
-                            .selectable(selected, role = Role.RadioButton) { libraryStore.updatePreferences(preferences.copy(theme = theme)) }
-                            .padding(horizontal = 10.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
-                        Box(Modifier.size(22.dp).clip(CircleShape).background(color).border(0.5.dp, colors.outline, CircleShape), contentAlignment = Alignment.Center) {
-                            if (selected) Icon(Icons.Outlined.Check, contentDescription = null, tint = if (theme == ReaderTheme.INK) Color.White else Color(0xFF242426), modifier = Modifier.size(14.dp))
-                        }
-                        Spacer(Modifier.width(7.dp))
-                        Text(label, style = MaterialTheme.typography.labelLarge, color = foreground)
-                    }
-                }
+            SettingsThemeChoices(preferences.theme) { theme ->
+                libraryStore.updatePreferences(preferences.copy(theme = theme))
             }
             Spacer(Modifier.height(12.dp))
             SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn) { libraryStore.updatePreferences(preferences.copy(keepScreenOn = it)) }
@@ -216,10 +201,14 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodySmall, color = secondary,
                             modifier = Modifier.padding(top = 3.dp))
                     }
-                    TextButton(enabled = clearingCache == null && cacheSizes[key] != null,
+                    val showBusy = rememberDelayedBusy(clearingCache == key)
+                    SettingsTextAction(enabled = clearingCache == null && cacheSizes[key] != null,
                         onClick = { clearCache(key, label) }) {
-                        if (clearingCache == key) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
-                        else Text("清理", color = secondary)
+                        MotionSwap(showBusy, Modifier.size(16.dp)) { busy ->
+                            if (busy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Text("清理", color = secondary)
                     }
                 }
             }
@@ -241,7 +230,7 @@ fun SettingsScreen(
                     Text("漫流", style = MaterialTheme.typography.titleMedium, color = foreground)
                     Text("${BuildConfig.VERSION_NAME} · ${BuildConfig.VERSION_CODE}", style = MaterialTheme.typography.labelMedium, color = secondary)
                 }
-                TextButton(onClick = { context.openSettingsLink("https://github.com/${UpdateManager.REPOSITORY}/releases") }) {
+                SettingsTextAction(onClick = { context.openSettingsLink("https://github.com/${UpdateManager.REPOSITORY}/releases") }) {
                     Text("版本记录", color = secondary, style = MaterialTheme.typography.labelLarge)
                     Spacer(Modifier.width(4.dp))
                     Icon(Icons.Outlined.OpenInNew, contentDescription = null, tint = secondary, modifier = Modifier.size(14.dp))
@@ -270,7 +259,7 @@ fun SettingsScreen(
                     LinearProgressIndicator(progress = { update.progress }, modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape), color = colors.primary, trackColor = colors.outlineVariant)
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text("${settingsBytes(update.downloaded)} / ${settingsBytes(update.total)}", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = secondary)
-                        TextButton(onClick = updateManager::cancelDownload) {
+                        SettingsTextAction(onClick = updateManager::cancelDownload) {
                             Icon(Icons.Outlined.Pause, contentDescription = null, tint = foreground, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("暂停", color = foreground)
@@ -341,29 +330,59 @@ private fun SettingsSectionLabel(text: String) {
 @Composable
 private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onSelected: (T) -> Unit) {
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(colors.surfaceContainerHigh).padding(4.dp).selectableGroup()) {
-        choices.forEach { (value, label) ->
-            Box(
-                modifier = Modifier.weight(1f).clip(RoundedCornerShape(11.dp)).background(if (selected == value) colors.surface else Color.Transparent)
-                    .selectable(selected == value, role = Role.RadioButton) { onSelected(value) }.padding(vertical = 12.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(label, style = MaterialTheme.typography.labelLarge, color = if (selected == value) colors.onSurface else colors.onSurfaceVariant, fontWeight = if (selected == value) FontWeight.SemiBold else FontWeight.Normal)
+    MotionTabs(
+        selected = choices.indexOfFirst { it.first == selected }, labels = choices.map { it.second },
+        onSelect = { onSelected(choices[it].first) }, role = Role.RadioButton,
+        track = colors.surfaceContainerHigh, indicator = colors.surface,
+        fontSize = MaterialTheme.typography.labelLarge.fontSize,
+        selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
+    )
+}
+
+@Composable
+private fun SettingsThemeChoices(selected: ReaderTheme, onSelected: (ReaderTheme) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val choices = listOf(
+        Triple(ReaderTheme.INK, "墨黑", Color(0xFF171719)),
+        Triple(ReaderTheme.PAPER, "纸白", Color(0xFFFAFAF8)),
+        Triple(ReaderTheme.SEPIA, "暖纸", Color(0xFFEADFC8)),
+    )
+    MotionTabs(
+        selected = choices.indexOfFirst { it.first == selected }, labels = choices.map { it.second },
+        onSelect = { onSelected(choices[it].first) }, role = Role.RadioButton,
+        indicator = colors.surfaceContainerHigh,
+        itemContent = { index, chosen, labelColor ->
+            val (theme, label, swatch) = choices[index]
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                Box(Modifier.size(22.dp).clip(CircleShape).background(swatch)
+                    .border(0.5.dp, colors.outline, CircleShape), contentAlignment = Alignment.Center) {
+                    MotionSwap(chosen, Modifier.size(14.dp)) { checked ->
+                        if (checked) Icon(Icons.Outlined.Check, contentDescription = null,
+                            tint = if (theme == ReaderTheme.INK) Color.White else Color(0xFF242426), modifier = Modifier.size(14.dp))
+                    }
+                }
+                Spacer(Modifier.width(7.dp))
+                Text(label, style = MaterialTheme.typography.labelLarge, color = labelColor)
             }
-        }
-    }
+        },
+    )
 }
 
 @Composable
 private fun SettingsToggle(title: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
     Row(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).toggleable(checked, role = Role.Switch, onValueChange = onCheckedChange).padding(vertical = 5.dp),
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+            .toggleable(checked, interactionSource = interaction, indication = null,
+                role = Role.Switch, onValueChange = onCheckedChange).padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
         Switch(
             checked = checked, onCheckedChange = null,
+            modifier = Modifier.motionPress(interaction, pressedScale = .94f),
+            interactionSource = interaction,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = colors.onPrimary, checkedTrackColor = colors.primary,
                 uncheckedThumbColor = colors.onSurfaceVariant, uncheckedTrackColor = colors.surfaceContainerHigh, uncheckedBorderColor = colors.outlineVariant,
@@ -375,7 +394,10 @@ private fun SettingsToggle(title: String, checked: Boolean, onCheckedChange: (Bo
 @Composable
 private fun SettingsLinkRow(title: String, detail: String, external: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(vertical = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+    val interaction = remember { MutableInteractionSource() }
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+        .motionPress(interaction, pressedScale = .99f).padding(vertical = 18.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
         Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         Spacer(Modifier.width(6.dp))
@@ -384,15 +406,29 @@ private fun SettingsLinkRow(title: String, detail: String, external: Boolean = f
 }
 
 @Composable
-private fun SettingsAction(enabled: Boolean = true, onClick: () -> Unit, content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit) {
+private fun SettingsAction(enabled: Boolean = true, onClick: () -> Unit, content: @Composable RowScope.() -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
     Button(
         onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().height(48.dp),
+        interactionSource = interaction,
         shape = RoundedCornerShape(15.dp),
         colors = ButtonDefaults.buttonColors(containerColor = colors.primary, contentColor = colors.onPrimary,
             disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant),
-        elevation = null, content = content,
-    )
+        elevation = null,
+    ) {
+        Row(Modifier.motionPress(interaction, enabled, pressedScale = .985f),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center, content = content)
+    }
+}
+
+@Composable
+private fun SettingsTextAction(enabled: Boolean = true, onClick: () -> Unit, content: @Composable RowScope.() -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    TextButton(enabled = enabled, onClick = onClick, interactionSource = interaction) {
+        Row(Modifier.motionPress(interaction, enabled), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center, content = content)
+    }
 }
 
 private fun Context.notificationsEnabled(): Boolean = getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() == true

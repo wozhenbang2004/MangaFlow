@@ -7,6 +7,7 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -100,6 +101,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -136,6 +138,8 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import java.io.File
 import java.net.URI
@@ -1011,6 +1015,9 @@ private fun ReaderSettingsDialog(
     onDismiss: () -> Unit,
 ) {
     var dimAmount by remember { mutableFloatStateOf(preferences.dimAmount) }
+    val motion = LocalMotionEnabled.current
+    val modes = listOf(ReadingMode.VERTICAL to "纵向", ReadingMode.WEBTOON to "条漫", ReadingMode.RIGHT_TO_LEFT to "右翻", ReadingMode.LEFT_TO_RIGHT to "左翻")
+    val themes = ReaderTheme.entries
     LaunchedEffect(visible, preferences.dimAmount) { if (visible) dimAmount = preferences.dimAmount }
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth().padding(20.dp), color = Color(0xFF202022), contentColor = Color.White, shape = RoundedCornerShape(24.dp)) {
@@ -1020,35 +1027,49 @@ private fun ReaderSettingsDialog(
                     ReaderIcon(Icons.Rounded.Close, "关闭设置", onClick = onDismiss)
                 }
                 Text("翻页方式", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
-                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = .05f)).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    listOf(ReadingMode.VERTICAL to "纵向", ReadingMode.WEBTOON to "条漫", ReadingMode.RIGHT_TO_LEFT to "右翻", ReadingMode.LEFT_TO_RIGHT to "左翻").forEach { (mode, name) ->
-                        Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(if (preferences.mode == mode) Color.White.copy(alpha = .14f) else Color.Transparent)
-                            .clickable { update(preferences.copy(mode = mode)) }.padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-                            Text(name, color = Color.White.copy(alpha = if (preferences.mode == mode) 1f else .55f), fontSize = 12.sp)
-                        }
-                    }
-                }
+                MotionTabs(
+                    selected = modes.indexOfFirst { it.first == preferences.mode },
+                    labels = modes.map { it.second },
+                    onSelect = { update(preferences.copy(mode = modes[it].first)) },
+                    foreground = Color.White, muted = Color.White.copy(alpha = .55f),
+                    track = Color.White.copy(alpha = .05f), indicator = Color.White.copy(alpha = .14f),
+                    fontSize = 12.sp, role = Role.RadioButton,
+                )
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("背景", fontSize = 14.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        ReaderTheme.entries.forEach { theme ->
-                            Box(Modifier.size(44.dp).semantics { contentDescription = when (theme) { ReaderTheme.INK -> "墨黑背景"; ReaderTheme.PAPER -> "纸白背景"; ReaderTheme.SEPIA -> "暖纸背景" } }
-                                .padding(4.dp).clip(CircleShape).background(theme.background()).clickable { update(preferences.copy(theme = theme)) }, contentAlignment = Alignment.Center) {
-                                if (preferences.theme == theme) Icon(Icons.Rounded.Check, "已选择", Modifier.size(18.dp), tint = theme.foreground())
+                    MotionTabs(
+                        selected = themes.indexOf(preferences.theme),
+                        labels = listOf("墨黑背景", "纸白背景", "暖纸背景"),
+                        onSelect = { update(preferences.copy(theme = themes[it])) },
+                        modifier = Modifier.width(156.dp),
+                        foreground = Color.White, muted = Color.White.copy(alpha = .55f),
+                        indicator = Color.White.copy(alpha = .10f), role = Role.RadioButton,
+                        itemContent = { index, selected, _ ->
+                            val theme = themes[index]
+                            Box(Modifier.size(36.dp).clip(CircleShape).background(theme.background())
+                                .semantics { contentDescription = when (theme) { ReaderTheme.INK -> "墨黑背景"; ReaderTheme.PAPER -> "纸白背景"; ReaderTheme.SEPIA -> "暖纸背景" } },
+                                contentAlignment = Alignment.Center) {
+                                MotionSwap(selected, Modifier.size(18.dp)) { checked ->
+                                    if (checked) Icon(Icons.Rounded.Check, null, Modifier.size(18.dp), tint = theme.foreground())
+                                }
                             }
-                        }
-                    }
+                        },
+                    )
                 }
                 ReaderToggle("保持屏幕常亮", preferences.keepScreenOn) { update(preferences.copy(keepScreenOn = it)) }
-                if (preferences.mode == ReadingMode.VERTICAL) ReaderToggle("页间留白", preferences.pageGap) { update(preferences.copy(pageGap = it)) }
-                if (preferences.mode == ReadingMode.WEBTOON) {
-                    Text("条漫连续显示完整长图，无页间空隙", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
-                }
-                if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
-                    ReaderToggle("双页跨页", preferences.doublePage) { update(preferences.copy(doublePage = it)) }
-                    if (preferences.doublePage) {
-                        ReaderToggle("封面独页", preferences.coverAlone) { update(preferences.copy(coverAlone = it)) }
-                        Text("宽幅图自动整页显示，错位可在阅读页点「错页校正」", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
+                Column(Modifier.fillMaxWidth().animateContentSize(
+                    animationSpec = tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
+                ), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    if (preferences.mode == ReadingMode.VERTICAL) ReaderToggle("页间留白", preferences.pageGap) { update(preferences.copy(pageGap = it)) }
+                    if (preferences.mode == ReadingMode.WEBTOON) {
+                        Text("条漫连续显示完整长图，无页间空隙", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
+                    }
+                    if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
+                        ReaderToggle("双页跨页", preferences.doublePage) { update(preferences.copy(doublePage = it)) }
+                        if (preferences.doublePage) {
+                            ReaderToggle("封面独页", preferences.coverAlone) { update(preferences.copy(coverAlone = it)) }
+                            Text("宽幅图自动整页显示，错位可在阅读页点「错页校正」", color = Color.White.copy(alpha = .55f), fontSize = 12.sp)
+                        }
                     }
                 }
                 Column {

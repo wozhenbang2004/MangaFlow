@@ -1,22 +1,30 @@
 package dev.mangaflow.ui.motion
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -31,7 +39,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
@@ -58,6 +68,8 @@ internal fun MotionTabs(
     indicatorHeight: Dp? = null,
     selectedFontWeight: FontWeight = FontWeight.Medium,
     unselectedFontWeight: FontWeight = FontWeight.Medium,
+    role: Role = Role.Tab,
+    itemContent: (@Composable (index: Int, selected: Boolean, color: Color) -> Unit)? = null,
 ) {
     if (labels.isEmpty()) return
     val index = selected.coerceIn(labels.indices)
@@ -67,6 +79,9 @@ internal fun MotionTabs(
     val motion = LocalMotionEnabled.current
     val tabWidths = remember(labels.size) { mutableStateMapOf<Int, Int>() }
     val height = if (compact) 38.dp else 48.dp
+    val textMeasurer = rememberTextMeasurer()
+    val textStyle = LocalTextStyle.current.copy(fontSize = fontSize)
+    val density = LocalDensity.current
     LaunchedEffect(motion, labels.size) {
         snapshotFlow { latest.value }.collect { target ->
             val toRight = target > left.value
@@ -130,15 +145,31 @@ internal fun MotionTabs(
     ) {
         labels.forEachIndexed { i, label ->
             val interaction = remember { MutableInteractionSource() }
+            val pressed by interaction.collectIsPressedAsState()
+            val pressAlpha = animateFloatAsState(if (pressed) .06f else 0f,
+                if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-press")
+            val labelColor by animateColorAsState(if (i == index) foreground else muted,
+                if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-label")
+            // Reserve both weights so selecting a compact tab cannot shift its neighbours.
+            val labelWidth = if (compact && itemContent == null) with(density) {
+                maxOf(
+                    textMeasurer.measure(label, textStyle.copy(fontWeight = selectedFontWeight), maxLines = 1).size.width,
+                    textMeasurer.measure(label, textStyle.copy(fontWeight = unselectedFontWeight), maxLines = 1).size.width,
+                ).toDp()
+            } else 0.dp
             val tab = if (compact) Modifier.onSizeChanged { tabWidths[i] = it.width }
                 else Modifier.weight(1f)
             Box(tab.height(height).selectable(
-                selected = i == index, role = Role.Tab, interactionSource = interaction, indication = null,
+                selected = i == index, role = role, interactionSource = interaction, indication = null,
                 onClick = { onSelect(i) },
-            ).then(if (compact) Modifier.padding(horizontal = 3.dp) else Modifier), contentAlignment = Alignment.Center) {
-                Text(label, color = if (i == index) foreground else muted, fontSize = fontSize,
-                    fontWeight = if (i == index) selectedFontWeight else unselectedFontWeight,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            ).drawBehind {
+                drawRoundRect(foreground.copy(alpha = pressAlpha.value), cornerRadius = CornerRadius(10.dp.toPx()))
+            }.then(if (compact) Modifier.widthIn(min = labelWidth + 6.dp).padding(horizontal = 3.dp) else Modifier),
+                contentAlignment = Alignment.Center) {
+                if (itemContent != null) itemContent(i, i == index, labelColor)
+                else Text(label, color = labelColor, fontSize = fontSize,
+                        fontWeight = if (i == index) selectedFontWeight else unselectedFontWeight,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }

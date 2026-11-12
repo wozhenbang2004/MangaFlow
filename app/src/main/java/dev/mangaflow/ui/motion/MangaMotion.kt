@@ -18,12 +18,15 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
@@ -45,16 +48,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
@@ -158,6 +165,35 @@ internal fun <T> MotionSwap(target: T, modifier: Modifier = Modifier, content: @
             } else (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
         }, label = "state-slot",
     ) { value -> Box(Modifier.motionInputGate(value == target), contentAlignment = Alignment.Center) { content(value) } }
+}
+
+/** Only tab selection changes the pane. Live data and progress updates keep the current content. */
+@Composable
+internal fun MotionTabContent(
+    selected: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable (Int) -> Unit,
+) {
+    val motion = LocalMotionEnabled.current
+    val distance = with(LocalDensity.current) { 10.dp.roundToPx() }
+    val layoutDirection = LocalLayoutDirection.current
+    AnimatedContent(targetState = selected, modifier = modifier.clipToBounds(),
+        contentAlignment = Alignment.TopStart,
+        transitionSpec = {
+            if (!motion) (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
+            else {
+                val order = if (targetState > initialState) 1 else -1
+                val direction = if (layoutDirection == LayoutDirection.Rtl) -order else order
+                ((fadeIn(tween(MangaMotion.Content)) +
+                    slideInHorizontally(tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing)) { direction * distance }) togetherWith
+                    (fadeOut(tween(MangaMotion.Quick)) +
+                        slideOutHorizontally(tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)) { -direction * distance / 2 }))
+                    .using(null)
+            }
+        }, label = "tab-content",
+    ) { target ->
+        Box(Modifier.fillMaxSize().motionInputGate(target == selected)) { content(target) }
+    }
 }
 
 /** Keep this call composed while closed. The transition owns the lifetime of its Dialog window. */

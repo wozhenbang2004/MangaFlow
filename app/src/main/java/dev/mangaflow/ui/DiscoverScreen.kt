@@ -66,8 +66,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -90,9 +88,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -115,6 +115,7 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
@@ -189,11 +190,12 @@ fun DiscoverScreen(
             item(span = { GridItemSpan(maxLineSpan) }, key = "rank-filters") {
                 var audienceMenuOpen by remember { mutableStateOf(false) }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                        RankPeriod.entries.forEach { period ->
-                            DiscoveryFilter(period.label, state.period == period) { onPeriod(period) }
-                        }
+                    Box(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
+                        MotionTabs(selected = state.period.ordinal, labels = RankPeriod.entries.map { it.label },
+                            onSelect = { onPeriod(RankPeriod.entries[it]) }, role = Role.RadioButton,
+                            modifier = Modifier.width((RankPeriod.entries.size * 48).dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
+                            fontSize = 12.sp, indicatorHeight = 30.dp,
+                            selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal)
                     }
                     Box {
                         TextButton(onClick = { audienceMenuOpen = true }, contentPadding = PaddingValues(horizontal = 6.dp)) {
@@ -453,8 +455,10 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
 
 @Composable
 private fun FeaturedManga(manga: Manga, repository: MangaRepository, interaction: MutableInteractionSource, onOpen: (Manga) -> Unit) {
-    Box(Modifier.fillMaxWidth().height(204.dp).clip(RoundedCornerShape(22.dp))
-        .background(Color(0xFF242426)).clickable(interactionSource = interaction, indication = null) { onOpen(manga) }) {
+    Box(Modifier.fillMaxWidth().height(204.dp)
+        .clickable(interactionSource = interaction, indication = null) { onOpen(manga) }
+        .motionPress(interaction, pressedScale = .985f)
+        .clip(RoundedCornerShape(22.dp)).background(Color(0xFF242426))) {
         MangaCover(manga, repository, Modifier.fillMaxSize(), ContentScale.Crop)
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
             0f to Color.Black.copy(alpha = 0.04f), 0.4f to Color.Transparent,
@@ -472,17 +476,6 @@ private fun FeaturedManga(manga: Manga, repository: MangaRepository, interaction
             }
         }
     }
-}
-
-@Composable
-private fun DiscoveryFilter(label: String, selected: Boolean, onClick: () -> Unit) {
-    FilterChip(selected = selected, onClick = onClick, label = { Text(label, fontSize = 12.sp) },
-        shape = RoundedCornerShape(10.dp), border = null,
-        colors = FilterChipDefaults.filterChipColors(
-            containerColor = Color.Transparent,
-            selectedContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f),
-            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            selectedLabelColor = MaterialTheme.colorScheme.onSurface))
 }
 
 @Composable

@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.ui.motion.MotionTabContent
 
 @Composable
 fun LibraryScreen(
@@ -36,26 +37,29 @@ fun LibraryScreen(
     Column(Modifier.fillMaxSize().navigationBarsPadding()) {
         BrowseTabs(if (showHistory) 1 else 0, listOf("收藏 ${favorites.size}", "最近阅读"),
             Modifier.fillMaxWidth().padding(horizontal = 16.dp)) { showHistory = it == 1 }
-        LazyVerticalGrid(
-            columns = if (showHistory) GridCells.Fixed(1) else GridCells.Adaptive(coverWidth),
-            state = if (showHistory) historyPosition else favoritesPosition,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(if (showHistory) 4.dp else 14.dp),
-        ) {
-            if (showHistory) {
-                if (history.isEmpty()) item(key = "empty-history") {
-                    EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
+        MotionTabContent(if (showHistory) 1 else 0, Modifier.weight(1f).fillMaxWidth()) { tab ->
+            val historyTab = tab == 1
+            LazyVerticalGrid(
+                columns = if (historyTab) GridCells.Fixed(1) else GridCells.Adaptive(coverWidth),
+                state = if (historyTab) historyPosition else favoritesPosition,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(if (historyTab) 4.dp else 14.dp),
+            ) {
+                if (historyTab) {
+                    if (history.isEmpty()) item(key = "empty-history") {
+                        EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
+                    }
+                    items(history, key = { "history-${it.manga.id}" }) {
+                        ContinueRow(it, repository, onContinue)
+                    }
+                } else {
+                    if (favorites.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }, key = "empty-favorites") {
+                        EmptyMessage("把喜欢的故事留下", "在漫画详情点一下收藏，就能放进书架。", "去发现", onDiscover)
+                    }
+                    items(favorites, key = Manga::id) { manga -> CoverTile(manga, repository, dense = true) { onOpen(manga) } }
                 }
-                items(history, key = { "history-${it.manga.id}" }) {
-                    ContinueRow(it, repository, onContinue)
-                }
-            } else {
-                if (favorites.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }, key = "empty-favorites") {
-                    EmptyMessage("把喜欢的故事留下", "在漫画详情点一下收藏，就能放进书架。", "去发现", onDiscover)
-                }
-                items(favorites, key = Manga::id) { manga -> CoverTile(manga, repository, dense = true) { onOpen(manga) } }
             }
         }
     }

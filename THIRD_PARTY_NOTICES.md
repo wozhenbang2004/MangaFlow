@@ -8,7 +8,7 @@ commit `81a1bcb6737356038163728b3b2a657c9dcffa32`.
 The image is decorative beside its author's name, keeps the fallback on failure, and is loaded only with the visible comment.
 The remaining comment layout belongs to MangaFlow.
 
-The shared detail, discovery and shelf selectors in `ui/motion/MotionTabs.kt`
+The shared detail, discovery, shelf, download, settings and reader selectors in `ui/motion/MotionTabs.kt`
 and `ui/BrowseTabs.kt` are adapted from the same fixed Ovio version:
 `components/ovio/liquid-tabs/use-liquid.ts` and
 `components/ovio/liquid-tabs/worlds/minimal.tsx`.
