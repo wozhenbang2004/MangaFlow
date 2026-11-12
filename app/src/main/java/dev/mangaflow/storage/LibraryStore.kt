@@ -30,6 +30,8 @@ data class ChapterProgress(
     val scrollOffset: Int = 0,
 )
 
+enum class ShelfState { NORMAL, FOLLOWING, HOARDING, PAUSED }
+
 /** Device-local reading state. Neither favorites nor reading history require a source account. */
 class LibraryStore(context: Context) {
     private val disk = context.applicationContext.getSharedPreferences("mangaflow_library", Context.MODE_PRIVATE)
@@ -37,6 +39,7 @@ class LibraryStore(context: Context) {
     private val restoreLegacyLongImages = readLegacyLongImageMigration()
     private val _favorites = MutableStateFlow(readArray("favorites") { readManga(it) }.distinctBy(Manga::id))
     private val _history = MutableStateFlow(readArray("history", ::readProgress).distinctBy { it.manga.id })
+    private val _shelfStates = MutableStateFlow(readShelfStates())
     private val _preferences = MutableStateFlow(readPreferences())
     private val _mangaPreferences = MutableStateFlow(readMangaPreferences())
     private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -51,16 +54,19 @@ class LibraryStore(context: Context) {
 
     val favorites: StateFlow<List<Manga>> = _favorites.asStateFlow()
     val history: StateFlow<List<ReadingProgress>> = _history.asStateFlow()
+    val shelfStates: StateFlow<Map<String, ShelfState>> = _shelfStates.asStateFlow()
     val preferences: StateFlow<ReaderPreferences> = _preferences.asStateFlow()
     val mangaPreferences: StateFlow<Map<String, ReaderPreferences>> = _mangaPreferences.asStateFlow()
 
     fun isFavorite(mangaId: String): Boolean = _favorites.value.any { it.id == mangaId }
 
     fun toggleFavorite(manga: Manga) = synchronized(lock) {
-        val next = if (isFavorite(manga.id)) _favorites.value.filterNot { it.id == manga.id }
+        val removing = isFavorite(manga.id)
+        val next = if (removing) _favorites.value.filterNot { it.id == manga.id }
         else listOf(manga) + _favorites.value
         _favorites.value = next
         disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString()).apply()
+        if (removing) removeShelfStateLocked(manga.id)
     }
 
     /** Idempotent removal: a stale item menu can never add the manga back. */
@@ -69,7 +75,42 @@ class LibraryStore(context: Context) {
         if (next.size == _favorites.value.size) return@synchronized
         _favorites.value = next
         disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString()).apply()
+        removeShelfStateLocked(mangaId)
     }
+
+    fun setShelfState(mangaId: String, state: ShelfState) = synchronized(lock) {
+        if (_favorites.value.none { it.id == mangaId }) return@synchronized
+        val next = LinkedHashMap(_shelfStates.value)
+        if (state == ShelfState.NORMAL) next.remove(mangaId) else next[mangaId] = state
+        if (next == _shelfStates.value) return@synchronized
+        _shelfStates.value = next
+        persistShelfStates(next)
+    }
+
+    private fun removeShelfStateLocked(mangaId: String) {
+        if (mangaId !in _shelfStates.value) return
+        val next = LinkedHashMap(_shelfStates.value)
+        next.remove(mangaId)
+        _shelfStates.value = next
+        persistShelfStates(next)
+    }
+
+    private fun persistShelfStates(states: Map<String, ShelfState>) {
+        val json = JSONObject()
+        states.forEach { (id, state) -> json.put(id, state.name) }
+        disk.edit().putString(SHELF_STATES_KEY, json.toString()).apply()
+    }
+
+    private fun readShelfStates(): Map<String, ShelfState> = runCatching {
+        val json = JSONObject(disk.getString(SHELF_STATES_KEY, "{}") ?: "{}")
+        buildMap {
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val id = keys.next()
+                ShelfState.entries.firstOrNull { it.name == json.optString(id) }?.let { put(id, it) }
+            }
+        }
+    }.getOrDefault(emptyMap())
 
     fun progressFor(mangaId: String): ReadingProgress? = _history.value.firstOrNull { it.manga.id == mangaId }
 
@@ -375,6 +416,7 @@ class LibraryStore(context: Context) {
         "${SPREAD_PREFIX}${mangaId.length}:$mangaId${chapterId.length}:$chapterId"
 
     private companion object {
+        const val SHELF_STATES_KEY = "shelf_states"
         const val MANGA_READER_PREFERENCES_KEY = "reader_preferences_by_manga"
         const val SPREAD_PREFIX = "spread_singles:"
         const val CHAPTER_PROGRESS_PREFIX = "chapter_progress:"

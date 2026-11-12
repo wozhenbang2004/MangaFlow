@@ -125,6 +125,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val libraryOpening by model.libraryOpening.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
     val history by model.library.history.collectAsStateWithLifecycle()
+    val shelfStates by model.library.shelfStates.collectAsStateWithLifecycle()
     val preferences by model.library.preferences.collectAsStateWithLifecycle()
     val downloads by model.downloads.entries.collectAsStateWithLifecycle()
     val refreshingDownloads by model.refreshingDownloads.collectAsStateWithLifecycle()
@@ -413,12 +414,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onAudience = { model.selectDiscovery(browse.mode, audience = it) },
                                     )
                                     Section.LIBRARY -> LibraryScreen(
-                                        favorites = favorites, history = history, repository = model.repository,
-                                        opening = libraryOpening, active = rootActive,
+                                        favorites = favorites, history = history, shelfStates = shelfStates,
+                                        repository = model.repository, opening = libraryOpening, active = rootActive,
                                         onOpen = model::readFromLibrary, onDetails = { model.openManga(it) },
                                         onContinue = model::continueReading,
                                         onRemoveFavorite = model::removeFavorite,
                                         onRemoveHistory = model::removeHistory,
+                                        onShelfState = { manga, state -> model.library.setShelfState(manga.id, state) },
                                         onDiscover = { changeSection(Section.DISCOVER) },
                                         onRetryOpen = model::retryLibraryReading, onCancelOpen = model::cancelLibraryReading,
                                     )
