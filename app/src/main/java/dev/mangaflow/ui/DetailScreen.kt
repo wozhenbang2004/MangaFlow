@@ -257,7 +257,7 @@ fun DetailScreen(
         ) {
             DetailGlassButton(Icons.AutoMirrored.Outlined.ArrowBack, "返回", haze, onBack)
             Box(Modifier.weight(1f).padding(horizontal = 12.dp), contentAlignment = Alignment.Center) {
-                AnimatedVisibility(visible = collapsed, enter = fadeIn(), exit = fadeOut()) {
+                androidx.compose.animation.AnimatedVisibility(visible = collapsed, enter = fadeIn(), exit = fadeOut()) {
                     Box(Modifier.clip(RoundedCornerShape(50)).hazeEffect(haze, thinGlass())
                         .padding(horizontal = 16.dp, vertical = 12.dp)) {
                         Text(current.title, color = DetailWhite, fontSize = 14.sp, fontWeight = FontWeight.Medium,
