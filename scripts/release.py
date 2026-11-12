@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -81,18 +82,39 @@ def ref_commit(tag):
     raise RuntimeError("Nested release tag depth exceeded")
 
 
+def require_tag_commit(tag, sha, missing_error=None):
+    # A successful ref creation must still be confirmed by a read. Retry only absence.
+    for delay in (0, 1, 2, 4, 8):
+        if delay:
+            time.sleep(delay)
+        tagged = ref_commit(tag)
+        if tagged == sha:
+            return
+        if tagged is not None:
+            raise RuntimeError(f"Release tag {tag} points to {tagged}; expected {sha}")
+    if missing_error is not None:
+        raise missing_error
+    raise RuntimeError(f"Release tag {tag} is still unavailable after confirmation retries; expected {sha}")
+
+
 def reserve_tag(tag, sha):
     tagged = ref_commit(tag)
     if tagged is None:
+        creation_error = None
         try:
-            request(API + "/git/refs", "POST", {"ref": "refs/tags/" + tag, "sha": sha})
+            created = request(API + "/git/refs", "POST", {"ref": "refs/tags/" + tag, "sha": sha})
         except urllib.error.HTTPError as error:
             if error.code not in (409, 422):
                 raise
             # A retry may observe a ref created by the first accepted request.
-        tagged = ref_commit(tag)
-    if tagged != sha:
-        raise RuntimeError("Release tag does not point to the exact built commit")
+            creation_error = error
+        else:
+            item = created.get("object") or {}
+            if created.get("ref") != "refs/tags/" + tag or item.get("type") != "commit" or item.get("sha") != sha:
+                raise RuntimeError("GitHub did not confirm creation of the requested release tag")
+        require_tag_commit(tag, sha, missing_error=creation_error)
+    elif tagged != sha:
+        raise RuntimeError(f"Release tag {tag} points to {tagged}; expected {sha}")
 
 
 def plan():
@@ -224,9 +246,11 @@ def publish():
             raise RuntimeError("GitHub did not confirm the complete release asset: " + file.name)
     require_current_main(value["sourceCommit"])
     reserve_tag(tag, value["sourceCommit"])
+    require_current_main(value["sourceCommit"])
     result = request(API + "/releases/" + str(release["id"]), "PATCH", {"draft": False, "make_latest": "true"})
-    if result["draft"] or result["tag_name"] != tag or ref_commit(tag) != value["sourceCommit"]:
+    if result["draft"] or result["tag_name"] != tag:
         raise RuntimeError("GitHub did not confirm publication")
+    require_tag_commit(tag, value["sourceCommit"])
     print(result["html_url"])
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

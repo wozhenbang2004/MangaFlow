@@ -2,6 +2,14 @@
 
 Current detail contract: [Large artwork and scrolling](#large-artwork-and-scrolling--2026-11-12-current-contract). Older decisions below are retained with their superseding requirements.
 
+## CI failure follow-up · 2026-11-12
+
+User: “cicd 怎么失败了”. Run `43191429494` (0.1.39, commit `2f613f9`) failed in `compileReleaseKotlin`: the nested `clipPath` / `clipRect` in `ExpandingSearchBar` hid the outer `ContentDrawScope` receiver. Call `this@drawWithContent.drawContent()` inside the same clips; keep the existing search reveal and reader fixes.
+
+Run `43190352044` (0.1.37) compiled and signed, then failed in `reserve_tag`. The subsequently observed `v0.1.37` points to its exact built commit `0a99fec65ed3eae2d1bf636cd87308df70aaec22`; the old error did not distinguish an absent ref from a different SHA, so transient absence is a hypothesis, not a proven historical response. Confirm the POST response, then retry only missing tag reads after 1/2/4/8 seconds. A different SHA or other HTTP error still fails; preserve a rejected create response if no matching tag appears. Recheck current main after the wait and before publication, and keep the final exact-tag check read-only. Do not move existing tags, replace release assets, change signing or loosen version monotonicity. Run 0.1.36 separately stopped because main had advanced; retain that protection.
+
+This follow-up uses existing CI logs, official API contracts and source/diff review. No tests or local build. Submit to current main and confirm the next CI trigger; the new compilation and publication result remains unverified at delivery.
+
 ## Search morph correction · 2026-11-12
 
 User: “搜索框的那个还不是不行去看看我们审美库吧肯定有类似我描述的那种效果的”. This rejects the search appearance delivered at `9527c84`; it does not accept SEARCH-02's visual result. The earlier “点击后图标会有一些动画然后搜索框从图标左侧展出” and floating liquid-glass request remain active.

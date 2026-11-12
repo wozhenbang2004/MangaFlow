@@ -217,7 +217,7 @@ internal fun ExpandingSearchBar(
                 // A moving bottom edge can cross any result row; it must keep the shell's corners.
                 clipPath(foregroundClip) {
                     clipRect(left = left, top = top, right = size.width,
-                        bottom = min(size.height, top + shellHeight)) { drawContent() }
+                        bottom = min(size.height, top + shellHeight)) { this@drawWithContent.drawContent() }
                 }
             }) {
             Row(Modifier.width(panelWidth).height(52.dp).padding(start = 16.dp, end = 48.dp),
