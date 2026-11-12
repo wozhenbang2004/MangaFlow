@@ -139,6 +139,7 @@ fun DetailScreen(
     onRetry: () -> Unit,
     onToggleFavorite: () -> Unit,
     onRead: (Chapter) -> Unit,
+    onContinue: (ReadingProgress) -> Unit,
     onDownload: (Chapter) -> Unit,
     onReviewMore: (String) -> Unit = {},
     onReviewRetry: (String) -> Unit = {},
@@ -152,8 +153,9 @@ fun DetailScreen(
         detail?.chapters ?: downloaded.values.filter { it.status == DownloadStatus.COMPLETED }
             .map(DownloadEntry::chapter).distinctBy(Chapter::id).sortedBy(Chapter::index)
     }
-    val startChapter = chapters.firstOrNull { it.id == progress?.chapterId } ?: chapters.firstOrNull()
-    val resuming = startChapter != null && startChapter.id == progress?.chapterId
+    val resumeProgress = progress?.takeIf { it.manga.id == manga.id && it.chapterId.isNotBlank() }
+    val startChapter = chapters.firstOrNull()
+    val canRead = resumeProgress != null || startChapter != null
     val groups = remember(chapters) { chapters.map(Chapter::group).distinct() }
     var group by rememberSaveable(manga.id) { mutableStateOf("") }
     var descending by rememberSaveable(manga.id) { mutableStateOf(false) }
@@ -228,7 +230,11 @@ fun DetailScreen(
                     }
                     if (error != null) {
                         Column(Modifier.padding(top = 16.dp, bottom = 8.dp)) {
-                            Text(if (chapters.isEmpty()) "目录暂未加载" else "正在显示已下载章节", color = DetailWhite, fontSize = 14.sp)
+                            Text(when {
+                                chapters.isEmpty() -> "目录暂未加载"
+                                chapters.all { downloaded[it.id]?.status == DownloadStatus.COMPLETED } -> "正在显示已下载章节"
+                                else -> "已保留上次目录"
+                            }, color = DetailWhite, fontSize = 14.sp)
                             Spacer(Modifier.height(8.dp))
                             Text(error, color = DetailSecondary, fontSize = 13.sp, lineHeight = 21.sp)
                             Row {
@@ -291,23 +297,23 @@ fun DetailScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Button(
-                onClick = { startChapter?.let(onRead) },
-                enabled = startChapter != null,
+                onClick = { if (resumeProgress != null) onContinue(resumeProgress) else startChapter?.let(onRead) },
+                enabled = canRead,
                 modifier = Modifier.weight(1f).heightIn(min = 56.dp),
                 shape = RoundedCornerShape(18.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = DetailWhite, contentColor = DetailInk,
                     disabledContainerColor = Color(0xFF29292C), disabledContentColor = DetailMuted),
                 contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
             ) {
-                if (loading && startChapter == null) {
+                if (loading && !canRead) {
                     CircularProgressIndicator(Modifier.size(18.dp), color = DetailSecondary, strokeWidth = 1.5.dp)
                 } else Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(24.dp))
                 Spacer(Modifier.width(8.dp))
                 Column {
-                    Text(if (resuming) "继续阅读" else if (loading && startChapter == null) "加载章节" else "开始阅读",
+                    Text(if (resumeProgress != null) "继续阅读" else if (loading && !canRead) "加载章节" else "开始阅读",
                         fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                    if (resuming && progress != null) {
-                        Text(progress.chapterTitle, fontSize = 10.sp, color = DetailInk.copy(alpha = 0.6f),
+                    if (resumeProgress != null) {
+                        Text(resumeProgress.chapterTitle, fontSize = 10.sp, color = DetailInk.copy(alpha = 0.6f),
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }

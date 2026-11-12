@@ -221,6 +221,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         onBack = model::closeDetail, onRetry = model::retryDetail,
                         onToggleFavorite = { model.toggleFavorite(current.state.manga) },
                         onRead = model::readChapter,
+                        onContinue = model::continueReading,
                         onDownload = { onRequestNotifications(); model.downloadChapter(it) },
                         onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                         onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
