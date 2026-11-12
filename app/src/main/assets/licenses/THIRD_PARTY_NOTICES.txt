@@ -1,0 +1,76 @@
+# Third-party notices
+
+## Ovio avatar and Liquid Tabs patterns
+
+The comment avatar's initials-under-photo fallback is adapted for Compose and Coil from
+[JanaSundar/ovio](https://github.com/JanaSundar/ovio/blob/81a1bcb6737356038163728b3b2a657c9dcffa32/components/shared/avatar.tsx),
+commit `81a1bcb6737356038163728b3b2a657c9dcffa32`.
+The image is decorative beside its author's name, keeps the fallback on failure, and is loaded only with the visible comment.
+The remaining comment layout belongs to MangaFlow.
+
+The detail section selector is also adapted from the same fixed Ovio version:
+`components/ovio/liquid-tabs/use-liquid.ts` and `worlds/minimal.tsx`.
+The Compose port preserves independently animated indicator edges and stationary labels,
+uses Android's animation clock and system duration scale, and omits the web deployment demo.
+
+MIT License
+
+Copyright (c) 2026 Jana Sundar
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+## Mihon compact manga header
+
+The compact horizontal cover/information composition in `CompactBookHeader` is adapted from
+[MangaAndSourceTitlesSmall](https://github.com/mihonapp/mihon/blob/524fa53043f2f5b2321ea13027e44f093ab4245c/app/src/main/java/eu/kanade/presentation/manga/components/MangaInfoHeader.kt),
+Mihon commit `524fa53043f2f5b2321ea13027e44f093ab4245c`, licensed under Apache-2.0.
+MangaFlow changes the cover dimensions, text limits and spacing, reuses its own image requests,
+and places metadata inside its bounded detail layout. It does not include Mihon's navigation,
+source APIs, search callbacks, long-scroll description or application-specific types.
+The complete license is included in `app/src/main/assets/licenses/Mihon-APACHE-2.0.txt`.
+
+## BoardUI pagination
+
+The controlled chapter pager is adapted from [BoardUI Pagination](https://www.boardui.com/zh-hans/components/pagination),
+`components/base/pagination/pagination.tsx`, the source saved on 2026-11-01
+(SHA256 `47fbc308182f5ad32415f6c51d917241db02a9b340c6f2fb536554ce784b33ac`).
+MangaFlow keeps controlled page selection, disabled first/last boundaries and compact arrows;
+48dp touch targets and a chapter-range sheet replace the desktop numeric page window.
+
+MIT License
+
+Copyright (c) 2026 Mertcan Dundar Esmergul (BoardUI)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
