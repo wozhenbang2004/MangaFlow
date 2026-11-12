@@ -8,10 +8,17 @@ import dev.mangaflow.account.CloudHistoryEntry
 import dev.mangaflow.account.CopyAccountRepository
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.CopyMangaRepository
+import dev.mangaflow.data.CopyCommunityRepository
+import dev.mangaflow.data.DiscoveryMode
+import dev.mangaflow.data.RankPeriod
+import dev.mangaflow.data.RankAudience
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.data.ReviewRepository
 import dev.mangaflow.data.ReviewSource
+import dev.mangaflow.data.ReviewStatus
+import dev.mangaflow.data.ReviewPage
+import dev.mangaflow.data.MangaReview
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
@@ -23,14 +30,19 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 data class BrowseState(
     val query: String = "",
+    val mode: DiscoveryMode = DiscoveryMode.RECOMMENDED,
+    val period: RankPeriod = RankPeriod.WEEK,
+    val audience: RankAudience = RankAudience.MALE,
     val items: List<Manga> = emptyList(),
     val loading: Boolean = true,
     val loadingMore: Boolean = false,
@@ -80,7 +92,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val library = LibraryStore(application)
     val downloads = DownloadStore.get(application)
     val updates = UpdateManager.get(application)
-    private val reviews = ReviewRepository()
+    val community = CopyCommunityRepository(repository)
+    private val reviews = ReviewRepository(application)
     private val accountRepository = CopyAccountRepository(application)
     private val _account = MutableStateFlow(AccountUiState())
     val account = _account.asStateFlow()
@@ -101,6 +114,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private var chapterPrefetchJob: Job? = null
     private var chapterPrefetchKey: String? = null
     private var readingRequestId = 0L
+    @Volatile private var detailRequestId = 0L
+    @Volatile private var browseRequestId = 0L
+    private val reviewPageJobs = mutableMapOf<String, Job>()
+    private val reviewOverrides = ConcurrentHashMap.newKeySet<String>()
     private val preparingDownloads = mutableSetOf<String>()
     private var accountJob: Job? = null
     private var accountRequestId = 0L
@@ -123,24 +140,39 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun setQuery(query: String) {
         if (query == _browse.value.query) return
         browseJob?.cancel()
-        _browse.value = BrowseState(query = query)
+        val previous = _browse.value
+        _browse.value = BrowseState(query = query, mode = previous.mode, period = previous.period, audience = previous.audience)
+        val requestId = ++browseRequestId
         browseJob = viewModelScope.launch {
             if (query.isNotBlank()) delay(450)
-            loadBrowse(query.trim(), 0)
+            loadBrowse(_browse.value, 0, requestId)
         }
+    }
+
+    fun selectDiscovery(mode: DiscoveryMode, period: RankPeriod = _browse.value.period,
+        audience: RankAudience = _browse.value.audience) {
+        val previous = _browse.value
+        if (previous.mode == mode && previous.period == period && previous.audience == audience) return
+        browseJob?.cancel()
+        _browse.value = BrowseState(query = previous.query, mode = mode, period = period, audience = audience)
+        val requestId = ++browseRequestId
+        browseJob = viewModelScope.launch { loadBrowse(_browse.value, 0, requestId) }
     }
 
     fun refresh() {
         browseJob?.cancel()
         _browse.update { it.copy(loading = true, error = null, failedPage = null, loadingMore = false) }
-        browseJob = viewModelScope.launch { loadBrowse(_browse.value.query.trim(), 0) }
+        val requestId = ++browseRequestId
+        val state = _browse.value
+        browseJob = viewModelScope.launch { loadBrowse(state, 0, requestId) }
     }
 
     fun loadMore() {
         val state = _browse.value
         if (state.loading || state.loadingMore || !state.hasMore) return
         _browse.update { it.copy(loadingMore = true, error = null, failedPage = null) }
-        browseJob = viewModelScope.launch { loadBrowse(state.query.trim(), state.page + 1) }
+        val requestId = ++browseRequestId
+        browseJob = viewModelScope.launch { loadBrowse(state, state.page + 1, requestId) }
     }
 
     fun retryBrowse() {
@@ -148,14 +180,17 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         if (state.loading || state.loadingMore) return
         val page = state.failedPage ?: return
         _browse.update { it.copy(loading = page == 0, loadingMore = page > 0, error = null, failedPage = null) }
-        browseJob = viewModelScope.launch { loadBrowse(state.query.trim(), page) }
+        val requestId = ++browseRequestId
+        browseJob = viewModelScope.launch { loadBrowse(state, page, requestId) }
     }
 
-    private suspend fun loadBrowse(query: String, page: Int) {
+    private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long) {
         try {
-            val result = if (query.isBlank()) repository.discover(page) else repository.search(query, page)
+            val query = state.query.trim()
+            val result = if (query.isBlank()) community.browse(state.mode, state.period, state.audience, page)
+                else repository.search(query, page)
             _browse.update { current ->
-                current.copy(
+                if (requestId != browseRequestId) current else current.copy(
                     items = (if (page == 0) result.items else current.items + result.items).distinctBy(Manga::id),
                     loading = false, loadingMore = false, error = null, failedPage = null,
                     hasMore = result.hasMore, page = page,
@@ -164,7 +199,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (failure: Exception) {
-            _browse.update { it.copy(loading = false, loadingMore = false,
+            _browse.update { if (requestId != browseRequestId) it else it.copy(loading = false, loadingMore = false,
                 error = failure.message ?: "暂时无法读取漫画", failedPage = page) }
         }
     }
@@ -172,14 +207,23 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun openManga(manga: Manga, continueChapterId: String? = null) {
         detailJob?.cancel()
         reviewJob?.cancel()
+        reviewPageJobs.values.forEach { it.cancel() }
+        reviewPageJobs.clear()
+        reviewOverrides.clear()
+        val requestId = ++detailRequestId
         _detail.value = DetailState(manga)
-        loadReviews(manga)
+        loadReviews(manga, requestId)
         detailJob = viewModelScope.launch {
             try {
                 val loaded = repository.detail(manga.id) { metadata ->
-                    _detail.update { if (it?.manga?.id == manga.id) it.copy(manga = metadata) else it }
+                    _detail.update { if (it?.manga?.id == manga.id && requestId == detailRequestId)
+                        it.copy(manga = metadata.copy(popularity = metadata.popularity ?: it.manga.popularity),
+                            reviews = it.reviews.map { source -> if (source.id == "copy")
+                                source.copy(popularity = metadata.popularity ?: source.popularity) else source }) else it }
                 }
-                _detail.update { it?.copy(manga = loaded.manga, detail = loaded, loading = false) }
+                _detail.update { if (requestId != detailRequestId || it?.manga?.id != manga.id) it else
+                    it.copy(manga = loaded.manga.copy(popularity = loaded.manga.popularity ?: it.manga.popularity), detail = loaded, loading = false) }
+                if (requestId != detailRequestId) return@launch
                 if (continueChapterId != null) {
                     val chapter = loaded.chapters.firstOrNull { it.id == continueChapterId }
                     if (chapter != null) readChapter(chapter)
@@ -192,34 +236,134 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 val message = if (offline.isEmpty()) failure.message ?: "暂时无法读取详情"
                 else "暂时无法读取线上目录，下面显示已下载章节。"
                 _detail.update { current ->
-                    if (current?.manga?.id != manga.id) current
+                    if (current?.manga?.id != manga.id || requestId != detailRequestId) current
                     else current.copy(loading = false, error = message,
                         detail = if (offline.isEmpty()) null else MangaDetail(current.manga, offline))
                 }
-                if (continueChapterId != null && offline.any { it.id == continueChapterId }) {
+                if (requestId == detailRequestId && continueChapterId != null && offline.any { it.id == continueChapterId }) {
                     beginReading(ReadingSession(manga, offline, continueChapterId))
                 }
             }
         }
     }
 
-    private fun loadReviews(manga: Manga) {
+    private fun loadReviews(manga: Manga, requestId: Long) {
         reviewJob = viewModelScope.launch {
             try {
-                val sources = reviews.lookup(manga) { source ->
-                    _detail.update { current ->
-                        if (current?.manga?.id != manga.id) current
-                        else current.copy(reviews = (current.reviews.filterNot { it.id == source.id } + source)
-                            .sortedBy { if (it.id == "bangumi") 0 else 1 })
+                coroutineScope {
+                    launch {
+                        val source = try { community.overview(manga) }
+                        catch (cancel: CancellationException) { throw cancel }
+                        catch (failure: Exception) { ReviewSource("copy", "拷贝", ReviewStatus.UNAVAILABLE,
+                            manga.sourceUrl, popularity = manga.popularity,
+                            message = failure.message ?: "拷贝评论暂时无法读取") }
+                        if ("copy" !in reviewOverrides) publishReview(manga.id, requestId, source)
+                    }
+                    launch {
+                        try { reviews.lookup(manga) {
+                            if (it.id !in reviewOverrides) publishReview(manga.id, requestId, it)
+                        } }
+                        catch (cancel: CancellationException) { throw cancel }
+                        catch (_: Exception) {
+                            listOf("bangumi" to "Bangumi", "anilist" to "AniList").forEach { (id, name) ->
+                                if (id !in reviewOverrides && _detail.value?.reviews?.none { it.id == id } == true)
+                                    publishReview(manga.id, requestId, ReviewSource(id, name, ReviewStatus.UNAVAILABLE,
+                                        if (id == "bangumi") "https://bgm.tv" else "https://anilist.co",
+                                        message = "$name 暂时无法读取"))
+                            }
+                        }
                     }
                 }
-                _detail.update { if (it?.manga?.id == manga.id) it.copy(reviews = sources, reviewsLoading = false) else it }
             } catch (cancel: CancellationException) {
                 throw cancel
-            } catch (_: Exception) {
-                _detail.update { if (it?.manga?.id == manga.id) it.copy(reviewsLoading = false) else it }
+            } finally {
+                _detail.update { if (it?.manga?.id == manga.id && requestId == detailRequestId)
+                    it.copy(reviewsLoading = false) else it }
             }
         }
+    }
+
+    private fun publishReview(mangaId: String, requestId: Long, source: ReviewSource) {
+        _detail.update { current ->
+            if (current?.manga?.id != mangaId || requestId != detailRequestId) current
+            else current.copy(reviews = (current.reviews.filterNot { it.id == source.id } +
+                if (source.id == "copy") source.copy(popularity = current.manga.popularity ?: source.popularity) else source)
+                .sortedBy { when (it.id) { "copy" -> 0; "bangumi" -> 1; else -> 2 } })
+        }
+    }
+
+    fun moreReviews(sourceId: String) {
+        val state = _detail.value ?: return
+        val source = state.reviews.firstOrNull { it.id == sourceId } ?: return
+        val page = source.nextPage ?: return
+        if (source.loadingMore || reviewPageJobs[sourceId]?.isActive == true) return
+        val requestId = detailRequestId
+        reviewOverrides.add(sourceId)
+        publishReview(state.manga.id, requestId, source.copy(loadingMore = true, reviewsError = null))
+        reviewPageJobs[sourceId] = viewModelScope.launch {
+            try {
+                val result = if (sourceId == "copy") community.comments(state.manga, source, page)
+                    else reviews.loadMore(state.manga, source, page)
+                publishReview(state.manga.id, requestId, source.copy(
+                    reviews = (source.reviews + result.items).distinctBy(MangaReview::id),
+                    reviewCount = result.total ?: source.reviewCount, nextPage = result.nextPage,
+                    loadingMore = false, reviewsError = null))
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                publishReview(state.manga.id, requestId, source.copy(loadingMore = false,
+                    reviewsError = failure.message ?: "评论加载失败，请重试"))
+            }
+        }
+    }
+
+    fun retryReviews(sourceId: String) {
+        val state = _detail.value ?: return
+        val source = state.reviews.firstOrNull { it.id == sourceId } ?: return
+        if (source.loadingMore || reviewPageJobs[sourceId]?.isActive == true) return
+        if (source.reviews.isNotEmpty() && source.nextPage != null && source.reviewsError != null) {
+            moreReviews(sourceId)
+            return
+        }
+        refreshReviewSource(sourceId)
+    }
+
+    fun matchReviews(sourceId: String, subjectId: String) = refreshReviewSource(sourceId, subjectId)
+
+    fun relinkReviews(sourceId: String) = refreshReviewSource(sourceId, relink = true)
+
+    private fun refreshReviewSource(sourceId: String, subjectId: String? = null, relink: Boolean = false) {
+        val state = _detail.value ?: return
+        val source = state.reviews.firstOrNull { it.id == sourceId } ?: return
+        if (reviewPageJobs[sourceId]?.isActive == true) return
+        val requestId = detailRequestId
+        reviewOverrides.add(sourceId)
+        publishReview(state.manga.id, requestId, source.copy(loadingMore = true, reviewsError = null))
+        reviewPageJobs[sourceId] = viewModelScope.launch {
+            try {
+                val result = when {
+                    sourceId == "copy" -> community.overview(state.manga)
+                    relink -> reviews.relink(state.manga, sourceId)
+                    subjectId != null -> reviews.choose(state.manga, sourceId, subjectId)
+                    source.subjectId.isNotBlank() && source.status == ReviewStatus.READY -> {
+                        val page = reviews.loadMore(state.manga, source, 0)
+                        source.copy(reviews = page.items, reviewCount = page.total, nextPage = page.nextPage,
+                            loadingMore = false, reviewsError = null)
+                    }
+                    else -> reviews.lookup(state.manga).first { it.id == sourceId }
+                }
+                publishReview(state.manga.id, requestId, result)
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                publishReview(state.manga.id, requestId, source.copy(loadingMore = false,
+                    reviewsError = failure.message ?: "评论加载失败，请重试"))
+            }
+        }
+    }
+
+    suspend fun reviewReplies(source: ReviewSource, review: MangaReview, page: Int): ReviewPage {
+        val manga = _detail.value?.manga ?: return ReviewPage(emptyList())
+        if (source.id != "copy") return ReviewPage(emptyList())
+        return community.replies(manga, source, review, page)
     }
 
     fun retryDetail() { _detail.value?.manga?.let { openManga(it) } }
@@ -227,6 +371,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun closeDetail() {
         detailJob?.cancel()
         reviewJob?.cancel()
+        reviewPageJobs.values.forEach { it.cancel() }
+        reviewPageJobs.clear()
+        detailRequestId++
         _detail.value = null
     }
 

@@ -271,6 +271,20 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
         val status = section.select("li").firstOrNull { row ->
             row.children().firstOrNull()?.text()?.trim()?.let { it.startsWith("狀態") || it.startsWith("状态") } == true
         }?.selectFirst(".comicParticulars-right-txt")?.text().orEmpty()
+        val popularityText = section.select("li").firstOrNull { row ->
+            row.children().firstOrNull()?.text()?.trim()?.let { it.startsWith("熱度") || it.startsWith("热度") } == true
+        }?.selectFirst(".comicParticulars-right-txt")?.text().orEmpty()
+        val popularity = Regex("^([0-9]+(?:\\.[0-9]+)?)\\s*([wW万萬亿億kK]?)$")
+            .matchEntire(popularityText.replace(",", "").trim())?.let { match ->
+                val unit = when (match.groupValues[2]) {
+                    "w", "W", "万", "萬" -> 10_000.0
+                    "亿", "億" -> 100_000_000.0
+                    "k", "K" -> 1_000.0
+                    else -> 1.0
+                }
+                match.groupValues[1].toDoubleOrNull()?.times(unit)?.takeIf { it.isFinite() && it >= 0 && it < Long.MAX_VALUE }
+                    ?.toLong()
+            }
         val manga = Manga(
             id = mangaId,
             title = title,
@@ -280,6 +294,8 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
             status = status,
             tags = section.select(".comicParticulars-tag a").map { it.text().removePrefix("#") }.filter(String::isNotBlank),
             sourceUrl = url.toString(),
+            sourceUuid = comicUuid.orEmpty(),
+            popularity = popularity,
         )
         currentCoroutineContext().ensureActive()
         onMetadata?.invoke(manga)

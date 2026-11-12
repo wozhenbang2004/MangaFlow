@@ -44,7 +44,6 @@ import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FormatListNumbered
@@ -67,7 +66,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -113,12 +111,11 @@ import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.data.MangaReview
+import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.ReviewSource
-import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
-import java.util.Locale
 import kotlinx.coroutines.launch
 
 private val DetailInk = Color(0xFF121213)
@@ -143,6 +140,11 @@ fun DetailScreen(
     onToggleFavorite: () -> Unit,
     onRead: (Chapter) -> Unit,
     onDownload: (Chapter) -> Unit,
+    onReviewMore: (String) -> Unit = {},
+    onReviewRetry: (String) -> Unit = {},
+    onReviewMatch: (String, String) -> Unit = { _, _ -> },
+    onReviewRelink: (String) -> Unit = {},
+    loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage = { _, _, _ -> ReviewPage(emptyList()) },
 ) {
     val current = detail?.manga ?: manga
     val downloaded = remember(downloadEntries, manga.id) { downloadEntries.filter { it.manga.id == manga.id }.associateBy { it.chapter.id } }
@@ -184,7 +186,14 @@ fun DetailScreen(
         ) {
             item(key = "hero") { DetailHero(current, openLink) }
             item(key = "synopsis") { DetailSynopsis(current.description, loading) }
-            item(key = "reviews") { DetailReviews(reviews, reviewsLoading, openLink) }
+            item(key = "reviews") {
+                CommunityOverview(
+                    mangaId = current.id, mangaTitle = current.title,
+                    sources = reviews, loading = reviewsLoading, openLink = openLink,
+                    onMore = onReviewMore, onRetry = onReviewRetry,
+                    onMatch = onReviewMatch, onRelink = onReviewRelink, loadReplies = loadReplies,
+                )
+            }
             // This header has a stable index so the persistent chapter shortcut can scroll to it.
             item(key = "catalog") {
                 Column(Modifier.padding(horizontal = 24.dp).padding(top = 34.dp, bottom = 8.dp)) {
@@ -402,90 +411,6 @@ private fun DetailSynopsis(description: String, loading: Boolean) {
 }
 
 @Composable
-private fun DetailReviews(sources: List<ReviewSource>, loading: Boolean, openLink: (String) -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 26.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("读者评价", color = DetailWhite, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.weight(1f))
-            if (loading) CircularProgressIndicator(Modifier.size(14.dp), color = DetailMuted, strokeWidth = 1.dp)
-        }
-        if (loading && sources.isEmpty()) {
-            Text("正在寻找同名作品", color = DetailMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp))
-        } else if (sources.isEmpty()) {
-            Text("暂无评价", color = DetailMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp))
-        }
-        sources.forEachIndexed { index, source ->
-            key(source.id) {
-                if (index > 0) HorizontalDivider(color = DetailLine)
-                ReviewSourceRow(source, openLink)
-            }
-        }
-        if (loading && sources.isNotEmpty()) {
-            val pending = listOf("bangumi" to "Bangumi", "anilist" to "AniList")
-                .filterNot { (id, _) -> sources.any { it.id == id } }.map { it.second }
-            Text(if (pending.isEmpty()) "正在补全评价" else "${pending.joinToString("、")} · 正在加载",
-                color = DetailMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
-        }
-    }
-}
-
-@Composable
-private fun ReviewSourceRow(source: ReviewSource, openLink: (String) -> Unit) {
-    var expanded by rememberSaveable(source.id, source.url) { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().padding(vertical = 16.dp).animateContentSize()) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(role = Role.Button) { openLink(source.url) },
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(Color.White.copy(alpha = 0.06f)),
-                contentAlignment = Alignment.Center) {
-                Text(if (source.id == "bangumi") "bgm" else "A", color = DetailWhite.copy(alpha = 0.92f),
-                    fontWeight = FontWeight.Bold, fontSize = if (source.id == "bangumi") 10.sp else 18.sp)
-            }
-            Column(Modifier.weight(1f)) {
-                Text(source.name, color = DetailWhite, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                source.ratingCount?.takeIf { it > 0 }?.let { count ->
-                    Text("$count 人评分", color = DetailMuted, fontSize = 10.sp, modifier = Modifier.padding(top = 3.dp))
-                }
-            }
-            if (source.score != null) {
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text(scoreLabel(source.score), color = DetailWhite, fontSize = 23.sp, fontWeight = FontWeight.Medium)
-                    Text(" / ${source.scoreScale}", color = DetailMuted, fontSize = 10.sp, modifier = Modifier.padding(bottom = 4.dp))
-                }
-            } else Text("—", color = DetailMuted, fontSize = 18.sp)
-            Icon(Icons.Outlined.OpenInNew, null, tint = DetailMuted, modifier = Modifier.size(14.dp))
-        }
-        if (source.status == ReviewStatus.READY && source.reviews.isNotEmpty()) {
-            (if (expanded) source.reviews else source.reviews.take(1)).forEach { review ->
-                ReviewExcerpt(review, openLink)
-            }
-            if (source.reviews.size > 1) TextButton(onClick = { expanded = !expanded },
-                contentPadding = PaddingValues(start = 46.dp, end = 6.dp)) {
-                Text(if (expanded) "收起" else "另外 ${source.reviews.size - 1} 条评价", color = DetailMuted, fontSize = 11.sp)
-            }
-        } else {
-            Text(source.message, color = DetailMuted, fontSize = 12.sp, lineHeight = 20.sp,
-                modifier = Modifier.padding(start = 46.dp, top = 5.dp))
-        }
-    }
-}
-
-@Composable
-private fun ReviewExcerpt(review: MangaReview, openLink: (String) -> Unit) {
-    Column(Modifier.padding(start = 46.dp, top = 8.dp).fillMaxWidth().clickable(role = Role.Button) { openLink(review.url) }) {
-        Text(review.summary, color = DetailSecondary, fontSize = 13.sp, lineHeight = 22.sp,
-            maxLines = 4, overflow = TextOverflow.Ellipsis)
-        Row(Modifier.heightIn(min = 36.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(review.author, color = DetailMuted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f))
-            review.score?.let { Text("${scoreLabel(it)} / ${review.scoreScale}", color = DetailMuted, fontSize = 10.sp) }
-            Spacer(Modifier.width(10.dp))
-            Text("原文", color = DetailMuted, fontSize = 10.sp)
-            Icon(Icons.Outlined.ChevronRight, null, tint = DetailMuted, modifier = Modifier.size(14.dp))
-        }
-    }
-}
-
-@Composable
 private fun ChapterSearch(query: String, onChange: (String) -> Unit, onClear: () -> Unit) {
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -602,6 +527,3 @@ private fun thinGlass() = HazeStyle(
     noiseFactor = 0f,
     fallbackTint = HazeTint(Color(0xFF242427).copy(alpha = 0.82f)),
 )
-
-private fun scoreLabel(score: Double): String = if (score == score.toInt().toDouble()) score.toInt().toString()
-else String.format(Locale.ROOT, "%.1f", score)

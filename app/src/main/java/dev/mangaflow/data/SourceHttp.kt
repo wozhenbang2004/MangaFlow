@@ -7,6 +7,7 @@ import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.time.ZonedDateTime
@@ -63,16 +64,22 @@ internal class SourceHttp(private val client: OkHttpClient = sourceClient()) {
                             val retry = retryAfter(current.header("Retry-After"))
                             when (current.code) {
                                 209, 210, 429 -> {
-                                    rememberPause(request.url, retry)
+                                    val pause = if (current.code == 429 && retry == 0L) 60L else retry
+                                    rememberPause(request.url, pause)
                                     // Account 210 responses can carry a business error.
                                     // Preserve that message for the account parser;
                                     // it must still reject the response as a login result.
                                     if (current.code != 210 || !readAccountError210) {
+                                        val reason = runCatching {
+                                            val json = JSONObject(current.peekBody(4096).string())
+                                            (json.opt("message") as? String)?.trim()?.take(240)
+                                        }.getOrNull()?.takeIf { it.isNotBlank() }
                                         throw SourceException(
-                                            "$operation 暂时被来源限制（${current.code}）" +
-                                                if (retry > 0) "，${retry} 秒后可重试。" else "，请稍后重试或查看原站提示。",
+                                            "$operation 来源返回提示（${current.code}）" +
+                                                (reason?.let { "：$it" } ?: "，请稍后重试或查看原站提示。") +
+                                                (if (pause > 0) " ${pause} 秒后可重试。" else ""),
                                             publicUrl,
-                                            retry,
+                                            pause,
                                         )
                                     }
                                 }

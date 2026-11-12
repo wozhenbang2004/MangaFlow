@@ -224,6 +224,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         manga = current.session.manga, chapters = current.session.chapters,
                         initialChapterId = current.session.chapterId,
                         repository = model.repository, libraryStore = model.library, downloadStore = model.downloads,
+                        communityRepository = model.community,
                         onBack = model::closeReader, onRequestNotificationPermission = onRequestNotifications,
                         onChapterVisible = model::onChapterVisible,
                         onNearChapterEnd = model::prefetchNextChapter,
@@ -242,6 +243,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         onToggleFavorite = { model.toggleFavorite(current.state.manga) },
                         onRead = model::readChapter,
                         onDownload = { onRequestNotifications(); model.downloadChapter(it) },
+                        onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
+                        onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
+                        loadReplies = model::reviewReplies,
                     )
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
                         Column(Modifier.fillMaxSize().statusBarsPadding()) {
@@ -262,6 +266,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onRetry = model::retryBrowse, onMore = model::loadMore,
                                         onOpen = { model.openManga(it) },
                                         onContinue = model::continueReading,
+                                        onMode = { model.selectDiscovery(it) },
+                                        onPeriod = { model.selectDiscovery(browse.mode, period = it) },
+                                        onAudience = { model.selectDiscovery(browse.mode, audience = it) },
                                     )
                                     Section.LIBRARY -> LibraryScreen(
                                         favorites = favorites, history = history, repository = model.repository,

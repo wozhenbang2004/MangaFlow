@@ -4,6 +4,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -49,6 +51,13 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -78,8 +87,12 @@ import coil3.request.crossfade
 import dev.mangaflow.BrowseState
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.data.DiscoveryMode
+import dev.mangaflow.data.RankPeriod
+import dev.mangaflow.data.RankAudience
 import dev.mangaflow.storage.ReadingProgress
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DiscoverScreen(
     state: BrowseState,
@@ -91,14 +104,18 @@ fun DiscoverScreen(
     onMore: () -> Unit,
     onOpen: (Manga) -> Unit,
     onContinue: (ReadingProgress) -> Unit,
+    onMode: (DiscoveryMode) -> Unit,
+    onPeriod: (RankPeriod) -> Unit,
+    onAudience: (RankAudience) -> Unit,
 ) {
     val grid = rememberLazyGridState()
     val keyboard = LocalSoftwareKeyboardController.current
-    var previousQuery by rememberSaveable { mutableStateOf(state.query) }
-    LaunchedEffect(state.query) {
-        if (previousQuery != state.query) {
+    val selectionKey = "${state.query}|${state.mode}|${state.period}|${state.audience}"
+    var previousQuery by rememberSaveable { mutableStateOf(selectionKey) }
+    LaunchedEffect(selectionKey) {
+        if (previousQuery != selectionKey) {
             grid.scrollToItem(0)
-            previousQuery = state.query
+            previousQuery = selectionKey
         }
     }
     LazyVerticalGrid(
@@ -141,7 +158,41 @@ fun DiscoverScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        if (state.query.isBlank() && history.isNotEmpty()) {
+        if (state.query.isBlank()) {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "discovery-tabs") {
+                Column {
+                    // Continuous underline follows the selected peer, keeping navigation separate from filters.
+                    TabRow(selectedTabIndex = state.mode.ordinal, containerColor = Color.Transparent,
+                        contentColor = MaterialTheme.colorScheme.onSurface, divider = {},
+                        indicator = { positions ->
+                            TabRowDefaults.SecondaryIndicator(
+                                modifier = Modifier.tabIndicatorOffset(positions[state.mode.ordinal]).padding(horizontal = 24.dp),
+                                height = 2.dp, color = MaterialTheme.colorScheme.onSurface)
+                        }) {
+                        DiscoveryMode.entries.forEach { mode ->
+                            Tab(selected = state.mode == mode, onClick = { onMode(mode) },
+                                selectedContentColor = MaterialTheme.colorScheme.onSurface,
+                                unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                text = { Text(mode.label, fontSize = 15.sp,
+                                    fontWeight = if (state.mode == mode) FontWeight.SemiBold else FontWeight.Normal) })
+                        }
+                    }
+                    if (state.mode == DiscoveryMode.RANKING) {
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            RankPeriod.entries.forEach { period ->
+                                DiscoveryFilter(period.label, state.period == period) { onPeriod(period) }
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            RankAudience.entries.forEach { audience ->
+                                DiscoveryFilter(audience.label, state.audience == audience) { onAudience(audience) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (state.query.isBlank() && state.mode == DiscoveryMode.RECOMMENDED && history.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "continue") {
                 ContinueRow(history.first(), repository, onContinue)
             }
@@ -154,23 +205,41 @@ fun DiscoverScreen(
             }
         } else if (state.items.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
-                EmptyMessage("没有找到这本漫画", "试试书名的一部分，或换个别名。")
+                EmptyMessage(if (state.query.isBlank()) "暂时没有漫画" else "没有找到这本漫画",
+                    if (state.query.isBlank()) "来源暂时没有返回内容，可以稍后刷新。" else "试试书名的一部分，或换个别名。")
             }
         } else {
-            if (state.query.isBlank()) {
+            if (state.query.isBlank() && state.mode == DiscoveryMode.RECOMMENDED) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "hero") {
                     FeaturedManga(state.items.first(), repository, onOpen)
                 }
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (state.query.isBlank()) "热门漫画" else "搜索结果", style = MaterialTheme.typography.titleLarge)
+                    Text(when {
+                        state.query.isNotBlank() -> "搜索结果"
+                        state.mode == DiscoveryMode.RANKING -> "${state.period.label} · ${state.audience.label}"
+                        state.mode == DiscoveryMode.LATEST -> "最近更新"
+                        else -> "发现好故事"
+                    }, style = MaterialTheme.typography.titleLarge)
                     Spacer(Modifier.weight(1f))
                     if (state.loading) CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 1.5.dp)
-                    else Text("拷贝漫画", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    else Text(if (state.mode == DiscoveryMode.RANKING && state.query.isBlank()) when (state.period) {
+                        RankPeriod.DAY -> "上升最快"
+                        RankPeriod.WEEK -> "最近 7 天"
+                        RankPeriod.MONTH -> "最近 30 天"
+                        RankPeriod.TOTAL -> "拷贝热度"
+                    } else "拷贝漫画", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            items(state.items, key = Manga::id) { manga -> CoverTile(manga, repository) { onOpen(manga) } }
+            if (state.query.isBlank() && state.mode == DiscoveryMode.RANKING) {
+                items(state.items, key = Manga::id, span = { GridItemSpan(maxLineSpan) }) { manga ->
+                    RankRow(manga, repository) { onOpen(manga) }
+                }
+            } else {
+                val visible = if (state.query.isBlank() && state.mode == DiscoveryMode.RECOMMENDED) state.items.drop(1) else state.items
+                items(visible, key = Manga::id) { manga -> CoverTile(manga, repository) { onOpen(manga) } }
+            }
             if (state.error != null) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "more-error") {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -192,13 +261,13 @@ fun DiscoverScreen(
 
 @Composable
 private fun FeaturedManga(manga: Manga, repository: MangaRepository, onOpen: (Manga) -> Unit) {
-    Box(Modifier.fillMaxWidth().height(330.dp).clip(RoundedCornerShape(24.dp))
+    Box(Modifier.fillMaxWidth().height(280.dp).clip(RoundedCornerShape(22.dp))
         .background(Color(0xFF242426)).clickable { onOpen(manga) }) {
         MangaCover(manga, repository, Modifier.fillMaxSize(), ContentScale.Crop)
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
             0f to Color.Black.copy(alpha = 0.04f), 0.4f to Color.Transparent,
             0.75f to Color.Black.copy(alpha = 0.5f), 1f to Color.Black.copy(alpha = 0.84f))))
-        Text("随手翻开", color = Color.White.copy(alpha = 0.92f), style = MaterialTheme.typography.labelMedium,
+        Text("拷贝推荐", color = Color.White.copy(alpha = 0.92f), style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(20.dp)
                 .clip(RoundedCornerShape(100)).background(Color.Black.copy(alpha = 0.23f)).padding(horizontal = 12.dp, vertical = 7.dp))
         Column(Modifier.align(Alignment.BottomStart).padding(24.dp)) {
@@ -212,6 +281,44 @@ private fun FeaturedManga(manga: Manga, repository: MangaRepository, onOpen: (Ma
                     modifier = Modifier.clip(CircleShape).background(Color.White.copy(alpha = 0.17f)).padding(12.dp).size(20.dp))
             }
         }
+    }
+}
+
+@Composable
+private fun DiscoveryFilter(label: String, selected: Boolean, onClick: () -> Unit) {
+    FilterChip(selected = selected, onClick = onClick, label = { Text(label, fontSize = 12.sp) },
+        shape = RoundedCornerShape(10.dp), border = null,
+        colors = FilterChipDefaults.filterChipColors(
+            containerColor = Color.Transparent,
+            selectedContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f),
+            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            selectedLabelColor = MaterialTheme.colorScheme.onSurface))
+}
+
+@Composable
+private fun RankRow(manga: Manga, repository: MangaRepository, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick)
+        .padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(manga.rank?.toString()?.padStart(2, '0') ?: "—", fontSize = 20.sp,
+            fontWeight = if ((manga.rank ?: 99) <= 3) FontWeight.SemiBold else FontWeight.Normal,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if ((manga.rank ?: 99) <= 3) .92f else .4f),
+            modifier = Modifier.width(38.dp))
+        MangaCover(manga, repository, Modifier.width(65.dp).height(91.dp).clip(RoundedCornerShape(9.dp)))
+        Column(Modifier.weight(1f).padding(start = 16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Text(manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(manga.authors.take(2).joinToString(" / "), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            manga.popularity?.let { value ->
+                val label = when {
+                    value >= 100_000_000 -> String.format(java.util.Locale.ROOT, "%.1f亿", value / 100_000_000.0)
+                    value >= 10_000 -> String.format(java.util.Locale.ROOT, "%.1f万", value / 10_000.0)
+                    else -> value.toString()
+                }
+                Text("热度 $label", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Icon(Icons.AutoMirrored.Outlined.ArrowForward, null, Modifier.padding(start = 8.dp).size(17.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .55f))
     }
 }
 

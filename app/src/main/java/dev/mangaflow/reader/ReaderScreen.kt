@@ -109,6 +109,7 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import coil3.size.Scale
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.Page
@@ -145,6 +146,7 @@ fun ReaderScreen(
     repository: MangaRepository,
     libraryStore: LibraryStore,
     downloadStore: DownloadStore,
+    communityRepository: CopyCommunityRepository,
     onBack: () -> Unit,
     onRequestNotificationPermission: () -> Unit = {},
     onChapterVisible: (Manga, Chapter) -> Unit = { _, _ -> },
@@ -258,7 +260,12 @@ fun ReaderScreen(
                         }
                     },
                     onTap = { controlsVisible = !controlsVisible },
-                    onNext = siblings.getOrNull(chapterIndex + 1)?.let { next -> { chapterId = next.id; controlsVisible = true } },
+                    endContent = {
+                        ChapterDiscussion(manga, chapter, communityRepository, background, preferences.theme.foreground(),
+                            onNext = siblings.getOrNull(chapterIndex + 1)?.let { next ->
+                                { chapterId = next.id; controlsVisible = true }
+                            })
+                    },
                 )
             }
         }
@@ -364,7 +371,7 @@ private fun ChapterPages(
     onVisibleImageLoaded: () -> Unit,
     onNearEnd: () -> Unit,
     onTap: () -> Unit,
-    onNext: (() -> Unit)?,
+    endContent: @Composable () -> Unit,
 ) {
     val save by rememberUpdatedState(onSave)
     val location by rememberUpdatedState(onLocation)
@@ -405,18 +412,21 @@ private fun ChapterPages(
             }
         }
         LaunchedEffect(list) {
-            snapshotFlow { list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex) to list.firstVisibleItemScrollOffset }
+            snapshotFlow { list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex) to
+                if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0 }
                 .distinctUntilChanged().collect { (index, offset) -> if (!restoring) location(index, offset) }
         }
         LaunchedEffect(list) {
-            snapshotFlow { Triple(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex), list.firstVisibleItemScrollOffset, restoring) }
+            snapshotFlow { Triple(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
+                if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0, restoring) }
                 .debounce(450).distinctUntilChanged().collect { (index, offset, restoringNow) -> if (!restoringNow) save(index, offset) }
         }
         LaunchedEffect(targetPage) {
             targetPage?.let { restoring = false; list.scrollToItem(it.coerceIn(0, pages.lastIndex)); onTargetConsumed() }
         }
         DisposableEffect(list) {
-            onDispose { if (!restoring) save(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex), list.firstVisibleItemScrollOffset) }
+            onDispose { if (!restoring) save(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
+                if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0) }
         }
         AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests) {
             val visible = list.layoutInfo.visibleItemsInfo.filter { it.index in pages.indices }
@@ -438,16 +448,14 @@ private fun ChapterPages(
                 )
             }
             item("chapter-end", contentType = "chapter-end") {
-                Column(Modifier.fillMaxWidth().padding(vertical = 48.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("本章已读完", color = preferences.theme.foreground().copy(alpha = .45f), fontSize = 13.sp)
-                    if (onNext != null) TextButton(onClick = onNext) { Text("继续下一章", color = preferences.theme.foreground()) }
-                }
+                endContent()
             }
         }
     } else {
-        val pager = rememberPagerState(initialPage = startPage, pageCount = { pages.size })
+        val pager = rememberPagerState(initialPage = startPage, pageCount = { pages.size + 1 })
         LaunchedEffect(pager) {
-            snapshotFlow { pager.currentPage }.distinctUntilChanged().collect { index -> location(index, 0); save(index, 0) }
+            snapshotFlow { pager.currentPage.coerceAtMost(pages.lastIndex) }.distinctUntilChanged()
+                .collect { index -> location(index, 0); save(index, 0) }
         }
         LaunchedEffect(pager, onNearEnd) {
             snapshotFlow { if (loadedPages[pager.currentPage] == true) pager.currentPage else -1 }
@@ -459,8 +467,11 @@ private fun ChapterPages(
                 }
         }
         LaunchedEffect(targetPage) { targetPage?.let { pager.scrollToPage(it.coerceIn(0, pages.lastIndex)); onTargetConsumed() } }
-        DisposableEffect(pager) { onDispose { save(pager.currentPage, 0) } }
-        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests) { pager.currentPage to pager.currentPage }
+        DisposableEffect(pager) { onDispose { save(pager.currentPage.coerceAtMost(pages.lastIndex), 0) } }
+        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests) {
+            val anchor = pager.currentPage.coerceAtMost(pages.lastIndex)
+            anchor to anchor
+        }
         HorizontalPager(
             state = pager,
             modifier = Modifier.fillMaxSize(),
@@ -468,11 +479,17 @@ private fun ChapterPages(
             beyondViewportPageCount = 1,
             key = { it },
         ) { index ->
-            ReaderPage(
-                pages[index], headers, paged = true, onTap = onTap, onMeasured = { loadedPages[index] = true },
-                onComposed = { present -> if (present) composedPages[index] = true else composedPages.remove(index) },
-                prefetch = prefetchRequests[index],
-            )
+            if (index < pages.size) {
+                ReaderPage(
+                    pages[index], headers, paged = true, onTap = onTap, onMeasured = { loadedPages[index] = true },
+                    onComposed = { present -> if (present) composedPages[index] = true else composedPages.remove(index) },
+                    prefetch = prefetchRequests[index],
+                )
+            } else {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    item("chapter-discussion", contentType = "chapter-end") { endContent() }
+                }
+            }
         }
     }
 }
