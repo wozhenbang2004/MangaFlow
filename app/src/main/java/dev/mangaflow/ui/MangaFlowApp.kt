@@ -304,7 +304,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 verticalAlignment = Alignment.CenterVertically) {
                                 val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
                                 Box {
-                                    MotionIconButton(onClick = { scope.launch { drawer.open() } }) {
+                                    MotionIconButton(onClick = {
+                                        keyboard?.hide()
+                                        searchExpanded = false
+                                        model.setQuery("")
+                                        scope.launch { drawer.open() }
+                                    }) {
                                         Icon(Icons.Outlined.Menu, if (hasUpdate) "打开导航，有新版本" else "打开导航", Modifier.size(22.dp))
                                     }
                                     if (hasUpdate && current.section == Section.DISCOVER) Box(
@@ -329,7 +334,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     TextButton(onClick = { sectionName = Section.ACCOUNT.name }) { Text("云端书架") }
                                 }
                                 if (current.section == Section.DISCOVER) {
-                                    if (history.isNotEmpty()) MotionIconButton(onClick = { keyboard?.hide(); recentReadingOpen = true }) {
+                                    if (history.isNotEmpty()) MotionIconButton(onClick = {
+                                        keyboard?.hide()
+                                        searchExpanded = false
+                                        model.setQuery("")
+                                        recentReadingOpen = true
+                                    }) {
                                         Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
                                     }
                                     MotionIconButton(onClick = {
@@ -347,8 +357,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
+                                        backgroundState = model.browseBackground(browse),
                                         searchExpanded = searchExpanded,
-                                        active = current.key == frame.key,
+                                        active = current.key == frame.key && !drawer.isOpen && !recentReadingOpen,
                                         canAutoAdvance = !drawer.isOpen && !recentReadingOpen && !searchExpanded && current.key == frame.key,
                                         onCloseSearch = { searchExpanded = false; model.setQuery("") },
                                         onQuery = model::setQuery, onRefresh = model::refresh,

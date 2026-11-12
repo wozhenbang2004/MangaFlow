@@ -47,7 +47,7 @@ Current motion feedback: “好几个按钮 tab 的切换点击都没有舒服�
 
 ## Detail density update · 2026-11-12
 
-The user's later screenshots reject the paginated three-tab detail page. The latest accepted direction is the **two-tab (chapters / comments), inline synopsis, side-tool drawer, four-column-leaning lazy infinite chapter grid** documented in the final section of DESIGN.md. Treat this as superseding the earlier "Dense detail redesign" spec that required pagers and an Introduction tab. Download-mode toggles must not insert rows or move the grid; reserve icon space within each tile. Continue-reading buttons must display the actual chapter name. Keep real source badges with restrained multiple accents. Review the source, commit directly to main and let its CI/CD build; the user performs testing and verification.
+The user's later screenshots reject the paginated three-tab detail page. The latest accepted direction is the **two-tab (chapters / comments), inline synopsis, simple inline chapter-group switching, four-column-leaning lazy infinite chapter grid** documented in DESIGN.md. The search-overlay follow-up below removes the former side-tool drawer. Treat this as superseding the earlier "Dense detail redesign" spec that required pagers and an Introduction tab. Download-mode toggles must not insert rows or move the grid; reserve icon space within each tile. Continue-reading buttons must display the actual chapter name. Keep real source badges with restrained multiple accents. Review the source, commit directly to main and let its CI/CD build; the user performs testing and verification.
 
 ## Current feedback and scope · 2026-11-12
 
@@ -121,7 +121,15 @@ The user's later screenshots reject the paginated three-tab detail page. The lat
 
 ## Artwork detail follow-up · 2026-11-12
 
-- Latest user instruction: "没事 ci 触发了就行别管了你去改新的这个问题漫画详情我希望做成 kayokoi.site 这个网站那样的大图而且这个网站滑动那个大图相关的逻辑也要学过来以及为什么要弄黑色背景额". This supersedes the fixed small header / no outer artwork motion, but retains the dense continuous catalog, inline synopsis, side tools, stable download icons and chapter-named read action. See the final contract in DESIGN.md.
+- Latest artwork instruction: "没事 ci 触发了就行别管了你去改新的这个问题漫画详情我希望做成 kayokoi.site 这个网站那样的大图而且这个网站滑动那个大图相关的逻辑也要学过来以及为什么要弄黑色背景额". This supersedes the fixed small header / no outer artwork motion, but retains the dense continuous catalog, inline synopsis, simple group switching, stable download icons and chapter-named read action. See the final contract in DESIGN.md.
 - The detail page must use the app's Material theme, including comments, sheets, chapter states and system-bar icons. Do not hardcode an always-dark detail palette.
 - Use the real cover as large stationary artwork; move the foreground information and chapter surface over it. Reuse Material3 nested scrolling and Foundation gestures, with a smooth contents shortcut. No invented artwork or metadata and no source/auth changes.
 - The CI-trigger-only instruction is now part of the project-wide current workflow above: review source, commit directly to main, confirm CI/CD triggered, and leave all testing and actual-use verification to the user. Do not create a separate build branch, wait for builds/releases, or claim an unobserved result.
+
+## Search overlay and control cleanup · 2026-11-12
+
+- User: “下载旁边那个图标以及他的功能都删掉吧包括他那个侧边小抽屉，保留简单的章节分组切换”; “这个什么来源删掉没必要啊还搞个什么待处理”; “那个有点透明的效果能不能弄成液态玻璃”. This supersedes earlier chapter-tool drawer and review-source sheet requirements.
+- Keep chapter groups directly beside the fixed download action. Remove the drawer, its search/order/locator controls and their state. A single group needs only a quiet chapter count; download mode must not move the grid.
+- Start the Comments tab with its mixed feed. Remove the Source / Pending management entry and sheet; retain each comment's provider badge, exact-source replies and pagination. Show actual failures/retry or explicit uncertain-title choices only when needed, after available comments.
+- Search remains a dismissible floating panel. Its input/results must not replace, resize or scroll the browsing content behind it. Preserve separate query positions, the last browse snapshot across configuration changes, outgoing-panel content and keyboard/focus ownership.
+- Shared `ui/LiquidGlass.kt` samples real backdrop content using the existing Haze 1.6.0 dependency. Android 13+ adds restrained rounded-edge refraction; older versions retain supported blur or a readable tinted surface. Keep text/icons outside the optical layer, do not add perpetual effects, and preserve theme contrast and the main motion integration. The source is not evidence of device appearance or frame rate.

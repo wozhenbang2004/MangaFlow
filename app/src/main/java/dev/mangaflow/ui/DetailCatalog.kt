@@ -1,12 +1,15 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,69 +20,53 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowDownward
-import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Schedule
-import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -88,15 +75,16 @@ import dev.mangaflow.data.Chapter
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
-import kotlinx.coroutines.launch
 
 /**
- * The catalog owns one stable, lazily-composed chapter grid. Filters and jumps live in
- * an overlay drawer so switching download mode never inserts or removes a layout row.
+ * One stable, lazily-composed chapter grid, with groups and download selection in a
+ * fixed toolbar. Changing download mode never inserts a row or shifts the chapters.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -114,181 +102,101 @@ internal fun DetailCatalog(
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
-    val group = chosenGroup?.takeIf { it.isEmpty() || it in groups }.orEmpty()
-    var descending by rememberSaveable(mangaId) { mutableStateOf(false) }
-    var query by rememberSaveable(mangaId) { mutableStateOf("") }
-    var anchorId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
+    // A temporarily empty directory must not clear a restored group or its scroll position.
+    val group = chosenGroup?.takeIf { groups.isEmpty() || it in groups }
     var downloadMode by rememberSaveable(mangaId) { mutableStateOf(false) }
     var shownError by remember { mutableStateOf<String?>(null) }
     var selectedChapterId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var closingChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
 
-    val drawer = rememberDrawerState(DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
-    val keyboard = LocalSoftwareKeyboardController.current
-    val focusManager = LocalFocusManager.current
     val grid = rememberLazyGridState()
     val showBusy = rememberDelayedBusy(loading)
-    val shown = remember(chapters, group, query, descending) {
-        chapters.filter {
-            (group.isEmpty() || it.group == group) &&
-                (query.isBlank() || it.title.contains(query.trim(), ignoreCase = true))
-        }.let { if (descending) it.asReversed() else it }
+    val shown = remember(chapters, group) {
+        if (group == null) chapters else chapters.filter { it.group == group }
     }
-    val savedChapter = chapters.firstOrNull { it.id == progress?.chapterId }
 
     // Restore the same grid position after visiting Comments or the reader.
-    // Only an actual filter/order change returns to the start of the directory.
-    val filterSignature = group + "\u001f" + descending + "\u001f" + query
-    var appliedFilter by rememberSaveable(mangaId) { mutableStateOf(filterSignature) }
-    LaunchedEffect(filterSignature) {
-        if (appliedFilter != filterSignature) {
+    // Only a different chapter group returns to the start of the directory.
+    var appliedGroup by rememberSaveable(mangaId) { mutableStateOf(group) }
+    LaunchedEffect(group) {
+        if (appliedGroup != group) {
             grid.scrollToItem(0)
-            appliedFilter = filterSignature
-        }
-    }
-    LaunchedEffect(anchorId, shown) {
-        val target = anchorId
-        if (target != null) {
-            val index = shown.indexOfFirst { it.id == target }
-            if (index >= 0) grid.scrollToItem(index)
-            anchorId = null
+            appliedGroup = group
         }
     }
 
-    val openChapter: (Chapter) -> Unit = {
-        keyboard?.hide()
-        focusManager.clearFocus()
-        onRead(it)
-    }
-    val closeDrawer: () -> Unit = { scope.launch { drawer.close() }; Unit }
-
-    ModalNavigationDrawer(
-        drawerState = drawer,
-        drawerContent = {
-            ModalDrawerSheet(
-                modifier = Modifier.width(290.dp),
-                drawerContainerColor = DetailSurface,
-                drawerContentColor = DetailForeground,
-                drawerShape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
-            ) {
-                Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(start = 22.dp, end = 6.dp, top = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("目录工具", color = DetailForeground, fontSize = 17.sp,
-                            fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        DetailAction(Icons.Outlined.Close, "关闭目录工具", onClick = closeDrawer)
-                    }
-                    ChapterSearch(query = query, onChange = { query = it }, onClear = { query = "" })
-                    Text("排列", color = DetailMuted, fontSize = 11.sp,
-                        modifier = Modifier.padding(start = 22.dp, top = 20.dp, bottom = 6.dp))
-                    DrawerChoice(
-                        label = if (descending) "从新到旧" else "从旧到新",
-                        selected = false,
-                        icon = if (descending) Icons.Outlined.ArrowDownward else Icons.Outlined.ArrowUpward,
-                        onClick = { descending = !descending },
-                    )
-                    if (savedChapter != null) {
-                        DrawerChoice(
-                            label = "定位上次阅读",
-                            selected = false,
-                            icon = Icons.Outlined.MyLocation,
-                            onClick = {
-                                chosenGroup = savedChapter.group
-                                query = ""
-                                anchorId = savedChapter.id
-                                keyboard?.hide()
-                                focusManager.clearFocus()
-                                closeDrawer()
-                            },
-                        )
-                    }
-                    Text("章节分组", color = DetailMuted, fontSize = 11.sp,
-                        modifier = Modifier.padding(start = 22.dp, top = 20.dp, bottom = 6.dp))
-                    (listOf("" to chapters.size) + groups.entries.map { it.key to it.value }).forEach { (name, count) ->
-                        DrawerChoice(
-                            label = name.ifBlank { "全部" },
-                            count = count,
-                            selected = group == name,
-                            onClick = { chosenGroup = name; closeDrawer() },
-                        )
-                    }
-                }
-            }
-        },
-    ) {
-        Column(Modifier.fillMaxSize()) {
-            Row(
-                Modifier.fillMaxWidth().height(48.dp).padding(start = 16.dp, end = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().height(48.dp).padding(start = 16.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (groups.size > 1) {
+                ChapterGroups(
+                    groups = groups, total = chapters.size, selected = group,
+                    onSelect = { chosenGroup = it }, modifier = Modifier.weight(1f),
+                )
+            } else {
                 Text(
                     if (downloadMode) "点选章节下载" else (shown.size.toString() + " 话"),
                     color = if (downloadMode) DetailForeground else DetailMuted,
                     fontSize = 12.sp, modifier = Modifier.weight(1f),
                 )
-                if (error != null) {
-                    DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { shownError = error })
-                    DetailAction(Icons.Outlined.Refresh, "重新加载目录",
-                        enabled = !loading, onClick = onRetry)
-                }
-                DetailAction(Icons.Outlined.Tune, "筛选、排序和搜索章节",
-                    selected = group.isNotEmpty() || query.isNotEmpty() || descending,
-                    onClick = { scope.launch { drawer.open() } })
-                DetailAction(
-                    if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
-                    if (downloadMode) "完成选择下载" else "选择章节下载",
-                    selected = downloadMode,
-                    onClick = { downloadMode = !downloadMode },
+            }
+            if (error != null) {
+                DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { shownError = error })
+                DetailAction(Icons.Outlined.Refresh, "重新加载目录",
+                    enabled = !loading, onClick = onRetry)
+            }
+            DetailAction(
+                if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
+                if (downloadMode) "完成选择下载" else "选择章节下载",
+                selected = downloadMode,
+                onClick = { downloadMode = !downloadMode },
+            )
+        }
+        Box(Modifier.fillMaxWidth().height(2.dp).padding(horizontal = 16.dp)) {
+            if (showBusy) LinearProgressIndicator(
+                modifier = Modifier.fillMaxSize(), color = DetailSecondary, trackColor = Color.Transparent)
+        }
+        if (shown.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth().nestedScroll(scrolling)
+                .scrollable(rememberScrollableState { 0f }, Orientation.Vertical),
+                contentAlignment = Alignment.Center) {
+                Text(
+                    when {
+                        loading && chapters.isEmpty() -> "正在读取章节"
+                        error != null && chapters.isEmpty() -> "目录暂不可用，点击顶部重试"
+                        else -> "暂无章节"
+                    },
+                    color = DetailMuted, fontSize = 13.sp,
+                    modifier = Modifier.padding(24.dp),
                 )
             }
-            Box(Modifier.fillMaxWidth().height(2.dp).padding(horizontal = 16.dp)) {
-                if (showBusy) LinearProgressIndicator(
-                    modifier = Modifier.fillMaxSize(), color = DetailSecondary, trackColor = Color.Transparent)
-            }
-            if (shown.isEmpty()) {
-                Box(Modifier.weight(1f).fillMaxWidth().nestedScroll(scrolling)
-                    .scrollable(rememberScrollableState { 0f }, Orientation.Vertical),
-                    contentAlignment = Alignment.Center) {
-                    Text(
-                        when {
-                            loading && chapters.isEmpty() -> "正在读取章节"
-                            error != null && chapters.isEmpty() -> "目录暂不可用，点击顶部重试"
-                            query.isNotBlank() -> "没有找到这一章"
-                            else -> "暂无章节"
-                        },
-                        color = DetailMuted, fontSize = 13.sp,
-                        modifier = Modifier.padding(24.dp),
+        } else {
+            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+            val showGroup = group == null && groups.size > 1
+            val tileHeight = (if (showGroup) 58f else 47f).times(fontScale).dp
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = (74f * fontScale).dp),
+                state = grid,
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)
+                    .nestedScroll(scrolling),
+                contentPadding = PaddingValues(top = 5.dp, bottom = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                items(shown, key = Chapter::id) { chapter ->
+                    ChapterTile(
+                        chapter = chapter,
+                        entry = downloaded[chapter.id],
+                        progress = progress?.takeIf { it.chapterId == chapter.id },
+                        showGroup = showGroup,
+                        downloadMode = downloadMode,
+                        height = tileHeight,
+                        onRead = { onRead(chapter) },
+                        onDownload = { onDownload(chapter) },
+                        onActions = { selectedChapterId = chapter.id },
                     )
-                }
-            } else {
-                val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-                val showGroup = group.isEmpty() && groups.size > 1
-                val tileHeight = (if (showGroup) 58f else 47f).times(fontScale).dp
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = (74f * fontScale).dp),
-                    state = grid,
-                    modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)
-                        .nestedScroll(scrolling),
-                    contentPadding = PaddingValues(top = 5.dp, bottom = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    verticalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    items(shown, key = Chapter::id) { chapter ->
-                        ChapterTile(
-                            chapter = chapter,
-                            entry = downloaded[chapter.id],
-                            progress = progress?.takeIf { it.chapterId == chapter.id },
-                            showGroup = showGroup,
-                            downloadMode = downloadMode,
-                            height = tileHeight,
-                            onRead = { openChapter(chapter) },
-                            onDownload = { onDownload(chapter) },
-                            onActions = { selectedChapterId = chapter.id },
-                        )
-                    }
                 }
             }
         }
@@ -333,7 +241,7 @@ internal fun DetailCatalog(
                     color = DetailMuted, fontSize = 12.sp,
                     modifier = Modifier.padding(vertical = 10.dp),
                 )
-                TextButton(onClick = { dismissActions(); openChapter(chapter) },
+                TextButton(onClick = { dismissActions(); onRead(chapter) },
                     modifier = Modifier.fillMaxWidth()) {
                     Text("阅读这一章", color = DetailForeground)
                 }
@@ -348,31 +256,58 @@ internal fun DetailCatalog(
 }
 
 @Composable
-private fun DrawerChoice(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    count: Int? = null,
-    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+private fun ChapterGroups(
+    groups: Map<String, Int>,
+    total: Int,
+    selected: String?,
+    onSelect: (String?) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val interaction = remember { MutableInteractionSource() }
+    val choices = remember(groups, total) {
+        buildList<Pair<String?, Int>> {
+            add(null to total)
+            groups.forEach { (name, count) -> add(name to count) }
+        }
+    }
+    val motion = LocalMotionEnabled.current
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)
-            .heightIn(min = 42.dp)
-            .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
-            .motionPress(interaction)
-            .clip(RoundedCornerShape(11.dp))
-            .background(if (selected) DetailForeground.copy(alpha = .09f) else Color.Transparent)
-            .padding(horizontal = 12.dp),
+        modifier.horizontalScroll(rememberScrollState()).selectableGroup(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        if (icon != null) Icon(icon, null, tint = DetailSecondary, modifier = Modifier.size(18.dp))
-        Text(label, color = if (selected) DetailForeground else DetailSecondary,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            fontSize = 13.sp, modifier = Modifier.weight(1f))
-        if (count != null) Text(count.toString(), color = DetailMuted, fontSize = 11.sp)
-        if (selected) Icon(Icons.Outlined.Check, null, tint = DetailForeground, modifier = Modifier.size(16.dp))
+        choices.forEach { (name, count) ->
+            key(name) {
+                val active = selected == name
+                val label = name?.ifBlank { "未分组" } ?: "全部"
+                val interaction = remember { MutableInteractionSource() }
+                val tint by animateColorAsState(
+                    if (active) DetailForeground.copy(alpha = .075f) else Color.Transparent,
+                    animationSpec = if (motion) tween(MangaMotion.Quick) else snap(),
+                    label = "chapter-group-tint",
+                )
+                Box(
+                    Modifier.height(48.dp).widthIn(min = 48.dp)
+                        .selectable(
+                            selected = active, role = Role.Tab,
+                            interactionSource = interaction, indication = null,
+                            onClick = { onSelect(name) },
+                        ).semantics { contentDescription = "$label，$count 话" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Row(
+                        Modifier.motionPress(interaction)
+                            .clip(RoundedCornerShape(9.dp)).background(tint)
+                            .padding(horizontal = 9.dp, vertical = 5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(label, color = if (active) DetailForeground else DetailSecondary,
+                            fontWeight = FontWeight.Medium, fontSize = 12.sp, maxLines = 1)
+                        Text(count.toString(), color = DetailMuted, fontSize = 10.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -466,37 +401,3 @@ private fun chapterStatus(entry: DownloadEntry?, progress: ReadingProgress?): St
         else -> null
     },
 ).joinToString("，")
-
-@Composable
-private fun ChapterSearch(
-    query: String,
-    onChange: (String) -> Unit,
-    onClear: () -> Unit,
-) {
-    val keyboard = LocalSoftwareKeyboardController.current
-    BasicTextField(
-        value = query, onValueChange = { onChange(it.take(100)) }, singleLine = true,
-        textStyle = TextStyle(color = DetailForeground, fontSize = 14.sp), cursorBrush = SolidColor(DetailForeground),
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-        keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
-            .semantics { contentDescription = "搜索章节名称" },
-        decorationBox = { input ->
-            Row(
-                Modifier.fillMaxWidth().heightIn(min = 46.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(DetailForeground.copy(alpha = .055f)).padding(start = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Outlined.Search, null, tint = DetailMuted, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Box(Modifier.weight(1f)) {
-                    if (query.isEmpty()) Text("章节名称或数字", color = DetailMuted, fontSize = 13.sp)
-                    input()
-                }
-                if (query.isNotEmpty()) DetailAction(Icons.Outlined.Close, "清空搜索", onClick = onClear)
-                else Spacer(Modifier.width(16.dp))
-            }
-        },
-    )
-}

@@ -1,11 +1,10 @@
 package dev.mangaflow.ui
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,14 +18,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -34,15 +28,11 @@ import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -81,6 +71,10 @@ import dev.mangaflow.data.ReviewKind
 import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionSwap
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -102,7 +96,6 @@ private fun reviewDateKey(date: String): String {
         value.take(4).all(Char::isDigit)) value.take(19) else ""
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun CommunityPanel(
     mangaId: String,
@@ -143,105 +136,112 @@ internal fun CommunityPanel(
                 ?.let { onMore(it.id) }
         }
     }
-    var showSources by rememberSaveable(mangaId) { mutableStateOf(false) }
-    var selectedId by rememberSaveable(mangaId) { mutableStateOf("copy") }
-    val selected = sources.firstOrNull { it.id == selectedId }
-    var choosingMatch by rememberSaveable(mangaId, selectedId) { mutableStateOf(false) }
-
-    Column(modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().height(40.dp).padding(start = 18.dp, end = 10.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            Text(if (mixed.isEmpty()) "全部评论" else "已加载 " + mixed.size + " 条评论",
-                color = CommunityMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
-            val errors = sources.count { it.status != ReviewStatus.READY || it.reviewsError != null }
-            Row(Modifier.clip(RoundedCornerShape(9.dp))
-                .clickable(role = Role.Button, onClickLabel = "查看评论来源") { showSources = true }
-                .padding(horizontal = 8.dp, vertical = 9.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                Icon(Icons.Outlined.Tune, null, tint = CommunityMuted, modifier = Modifier.size(15.dp))
-                Text(if (errors > 0) "来源 · " + errors + " 待处理" else "来源",
-                    color = CommunityMuted, fontSize = 11.sp)
-            }
+    val failures = sources.filter { it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null }
+    LazyColumn(state = listState, modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 12.dp)) {
+        items(mixed, key = {
+            it.source.id + ":" + it.source.subjectId + ":" + it.review.kind + ":" + it.review.id
+        }) { item ->
+            DiscussionComment(item.source, item.review, loadReplies)
+            HorizontalDivider(color = CommunityLine, thickness = .5.dp)
         }
-        LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 12.dp)) {
-            items(mixed, key = {
-                it.source.id + ":" + it.source.subjectId + ":" + it.review.kind + ":" + it.review.id
-            }) { item ->
-                DiscussionComment(item.source, item.review, loadReplies)
-                HorizontalDivider(color = CommunityLine, thickness = .5.dp)
-            }
-            item("mixed-footer") {
+        item("mixed-footer") {
+            Column(Modifier.fillMaxWidth()) {
                 when {
-                    loading && mixed.isEmpty() -> SmallLoading()
-                    sources.any { it.loadingMore } -> SmallLoading()
-                    mixed.isEmpty() -> Text("暂无公开评论，可在「来源」查看匹配与加载状态",
+                    loading || sources.any { it.loadingMore } -> SmallLoading()
+                    mixed.isEmpty() && failures.isEmpty() -> Text("还没有可显示的评论",
                         color = CommunityMuted, fontSize = 12.sp,
                         modifier = Modifier.padding(vertical = 18.dp))
-                    loadable.isEmpty() -> Text(
-                        if (sources.any { it.reviewsError != null }) "部分来源读取失败，可在「来源」重试"
-                        else "当前可获取的评论已加载完毕",
-                        color = CommunityMuted, fontSize = 11.sp,
+                    mixed.isNotEmpty() && loadable.isEmpty() && failures.isEmpty() -> Text(
+                        "当前可获取的评论已加载完毕", color = CommunityMuted, fontSize = 11.sp,
                         modifier = Modifier.padding(vertical = 16.dp))
-                    else -> Text("继续下滑加载更多评论", color = CommunityMuted, fontSize = 11.sp,
-                        modifier = Modifier.padding(vertical = 16.dp))
+                }
+                sources.forEach { source ->
+                    key(mangaId, source.id) {
+                        if (source.status == ReviewStatus.UNAVAILABLE || source.reviewsError != null) {
+                            CommentLoadNotice(source, onRetry)
+                        }
+                        if (source.status == ReviewStatus.NO_MATCH && source.candidates.isNotEmpty()) {
+                            CommentMatchChoice(source, onMatch)
+                        }
+                    }
                 }
             }
         }
     }
-    if (showSources) {
-        ModalBottomSheet(onDismissRequest = { showSources = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = DetailSurface, contentColor = CommunityWhite) {
-            Column(Modifier.fillMaxWidth().heightIn(max = 600.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
-                Text("评论来源", color = CommunityWhite, fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(start = 4.dp, bottom = 8.dp))
-                ProviderStrip(sources, selectedId, loading) { selectedId = it }
-                if (selected == null) {
-                    PendingSource(selectedId, loading, onRetry)
-                } else {
-                    SourceSummary(selected, showMatchedTitle = true)
-                    if (selected.status != ReviewStatus.READY) {
-                        SourceNotice(selected, onRetry,
-                            onChoose = { choosingMatch = !choosingMatch },
-                            chooseLabel = if (choosingMatch) "收起候选条目" else "选择对应漫画")
-                    } else {
-                        if (selected.reviewsError != null) CommentFailure(
-                            selected.reviewsError, selected.loadingMore) { onRetry(selectedId) }
-                        if (selected.id != "copy") TextButton(onClick = { onRelink(selectedId) },
-                            enabled = !selected.loadingMore) {
-                            Text("更换关联漫画", color = CommunityMuted, fontSize = 12.sp)
-                        }
-                        if (selected.candidates.isNotEmpty()) TextButton(onClick = {
-                            choosingMatch = !choosingMatch
-                        }, enabled = !selected.loadingMore) {
-                            Text(if (choosingMatch) "收起候选条目" else "关联有误？",
-                                color = CommunityMuted, fontSize = 12.sp)
-                        }
+}
+
+/** Failures belong beside the affected content, without a separate management screen. */
+@Composable
+private fun CommentLoadNotice(source: ReviewSource, onRetry: (String) -> Unit) {
+    val message = source.reviewsError?.takeIf(String::isNotBlank)
+        ?: source.message.takeIf { source.status == ReviewStatus.UNAVAILABLE && it.isNotBlank() }
+        ?: "评论暂时无法读取，请稍后重试。"
+    var expanded by rememberSaveable(source.id, message) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().animateContentSize(
+        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(),
+    )) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CommentSourceBadge(source.id)
+            Row(Modifier.weight(1f).clip(RoundedCornerShape(8.dp))
+                .clickable(role = Role.Button,
+                    onClickLabel = if (expanded) "收起失败原因" else "查看失败原因") { expanded = !expanded }
+                .padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (source.loadingMore) "正在重新读取评论" else "评论暂时无法读取",
+                    color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                MotionSwap(expanded, Modifier.size(16.dp)) { open ->
+                    Icon(if (open) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
+                        null, tint = CommunityMuted, modifier = Modifier.size(16.dp))
+                }
+            }
+            MotionIconButton(onClick = { onRetry(source.id) }, enabled = !source.loadingMore) {
+                Icon(Icons.Outlined.Refresh, "重试${source.name}评论", tint = CommunityMuted,
+                    modifier = Modifier.size(18.dp))
+            }
+        }
+        if (expanded) Text(message, color = CommunityMuted, fontSize = 12.sp, lineHeight = 18.sp,
+            modifier = Modifier.padding(bottom = 10.dp))
+    }
+}
+
+/** Only an explicit choice can add reviews for an uncertain title match. */
+@Composable
+private fun CommentMatchChoice(source: ReviewSource, onMatch: (String, String) -> Unit) {
+    var expanded by rememberSaveable(source.id, source.candidates) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().animateContentSize(
+        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(),
+    )) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(8.dp))
+            .clickable(enabled = !source.loadingMore, role = Role.Button,
+                onClickLabel = if (expanded) "收起漫画选择" else "选择对应漫画以查看评论") { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CommentSourceBadge(source.id)
+            Text(if (source.loadingMore) "正在读取评论" else "选择对应漫画以查看评论",
+                color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            MotionSwap(expanded, Modifier.size(32.dp)) { open ->
+                Icon(if (open) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
+                    null, tint = CommunityMuted, modifier = Modifier.size(16.dp))
+            }
+        }
+        if (expanded) {
+            source.candidates.forEach { candidate ->
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(9.dp))
+                    .clickable(enabled = !source.loadingMore, role = Role.Button,
+                        onClickLabel = "查看${candidate.title}的评论") {
+                        expanded = false
+                        onMatch(source.id, candidate.id)
+                    }.padding(horizontal = 8.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(candidate.title, color = CommunityWhite, fontSize = 12.sp,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        if (candidate.subtitle.isNotBlank()) Text(candidate.subtitle,
+                            color = CommunityMuted, fontSize = 10.sp, lineHeight = 15.sp,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
-                    if (choosingMatch) {
-                        selected.candidates.forEach { candidate ->
-                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp))
-                                .clickable(enabled = !selected.loadingMore, role = Role.Button) {
-                                    choosingMatch = false
-                                    onMatch(selected.id, candidate.id)
-                                }.padding(horizontal = 8.dp, vertical = 9.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(candidate.title, color = CommunityWhite, fontSize = 12.sp,
-                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                    if (candidate.subtitle.isNotBlank()) Text(candidate.subtitle,
-                                        color = CommunityMuted, fontSize = 10.sp,
-                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                }
-                                Icon(Icons.Outlined.ChevronRight, null, tint = CommunityMuted,
-                                    modifier = Modifier.size(18.dp))
-                            }
-                        }
-                    }
+                    Icon(Icons.Outlined.ChevronRight, null, tint = CommunityMuted,
+                        modifier = Modifier.size(18.dp))
                 }
             }
         }
@@ -265,114 +265,6 @@ private fun CommentSourceBadge(sourceId: String) {
         .semantics { contentDescription = "评论来自" + providerName(sourceId) },
         color = accent, fontSize = 10.sp, lineHeight = 13.sp,
         fontWeight = FontWeight.Medium, maxLines = 1)
-}
-
-@Composable
-private fun ProviderStrip(
-    sources: List<ReviewSource>,
-    selectedId: String,
-    loading: Boolean,
-    modifier: Modifier = Modifier,
-    onSelect: (String) -> Unit,
-) {
-    val providerIds = (CommunityProviders + sources.map { it.id }).distinct()
-    Row(modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        providerIds.forEach { id ->
-            val source = sources.firstOrNull { it.id == id }
-            val selected = id == selectedId
-            val background by animateColorAsState(
-                CommunityWhite.copy(alpha = if (selected) .09f else .025f),
-                animationSpec = tween(150), label = "provider-selection",
-            )
-            Row(Modifier.heightIn(min = 48.dp).widthIn(min = 96.dp).clip(RoundedCornerShape(12.dp))
-                .background(background).selectable(selected, role = Role.Tab, onClick = { onSelect(id) })
-                .semantics { contentDescription = providerDescription(id, source, loading) }
-                .padding(horizontal = 9.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                ProviderMark(id, tint = if (selected) CommunityWhite else CommunityMuted)
-                Column {
-                    if (source == null && loading) {
-                        CircularProgressIndicator(Modifier.size(12.dp), color = CommunityMuted, strokeWidth = 1.dp)
-                    } else {
-                        Text(sourceMetric(source), color = if (selected) CommunityWhite else CommunityMuted,
-                            fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
-                    }
-                    Text(when {
-                        source?.status == ReviewStatus.NO_MATCH -> "待关联"
-                        source?.status == ReviewStatus.UNAVAILABLE -> "暂不可用"
-                        id == "copy" -> "热度"
-                        else -> "/ ${source?.scoreScale ?: if (id == "anilist") 100 else 10}"
-                    }, color = CommunityMuted, fontSize = 10.sp, modifier = Modifier.padding(top = 1.dp))
-                }
-            }
-        }
-    }
-}
-
-/** Compact site abbreviations; these are deliberately not imitations of official logos. */
-@Composable
-internal fun ProviderMark(id: String, modifier: Modifier = Modifier, tint: Color = CommunityWhite) {
-    Box(modifier.size(25.dp).clip(RoundedCornerShape(7.dp)).background(tint.copy(alpha = 0.065f)),
-        contentAlignment = Alignment.Center) {
-        Text(when (id) { "copy" -> "拷"; "bangumi" -> "bgm"; "anilist" -> "A"; else -> id.take(2) },
-            color = tint, fontSize = if (id == "bangumi") 9.sp else 13.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-private fun SourceSummary(source: ReviewSource, showMatchedTitle: Boolean = false) {
-    Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            val detail = listOfNotNull(
-                source.ratingCount?.let { "$it 人评分" },
-                source.reviewCount?.let { "$it 条评论" }
-                    ?: source.reviews.takeIf { it.isNotEmpty() }?.let {
-                        if (source.id == "anilist") "已加载 ${it.size} 篇长评" else "已加载 ${it.size} 条评论"
-                    },
-            ).joinToString(" · ").takeIf { it.isNotBlank() }
-            Text(listOfNotNull(source.name, detail).joinToString(" · "), color = CommunityMuted, fontSize = 11.sp,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (showMatchedTitle && source.matchedTitle.isNotBlank()) {
-                Text(source.matchedTitle, color = CommunityWhite.copy(alpha = 0.75f), fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 4.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-        }
-    }
-}
-
-@Composable
-private fun PendingSource(id: String, loading: Boolean, onRetry: (String) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(if (loading) "正在读取${providerName(id)}评论" else "暂未取得${providerName(id)}评价",
-            color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-        if (!loading) TextButton(onClick = { onRetry(id) }) { Text("重试", color = CommunityWhite, fontSize = 12.sp) }
-    }
-}
-
-@Composable
-private fun SourceNotice(
-    source: ReviewSource,
-    onRetry: (String) -> Unit,
-    onChoose: () -> Unit,
-    chooseLabel: String = "选择对应漫画",
-) {
-    Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-        Text(source.message.ifBlank {
-            if (source.status == ReviewStatus.NO_MATCH) "还未确认对应条目" else "暂时无法读取这个站点"
-        }, color = CommunityMuted, fontSize = 12.sp, lineHeight = 19.sp)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (source.candidates.isNotEmpty()) TextButton(onClick = onChoose,
-                enabled = !source.loadingMore, contentPadding = PaddingValues(end = 14.dp)) {
-                Text(chooseLabel, color = CommunityWhite, fontSize = 12.sp)
-            }
-            TextButton(onClick = { onRetry(source.id) }, enabled = !source.loadingMore,
-                contentPadding = PaddingValues(end = 14.dp)) {
-                Text(if (source.status == ReviewStatus.NO_MATCH) "重新查找" else "重试", color = CommunityMuted, fontSize = 12.sp)
-            }
-            if (source.loadingMore) CircularProgressIndicator(Modifier.size(12.dp), color = CommunityMuted, strokeWidth = 1.dp)
-        }
-    }
 }
 
 @Composable
@@ -607,29 +499,5 @@ private fun providerName(id: String): String = when (id) {
     else -> id
 }
 
-private fun sourceMetric(source: ReviewSource?): String = when {
-    source == null -> "—"
-    source.id == "copy" -> source.popularity?.let(::compactPopularity) ?: "—"
-    source.score != null -> communityScore(source.score)
-    else -> "—"
-}
-
-private fun providerDescription(id: String, source: ReviewSource?, loading: Boolean): String {
-    val name = source?.name ?: providerName(id)
-    return when {
-        source == null -> "$name，${if (loading) "正在加载" else "暂未取得评价"}"
-        source.status == ReviewStatus.NO_MATCH -> "$name，待关联漫画"
-        source.status == ReviewStatus.UNAVAILABLE -> "$name，暂时不可用"
-        source.id == "copy" -> "$name，热度 ${source.popularity?.toString() ?: "暂无数据"}，查看评论"
-        else -> "$name，${source.score?.let { "${communityScore(it)} 分，满分 ${source.scoreScale}" } ?: "暂无评分"}，查看评论"
-    }
-}
-
 private fun communityScore(score: Double): String =
     if (score == score.toInt().toDouble()) score.toInt().toString() else String.format(Locale.ROOT, "%.1f", score)
-
-private fun compactPopularity(value: Long): String = when {
-    value >= 100_000_000 -> String.format(Locale.ROOT, "%.1f亿", value / 100_000_000.0)
-    value >= 10_000 -> String.format(Locale.ROOT, "%.1f万", value / 10_000.0)
-    else -> value.toString()
-}

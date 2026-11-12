@@ -71,7 +71,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -92,6 +91,9 @@ import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
@@ -174,6 +176,7 @@ fun DetailScreen(
     }
     val scope = rememberCoroutineScope()
     var contentsJump by remember { mutableStateOf<Job?>(null) }
+    val artworkBackdrop = rememberHazeState()
 
     BoxWithConstraints(
         Modifier.fillMaxSize().background(DetailBackground)
@@ -222,7 +225,8 @@ fun DetailScreen(
         // Sakurairo's fixed-background relationship: only the foreground moves.
         // Keep this image's bounds independent of heightOffset to avoid recropping each frame.
         Box(
-            Modifier.fillMaxWidth().height(heroHeight + 48.dp + statusInset).background(DetailSurface),
+            Modifier.fillMaxWidth().height(heroHeight + 48.dp + statusInset)
+                .hazeSource(artworkBackdrop).background(DetailSurface),
             contentAlignment = Alignment.TopCenter,
         ) {
             Icon(Icons.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
@@ -238,7 +242,7 @@ fun DetailScreen(
         }
         Column(Modifier.fillMaxSize()) {
             ArtworkToolbar(
-                header = header, compact = compactHero, title = current.title,
+                header = header, compact = compactHero, title = current.title, backdrop = artworkBackdrop,
                 favorite = isFavorite, coverFailed = coverFailed, active = active,
                 onBack = onBack, onIntroduction = { fullIntroduction = true },
                 onToggleFavorite = onToggleFavorite, onRetryCover = {
@@ -267,14 +271,14 @@ fun DetailScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     if (!compactHero) {
-                        HeroBookInformation(current, onIntroduction = { fullIntroduction = true },
+                        HeroBookInformation(current, artworkBackdrop, onIntroduction = { fullIntroduction = true },
                             onContents = openContents)
                     } else {
-                        MotionIconButton(
-                            onClick = openContents,
-                            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(16.dp))
-                                .background(MaterialTheme.colorScheme.surface.copy(alpha = .94f)),
-                        ) { Icon(Icons.Outlined.KeyboardArrowDown, "滑到章节", tint = DetailForeground) }
+                        LiquidGlassSurface(artworkBackdrop, Modifier.size(48.dp), cornerRadius = 16.dp) {
+                            MotionIconButton(onClick = openContents, modifier = Modifier.size(48.dp)) {
+                                Icon(Icons.Outlined.KeyboardArrowDown, "滑到章节", tint = DetailForeground)
+                            }
+                        }
                     }
                 }
             }
@@ -321,6 +325,7 @@ private fun ArtworkToolbar(
     header: TopAppBarState,
     compact: Boolean,
     title: String,
+    backdrop: HazeState,
     favorite: Boolean,
     coverFailed: Boolean,
     active: Boolean,
@@ -331,8 +336,6 @@ private fun ArtworkToolbar(
 ) {
     val colors = MaterialTheme.colorScheme
     val progress = header.collapsedFraction.coerceIn(0f, 1f)
-    val tint = lerp(Color.White, colors.onSurface, progress)
-    val plate = Color.Black.copy(alpha = .24f * (1f - progress))
     val titleAlpha = if (compact) 1f else ((progress - .35f) / .65f).coerceIn(0f, 1f)
     val titleInteraction = remember { MutableInteractionSource() }
     val activity = LocalContext.current.activityOrNull()
@@ -351,60 +354,67 @@ private fun ArtworkToolbar(
     Row(Modifier.fillMaxWidth().background(colors.surface.copy(alpha = progress))
         .statusBarsPadding().height(48.dp).padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", tint, plate, onBack)
+        ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, 1f - progress, onBack)
         Box(Modifier.weight(1f).padding(horizontal = 4.dp).graphicsLayer { alpha = titleAlpha }
             .motionInputGate(titleAlpha > .1f)
             .clickable(interactionSource = titleInteraction, indication = null, role = Role.Button,
                 onClickLabel = "漫画信息与完整简介", onClick = onIntroduction)
-            .clip(RoundedCornerShape(12.dp)).background(if (compact) plate else Color.Transparent)
-            .padding(horizontal = 10.dp, vertical = 10.dp)) {
-            Text(title, modifier = Modifier.motionPress(titleInteraction, pressedScale = .985f),
-                color = tint, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+            .clip(RoundedCornerShape(12.dp))) {
+            LiquidGlassSurface(backdrop,
+                Modifier.matchParentSize().graphicsLayer { alpha = 1f - progress }, cornerRadius = 12.dp) {}
+            Text(title, modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                .motionPress(titleInteraction, pressedScale = .985f),
+                color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", tint, plate, onRetryCover)
+        if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, 1f - progress, onRetryCover)
         ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-            if (favorite) "从书架移除" else "加入书架", tint, plate, onToggleFavorite)
+            if (favorite) "从书架移除" else "加入书架", backdrop, 1f - progress, onToggleFavorite)
     }
 }
 
 @Composable
-private fun ArtworkAction(icon: ImageVector, description: String, tint: Color, plate: Color, onClick: () -> Unit) {
+private fun ArtworkAction(icon: ImageVector, description: String, backdrop: HazeState, glassAlpha: Float, onClick: () -> Unit) {
     MotionIconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
-        Box(Modifier.size(36.dp).clip(RoundedCornerShape(14.dp)).background(plate), contentAlignment = Alignment.Center) {
-            MotionSwap(icon, Modifier.size(21.dp)) { shown -> Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp)) }
+        Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+            LiquidGlassSurface(backdrop,
+                Modifier.matchParentSize().graphicsLayer { alpha = glassAlpha }, cornerRadius = 14.dp) {}
+            MotionSwap(icon, Modifier.size(21.dp)) { shown ->
+                Icon(shown, description, tint = DetailForeground, modifier = Modifier.size(21.dp))
+            }
         }
     }
 }
 
 @Composable
-private fun HeroBookInformation(manga: Manga, onIntroduction: () -> Unit, onContents: () -> Unit) {
-    Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
-            .background(MaterialTheme.colorScheme.surface.copy(alpha = .94f))
-            .padding(horizontal = 14.dp).padding(top = 13.dp, bottom = 5.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Text(
-            manga.title, color = DetailForeground, fontSize = 22.sp, lineHeight = 28.sp,
-            fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
-        )
-        if (manga.authors.isNotEmpty()) Text(
-            manga.authors.joinToString(" / "), color = DetailSecondary, fontSize = 11.sp,
-            lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            "简介 · " + manga.description.ifBlank { "来源暂无简介" },
-            modifier = Modifier.clip(RoundedCornerShape(4.dp))
-                .clickable(role = Role.Button, onClickLabel = "查看完整简介", onClick = onIntroduction),
-            color = DetailSecondary, fontSize = 12.sp, lineHeight = 18.sp,
-            maxLines = 2, overflow = TextOverflow.Ellipsis,
-        )
-        DetailTags(manga)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            MangaMetricBadges(manga, Modifier.weight(1f), foreground = DetailForeground)
-            MotionIconButton(onClick = onContents, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Outlined.KeyboardArrowDown, "滑到章节", tint = DetailForeground)
+private fun HeroBookInformation(manga: Manga, backdrop: HazeState, onIntroduction: () -> Unit, onContents: () -> Unit) {
+    LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 18.dp) {
+        Column(
+            Modifier.fillMaxWidth()
+                .padding(horizontal = 14.dp).padding(top = 13.dp, bottom = 5.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Text(
+                manga.title, color = DetailForeground, fontSize = 22.sp, lineHeight = 28.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+            if (manga.authors.isNotEmpty()) Text(
+                manga.authors.joinToString(" / "), color = DetailForeground.copy(alpha = .82f), fontSize = 11.sp,
+                lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "简介 · " + manga.description.ifBlank { "暂无简介" },
+                modifier = Modifier.clip(RoundedCornerShape(4.dp))
+                    .clickable(role = Role.Button, onClickLabel = "查看完整简介", onClick = onIntroduction),
+                color = DetailForeground.copy(alpha = .82f), fontSize = 12.sp, lineHeight = 18.sp,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+            DetailTags(manga)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MangaMetricBadges(manga, Modifier.weight(1f), foreground = DetailForeground)
+                MotionIconButton(onClick = onContents, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Outlined.KeyboardArrowDown, "滑到章节", tint = DetailForeground)
+                }
             }
         }
     }

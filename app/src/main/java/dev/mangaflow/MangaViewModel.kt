@@ -116,6 +116,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val account = _account.asStateFlow()
     private val _browse = MutableStateFlow(BrowseState())
     val browse = _browse.asStateFlow()
+    private var retainedBrowse: BrowseState? = null
     private val _detail = MutableStateFlow<DetailState?>(null)
     val detail = _detail.asStateFlow()
     private val _reading = MutableStateFlow<ReadingSession?>(null)
@@ -173,7 +174,18 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         showBrowse(BrowseState(query = query, mode = mode, period = period, audience = audience))
     }
 
+    /** The search backdrop survives screen disposal and Activity recreation with this ViewModel. */
+    fun browseBackground(selection: BrowseState): BrowseState {
+        if (selection.query.isBlank()) return selection
+        val background = BrowseState(mode = selection.mode, period = selection.period, audience = selection.audience)
+        return retainedBrowse?.takeIf { it.cacheKey == background.cacheKey }
+            ?: browseCache.cached(background.cacheKey)?.restore(background)
+            ?: background
+    }
+
     private fun showBrowse(selection: BrowseState, debounce: Boolean = false) {
+        val previous = _browse.value
+        if (previous.query.isBlank()) retainedBrowse = previous
         browseJob?.cancel()
         val requestId = ++browseRequestId
         val generation = browseCache.generation
