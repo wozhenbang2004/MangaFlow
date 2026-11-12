@@ -144,7 +144,7 @@ fun DownloadsScreen(
     val showLoading = rememberDelayedBusy(loading)
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
-    var headerHeightPx by remember { mutableIntStateOf(with(density) { 88.dp.toPx().toInt() }) }
+    var headerHeightPx by remember { mutableIntStateOf(with(density) { 92.dp.toPx().toInt() }) }
     val contentTopPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -278,11 +278,9 @@ fun DownloadsScreen(
                 }
             }
         }
-        SegmentedGlassHeader(backdrop, navigation,
-            modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
-                .onSizeChanged { headerHeightPx = it.height },
-        ) {
-            Column(Modifier.fillMaxWidth().pointerInput(Unit) {}) {
+        Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
+            .onSizeChanged { headerHeightPx = it.height }) {
+            PageTitleHeader("下载", backdrop, navigation, actions = {
                 toolbar {
                     MotionIconButton(enabled = !importBusy, modifier = Modifier.size(44.dp),
                         onClick = { showImportSources = true }) {
@@ -323,6 +321,9 @@ fun DownloadsScreen(
                         }
                     }
                 }
+            })
+            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().padding(top = 4.dp),
+                cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     MotionTabs(
                         selected = filter.ordinal, labels = DownloadFilter.entries.map { it.label },
@@ -332,15 +333,6 @@ fun DownloadsScreen(
                         fontSize = MaterialTheme.typography.labelLarge.fontSize,
                         selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
                     )
-                    Spacer(Modifier.width(4.dp))
-                    Row(Modifier.semantics(mergeDescendants = true) {
-                        contentDescription = if (loading) "正在恢复下载" else "已下载 ${completedEntries.size} 章，共 ${entries.size} 章"
-                    }, horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (loading) CircularProgressIndicator(Modifier.size(12.dp), color = secondary, strokeWidth = 1.dp)
-                        else Icon(if (entries.isNotEmpty() && completedEntries.size == entries.size) Icons.Outlined.Check
-                            else Icons.Outlined.Download, null, Modifier.size(14.dp), tint = secondary)
-                        Text("${completedEntries.size}/${entries.size}", color = secondary, style = MaterialTheme.typography.labelSmall)
-                    }
                 }
             }
         }

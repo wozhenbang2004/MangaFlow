@@ -86,10 +86,10 @@ fun LibraryScreen(
     onContinue: (ReadingProgress) -> Unit, onOpenPageCollection: (PageCollection) -> Unit, onDiscover: () -> Unit,
     onRetryOpen: () -> Unit, onCancelOpen: () -> Unit,
     onRemoveFavorite: (Manga) -> Unit, onRemoveHistory: (String) -> Unit,
-    backdrop: HazeState, navigation: @Composable () -> Unit, toolbar: @Composable () -> Unit,
+    backdrop: HazeState, navigation: @Composable () -> Unit, toolbar: @Composable (@Composable () -> Unit) -> Unit,
 ) {
     val density = LocalDensity.current
-    var headerHeightPx by remember { mutableIntStateOf(with(density) { 88.dp.toPx().toInt() }) }
+    var headerHeightPx by remember { mutableIntStateOf(with(density) { 92.dp.toPx().toInt() }) }
     val headerPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showCollections by rememberSaveable { mutableStateOf(false) }
@@ -208,36 +208,39 @@ fun LibraryScreen(
                 Modifier.align(Alignment.BottomCenter).padding(16.dp))
         }
     }
-        SegmentedGlassHeader(
-            backdrop = backdrop, navigation = navigation,
-            modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
-                .onSizeChanged { headerHeightPx = it.height },
-        ) {
-            toolbar()
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                MotionTabs(selected = if (showHistory) 1 else 0, labels = listOf("收藏", "最近阅读"),
-                    onSelect = { index ->
-                        if (showHistory != (index == 1)) onCancelOpen()
-                        showHistory = index == 1
-                    }, modifier = Modifier.weight(1f), controlHeight = 44.dp, indicatorHeight = 28.dp,
-                    treatment = MotionTabTreatment.Soft,
-                    indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .045f), fontSize = 14.sp,
-                    selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
-                    itemContent = { index, selected, color ->
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(if (index == 0) "收藏" else "最近阅读", color = color, fontSize = 14.sp,
-                                modifier = Modifier.weight(1f, fill = false), overflow = TextOverflow.Ellipsis,
-                                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal, maxLines = 1)
-                            if (index == 0) Text(favorites.size.toString(), fontSize = 11.sp, color = color.copy(alpha = .6f), maxLines = 1)
-                        }
-                    })
-                MotionIconButton(onClick = { showCollections = true }, enabled = active, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Outlined.Collections, "画面收藏，${collections.size} 项", Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
+            .onSizeChanged { headerHeightPx = it.height }) {
+            PageTitleHeader("书架", backdrop, navigation, actions = {
+                toolbar {
+                    MotionIconButton(onClick = { showCollections = true }, enabled = active, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Outlined.Collections, "画面收藏，${collections.size} 项", Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    MotionIconButton(onClick = { showStats = true }, enabled = active, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Outlined.BarChart, "阅读统计", Modifier.size(21.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
-                MotionIconButton(onClick = { showStats = true }, enabled = active, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Outlined.BarChart, "阅读统计", Modifier.size(21.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            })
+            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().padding(top = 4.dp),
+                cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    MotionTabs(selected = if (showHistory) 1 else 0, labels = listOf("收藏", "最近阅读"),
+                        onSelect = { index ->
+                            if (showHistory != (index == 1)) onCancelOpen()
+                            showHistory = index == 1
+                        }, modifier = Modifier.weight(1f), controlHeight = 44.dp, indicatorHeight = 28.dp,
+                        treatment = MotionTabTreatment.Soft,
+                        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .045f), fontSize = 14.sp,
+                        selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
+                        itemContent = { index, selected, color ->
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(if (index == 0) "收藏" else "最近阅读", color = color, fontSize = 14.sp,
+                                    modifier = Modifier.weight(1f, fill = false), overflow = TextOverflow.Ellipsis,
+                                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal, maxLines = 1)
+                                if (index == 0) Text(favorites.size.toString(), fontSize = 11.sp, color = color.copy(alpha = .6f), maxLines = 1)
+                            }
+                        })
                 }
             }
         }

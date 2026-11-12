@@ -144,7 +144,7 @@ fun AccountScreen(
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "account-heading") {
-                AccountHeading(signedIn = false, busy = state.busy, onRefresh = onRefresh)
+                Text("匿名阅读已启用", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "login-form") {
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -213,8 +213,6 @@ fun AccountScreen(
                 Column(Modifier.fillMaxSize()) {
                     Column(Modifier.fillMaxWidth().heightIn(max = profileMaxHeight)
                         .verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = 4.dp)) {
-                        AccountHeading(signedIn = true, busy = state.busy, onRefresh = onRefresh)
-                        Spacer(Modifier.height(24.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(42.dp).clip(CircleShape).background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
@@ -227,6 +225,9 @@ fun AccountScreen(
                                         Text(profile.username, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
+                                }
+                                IconButton(onClick = onRefresh, enabled = !state.busy) {
+                                    Icon(Icons.Outlined.Refresh, "刷新账号", Modifier.size(21.dp))
                                 }
                                 TextButton(onClick = { clearInputs(); removeFavorite = null; onLogout() }) { Text("退出") }
                             }
@@ -330,20 +331,6 @@ fun AccountScreen(
             },
             dismissButton = { TextButton(onClick = { removeFavorite = null }) { Text("取消") } },
         )
-    }
-}
-
-@Composable
-private fun AccountHeading(signedIn: Boolean, busy: Boolean, onRefresh: () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text("账号", style = MaterialTheme.typography.headlineLarge)
-            if (!signedIn) Text("匿名阅读已启用", Modifier.padding(top = 4.dp),
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        if (signedIn) IconButton(onClick = onRefresh, enabled = !busy) {
-            Icon(Icons.Outlined.Refresh, "刷新账号", Modifier.size(21.dp))
-        }
     }
 }
 

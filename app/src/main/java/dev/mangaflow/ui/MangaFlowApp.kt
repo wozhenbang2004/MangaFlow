@@ -420,7 +420,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 }
                             }
                             val toolbar: @Composable (@Composable () -> Unit) -> Unit = { actions ->
-                            Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 8.dp),
+                            Row((if (current.section == Section.DISCOVER) Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                                else Modifier.padding(horizontal = 4.dp)).height(44.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 if (current.section == Section.DISCOVER) {
                                     Row(Modifier.weight(1f).fillMaxHeight()
@@ -439,16 +440,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         // The root overlay owns the button; this slot keeps all toolbar bounds fixed.
                                         Spacer(Modifier.size(44.dp))
                                     }
-                                } else {
-                                    Text(when (current.section) {
-                                        Section.LIBRARY -> "书架"
-                                        Section.DOWNLOADS -> "下载"
-                                        Section.SETTINGS -> "设置"
-                                        Section.ACCOUNT -> "账号"
-                                        else -> "漫流"
-                                    },
-                                        modifier = Modifier.padding(start = 4.dp), fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-                                    Spacer(Modifier.weight(1f))
                                 }
                                 if (hasUpdate && current.section != Section.DISCOVER) {
                                     MotionIconButton(modifier = Modifier.size(44.dp), onClick = { changeSection(Section.SETTINGS) }) {
@@ -484,7 +475,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         favorites = favorites, history = history,
                                         libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
                                         repository = model.repository, opening = libraryOpening, active = rootActive,
-                                        backdrop = searchBackdrop, navigation = navigation, toolbar = { toolbar {} },
+                                        backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         onOpen = model::readFromLibrary, onDetails = { model.openManga(it) },
                                         onContinue = model::continueReading,
                                         onRemoveFavorite = model::removeFavorite,
@@ -510,9 +501,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache)
                                 }
                             }
-                            if (current.section !in setOf(Section.DOWNLOADS, Section.LIBRARY)) {
+                            if (current.section in setOf(Section.ACCOUNT, Section.SETTINGS)) {
+                                PageTitleHeader(if (current.section == Section.ACCOUNT) "账号" else "设置",
+                                    searchBackdrop, navigation,
+                                    modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
+                                        .onSizeChanged { chromeHeightPx = it.height },
+                                    actions = if (hasUpdate) ({ toolbar {} }) else null)
+                            } else if (current.section == Section.DISCOVER) {
                                 SegmentedGlassHeader(searchBackdrop, navigation,
-                                    controlsWidth = if (current.section == Section.DISCOVER) discoveryControlWidth else null,
+                                    controlsWidth = discoveryControlWidth,
                                     modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
                                         .onSizeChanged { chromeHeightPx = it.height },
                                     controlsAlpha = {
