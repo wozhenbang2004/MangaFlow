@@ -82,6 +82,12 @@ internal object MangaMotion {
     const val PressDamping = .866f
     const val PanelStiffness = 840f
     const val PanelDamping = 1.38f
+    // Approximate Compose counterpart of beUI Morphing Search's 580ms / .22 bounce role.
+    const val SearchStiffness = 230f
+    const val SearchDamping = .78f
+    const val SearchLead = 70L
+    const val SearchClip = 320
+    val SearchEasing = CubicBezierEasing(.16f, 1f, .3f, 1f)
 }
 
 internal val LocalMotionEnabled = staticCompositionLocalOf { true }

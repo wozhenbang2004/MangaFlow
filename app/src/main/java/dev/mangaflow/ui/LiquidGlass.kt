@@ -67,6 +67,7 @@ internal fun LiquidGlassSurface(
     skin: GlassSkin = LocalGlassSkin.current,
     interactionSource: MutableInteractionSource? = null,
     trackPointer: Boolean = false,
+    elevation: Dp? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -128,7 +129,7 @@ internal fun LiquidGlassSurface(
     } else Modifier
 
     CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
-        Box(modifier.shadow(if (liquid) 4.dp else 2.dp, shape, clip = false,
+        Box(modifier.shadow(elevation ?: if (liquid) 4.dp else 2.dp, shape, clip = false,
             ambientColor = Color.Black.copy(alpha = .04f),
             spotColor = Color.Black.copy(alpha = .065f))
             .clip(shape).background(colors.surface.copy(alpha = .96f)).then(pointerTracking)) {

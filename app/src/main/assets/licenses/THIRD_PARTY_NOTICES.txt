@@ -88,6 +88,16 @@ input and focus, and retains panels until their exit finishes. Android owns the
 animation clock, dialog window, semantics and system motion preference. The web
 runtime and full-screen blur are not included.
 
+The root-level discovery search in `ui/ExpandingSearchBar.kt` also adapts that version's
+`components/motion/morphing-search.tsx` and `components/motion/popover-morph.tsx`.
+It retains the shared shell, fixed-size foreground, independent reveal, end-aligned anchor
+and exit presence. The Android adaptation opens leftward from the existing 48dp icon slot,
+adds a short leading icon response, uses an approximate unit-mass counterpart of the
+source's 580ms/bounce-0.22 shell spring and its 320ms foreground easing, and joins real
+query results inside the same shell. Haze and the existing optical layer replace the web
+backdrop filter; the upstream input divider is omitted. This is not a pixel-identical
+port or evidence of device appearance, timing or frame rate.
+
 MIT License
 
 Copyright (c) 2026 Saurabh Chauhan

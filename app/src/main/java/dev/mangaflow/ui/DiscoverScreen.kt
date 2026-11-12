@@ -1,7 +1,6 @@
 package dev.mangaflow.ui
 
 import android.view.accessibility.AccessibilityManager
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -26,7 +25,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -81,20 +79,17 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
@@ -122,6 +117,7 @@ import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.rememberHazeState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -134,7 +130,7 @@ fun DiscoverScreen(
     state: BrowseState,
     backgroundState: BrowseState,
     searchExpanded: Boolean,
-    onCloseSearch: () -> Unit,
+    searchBackdrop: HazeState,
     canAutoAdvance: Boolean,
     repository: MangaRepository,
     onRefresh: () -> Unit,
@@ -145,147 +141,115 @@ fun DiscoverScreen(
     onAudience: (RankAudience) -> Unit,
     active: Boolean = true,
 ) {
-    val keyboard = LocalSoftwareKeyboardController.current
-    val focus = LocalFocusManager.current
     val motion = LocalMotionEnabled.current
-    val dismissSearch = {
-        keyboard?.hide()
-        focus.clearFocus(force = true)
-        onCloseSearch()
-    }
-    BackHandler(active && searchExpanded, onBack = dismissSearch)
-    // Keep browsing behind the search panel; query updates own only the overlay.
     val browse = if (state.query.isBlank()) state else backgroundState
-    var retainedSearch by remember { mutableStateOf(state) }
-    SideEffect {
-        if (searchExpanded) retainedSearch = state
-    }
-    // Clearing the query on dismissal must not shrink the leaving panel halfway through its fade.
-    val search = if (searchExpanded) state else retainedSearch
-    val searchBackdrop = rememberHazeState()
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
-    val searchPositions = rememberSaveable(saver = SearchPositionsSaver) { LinkedHashMap<String, LazyListState>() }
+    Column(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(searchBackdrop)
+        .motionInputGate(active && !searchExpanded)) {
+        // Filters stay outside the changing list, so their indicator keeps its velocity.
+        AnimatedVisibility(
+            visible = browse.mode == DiscoveryMode.RANKING,
+            enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) +
+                expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                shrinkVertically(tween(if (motion) MangaMotion.Content else 0)),
+        ) {
+            RankingControls(browse, onPeriod, onAudience, onRefresh,
+                Modifier.motionInputGate(active && !searchExpanded && browse.mode == DiscoveryMode.RANKING))
+        }
+        MotionTabContent(
+            selected = browse,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentKey = { it.cacheKey },
+            order = { it.mode.ordinal * 8 + it.period.ordinal * 2 + it.audience.ordinal },
+        ) { pane ->
+            DiscoveryPane(pane, positions, repository,
+                active = active && !searchExpanded && pane.cacheKey == browse.cacheKey,
+                canAutoAdvance = canAutoAdvance,
+                onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen)
+        }
+    }
+}
+
+/** Lives with the root search host, so dismissing the shell retains per-query positions. */
+@Composable
+internal fun DiscoverySearchResults(
+    state: BrowseState,
+    expanded: Boolean,
+    active: Boolean,
+    maxHeight: Dp,
+    repository: MangaRepository,
+    onRetry: () -> Unit,
+    onMore: () -> Unit,
+    onOpen: (Manga) -> Unit,
+) {
+    var retainedSearch by remember { mutableStateOf(state) }
+    SideEffect { if (expanded) retainedSearch = state }
+    val search = if (expanded) state else retainedSearch
+    val positions = rememberSaveable(saver = SearchPositionsSaver) { LinkedHashMap<String, LazyListState>() }
+    if (search.query.isBlank() || maxHeight <= 0.dp) return
     val retainedResults = remember(search.cacheKey) {
-        val saved = searchPositions.remove(search.cacheKey) ?: LazyListState()
-        searchPositions[search.cacheKey] = saved
-        while (searchPositions.size > 24) searchPositions.remove(searchPositions.keys.first())
+        val saved = positions.remove(search.cacheKey) ?: LazyListState()
+        positions[search.cacheKey] = saved
+        while (positions.size > 24) positions.remove(positions.keys.first())
         saved
     }
-    Box(Modifier.fillMaxSize().navigationBarsPadding()) {
-        Column(Modifier.fillMaxSize().hazeSource(searchBackdrop)
-            .motionInputGate(active && !searchExpanded)) {
-            // Filters stay outside the changing list, so their indicator keeps its velocity.
-            AnimatedVisibility(
-                visible = browse.mode == DiscoveryMode.RANKING,
-                enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) +
-                    expandVertically(tween(if (motion) MangaMotion.Content else 0)),
-                exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
-                    shrinkVertically(tween(if (motion) MangaMotion.Content else 0)),
-            ) {
-                RankingControls(browse, onPeriod, onAudience, onRefresh,
-                    Modifier.motionInputGate(active && !searchExpanded && browse.mode == DiscoveryMode.RANKING))
-            }
-            MotionTabContent(
-                selected = browse,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentKey = { it.cacheKey },
-                order = { it.mode.ordinal * 8 + it.period.ordinal * 2 + it.audience.ordinal },
-            ) { pane ->
-                DiscoveryPane(pane, positions, repository,
-                    active = active && !searchExpanded && pane.cacheKey == browse.cacheKey,
-                    canAutoAdvance = canAutoAdvance,
-                    onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen)
+    Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).padding(8.dp)
+        .motionInputGate(active)) {
+        Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, bottom = 5.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text("搜索结果", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.weight(1f))
+            if (search.loading && search.items.isEmpty()) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            } else if (search.items.isNotEmpty()) {
+                Text("${search.items.size} 条", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        // Only this overlay receives IME insets; the browse list retains its position and height.
-        AnimatedVisibility(
-            visible = searchExpanded,
-            modifier = Modifier.fillMaxSize().imePadding().motionInputGate(searchExpanded && active)
-                .semantics { paneTitle = "搜索漫画" },
-            enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)),
-            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)),
-        ) {
-            BoxWithConstraints(Modifier.fillMaxSize()) {
-                val panelMaxHeight = (maxHeight - 8.dp).coerceAtLeast(0.dp)
-                Box(
-                    Modifier.fillMaxSize()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null, onClickLabel = "关闭搜索", onClick = dismissSearch,
-                        ),
-                )
-                if (search.query.isNotBlank()) LiquidGlassSurface(
-                    state = searchBackdrop,
-                    role = GlassSurfaceRole.PANEL,
-                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
-                        .padding(start = 14.dp, end = 14.dp, top = 8.dp)
-                        .pointerInput(Unit) {},
-                    cornerRadius = 22.dp,
-                ) {
-                    Column(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).padding(8.dp)) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text("搜索结果", style = MaterialTheme.typography.titleSmall)
-                            Spacer(Modifier.weight(1f))
-                            if (search.loading && search.items.isEmpty()) {
-                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                            } else if (search.items.isNotEmpty()) {
-                                Text("${search.items.size} 条", style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+        when {
+            search.loading && search.items.isEmpty() -> Box(
+                Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
+            ) { Text("正在查找…", style = MaterialTheme.typography.bodySmall) }
+            search.items.isEmpty() -> Column(
+                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(if (search.error != null) "搜索暂时不可用" else "没有找到相关漫画",
+                    style = MaterialTheme.typography.bodyMedium)
+                if (search.error != null) {
+                    Text(search.error, modifier = Modifier.padding(top = 6.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    TextButton(onClick = onRetry) { Text("重试") }
+                }
+            }
+            else -> LazyColumn(
+                state = retainedResults,
+                modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                contentPadding = PaddingValues(bottom = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                items(search.items, key = Manga::id) { manga ->
+                    SearchResultRow(manga, repository) { onOpen(manga) }
+                }
+                if (search.hasMore || search.loadingMore) {
+                    item(key = "search-more") {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            if (search.loadingMore) {
+                                CircularProgressIndicator(Modifier.padding(12.dp).size(19.dp), strokeWidth = 2.dp)
+                            } else TextButton(onClick = onMore) { Text("更多结果") }
                         }
-                        when {
-                            search.loading && search.items.isEmpty() -> Box(
-                                Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
-                            ) { Text("正在查找…", style = MaterialTheme.typography.bodySmall) }
-                            search.items.isEmpty() -> Column(
-                                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 16.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                            ) {
-                                Text(if (search.error != null) "搜索暂时不可用" else "没有找到相关漫画",
-                                    style = MaterialTheme.typography.bodyMedium)
-                                if (search.error != null) {
-                                    Text(search.error, modifier = Modifier.padding(top = 6.dp),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                    TextButton(onClick = onRetry) { Text("重试") }
-                                }
-                            }
-                            else -> LazyColumn(
-                                state = retainedResults,
-                                modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
-                                contentPadding = PaddingValues(bottom = 4.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
-                            ) {
-                                items(search.items, key = Manga::id) { manga ->
-                                    SearchResultRow(manga, repository) {
-                                        dismissSearch()
-                                        onOpen(manga)
-                                    }
-                                }
-                                if (search.hasMore || search.loadingMore) {
-                                    item(key = "search-more") {
-                                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                            if (search.loadingMore) {
-                                                CircularProgressIndicator(Modifier.padding(12.dp).size(19.dp), strokeWidth = 2.dp)
-                                            } else TextButton(onClick = onMore) { Text("更多结果") }
-                                        }
-                                    }
-                                }
-                                if (search.error != null) item(key = "search-error") {
-                                    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text(search.error, style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                        TextButton(onClick = onRetry) { Text("重试") }
-                                    }
-                                }
-                            }
-                        }
+                    }
+                }
+                if (search.error != null) item(key = "search-error") {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(search.error, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        TextButton(onClick = onRetry) { Text("重试") }
                     }
                 }
             }

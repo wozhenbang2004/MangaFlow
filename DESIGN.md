@@ -2,6 +2,19 @@
 
 Current detail contract: [Large artwork and scrolling](#large-artwork-and-scrolling--2026-11-12-current-contract). Older decisions below are retained with their superseding requirements.
 
+## Search morph correction · 2026-11-12
+
+User: “搜索框的那个还不是不行去看看我们审美库吧肯定有类似我描述的那种效果的”. This rejects the search appearance delivered at `9527c84`; it does not accept SEARCH-02's visual result. The earlier “点击后图标会有一些动画然后搜索框从图标左侧展出” and floating liquid-glass request remain active.
+
+SEARCH-03 replaces the toolbar-bound width-only implementation. Adopt the saved beUI Morphing Search (`atlas-c-05`, `starc007/ui-components` commit `a866cb2f37ce68c3fc0c66425e86e3f31566e4be`, `components/motion/morphing-search.tsx`) and the same version's `popover-morph.tsx` end-aligned reveal. The search source, preview, easing and MIT license were read from `references/uiux/assets/upstream-completion-20261102.zip`; its saved `media/morphing-search.jpg` shows the expanded reference, not our Android result. The popover file was read directly at that fixed commit. These are source-backed adaptations, not an approved exact reproduction.
+
+- Put the search shell above the root content, retaining the original 48dp trigger slot and the 52dp toolbar. Its right anchor stays fixed while the shell grows left; a small icon response leads the shell by 70ms. Adapt the source's 580ms/bounce .22 spring as a reversible Compose spring, and retain its independent 320ms `(0.16,1,0.3,1)` foreground reveal. Measure input/results at their final width; never scale glyphs or animate the whole browse layout.
+- The same shell contains the input and, only for a nonblank query, the real results. An empty query has only the compact search capsule. Remove the upstream input divider. Preserve query caches, per-query positions, cancellation, error/retry and original manga data.
+- Let the root search and results sample the actual toolbar/browse source as foreground siblings. Preserve `0a99fec`'s global glass skin and pinned Backdrop optics: use the clear control role for an empty input and the readable panel role for query results, with restrained floating elevation. Share the input's interaction source with the separate optical shell; icon press transforms remain independent. Keep text outside the optical layer; do not duplicate cover art or include the glass in its own sampling source.
+- Back, outside click, clear and close keep one dismissal path. Leaving content loses interaction/focus immediately and remains only until its exit finishes; rapid reversal uses the current animation value. Focus/IME waits for the revealed input, only the overlay uses IME insets, and the drawer remains available. Respect reduced motion.
+
+Scope is the discovery search and necessary host/results integration. Other concurrent reader, ranking, provider and glass-skin work must be preserved. Review source/diff, submit directly to current main and confirm CI trigger; no tests or local prebuild. Android appearance, keyboard timing and gesture feel remain pending user device feedback.
+
 ## Release gestures, dense comments and ranking icons · 2026-11-12
 
 User: “别弄成读者还是得保留拷贝二字以及上拉加载我希望做成松手释放” and “评论上浮我希望做成信息密度更高点现在太大了信息量太少了以及以及没必要标记什么本话还有最新优先这种字样啊以及章节那一块区域还是没办法识别到我的滑动啊这里的榜单切换也弄点动画啊男频女频这个很丑啊弄成男女图标吧点击切换切换动画也做好”. Before-state screenshots: `1000121369.jpg`–`1000121372.jpg`; no chat message ID was supplied. This replaces the neutral comment source in LABEL-01, immediate threshold execution in READER-END-01/BROWSE-LOAD-01, and text audience choices in RANK-02. Other search, download and chapter-only requirements remain in force.

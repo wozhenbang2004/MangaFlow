@@ -89,6 +89,8 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.update.UpdatePhase
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.launch
 
 private enum class Section(val title: String, val icon: ImageVector) {
@@ -299,17 +301,27 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         )
                     }
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
-                        Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                        val searchBackdrop = rememberHazeState()
+                        var searchPresent by remember { mutableStateOf(searchExpanded) }
+                        val searchVisible = searchExpanded || searchPresent
+                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen
+                        val closeSearch: () -> Unit = {
+                            keyboard?.hide()
+                            focus.clearFocus(force = true)
+                            searchExpanded = false
+                            model.setQuery("")
+                        }
+                        Box(Modifier.fillMaxSize().statusBarsPadding()) {
+                        Column(Modifier.fillMaxSize()) {
                             val compactHeader = current.section == Section.DISCOVER || current.section == Section.LIBRARY
                             Row(Modifier.fillMaxWidth().height(if (compactHeader) 52.dp else 60.dp)
+                                .then(if (current.section == Section.DISCOVER) Modifier.hazeSource(searchBackdrop) else Modifier)
                                 .padding(horizontal = if (compactHeader) 8.dp else 12.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
                                 Box {
                                     MotionIconButton(onClick = {
-                                        keyboard?.hide()
-                                        searchExpanded = false
-                                        model.setQuery("")
+                                        closeSearch()
                                         scope.launch { drawer.open() }
                                     }) {
                                         Icon(Icons.Outlined.Menu, if (hasUpdate) "打开导航，有新版本" else "打开导航", Modifier.size(22.dp))
@@ -319,33 +331,20 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             .background(MaterialTheme.colorScheme.onSurface, CircleShape))
                                 }
                                 if (current.section == Section.DISCOVER) {
-                                    ExpandingSearchBar(
-                                        expanded = searchExpanded,
-                                        query = browse.query,
-                                        active = current.key == frame.key && !drawer.isOpen && !recentReadingOpen,
-                                        onExpandedChange = { expanded ->
-                                            searchExpanded = expanded
-                                            if (!expanded) model.setQuery("")
-                                        },
-                                        onQuery = model::setQuery,
-                                        onSearch = model::refresh,
-                                        modifier = Modifier.weight(1f).fillMaxHeight(),
-                                    ) {
-                                        Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
-                                            BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label }, Modifier.weight(1f)) { index ->
-                                                keyboard?.hide()
-                                                searchExpanded = false
-                                                model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
-                                            }
-                                            if (history.isNotEmpty()) MotionIconButton(onClick = {
-                                                keyboard?.hide()
-                                                searchExpanded = false
-                                                model.setQuery("")
-                                                recentReadingOpen = true
-                                            }) {
-                                                Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
-                                            }
+                                    Row(Modifier.weight(1f).fillMaxHeight().motionInputGate(rootActive && !searchVisible),
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label }, Modifier.weight(1f)) { index ->
+                                            closeSearch()
+                                            model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
                                         }
+                                        if (history.isNotEmpty()) MotionIconButton(onClick = {
+                                            closeSearch()
+                                            recentReadingOpen = true
+                                        }) {
+                                            Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
+                                        }
+                                        // The root overlay owns the button; this slot keeps all toolbar bounds fixed.
+                                        Spacer(Modifier.size(48.dp))
                                     }
                                 } else {
                                     Text(if (current.section == Section.LIBRARY) "书架" else "漫流",
@@ -364,10 +363,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
                                         backgroundState = model.browseBackground(browse),
-                                        searchExpanded = searchExpanded,
-                                        active = current.key == frame.key && !drawer.isOpen && !recentReadingOpen,
-                                        canAutoAdvance = !drawer.isOpen && !recentReadingOpen && !searchExpanded && current.key == frame.key,
-                                        onCloseSearch = { searchExpanded = false; model.setQuery("") },
+                                        searchExpanded = searchVisible,
+                                        searchBackdrop = searchBackdrop,
+                                        active = rootActive,
+                                        canAutoAdvance = rootActive && !searchVisible,
                                         onRefresh = model::refresh,
                                         onRetry = model::retryBrowse, onMore = model::loadMore,
                                         onOpen = { model.openManga(it) },
@@ -396,6 +395,25 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache)
                                 }
                             }
+                        }
+                        if (current.section == Section.DISCOVER) ExpandingSearchBar(
+                            expanded = searchExpanded,
+                            query = browse.query,
+                            active = rootActive,
+                            backdrop = searchBackdrop,
+                            onExpandedChange = { if (it) searchExpanded = true else closeSearch() },
+                            onPresenceChange = { searchPresent = it },
+                            onQuery = model::setQuery,
+                            onSearch = model::refresh,
+                            modifier = Modifier.fillMaxSize(),
+                        ) { maxHeight, searchActive ->
+                            DiscoverySearchResults(
+                                state = browse, expanded = searchExpanded, active = searchActive,
+                                maxHeight = maxHeight, repository = model.repository,
+                                onRetry = model::retryBrowse, onMore = model::loadMore,
+                                onOpen = { manga -> closeSearch(); model.openManga(manga) },
+                            )
+                        }
                         }
                     }
                 }
