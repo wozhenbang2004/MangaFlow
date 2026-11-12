@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -60,6 +61,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.Bookmark
+import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
@@ -71,6 +74,7 @@ import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -145,6 +149,7 @@ import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.LibraryStore
+import dev.mangaflow.storage.ReaderBookmark
 import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
@@ -218,6 +223,13 @@ fun ReaderScreen(
     // here used to recompose ReaderScreen and ChapterPages for every animation frame.
     val cursor = remember(chapterId) { ReaderCursor() }
     var targetPage by remember(chapterId) { mutableStateOf<Int?>(null) }
+    var targetOffset by remember(chapterId) { mutableIntStateOf(0) }
+    var returnLocation by remember(chapterId) { mutableStateOf<ReaderReturnLocation?>(null) }
+    var showPageNavigator by remember(chapterId) { mutableStateOf(false) }
+    var bookmarks by remember(manga.id, chapterId) {
+        mutableStateOf(libraryStore.bookmarksFor(manga.id, chapterId))
+    }
+    var bookmarkEditor by remember(chapterId) { mutableStateOf<ReaderBookmark?>(null) }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showComments by remember(chapterId) { mutableStateOf(false) }
@@ -359,7 +371,8 @@ fun ReaderScreen(
                         initialPage = pageIndex,
                         initialOffset = cursor.scrollOffset,
                         targetPage = targetPage,
-                        onTargetConsumed = { targetPage = null },
+                        targetOffset = targetOffset,
+                        onTargetConsumed = { targetPage = null; targetOffset = 0 },
                         onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
                         onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, pages.size, offset,
                             clearLegacyLongImagePosition = preferences.mode == ReadingMode.VERTICAL) },
@@ -492,9 +505,34 @@ fun ReaderScreen(
                             pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
                             enabled = controlsVisible,
                             backdrop = readerBackdrop,
-                            onSeek = { targetPage = it },
+                            onSeek = { destination ->
+                                if (destination != pageIndex) {
+                                    returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
+                                    targetOffset = 0
+                                    targetPage = destination
+                                }
+                            },
+                            onOpenNavigator = { showPageNavigator = true },
                             onInteractionChanged = { progressInteracting = it },
                         )
+                        AnimatedVisibility(visible = returnLocation != null) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                TextButton(
+                                    enabled = controlsVisible,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                    onClick = {
+                                        returnLocation?.let { previous ->
+                                            val current = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
+                                            targetOffset = previous.scrollOffset
+                                            targetPage = previous.pageIndex
+                                            returnLocation = current
+                                        }
+                                    },
+                                ) {
+                                    Text("返回刚才", color = colors.onSurfaceVariant, fontSize = 11.sp)
+                                }
+                            }
+                        }
                     }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween) {
@@ -503,6 +541,14 @@ fun ReaderScreen(
                             siblings.getOrNull(chapterIndex - 1)?.let { chapterId = it.id }
                         }
                         ReaderIcon(Icons.Rounded.MenuBook, "章节目录", interactive = controlsVisible) { showChapters = true }
+                        val currentBookmark = bookmarks.firstOrNull { it.pageIndex == pageIndex }
+                        ReaderIcon(
+                            if (currentBookmark == null) Icons.Rounded.BookmarkBorder else Icons.Rounded.Bookmark,
+                            if (currentBookmark == null) "添加页书签" else "编辑页书签",
+                            enabled = pages.isNotEmpty(), interactive = controlsVisible,
+                        ) {
+                            bookmarkEditor = currentBookmark ?: ReaderBookmark(pageIndex)
+                        }
                         ReaderIcon(Icons.Rounded.Forum, "本章评论", enabled = pages.isNotEmpty(), interactive = controlsVisible) {
                             showComments = true
                         }
@@ -589,6 +635,37 @@ fun ReaderScreen(
             }
         }
     }
+    ReaderPageNavigatorDialog(
+        visible = showPageNavigator,
+        pages = pages,
+        headers = headers,
+        currentPage = pageIndex,
+        bookmarks = bookmarks,
+        backdrop = readerBackdrop,
+        onSelect = { destination ->
+            if (destination != pageIndex) {
+                returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
+                targetOffset = 0
+                targetPage = destination
+            }
+            showPageNavigator = false
+        },
+        onDismiss = { showPageNavigator = false },
+    )
+    ReaderBookmarkDialog(
+        bookmark = bookmarkEditor,
+        canRemove = bookmarkEditor?.let { editing -> bookmarks.any { it.pageIndex == editing.pageIndex } } == true,
+        backdrop = readerBackdrop,
+        onSave = { editing, note ->
+            bookmarks = libraryStore.saveBookmark(manga.id, chapterId, editing.pageIndex, note)
+            bookmarkEditor = null
+        },
+        onRemove = { editing ->
+            bookmarks = libraryStore.removeBookmark(manga.id, chapterId, editing.pageIndex)
+            bookmarkEditor = null
+        },
+        onDismiss = { bookmarkEditor = null },
+    )
     ReaderSettingsDialog(visible = showSettings, preferences = preferences, backdrop = readerBackdrop,
         onDimPreview = { dimPreview.value = it }, update = { next ->
         if (next.mode != preferences.mode || next.doublePage != preferences.doublePage || next.coverAlone != preferences.coverAlone) {
@@ -645,6 +722,7 @@ private fun ChapterPages(
     initialPage: Int,
     initialOffset: Int,
     targetPage: Int?,
+    targetOffset: Int,
     onTargetConsumed: () -> Unit,
     onLocation: (Int, Int) -> Unit,
     onSave: (Int, Int) -> Unit,
@@ -734,8 +812,12 @@ private fun ChapterPages(
                 if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0, restoring) }
                 .debounce(450).distinctUntilChanged().collect { (index, offset, restoringNow) -> if (!restoringNow) save(index, offset) }
         }
-        LaunchedEffect(targetPage) {
-            targetPage?.let { restoring = false; list.scrollToItem(it.coerceIn(0, pages.lastIndex)); onTargetConsumed() }
+        LaunchedEffect(targetPage, targetOffset) {
+            targetPage?.let {
+                restoring = false
+                list.scrollToItem(it.coerceIn(0, pages.lastIndex), targetOffset.coerceAtLeast(0))
+                onTargetConsumed()
+            }
         }
         DisposableEffect(list) {
             onDispose { if (!restoring) save(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
@@ -1175,6 +1257,121 @@ private fun ReaderPage(
     }
 }
 
+private data class ReaderReturnLocation(val pageIndex: Int, val scrollOffset: Int)
+
+@Composable
+private fun ReaderPageNavigatorDialog(
+    visible: Boolean,
+    pages: List<Page>,
+    headers: Map<String, String>,
+    currentPage: Int,
+    bookmarks: List<ReaderBookmark>,
+    backdrop: HazeState,
+    onSelect: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val bookmarked = remember(bookmarks) { bookmarks.map(ReaderBookmark::pageIndex).toSet() }
+    MotionDialog(
+        visible = visible,
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        ReaderDialogSurface(
+            Modifier.padding(horizontal = 16.dp).widthIn(max = 560.dp).fillMaxWidth()
+                .heightIn(max = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(220).dp),
+            backdrop,
+        ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
+                ReaderPanelHeading("页导航", "关闭页导航", onDismiss)
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(76.dp),
+                    modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+                    contentPadding = PaddingValues(bottom = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(pages, key = { it.index }) { page ->
+                        val selected = page.index == currentPage
+                        val request = remember(page.url, headers) {
+                            ImageRequest.Builder(context).data(page.url)
+                                .httpHeaders(NetworkHeaders.Builder().apply {
+                                    headers.forEach { (name, value) -> set(name, value) }
+                                }.build()).crossfade(0).build()
+                        }
+                        Column(
+                            Modifier.clip(RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = if (selected) .08f else .035f))
+                                .clickable(role = Role.Button) { onSelect(page.index) }
+                                .padding(5.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Box(Modifier.fillMaxWidth().aspectRatio(.7f)
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)) {
+                                AsyncImage(
+                                    model = request,
+                                    contentDescription = "第 ${page.index + 1} 页",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                                if (page.index in bookmarked) Icon(
+                                    Icons.Rounded.Bookmark, null,
+                                    Modifier.align(Alignment.TopEnd).padding(4.dp).size(15.dp),
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
+                            Text(
+                                "${page.index + 1}",
+                                fontSize = 10.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 3.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReaderBookmarkDialog(
+    bookmark: ReaderBookmark?,
+    canRemove: Boolean,
+    backdrop: HazeState,
+    onSave: (ReaderBookmark, String) -> Unit,
+    onRemove: (ReaderBookmark) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var note by remember(bookmark?.pageIndex, bookmark?.note) { mutableStateOf(bookmark?.note.orEmpty()) }
+    MotionDialog(visible = bookmark != null, onDismissRequest = onDismiss) {
+        bookmark?.let { editing ->
+            ReaderDialogSurface(Modifier.padding(20.dp).widthIn(max = 460.dp).fillMaxWidth(), backdrop) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp)) {
+                    ReaderPanelHeading("第 ${editing.pageIndex + 1} 页书签", "关闭书签", onDismiss)
+                    OutlinedTextField(
+                        value = note,
+                        onValueChange = { if (it.length <= 240) note = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        maxLines = 5,
+                        label = { Text("备注（可选）") },
+                        placeholder = { Text("记点什么，免得未来的你又问现在的你在看哪。") },
+                    )
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+                        if (canRemove) TextButton(onClick = { onRemove(editing) }) {
+                            Text("删除", color = MaterialTheme.colorScheme.error)
+                        }
+                        TextButton(onClick = { onSave(editing, note) }) { Text("保存") }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ReaderProgressSlider(
     pageIndex: Int,
@@ -1183,6 +1380,7 @@ private fun ReaderProgressSlider(
     enabled: Boolean,
     backdrop: HazeState,
     onSeek: (Int) -> Unit,
+    onOpenNavigator: () -> Unit,
     onInteractionChanged: (Boolean) -> Unit,
 ) {
     val interactions = remember { MutableInteractionSource() }
@@ -1221,7 +1419,12 @@ private fun ReaderProgressSlider(
             backdrop = backdrop,
             label = "阅读进度，第 ${shown.roundToInt() + 1} 页，共 $pageCount 页",
         )
-        Row(Modifier.width(numberWidth), horizontalArrangement = Arrangement.Center) {
+        Row(
+            Modifier.width(numberWidth).clip(RoundedCornerShape(8.dp))
+                .clickable(enabled = enabled && pageCount > 0, role = Role.Button, onClick = onOpenNavigator)
+                .padding(vertical = 5.dp),
+            horizontalArrangement = Arrangement.Center,
+        ) {
             Text("${shown.roundToInt() + 1}", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             Text(" / $pageCount", color = colors.onSurface.copy(alpha = .86f), fontSize = 12.sp)
         }

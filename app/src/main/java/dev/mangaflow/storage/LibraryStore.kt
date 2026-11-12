@@ -32,6 +32,12 @@ data class ChapterProgress(
 
 enum class ShelfState { NORMAL, FOLLOWING, HOARDING, PAUSED }
 
+data class ReaderBookmark(
+    val pageIndex: Int,
+    val note: String = "",
+    val updatedAt: Long = System.currentTimeMillis(),
+)
+
 /** Device-local reading state. Neither favorites nor reading history require a source account. */
 class LibraryStore(context: Context) {
     private val disk = context.applicationContext.getSharedPreferences("mangaflow_library", Context.MODE_PRIVATE)
@@ -292,6 +298,55 @@ class LibraryStore(context: Context) {
         val removedManga: MutableMap<String, Long> = linkedMapOf(),
     )
 
+    /** Explicit page bookmarks survive ordinary history cleanup because the user created them deliberately. */
+    fun bookmarksFor(mangaId: String, chapterId: String): List<ReaderBookmark> = synchronized(lock) {
+        val encoded = disk.getString(bookmarkKey(mangaId, chapterId), "[]") ?: "[]"
+        runCatching {
+            val array = JSONArray(encoded)
+            (0 until array.length()).mapNotNull { index ->
+                array.optJSONObject(index)?.let { json ->
+                    val page = json.optInt("pageIndex", -1)
+                    if (page < 0) null else ReaderBookmark(
+                        pageIndex = page,
+                        note = json.optString("note"),
+                        updatedAt = json.optLong("updatedAt", 0L),
+                    )
+                }
+            }.distinctBy(ReaderBookmark::pageIndex).sortedBy(ReaderBookmark::pageIndex)
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveBookmark(mangaId: String, chapterId: String, pageIndex: Int, note: String): List<ReaderBookmark> =
+        synchronized(lock) {
+            if (pageIndex < 0) return@synchronized bookmarksFor(mangaId, chapterId)
+            val next = (bookmarksFor(mangaId, chapterId).filterNot { it.pageIndex == pageIndex } +
+                ReaderBookmark(pageIndex, note.trim().take(240)))
+                .sortedBy(ReaderBookmark::pageIndex)
+            persistBookmarks(mangaId, chapterId, next)
+            next
+        }
+
+    fun removeBookmark(mangaId: String, chapterId: String, pageIndex: Int): List<ReaderBookmark> =
+        synchronized(lock) {
+            val next = bookmarksFor(mangaId, chapterId).filterNot { it.pageIndex == pageIndex }
+            persistBookmarks(mangaId, chapterId, next)
+            next
+        }
+
+    private fun persistBookmarks(mangaId: String, chapterId: String, bookmarks: List<ReaderBookmark>) {
+        val key = bookmarkKey(mangaId, chapterId)
+        val editor = disk.edit()
+        if (bookmarks.isEmpty()) editor.remove(key)
+        else editor.putString(key, JSONArray(bookmarks.map { bookmark ->
+            JSONObject().apply {
+                put("pageIndex", bookmark.pageIndex)
+                put("note", bookmark.note)
+                put("updatedAt", bookmark.updatedAt)
+            }
+        }).toString())
+        editor.apply()
+    }
+
     /** Explicit spread corrections live separately from reading history and source image data. */
     fun spreadSinglesFor(mangaId: String, chapterId: String): Set<Int> = synchronized(lock) {
         val value = disk.getString(spreadKey(mangaId, chapterId), "[]") ?: "[]"
@@ -415,9 +470,13 @@ class LibraryStore(context: Context) {
     private fun spreadKey(mangaId: String, chapterId: String) =
         "${SPREAD_PREFIX}${mangaId.length}:$mangaId${chapterId.length}:$chapterId"
 
+    private fun bookmarkKey(mangaId: String, chapterId: String) =
+        "${BOOKMARK_PREFIX}${mangaId.length}:$mangaId${chapterId.length}:$chapterId"
+
     private companion object {
         const val SHELF_STATES_KEY = "shelf_states"
         const val MANGA_READER_PREFERENCES_KEY = "reader_preferences_by_manga"
+        const val BOOKMARK_PREFIX = "reader_bookmarks:"
         const val SPREAD_PREFIX = "spread_singles:"
         const val CHAPTER_PROGRESS_PREFIX = "chapter_progress:"
         const val LONG_IMAGE_POSITION_PREFIX = "long_image_position:"
