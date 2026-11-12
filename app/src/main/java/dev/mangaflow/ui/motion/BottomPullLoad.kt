@@ -19,6 +19,7 @@ package dev.mangaflow.ui.motion
 
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -35,13 +36,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
@@ -55,6 +62,7 @@ private data class BottomPullLoadInputs(
     val motion: Boolean,
     val canScrollForward: () -> Boolean,
     val onLoadMore: () -> Unit,
+    val actionLabel: String,
 )
 
 /** A footer pull keeps the list stationary and uses only its unconsumed drag distance. */
@@ -67,6 +75,7 @@ internal class BottomPullLoadState private constructor(
     var progress by mutableFloatStateOf(0f)
         private set
     val loading: Boolean get() = inputs().loading
+    val actionLabel: String get() = inputs().actionLabel
 
     private var distancePulled = 0f
     private var triggeredForGesture = false
@@ -87,19 +96,20 @@ internal class BottomPullLoadState private constructor(
             settleJob?.cancel()
             val consumed = minOf(available.y, distancePulled)
             distancePulled -= consumed
-            progress = distancePulled * DragMultiplier / thresholdPx
+            progress = (distancePulled / thresholdPx).coerceIn(0f, 1f)
             return Offset(0f, consumed)
         }
 
         override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
             if (source != NestedScrollSource.UserInput || available.y >= 0f || !canRequest ||
                 triggeredForGesture || inputs().canScrollForward()) return Offset.Zero
-            if (settleJob?.isActive == true) distancePulled = progress * thresholdPx / DragMultiplier
+            if (settleJob?.isActive == true) distancePulled = progress * thresholdPx
             settleJob?.cancel()
             // Bottom loading reverses Material3's pull direction; fling deltas never accumulate.
             val previous = distancePulled
-            distancePulled = (distancePulled - available.y).coerceAtMost(thresholdPx / DragMultiplier)
-            progress = (distancePulled * DragMultiplier / thresholdPx).coerceIn(0f, 1f)
+            distancePulled = (distancePulled - available.y).coerceAtMost(thresholdPx)
+            // The displayed fraction is this gesture's actual distance, without a trailing animation.
+            progress = (distancePulled / thresholdPx).coerceIn(0f, 1f)
             val taken = distancePulled - previous
             if (progress >= 1f) {
                 triggeredForGesture = true
@@ -173,10 +183,11 @@ internal class BottomPullLoadState private constructor(
             loading: Boolean,
             canScrollForward: () -> Boolean,
             onLoadMore: () -> Unit,
+            actionLabel: String,
         ): BottomPullLoadState {
             val inputs = rememberUpdatedState(BottomPullLoadInputs(
-                enabled, loading, LocalMotionEnabled.current, canScrollForward, onLoadMore))
-            val threshold = with(LocalDensity.current) { 48.dp.toPx() }
+                enabled, loading, LocalMotionEnabled.current, canScrollForward, onLoadMore, actionLabel))
+            val threshold = with(LocalDensity.current) { 96.dp.toPx() }
             val scope = rememberCoroutineScope()
             val state = remember(key, threshold) { BottomPullLoadState(threshold, scope) { inputs.value } }
             LaunchedEffect(state, loading, enabled, inputs.value.motion) { state.updatePresentation() }
@@ -193,27 +204,41 @@ internal fun rememberBottomPullLoadState(
     loading: Boolean,
     canScrollForward: () -> Boolean,
     onLoadMore: () -> Unit,
-): BottomPullLoadState = BottomPullLoadState.rememberState(key, enabled, loading, canScrollForward, onLoadMore)
+    actionLabel: String = "加载更多",
+): BottomPullLoadState = BottomPullLoadState.rememberState(
+    key, enabled, loading, canScrollForward, onLoadMore, actionLabel)
 
 internal fun Modifier.bottomPullLoad(state: BottomPullLoadState): Modifier =
     nestedScroll(state.connection).semantics {
         customActions = if (state.loadActionAvailable)
-            listOf(CustomAccessibilityAction("加载更多", state::accessibilityLoadMore)) else emptyList()
+            listOf(CustomAccessibilityAction(state.actionLabel, state::accessibilityLoadMore)) else emptyList()
     }
 
 /** The caller reserves a footer slot; no drag-dependent size or list offset is introduced. */
 @Composable
-internal fun BottomPullLoadIndicator(state: BottomPullLoadState, modifier: Modifier = Modifier) {
-    val color = MaterialTheme.colorScheme.onSurfaceVariant
-    val indicator = modifier.size(22.dp).semantics { contentDescription = "加载更多" }
+internal fun BottomPullLoadIndicator(
+    state: BottomPullLoadState,
+    modifier: Modifier = Modifier,
+    color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+) {
+    val indicator = modifier.size(22.dp).semantics {
+        contentDescription = state.actionLabel
+        progressBarRangeInfo = if (state.loading) ProgressBarRangeInfo.Indeterminate
+            else ProgressBarRangeInfo(state.progress, 0f..1f)
+    }
     if (state.loading && LocalMotionEnabled.current) {
         CircularProgressIndicator(modifier = indicator, color = color, strokeWidth = 2.dp)
     } else {
-        CircularProgressIndicator(progress = { if (state.loading) 1f else state.progress },
-            modifier = indicator, color = color, strokeWidth = 2.dp,
-            trackColor = color.copy(alpha = .12f))
+        Canvas(indicator) {
+            val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+            val radius = ((size.minDimension - stroke.width) / 2f).coerceAtLeast(0f)
+            drawCircle(color.copy(alpha = .12f), radius = radius, style = stroke)
+            val fraction = if (state.loading) 1f else state.progress.coerceIn(0f, 1f)
+            if (fraction > 0f) drawArc(
+                color = color, startAngle = -90f, sweepAngle = 360f * fraction,
+                useCenter = false, topLeft = center - Offset(radius, radius),
+                size = Size(radius * 2f, radius * 2f), style = stroke,
+            )
+        }
     }
 }
-
-// Material3 PullToRefresh's resistance; a 48dp visible pull takes 96dp of finger movement.
-private const val DragMultiplier = .5f

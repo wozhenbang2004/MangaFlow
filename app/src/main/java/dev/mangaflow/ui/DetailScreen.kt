@@ -474,7 +474,6 @@ private fun DetailIntroduction(manga: Manga, onDismiss: () -> Unit) {
                 MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailForeground)
                 Text(manga.description.ifBlank { "来源暂无简介" },
                     fontSize = 14.sp, lineHeight = 23.sp, color = DetailSecondary)
-                Text("内容来源 · 拷贝漫画", fontSize = 11.sp, color = DetailMuted)
             }
         }
     }

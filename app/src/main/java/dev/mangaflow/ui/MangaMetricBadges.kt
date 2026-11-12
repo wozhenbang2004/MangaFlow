@@ -64,8 +64,8 @@ internal fun MangaMetricBadges(
         maxItemsInEachRow = if (compact) 2 else Int.MAX_VALUE,
     ) {
         heat?.let { value ->
-            MetricBadge("拷", if (compact) metricCount(value) else "$heatLabel ${metricCount(value)}",
-                "拷贝漫画，$heatLabel $value", foreground, compact, "copy")
+            MetricBadge(if (compact) "热" else heatLabel, metricCount(value),
+                "$heatLabel $value", foreground, compact, "copy")
         }
         listOf("bangumi", "anilist").forEach { id ->
             val metric = metrics.firstOrNull { it.sourceId == id }

@@ -337,7 +337,7 @@ fun AccountScreen(
 private fun AccountHeading(signedIn: Boolean, busy: Boolean, onRefresh: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("拷贝账号", style = MaterialTheme.typography.headlineLarge)
+            Text("账号", style = MaterialTheme.typography.headlineLarge)
             if (!signedIn) Text("匿名阅读已启用", Modifier.padding(top = 4.dp),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

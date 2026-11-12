@@ -83,7 +83,7 @@ internal class ChapterDiscussionState(
     private fun initialSources(): List<ReaderDiscussionSource> {
         val cached = chapters.cachedChapterComments(chapter)
         val chapterSource = ReviewSource(
-            id = "copy", name = "拷贝", status = ReviewStatus.READY,
+            id = "copy", name = "读者", status = ReviewStatus.READY,
             url = cached?.items?.firstOrNull()?.url ?: manga.sourceUrl,
             matchedTitle = chapter.title, subjectId = chapter.id,
             reviews = cached?.items.orEmpty().filter { it.kind == ReviewKind.CHAPTER }, reviewCount = cached?.total,

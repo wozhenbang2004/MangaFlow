@@ -2,6 +2,7 @@ package dev.mangaflow.ui
 
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.layout.Box
@@ -31,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -53,6 +55,8 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionInputGate
+import kotlinx.coroutines.flow.first
+import kotlin.math.sin
 
 /** A fixed toolbar slot: the surface grows left from the same, always reachable icon. */
 @Composable
@@ -79,9 +83,7 @@ internal fun ExpandingSearchBar(
     val reveal = transition.animateFloat(
         transitionSpec = {
             if (!motion) snap()
-            else if (targetState) tween(MangaMotion.Enter, delayMillis = MangaMotion.Quick / 3,
-                easing = MangaMotion.EnterEasing)
-            else tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)
+            else spring(dampingRatio = MangaMotion.PanelDamping, stiffness = MangaMotion.PanelStiffness)
         }, label = "search-width",
     ) { if (it) 1f else 0f }
     val icon = transition.animateFloat(
@@ -91,12 +93,6 @@ internal fun ExpandingSearchBar(
     val surfaceAlpha = transition.animateFloat(
         transitionSpec = { if (motion) tween(MangaMotion.Quick) else snap() }, label = "search-surface",
     ) { if (it) 1f else 0f }
-    val chromeAlpha = transition.animateFloat(
-        transitionSpec = {
-            if (!motion) snap()
-            else tween(MangaMotion.Quick, delayMillis = if (targetState) 0 else MangaMotion.Quick / 2)
-        }, label = "search-underlay",
-    ) { if (it) 0f else 1f }
     val present = expanded || transition.currentState || transition.isRunning
 
     LaunchedEffect(expanded, active) {
@@ -109,13 +105,14 @@ internal fun ExpandingSearchBar(
         val fullWidth = maxWidth
         Box(Modifier.fillMaxSize().padding(end = 48.dp)
             .hazeSource(backdrop)
-            .graphicsLayer { alpha = chromeAlpha.value }
             .motionInputGate(active && !present)) { content() }
 
         if (present) {
             var inputPlaced by remember { mutableStateOf(false) }
             LaunchedEffect(expanded, active, inputPlaced) {
                 if (expanded && active && inputPlaced) {
+                    // Give the lens room before focus and the keyboard claim the input.
+                    snapshotFlow { reveal.value }.first { it >= .86f }
                     requester.requestFocus()
                     keyboard?.show()
                 }
@@ -123,7 +120,7 @@ internal fun ExpandingSearchBar(
             LiquidGlassSurface(
                 state = backdrop,
                 modifier = Modifier.align(Alignment.CenterEnd)
-                    .width(48.dp + (fullWidth - 48.dp).coerceAtLeast(0.dp) * reveal.value)
+                    .width(48.dp + (fullWidth - 48.dp).coerceAtLeast(0.dp) * reveal.value.coerceIn(0f, 1f))
                     .height(48.dp).graphicsLayer { alpha = surfaceAlpha.value },
                 cornerRadius = 24.dp,
             ) {
@@ -179,7 +176,11 @@ internal fun ExpandingSearchBar(
                 stateDescription = if (expanded) "已展开" else "已收起"
             },
         ) {
-            Box(Modifier.size(22.dp)) {
+            Box(Modifier.size(22.dp).graphicsLayer {
+                val response = sin(icon.value.coerceIn(0f, 1f) * Math.PI).toFloat()
+                scaleX = 1f - .12f * response
+                scaleY = 1f - .12f * response
+            }) {
                 Icon(Icons.Outlined.Search, null, Modifier.fillMaxSize().graphicsLayer {
                     alpha = 1f - icon.value
                     rotationZ = -45f * icon.value

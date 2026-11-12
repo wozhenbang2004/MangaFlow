@@ -268,6 +268,6 @@ class MangaMetricsRepository(
         const val RETRY_TTL = 5 * 60_000L
         const val MAX_AGE = 7 * 24 * 60 * 60_000L
         val SOURCE_IDS = listOf("copy", "bangumi", "anilist")
-        fun sourceName(id: String) = when (id) { "copy" -> "拷贝"; "bangumi" -> "Bangumi"; else -> "AniList" }
+        fun sourceName(id: String) = when (id) { "copy" -> "热度"; "bangumi" -> "Bangumi"; else -> "AniList" }
     }
 }

@@ -452,9 +452,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     launch {
                         val source = try { community.overview(manga) }
                         catch (cancel: CancellationException) { throw cancel }
-                        catch (failure: Exception) { ReviewSource("copy", "拷贝", ReviewStatus.UNAVAILABLE,
+                        catch (failure: Exception) { ReviewSource("copy", "读者", ReviewStatus.UNAVAILABLE,
                             manga.sourceUrl, popularity = manga.popularity,
-                            message = failure.message ?: "拷贝评论暂时无法读取") }
+                            message = failure.message ?: "评论暂时无法读取") }
                         if ("copy" !in reviewOverrides) publishReview(manga.id, requestId, source)
                     }
                     launch {

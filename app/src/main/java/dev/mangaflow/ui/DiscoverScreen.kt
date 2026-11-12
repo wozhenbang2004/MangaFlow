@@ -49,12 +49,12 @@ import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalTextStyle
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -71,8 +71,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -83,6 +85,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.stateDescription
@@ -109,6 +112,7 @@ import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabContent
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.BottomPullLoadIndicator
 import dev.mangaflow.ui.motion.bottomPullLoad
 import dev.mangaflow.ui.motion.rememberBottomPullLoadState
@@ -157,7 +161,6 @@ fun DiscoverScreen(
     // Clearing the query on dismissal must not shrink the leaving panel halfway through its fade.
     val search = if (searchExpanded) state else retainedSearch
     val searchBackdrop = rememberHazeState()
-    val refreshing = rememberDelayedBusy(browse.refreshing)
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
     val searchPositions = rememberSaveable(saver = SearchPositionsSaver) { LinkedHashMap<String, LazyListState>() }
     val retainedResults = remember(search.cacheKey) {
@@ -169,13 +172,6 @@ fun DiscoverScreen(
     Box(Modifier.fillMaxSize().navigationBarsPadding()) {
         Column(Modifier.fillMaxSize().hazeSource(searchBackdrop)
             .motionInputGate(active && !searchExpanded)) {
-            Box(Modifier.fillMaxWidth().height(1.dp)) {
-                if (refreshing) LinearProgressIndicator(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .35f),
-                    trackColor = Color.Transparent,
-                )
-            }
             // Filters stay outside the changing list, so their indicator keeps its velocity.
             AnimatedVisibility(
                 visible = browse.mode == DiscoveryMode.RANKING,
@@ -211,7 +207,6 @@ fun DiscoverScreen(
                 val panelMaxHeight = (maxHeight - 8.dp).coerceAtLeast(0.dp)
                 Box(
                     Modifier.fillMaxSize()
-                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = .08f))
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null, onClickLabel = "关闭搜索", onClick = dismissSearch,
@@ -314,34 +309,33 @@ private fun RankingControls(
     val choiceWidth = maxOf(44.dp, labelWidth + 16.dp)
     val periodWidth = choiceWidth * RankPeriod.entries.size
     val audienceWidth = choiceWidth * RankAudience.entries.size
-    BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
-        // All labels remain visible: there is no clipped, horizontally scrolling fourth tab.
-        if (maxWidth >= periodWidth + audienceWidth + 56.dp) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                RankingPeriods(state.period, onPeriod, Modifier.weight(1f))
-                Spacer(Modifier.width(8.dp))
-                RankingAudience(state.audience, onAudience, Modifier.width(audienceWidth))
-                Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh) }
-            }
-        } else {
-            Column {
-                RankingPeriods(state.period, onPeriod, Modifier.fillMaxWidth())
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    RankingAudience(state.audience, onAudience, Modifier.width(audienceWidth))
-                    Spacer(Modifier.weight(1f))
-                    DiscoveryRefresh(state, onRefresh)
-                }
-            }
+    BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        val bothAudiences = maxWidth >= periodWidth + audienceWidth + 52.dp
+        val audienceSlot = if (bothAudiences) audienceWidth else maxOf(60.dp, labelWidth + 32.dp)
+        val shortPeriods = maxWidth < periodWidth + audienceSlot + 52.dp
+        // Keep every filter on one line. Narrow layouts disclose the other audience on tap.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            RankingPeriods(state.period, onPeriod, Modifier.weight(1f), shortPeriods)
+            Spacer(Modifier.width(4.dp))
+            if (bothAudiences) RankingAudience(state.audience, onAudience, Modifier.width(audienceSlot))
+            else RankingAudienceToggle(state.audience, onAudience, Modifier.width(audienceSlot))
+            Box(Modifier.width(48.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh) }
         }
     }
 }
 
 @Composable
-private fun RankingPeriods(period: RankPeriod, onPeriod: (RankPeriod) -> Unit, modifier: Modifier) {
+private fun RankingPeriods(period: RankPeriod, onPeriod: (RankPeriod) -> Unit, modifier: Modifier, concise: Boolean = false) {
     MotionTabs(selected = period.ordinal, labels = RankPeriod.entries.map { it.label },
         onSelect = { onPeriod(RankPeriod.entries[it]) }, role = Role.RadioButton,
         modifier = modifier, fontSize = 12.sp, indicatorHeight = 30.dp,
-        selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal)
+        selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
+        itemContent = { index, selected, color ->
+            val label = RankPeriod.entries[index].label
+            Text(if (concise) label.take(1) else label, color = color, fontSize = 12.sp,
+                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                maxLines = 1, modifier = Modifier.semantics { contentDescription = label })
+        })
 }
 
 @Composable
@@ -351,6 +345,27 @@ private fun RankingAudience(audience: RankAudience, onAudience: (RankAudience) -
         modifier = modifier, fontSize = 12.sp, indicatorHeight = 30.dp,
         track = MaterialTheme.colorScheme.onSurface.copy(alpha = .025f),
         selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal)
+}
+
+@Composable
+private fun RankingAudienceToggle(audience: RankAudience, onAudience: (RankAudience) -> Unit, modifier: Modifier) {
+    val next = RankAudience.entries[(audience.ordinal + 1) % RankAudience.entries.size]
+    val interaction = remember { MutableInteractionSource() }
+    Box(modifier.height(48.dp)
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = "切换到${next.label}", onClick = { onAudience(next) })
+        .semantics { stateDescription = audience.label }
+        .motionPress(interaction), contentAlignment = Alignment.Center) {
+        MotionSwap(audience, Modifier.clip(RoundedCornerShape(15.dp))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .055f))) { shown ->
+            Row(Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+                horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(shown.label, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(13.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
 }
 
 @Composable
@@ -415,7 +430,6 @@ private fun DiscoveryPane(
                     Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "发现好故事",
                         style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.weight(1f))
-                    Text("拷贝漫画", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     DiscoveryRefresh(state, onRefresh)
                 }
             }
@@ -469,10 +483,19 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, onOpen: (
 
 @Composable
 private fun DiscoveryRefresh(state: BrowseState, onRefresh: () -> Unit) {
+    val busy = rememberDelayedBusy(state.refreshing)
+    val motion = LocalMotionEnabled.current
     MotionIconButton(onClick = onRefresh, enabled = !state.loading && !state.refreshing) {
-        Icon(Icons.Outlined.Refresh,
-            if (state.updatedAt > 0) "刷新漫画，${browseUpdatedAt(state.updatedAt)}" else "刷新漫画",
-            Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+            if (busy) {
+                if (motion) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else CircularProgressIndicator(progress = { 1f }, modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else Icon(Icons.Outlined.Refresh,
+                if (state.updatedAt > 0) "刷新漫画，${browseUpdatedAt(state.updatedAt)}" else "刷新漫画",
+                Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -521,24 +544,33 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
 
 @Composable
 private fun FeaturedManga(manga: Manga, repository: MangaRepository, interaction: MutableInteractionSource, onOpen: (Manga) -> Unit) {
-    Box(Modifier.fillMaxWidth().height(204.dp)
+    val colors = MaterialTheme.colorScheme
+    val height = 28.dp + 176.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+    BoxWithConstraints(Modifier.fillMaxWidth().height(height)
         .clickable(interactionSource = interaction, indication = null) { onOpen(manga) }
         .motionPress(interaction, pressedScale = .985f)
-        .clip(RoundedCornerShape(22.dp)).background(Color(0xFF242426))) {
-        MangaCover(manga, repository, Modifier.fillMaxSize(), ContentScale.Crop)
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
-            0f to Color.Black.copy(alpha = 0.04f), 0.4f to Color.Transparent,
-            0.75f to Color.Black.copy(alpha = 0.5f), 1f to Color.Black.copy(alpha = 0.84f))))
-        Column(Modifier.align(Alignment.BottomStart).padding(18.dp)) {
-            Text(manga.title, color = Color.White, fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-            MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 9.dp), foreground = Color.White)
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(manga.authors.take(2).joinToString(" · ").ifBlank { "翻开，进入故事" },
-                    color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Icon(Icons.AutoMirrored.Outlined.ArrowForward, "查看漫画", tint = Color.White,
-                    modifier = Modifier.padding(start = 12.dp).size(20.dp))
+        .clip(RoundedCornerShape(22.dp)).background(colors.surfaceVariant)) {
+        val coverWidth = (maxWidth * .36f).coerceIn(88.dp, 122.dp)
+        // The repeated artwork is only a quiet backdrop; the actual cover below is never cropped.
+        MangaCover(manga, repository, Modifier.matchParentSize().blur(24.dp)
+            .graphicsLayer { alpha = .2f }, ContentScale.Crop)
+        Box(Modifier.matchParentSize().background(Brush.horizontalGradient(listOf(
+            colors.surface.copy(alpha = .35f), colors.surface.copy(alpha = .88f)))))
+        Row(Modifier.align(Alignment.Center).fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            MangaCover(manga, repository, Modifier.width(coverWidth).height(176.dp)
+                .clip(RoundedCornerShape(10.dp)), ContentScale.Fit)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(manga.title, color = colors.onSurface, fontSize = 18.sp, lineHeight = 24.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                MangaMetricBadges(manga, Modifier.fillMaxWidth(), compact = true)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(manga.authors.take(2).joinToString(" · ").ifBlank { "翻开，进入故事" },
+                        color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Icon(Icons.AutoMirrored.Outlined.ArrowForward, "查看漫画", tint = colors.onSurface,
+                        modifier = Modifier.padding(start = 6.dp).size(19.dp))
+                }
             }
         }
     }

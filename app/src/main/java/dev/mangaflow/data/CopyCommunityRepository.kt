@@ -40,20 +40,20 @@ class CopyCommunityRepository(
         val operation = when (mode) {
             DiscoveryMode.RECOMMENDED -> {
                 builder.addPathSegment("recs").addQueryParameter("pos", "3200102")
-                "拷贝推荐"
+                "漫画推荐"
             }
             DiscoveryMode.RANKING -> {
                 builder.addPathSegment("ranks")
                     .addQueryParameter("type", "1")
                     .addQueryParameter("date_type", period.value)
                     .addQueryParameter("audience_type", audience.value)
-                "拷贝热榜"
+                "漫画热榜"
             }
             DiscoveryMode.LATEST -> {
                 builder.addPathSegment("comics")
                     .addQueryParameter("free_type", "1")
                     .addQueryParameter("ordering", "-datetime_updated")
-                "拷贝更新"
+                "漫画更新"
             }
         }
         val url = builder.addQueryParameter("limit", BROWSE_SIZE.toString())
@@ -105,7 +105,7 @@ class CopyCommunityRepository(
     suspend fun overview(manga: Manga, forceRefresh: Boolean = false): ReviewSource = withContext(Dispatchers.IO) {
         val subjectId = comicUuid(manga)
         val source = ReviewSource(
-            id = "copy", name = "拷贝", status = ReviewStatus.READY,
+            id = "copy", name = "读者", status = ReviewStatus.READY,
             url = comicUrl(manga.id), matchedTitle = manga.title,
             subjectId = subjectId, popularity = overallPopularity(manga),
         )
@@ -115,13 +115,13 @@ class CopyCommunityRepository(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (failure: Exception) {
-            source.copy(reviewsError = failure.message ?: "拷贝评论暂时无法读取，请重试。", nextPage = 0)
+            source.copy(reviewsError = failure.message ?: "评论暂时无法读取，请重试。", nextPage = 0)
         }
     }
 
     /** Browse responses already include overall heat; never fetch a chapter catalog for a badge. */
     fun metric(manga: Manga): ReviewSource = ReviewSource(
-        id = "copy", name = "拷贝", status = ReviewStatus.READY,
+        id = "copy", name = "读者", status = ReviewStatus.READY,
         url = comicUrl(manga.id), matchedTitle = manga.title,
         popularity = overallPopularity(manga), subjectId = manga.sourceUuid,
     )
@@ -138,7 +138,7 @@ class CopyCommunityRepository(
             .addQueryParameter("limit", COMMENT_SIZE.toString())
             .addQueryParameter("offset", offset(page, COMMENT_SIZE).toString()).build()
         commentPage("work:$subjectId:$page", forceRefresh) {
-            readComments(apiJson(url, "拷贝作品评论", publicUrl), page, publicUrl)
+            readComments(apiJson(url, "作品评论", publicUrl), page, publicUrl)
         }
     }
 
@@ -162,7 +162,7 @@ class CopyCommunityRepository(
             .addQueryParameter("limit", COMMENT_SIZE.toString())
             .addQueryParameter("offset", offset(page, COMMENT_SIZE).toString()).build()
         commentPage("reply:$subjectId:$replyId:$page") {
-            readComments(apiJson(url, "拷贝评论回复", publicUrl), page, publicUrl)
+            readComments(apiJson(url, "评论回复", publicUrl), page, publicUrl)
         }
     }
 
@@ -195,7 +195,7 @@ class CopyCommunityRepository(
             .addQueryParameter("offset", offset(page, COMMENT_SIZE).toString()).build()
         // Chapter UUID is sufficient; do not make an extra work-detail request here.
         commentPage("chapter:$chapterId:$page", forceRefresh) {
-            readComments(apiJson(url, "拷贝本章讨论", publicUrl), page, publicUrl, chapterId)
+            readComments(apiJson(url, "本话讨论", publicUrl), page, publicUrl, chapterId)
         }
     }
 
@@ -256,7 +256,7 @@ class CopyCommunityRepository(
     }
 
     private suspend fun subjectId(manga: Manga, source: ReviewSource, publicUrl: String): String {
-        if (source.id != "copy") throw SourceException("评论来源与拷贝接口不匹配。", publicUrl)
+        if (source.id != "copy") throw SourceException("评论来源与当前接口不匹配。", publicUrl)
         return if (source.subjectId.isNotBlank()) uuid(source.subjectId, "漫画") else comicUuid(manga)
     }
 

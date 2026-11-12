@@ -374,7 +374,7 @@ class CopyAccountRepository(context: Context) {
     }
 
     private fun requireSession(): SessionLease = synchronized(sessionLock) {
-        SessionLease(version, sessionCredential ?: throw SourceException("请先登录自己的拷贝漫画账号。"), committed = true)
+        SessionLease(version, sessionCredential ?: throw SourceException("请先登录账号。"), committed = true)
     }
 
     private suspend fun ensureLease(lease: SessionLease) {

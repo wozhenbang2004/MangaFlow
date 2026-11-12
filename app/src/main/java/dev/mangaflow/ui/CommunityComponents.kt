@@ -197,7 +197,7 @@ private fun CommentLoadNotice(source: ReviewSource, onRetry: (String) -> Unit) {
                 }
             }
             MotionIconButton(onClick = { onRetry(source.id) }, enabled = !source.loadingMore) {
-                Icon(Icons.Outlined.Refresh, "重试${source.name}评论", tint = CommunityMuted,
+                Icon(Icons.Outlined.Refresh, if (source.id == "copy") "重新读取评论" else "重试${providerName(source.id)}评论", tint = CommunityMuted,
                     modifier = Modifier.size(18.dp))
             }
         }
@@ -259,12 +259,15 @@ private fun CommentSourceBadge(sourceId: String, scopeLabel: String? = null) {
         else -> CommunityMuted
     }
     val name = when (sourceId) {
-        "copy" -> "拷贝"; "bangumi" -> "bgm"; "anilist" -> "AniList"
+        "copy" -> if (scopeLabel == null) "读者" else ""; "bangumi" -> "bgm"; "anilist" -> "AniList"
         else -> providerName(sourceId)
     }
-    Text(listOfNotNull(name, scopeLabel).joinToString(" · "), modifier = Modifier.clip(RoundedCornerShape(5.dp))
+    Text(listOfNotNull(name.takeIf(String::isNotBlank), scopeLabel).joinToString(" · "), modifier = Modifier.clip(RoundedCornerShape(5.dp))
         .background(accent.copy(alpha = .12f)).padding(horizontal = 5.dp, vertical = 2.dp)
-        .semantics { contentDescription = "评论来自" + providerName(sourceId) + scopeLabel.orEmpty() },
+        .semantics {
+            contentDescription = if (sourceId == "copy") "${scopeLabel ?: "读者"}评论"
+                else "评论来自" + providerName(sourceId) + scopeLabel.orEmpty()
+        },
         color = accent, fontSize = 10.sp, lineHeight = 13.sp,
         fontWeight = FontWeight.Medium, maxLines = 1)
 }
@@ -382,7 +385,7 @@ private fun CommentContent(
 
 /** Ovio's saved Avatar pattern: initials remain underneath a lazy image, including on failure. */
 @Composable
-private fun CommentAvatar(review: MangaReview, foreground: Color) {
+internal fun CommentAvatar(review: MangaReview, foreground: Color) {
     val context = LocalContext.current
     var failed by remember(review.avatarUrl) { mutableStateOf(false) }
     val initial = remember(review.author) {
@@ -500,7 +503,7 @@ private fun CommentReplies(
 }
 
 private fun providerName(id: String): String = when (id) {
-    "copy" -> "拷贝漫画"
+    "copy" -> "读者评论"
     "bangumi" -> "Bangumi"
     "anilist" -> "AniList"
     else -> id

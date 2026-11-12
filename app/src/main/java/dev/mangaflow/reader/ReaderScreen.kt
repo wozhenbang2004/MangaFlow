@@ -144,6 +144,9 @@ import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.motion.BottomPullLoadState
+import dev.mangaflow.ui.motion.bottomPullLoad
+import dev.mangaflow.ui.motion.rememberBottomPullLoadState
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialog
@@ -210,6 +213,10 @@ fun ReaderScreen(
     var manualSingles by remember(manga.id, chapterId) {
         mutableStateOf(libraryStore.spreadSinglesFor(manga.id, chapterId))
     }
+    var atChapterEnd by remember(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) {
+        mutableStateOf(false)
+    }
+    var nextRequested by remember(chapterId) { mutableStateOf(false) }
     var showChapters by rememberSaveable { mutableStateOf(false) }
     var downloadMessage by remember(chapterId) { mutableStateOf<String?>(null) }
     var displayedDownloadMessage by remember(chapterId) { mutableStateOf("") }
@@ -218,6 +225,16 @@ fun ReaderScreen(
     var chapterVisibilityReported by rememberSaveable(manga.id, chapterId) { mutableStateOf(false) }
     var nextChapterPrefetched by remember(manga.id, chapterId) { mutableStateOf(false) }
     var leavingReader by remember { mutableStateOf(false) }
+    val nextChapter = siblings.getOrNull(chapterIndex + 1).takeIf { chapterIndex >= 0 }
+    val openNextChapter: (() -> Unit)? = nextChapter?.let { next ->
+        {
+            if (active && !leavingReader && !nextRequested && chapterId == chapter.id) {
+                nextRequested = true
+                chapterId = next.id
+                controlsVisible = true
+            }
+        }
+    }
     val chapterVisible by rememberUpdatedState(onChapterVisible)
     val nearChapterEnd by rememberUpdatedState(onNearChapterEnd)
     val scope = rememberCoroutineScope()
@@ -299,6 +316,9 @@ fun ReaderScreen(
     }
     LaunchedEffect(preferences.dimAmount) { dimPreview.value = null }
     LaunchedEffect(touchExploration) { if (touchExploration) controlsVisible = true }
+    LaunchedEffect(atChapterEnd, touchExploration) {
+        if (atChapterEnd && !touchExploration) controlsVisible = false
+    }
 
     Box(Modifier.fillMaxSize()) {
         // Sample the existing artwork and dim layer; controls stay outside their own backdrop.
@@ -339,18 +359,33 @@ fun ReaderScreen(
                             }
                         },
                         onNearEnd = {
-                            val next = siblings.getOrNull(chapterIndex + 1)
+                            val next = nextChapter
                             if (active && !leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
                                 nextChapterPrefetched = true
                                 nearChapterEnd(manga, next)
                             }
                         },
                         onTap = { controlsVisible = !controlsVisible },
-                        endContent = {
-                            ChapterDiscussion(manga, chapter, colors.background, colors.onSurface,
-                                onNext = siblings.getOrNull(chapterIndex + 1)?.let { next ->
-                                    { chapterId = next.id; controlsVisible = true }
-                                }, state = discussionState)
+                        active = active && !leavingReader && !showSettings && !showChapters &&
+                            !showSpreadAdjustment && !showComments && !nextRequested,
+                        onAtEndChanged = { atChapterEnd = it },
+                        onNext = openNextChapter,
+                        endContent = { pull ->
+                            ChapterEndFooter(
+                                pull = pull,
+                                nextTitle = nextChapter?.title,
+                                unavailableMessage = when {
+                                    chaptersLoading -> "正在读取目录"
+                                    chaptersError != null -> "目录暂未更新"
+                                    chapterIndex < 0 -> "目录暂不可用"
+                                    else -> "已到最后一话"
+                                },
+                                background = background,
+                                foreground = preferences.theme.foreground(),
+                                onTap = { controlsVisible = !controlsVisible },
+                                onNext = openNextChapter,
+                                onRetry = onRetryChapters.takeIf { !chaptersLoading && (chaptersError != null || chapterIndex < 0) },
+                            )
                         },
                     )
                 }
@@ -358,6 +393,18 @@ fun ReaderScreen(
 
             // Read the live dim preview during drawing; dragging does not publish or persist preferences.
             Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
+        }
+
+        if (active && !leavingReader && atChapterEnd && !loading && error == null &&
+            !showComments && !showSettings && !showChapters && !showSpreadAdjustment) {
+            ChapterEndComments(
+                chapterId = chapterId, state = discussionState, backdrop = readerBackdrop,
+                controlsVisible = controlsVisible, touchExploration = touchExploration,
+                onOpen = { showComments = true },
+                modifier = Modifier.align(Alignment.BottomStart)
+                    .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+                    .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+            )
         }
 
         AnimatedVisibility(
@@ -482,8 +529,8 @@ fun ReaderScreen(
                             }
                         }
                         ReaderIcon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
-                            enabled = chapterIndex >= 0 && chapterIndex < siblings.lastIndex, interactive = controlsVisible) {
-                            siblings.getOrNull(chapterIndex + 1)?.let { chapterId = it.id }
+                            enabled = openNextChapter != null && !nextRequested, interactive = controlsVisible) {
+                            openNextChapter?.invoke()
                         }
                     }
                 }
@@ -544,9 +591,8 @@ fun ReaderScreen(
         onDismiss = { showChapters = false },
     )
     if (showComments) ChapterDiscussion(
-        manga, chapter, colors.background, colors.onSurface,
-        onNext = null,
-        previewVisible = false, onClose = { showComments = false }, state = discussionState,
+        chapter, colors.background, colors.onSurface,
+        onClose = { showComments = false }, state = discussionState,
     )
 }
 
@@ -569,22 +615,44 @@ private fun ChapterPages(
     onVisibleImageLoaded: () -> Unit,
     onNearEnd: () -> Unit,
     onTap: () -> Unit,
-    endContent: @Composable () -> Unit,
+    active: Boolean,
+    onAtEndChanged: (Boolean) -> Unit,
+    onNext: (() -> Unit)?,
+    endContent: @Composable (BottomPullLoadState) -> Unit,
 ) {
     val save by rememberUpdatedState(onSave)
     val location by rememberUpdatedState(onLocation)
     val visibleImageLoaded by rememberUpdatedState(onVisibleImageLoaded)
     val nearEnd by rememberUpdatedState(onNearEnd)
+    val atEndChanged by rememberUpdatedState(onAtEndChanged)
     val loadedPages = remember { mutableStateMapOf<Int, Boolean>() }
     val composedPages = remember { mutableStateMapOf<Int, Boolean>() }
     val prefetchRequests = remember { mutableStateMapOf<Int, Disposable>() }
     val startPage = remember { initialPage.coerceIn(0, pages.lastIndex) }
     val startOffset = remember { initialOffset.coerceAtLeast(0) }
+    val endRevealPx = with(LocalDensity.current) { 24.dp.roundToPx() }
     if (preferences.mode == ReadingMode.VERTICAL) {
         val list = rememberLazyListState(initialFirstVisibleItemIndex = startPage)
         val legacyLongPosition = remember { longImagePosition(startPage)?.takeIf { it > 0f } }
         var restoring by remember { mutableStateOf(startOffset > 0 || legacyLongPosition != null) }
         var targetHeight by remember { mutableIntStateOf(0) }
+        val pull = rememberBottomPullLoadState(
+            key = list,
+            enabled = active && !restoring && onNext != null,
+            loading = false,
+            canScrollForward = { list.canScrollForward },
+            onLoadMore = { onNext?.invoke() },
+            actionLabel = "进入下一话",
+        )
+        LaunchedEffect(list, endRevealPx) {
+            snapshotFlow {
+                val layout = list.layoutInfo
+                !restoring && layout.visibleItemsInfo.any {
+                    it.key == "chapter-end" && it.offset < layout.viewportEndOffset - endRevealPx &&
+                        it.offset + it.size > layout.viewportStartOffset
+                }
+            }.distinctUntilChanged().collect { atEndChanged(it) }
+        }
         val dragging by list.interactionSource.collectIsDraggedAsState()
         LaunchedEffect(restoring, targetHeight) {
             if (restoring && targetHeight > 0) {
@@ -633,7 +701,8 @@ private fun ChapterPages(
             val anchor = list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex)
             (visible.firstOrNull()?.index ?: anchor) to (visible.lastOrNull()?.index ?: anchor)
         }
-        LazyColumn(state = list, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
+        LazyColumn(state = list, modifier = Modifier.fillMaxSize().bottomPullLoad(pull),
+            verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
             itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                 ReaderPage(
                     page, headers, resolvePage = resolvePage, retryPage = retryPage, paged = false, onTap = onTap,
@@ -644,7 +713,7 @@ private fun ChapterPages(
                 )
             }
             item("chapter-end", contentType = "chapter-end") {
-                endContent()
+                endContent(pull)
             }
         }
     } else {
@@ -656,6 +725,21 @@ private fun ChapterPages(
             groups.indexOfFirst { it.contains(startPage) }.coerceAtLeast(0)
         }
         val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size + 1 })
+        val endList = rememberLazyListState()
+        val pull = rememberBottomPullLoadState(
+            key = pager,
+            enabled = active && onNext != null && pager.settledPage == groups.size && !pager.isScrollInProgress,
+            loading = false,
+            canScrollForward = { endList.canScrollForward },
+            onLoadMore = { onNext?.invoke() },
+            actionLabel = "进入下一话",
+        )
+        LaunchedEffect(pager, groups) {
+            snapshotFlow {
+                pager.settledPage == groups.size && pager.currentPage == groups.size &&
+                    kotlin.math.abs(pager.currentPageOffsetFraction) < .01f
+            }.distinctUntilChanged().collect { atEndChanged(it) }
+        }
         LaunchedEffect(pager, groups) {
             snapshotFlow { groups.getOrNull(pager.currentPage)?.first ?: pages.lastIndex }
                 .distinctUntilChanged().collect { index -> location(index, 0) }
@@ -735,8 +819,8 @@ private fun ChapterPages(
                     renderImage(group.first, Modifier.fillMaxSize(), Alignment.Center)
                 }
             } else {
-                LazyColumn(Modifier.fillMaxSize()) {
-                    item("chapter-discussion", contentType = "chapter-end") { endContent() }
+                LazyColumn(state = endList, modifier = Modifier.fillMaxSize().bottomPullLoad(pull)) {
+                    item("chapter-end", contentType = "chapter-end") { endContent(pull) }
                 }
             }
         }

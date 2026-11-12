@@ -16,6 +16,9 @@ Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 
 ## Working rules
 
+- Latest search/home/reader feedback is recorded in DESIGN.md as SEARCH-02, HOME-COVER-02, RANK-02, LABEL-01, READER-END-01–02 and PULL-02. Keep the search reveal floating and free of a bottom progress line, complete carousel covers, audience on the ranking row, chapter-only floating previews and finger-driven continuation progress. Do not restore the two-row audience fallback or long inline chapter-end comment list.
+- Provider IDs/URLs and attribution are internal data. App-authored UI uses neutral labels and native metric names; do not reintroduce redundant provider branding into headings, badges, account titles or error prefixes. Preserve original comment/author text and required license notices.
+
 - CI/CD remains build/package/sign/release only; do not add test or lint jobs. Follow the current development and delivery rules above. Source review and build results do not establish successful real usage.
 - Main automatically builds and publishes a signed release. Keep the existing signing key and monotonically increasing version code.
 - Never commit credentials, signing keys, downloaded comics, personal data, or session tokens.

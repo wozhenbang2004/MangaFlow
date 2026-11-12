@@ -2,6 +2,26 @@
 
 Current detail contract: [Large artwork and scrolling](#large-artwork-and-scrolling--2026-11-12-current-contract). Older decisions below are retained with their superseding requirements.
 
+## Search, discovery and chapter-end feedback · 2026-11-12
+
+User: “搜索这个条好丑啊我希望有那种舒服展开的效果以及怎么还在下面加条线了？弄个液态玻璃样的搜索框就行以及轮播图还是显示不全以及男频女频那个不要占一行啊。。。以及删掉所有拷贝漫画这样的字眼没必要暴露以及我希望滑倒本话最后也加一个上拉跳到下一话以及到这话底部时我希望左下有有个评论的图标同时那些评论悬浮上浮出一个个出现不知道你懂不懂我想要的东西以及我们现在的那个上拉加载那个加载条进度应该和上拉进度一致”. Supplied images: `1000121364.jpg`, `1000121365.jpg`, `1000121366.jpg`, `1000121368.jpg`. These show the reported before state; no chat message ID was supplied.
+
+This correction supersedes the earlier cropped hero, two-row audience fallback and long chapter-end comment preview. Preserve the chapter-only feed and unified vertical mode from `dc18058`, plus the later `a8d3b9b` correction: explicitly requested downloads can be read before completion; opening or switching chapters does not enqueue downloads.
+
+| ID | Decision and implementation | Observable requirement |
+| --- | --- | --- |
+| SEARCH-02 | Adapt the existing fixed-icon `ExpandingSearchBar`, shared motion and `LiquidGlassSurface`; keep the backdrop source live beneath the expanding lens and gate its input. Remove the toolbar's refresh progress line and the search backdrop's gray wash. | The icon responds, a floating glass capsule grows toward its left, and text/hit bounds do not stretch. Closing and rapid toggles reverse the same transition. Keyboard and results do not displace the retained browse list. |
+| HOME-COVER-02 | Keep the full-width, six-item pager and show the complete real cover with `Fit`, alongside a separate title/metadata region. Any soft background comes from that same cover. | Portrait artwork has no cropped head or bottom; the title does not cover the art. No invented landscape image, clipped next-card preview or tall replacement hero. |
+| RANK-02 | Keep the four periods and audience on one row; when both audience labels cannot fit, use a compact current-audience switch with both choices available. | No dedicated male/female row. Four periods remain reachable without clipping; choice changes retain the shared selection/content motion. |
+| LABEL-01 | Remove provider branding from app-authored headings, descriptions, errors and heat marks. Use the actual metric label or a neutral comment label. | No redundant provider subtitle or source-name footer. Internal provider IDs, request addresses, original comment/author content and license attribution remain accurate. |
+| READER-END-01 | Replace the inline long discussion with a compact chapter-end region, driven by the shared bottom-pull state and the existing next-chapter action. | Continuing the upward drag fills a ring and enters the next chapter once full. Fling alone does not navigate; the final chapter has an explicit end state. The ring tracks the finger directly and reverses with it. |
+| READER-END-02 | At chapter end, place the comment action at lower left and reveal a small number of real chapter-comment previews upward in sequence. Open the existing shared-state comment sheet on demand. | No work reviews or fabricated filler. Preview motion stops when leaving the end, changing chapter, opening the sheet or leaving the app; reduced motion and touch exploration retain a usable comment action. Spoilers and obvious link/contact promotion stay out of automatic previews. Reading page/offset stays separate. |
+| PULL-02 | `BottomPullLoadState.progress` is actual unused upward drag distance divided by 96dp; draw the arc directly as that fraction of a circle. | Dragging has no time-based progress tween. Retreating retracts the ring; actual asynchronous loading alone uses an indeterminate spinner. One action per gesture, stable layout and accessible non-drag action. |
+
+Reuse: the project's already adopted Haze 1.6.0 glass, beUI/Ovio motion relationships and Apache-2.0 AndroidX-derived bottom-pull implementation. The saved `toast-stacked` independent reference informs staggered preview lifetime and layered movement; this is an Android adaptation, not Sonner upstream code or a claim of matching its original runtime.
+
+Delivery boundary: source/diff review, direct main submission and confirmation that the existing CI/CD triggered. No tests, lint, local prebuild, emulator or UI automation. Compilation, device appearance and gesture feel remain pending the actual build and user feedback.
+
 ## Original density requirement
 
 “我不希望漫画详情页是这样的 uiux 请你把信息密度做高点我不希望我是滑下去的请你设计好 uiux”
