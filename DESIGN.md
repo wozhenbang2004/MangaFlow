@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## Flat collection and glass downloads · 2026-11-12 (current)
+
+User: “下载页顶部也做成发现页那样的玻璃顶部，以及这个书架别弄 3d 了就弄正常的，以及书架别弄追更等功能”. Screenshot `1000121422.jpg` shows the flat downloads title/summary/filter above the list. This explicitly supersedes SHELF-08 and every earlier physical shelf/cabinet/spine decision and shelf-status feature.
+
+| ID | Current decision | Acceptance boundary |
+| --- | --- | --- |
+| SHELF-09 | Use the existing app's ordinary full-cover grid language: flat complete covers, horizontal titles and a quiet saved-reading line. Remove 3D transforms, paper/binding faces, spine titles, shelf planks and cabinet framing. Remove the follow/hoard/pause filter, status labels and state-management actions from the collection UI and its callbacks. | Keep original collection order, complete title semantics, direct continuation, history, picture collections, reading statistics, left-swipe removal and long-press drag-to-trash. Do not delete user records or legacy backup fields as a cosmetic migration. |
+| DOWNLOADS-04 | Reuse the discovery page's actual LiquidGlassSurface/Backdrop/Haze header: the app-bar title, summary/import/queue actions and filter share one quiet floating surface. The existing three retained lazy lists flow behind it and reserve its measured height as top padding at rest. | Only the real scrolling list is captured; controls never sample themselves. Preserve all import paths, per-filter positions, pause/retry/clear confirmation, progress and snackbar behavior. No duplicated app-bar title or new download behavior. |
+
+Source reuse is the current ordinary CoverTile/MangaCover, existing collection gestures and the already adopted discovery glass header. Independent source/diff review confirmed removal of shelf-state UI parameters and all their callers, preservation of the direct-read/delete paths and legacy storage, and the downloads header's single capture/measured inset/three retained lists. Preserve concurrent main changes, submit directly to main and confirm CI triggered. No tests, local build or UI automation; user device acceptance remains pending.
+
 ## Quiet comments, reader status and Relay account compatibility · 2026-11-12 (current)
 
 User: “这个评论加载就别显示这些了啊”“登录还是会报错啊我电脑 relay 桌面端都可以啊”“再研究下还有什么功能接口可以接入拓宽我们的内容和功能”. Follow-up: “时间页码那些就别弄边框了直接淡在某个角落”. Screenshot: unmatched provider rows, metadata failures and the reader's white time/page plate. Exact message IDs are unavailable. This supersedes DETAIL-CONT-06's inline source-status footer and the historical status plate.

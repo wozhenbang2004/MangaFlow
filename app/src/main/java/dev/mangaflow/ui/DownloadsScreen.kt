@@ -58,6 +58,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -70,13 +71,18 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeSource
 import coil3.compose.AsyncImage
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
@@ -111,6 +117,8 @@ fun DownloadsScreen(
     store: DownloadStore,
     onRead: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
+    backdrop: HazeState,
+    toolbar: @Composable () -> Unit,
     refreshingIds: Set<String> = emptySet(),
 ) {
     val context = LocalContext.current
@@ -131,6 +139,9 @@ fun DownloadsScreen(
     val savedScroll = rememberLazyListState()
     val showLoading = rememberDelayedBusy(loading)
     val colors = MaterialTheme.colorScheme
+    val density = LocalDensity.current
+    var headerHeightPx by remember { mutableIntStateOf(with(density) { 144.dp.toPx().toInt() }) }
+    val contentTopPadding = with(density) { headerHeightPx.toDp() } + 4.dp
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
     val activeEntries = entries.filter { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
@@ -184,64 +195,10 @@ fun DownloadsScreen(
     }
 
     Box(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
-        Column(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(if (loading) "正在恢复下载" else "${completedEntries.size} / ${entries.size} 章已下载",
-                            color = foreground, style = MaterialTheme.typography.labelLarge,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${downloadBytes(usedBytes)} · ${downloadBytes(availableBytes)} 可用",
-                            color = secondary, style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    DownloadTextAction(enabled = !importBusy,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        onClick = { showImportSources = true }) {
-                        if (importBusy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = secondary)
-                        else Icon(Icons.Outlined.Add, null, Modifier.size(18.dp), tint = foreground)
-                        Spacer(Modifier.width(4.dp))
-                        Text(if (importBusy) "导入中" else "导入", color = foreground,
-                            style = MaterialTheme.typography.labelMedium)
-                    }
-                    Box {
-                        MotionIconButton(onClick = { showQueueActions = true },
-                            enabled = entries.isNotEmpty() && !bulkBusy, modifier = Modifier.size(44.dp)) {
-                            Icon(Icons.Outlined.MoreHoriz, "下载队列操作", Modifier.size(21.dp), tint = secondary)
-                        }
-                        // Reuse the record-menu skin without a permanent extra toolbar row.
-                        DropdownMenu(expanded = showQueueActions && entries.isNotEmpty(),
-                            onDismissRequest = { showQueueActions = false },
-                            modifier = Modifier.widthIn(min = 164.dp, max = 240.dp),
-                            shape = RoundedCornerShape(18.dp), containerColor = colors.surfaceContainerLow,
-                            tonalElevation = 0.dp, shadowElevation = 4.dp) {
-                            if (activeEntries.isNotEmpty()) DropdownMenuItem(
-                                text = { Text("全部暂停") }, leadingIcon = { Icon(Icons.Outlined.Pause, null) },
-                                enabled = !bulkBusy,
-                                onClick = { showQueueActions = false; activeEntries.forEach { store.pause(it.id) } })
-                            if (resumableEntries.isNotEmpty()) DropdownMenuItem(
-                                text = { Text("继续未完成") }, leadingIcon = { Icon(Icons.Outlined.PlayArrow, null) },
-                                enabled = !bulkBusy,
-                                onClick = { showQueueActions = false; resumableEntries.forEach(onRetry) })
-                            if (completedEntries.isNotEmpty()) DropdownMenuItem(
-                                text = { Text("清理已下载") }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
-                                enabled = !bulkBusy,
-                                onClick = { showQueueActions = false; clearCompleted = true })
-                        }
-                    }
-                }
-                Spacer(Modifier.height(4.dp))
-                MotionTabs(
-                    selected = filter.ordinal, labels = DownloadFilter.entries.map { it.label },
-                    onSelect = { filter = DownloadFilter.entries[it] }, underline = true, compact = true,
-                    foreground = foreground, muted = secondary, indicator = foreground,
-                    fontSize = MaterialTheme.typography.labelLarge.fontSize,
-                    selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
-                )
-                Spacer(Modifier.height(6.dp))
-            }
+        // Only the original scrolling lists feed the glass; controls remain foreground siblings.
+        Box(Modifier.fillMaxSize().hazeSource(backdrop)) {
             // The filter owns the transition; progress updates keep the existing list in place.
-            MotionTabContent(filter.ordinal, Modifier.weight(1f).fillMaxWidth()) { index ->
+            MotionTabContent(filter.ordinal, Modifier.fillMaxSize()) { index ->
                 val pageFilter = DownloadFilter.entries[index]
                 val visible = when (pageFilter) {
                     DownloadFilter.ALL -> entries
@@ -255,7 +212,7 @@ fun DownloadsScreen(
                 }
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(), state = scroll,
-                    contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 32.dp),
+                    contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = contentTopPadding, bottom = 32.dp),
                 ) {
                     if (loading) {
                         item {
@@ -314,6 +271,72 @@ fun DownloadsScreen(
                             HorizontalDivider(Modifier.padding(vertical = 8.dp), color = colors.outlineVariant.copy(alpha = .45f))
                         }
                     }
+                }
+            }
+        }
+        LiquidGlassSurface(
+            state = backdrop,
+            modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
+                .onSizeChanged { headerHeightPx = it.height },
+            cornerRadius = 24.dp, role = GlassSurfaceRole.NAVIGATION,
+            trackPointer = true, elevation = 2.dp,
+        ) {
+            Column(Modifier.fillMaxWidth().pointerInput(Unit) {}) {
+                toolbar()
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(if (loading) "正在恢复下载" else "${completedEntries.size} / ${entries.size} 章已下载",
+                                color = foreground, style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${downloadBytes(usedBytes)} · ${downloadBytes(availableBytes)} 可用",
+                                color = secondary, style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        DownloadTextAction(enabled = !importBusy,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            onClick = { showImportSources = true }) {
+                            if (importBusy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = secondary)
+                            else Icon(Icons.Outlined.Add, null, Modifier.size(18.dp), tint = foreground)
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (importBusy) "导入中" else "导入", color = foreground,
+                                style = MaterialTheme.typography.labelMedium)
+                        }
+                        Box {
+                            MotionIconButton(onClick = { showQueueActions = true },
+                                enabled = entries.isNotEmpty() && !bulkBusy, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Outlined.MoreHoriz, "下载队列操作", Modifier.size(21.dp), tint = secondary)
+                            }
+                            // Reuse the record-menu skin without a permanent extra toolbar row.
+                            DropdownMenu(expanded = showQueueActions && entries.isNotEmpty(),
+                                onDismissRequest = { showQueueActions = false },
+                                modifier = Modifier.widthIn(min = 164.dp, max = 240.dp),
+                                shape = RoundedCornerShape(18.dp), containerColor = colors.surfaceContainerLow,
+                                tonalElevation = 0.dp, shadowElevation = 4.dp) {
+                                if (activeEntries.isNotEmpty()) DropdownMenuItem(
+                                    text = { Text("全部暂停") }, leadingIcon = { Icon(Icons.Outlined.Pause, null) },
+                                    enabled = !bulkBusy,
+                                    onClick = { showQueueActions = false; activeEntries.forEach { store.pause(it.id) } })
+                                if (resumableEntries.isNotEmpty()) DropdownMenuItem(
+                                    text = { Text("继续未完成") }, leadingIcon = { Icon(Icons.Outlined.PlayArrow, null) },
+                                    enabled = !bulkBusy,
+                                    onClick = { showQueueActions = false; resumableEntries.forEach(onRetry) })
+                                if (completedEntries.isNotEmpty()) DropdownMenuItem(
+                                    text = { Text("清理已下载") }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
+                                    enabled = !bulkBusy,
+                                    onClick = { showQueueActions = false; clearCompleted = true })
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    MotionTabs(
+                        selected = filter.ordinal, labels = DownloadFilter.entries.map { it.label },
+                        onSelect = { filter = DownloadFilter.entries[it] }, underline = true, compact = true,
+                        foreground = foreground, muted = secondary, indicator = foreground,
+                        fontSize = MaterialTheme.typography.labelLarge.fontSize,
+                        selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
+                    )
+                    Spacer(Modifier.height(6.dp))
                 }
             }
         }

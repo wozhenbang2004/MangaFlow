@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -57,6 +56,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -69,24 +69,19 @@ import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.PageCollection
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.storage.ShelfState
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 
 @Composable
 fun LibraryScreen(
-    favorites: List<Manga>, history: List<ReadingProgress>, shelfStates: Map<String, ShelfState>,
+    favorites: List<Manga>, history: List<ReadingProgress>,
     repository: MangaRepository, libraryStore: LibraryStore, opening: LibraryOpenState?, active: Boolean,
     onOpen: (Manga) -> Unit, onDetails: (Manga) -> Unit,
     onContinue: (ReadingProgress) -> Unit, onOpenPageCollection: (PageCollection) -> Unit, onDiscover: () -> Unit,
     onRetryOpen: () -> Unit, onCancelOpen: () -> Unit,
     onRemoveFavorite: (Manga) -> Unit, onRemoveHistory: (String) -> Unit,
-    onShelfState: (Manga, ShelfState) -> Unit,
 ) {
     var showHistory by rememberSaveable { mutableStateOf(false) }
-    var shelfFilterName by rememberSaveable { mutableStateOf("") }
-    val shelfFilters = listOf<ShelfState?>(null, ShelfState.FOLLOWING, ShelfState.HOARDING, ShelfState.PAUSED)
-    val shelfFilter = shelfFilters.firstOrNull { it?.name.orEmpty() == shelfFilterName }
     var showCollections by rememberSaveable { mutableStateOf(false) }
     var showStats by rememberSaveable { mutableStateOf(false) }
     val collections by libraryStore.pageCollections.collectAsStateWithLifecycle()
@@ -158,75 +153,52 @@ fun LibraryScreen(
                         }
                     }
                 } else {
-                    Column(Modifier.fillMaxSize()) {
-                        BrowseTabs(
-                            shelfFilters.indexOf(shelfFilter),
-                            shelfFilters.map {
-                                when (it) {
-                                    null -> "全部"
-                                    ShelfState.FOLLOWING -> "追更"
-                                    ShelfState.HOARDING -> "养肥"
-                                    ShelfState.PAUSED -> "搁置"
-                                    ShelfState.NORMAL -> "收藏"
-                                }
-                            },
-                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
-                        ) { index ->
-                            shelfFilterName = shelfFilters[index]?.name.orEmpty()
-                            managedId = null
-                        }
-                        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                            val visibleFavorites = remember(favorites, shelfStates, shelfFilter) {
-                                if (shelfFilter == null) favorites
-                                else favorites.filter { (shelfStates[it.id] ?: ShelfState.NORMAL) == shelfFilter }
+                    BoxWithConstraints(Modifier.fillMaxSize()) {
+                        val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+                        val available = (maxWidth - 32.dp).coerceAtLeast(1.dp)
+                        val gap = 12.dp
+                        val minimumWidth = 94.dp * fontScale.coerceAtMost(1.6f)
+                        val perShelf = ((available + gap) / (minimumWidth + gap)).toInt().coerceIn(1, 3)
+                        val bookWidth = (available - gap * (perShelf - 1)) / perShelf
+                        val bookHeight = bookWidth / .7f
+                        val rows = remember(favorites, perShelf) { favorites.chunked(perShelf) }
+                        LazyColumn(
+                            state = favoritesPosition,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(top = 18.dp, bottom = 32.dp),
+                            verticalArrangement = Arrangement.spacedBy(18.dp),
+                        ) {
+                            if (favorites.isEmpty()) item(key = "empty-collection") {
+                                EmptyBookshelf(onDiscover)
                             }
-                            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-                            val available = (maxWidth - 32.dp).coerceAtLeast(1.dp)
-                            val gap = 4.dp
-                            val bookWidth = minOf(56.dp * fontScale.coerceAtMost(1.6f), available)
-                            val perShelf = ((available + gap) / (bookWidth + gap)).toInt().coerceAtLeast(1)
-                            val bookHeight = 224.dp * fontScale.coerceAtMost(1.4f)
-                            val rows = remember(visibleFavorites, perShelf) { visibleFavorites.chunked(perShelf) }
-                            LazyColumn(
-                                state = favoritesPosition,
-                                modifier = Modifier.fillMaxSize(),
-                                contentPadding = PaddingValues(top = 18.dp, bottom = 32.dp),
-                                verticalArrangement = Arrangement.spacedBy(18.dp),
-                            ) {
-                                if (visibleFavorites.isEmpty()) item(key = "empty-shelf-${shelfFilter?.name.orEmpty()}") {
-                                    if (favorites.isEmpty()) EmptyBookshelf(onDiscover)
-                                    else EmptyShelfGroup(shelfFilter)
-                                }
-                                items(rows, key = { "shelf-${it.first().id}" }) { books ->
-                                    BookshelfRow(
-                                        books, repository, progressById, shelfStates, opening,
-                                        bookWidth, bookHeight, managedId,
-                                        draggedId = draggedFavorite?.id,
-                                        deleteArmed = trashArmed,
-                                        onOpen = onOpen,
-                                        onDetails = onDetails,
-                                        onRemove = onRemoveFavorite,
-                                        onManage = { if (it != null) onCancelOpen(); managedId = it },
-                                        onShelfState = onShelfState,
-                                        onDragStart = { manga, point ->
-                                            onCancelOpen()
-                                            managedId = null
-                                            draggedFavorite = manga
-                                            dragPoint = point
-                                        },
-                                        onDragMove = { dragPoint = it },
-                                        onDragEnd = { manga, point ->
-                                            val remove = draggedFavorite?.id == manga.id && isTrashDrop(point)
-                                            draggedFavorite = null
-                                            dragPoint = Offset.Unspecified
-                                            if (remove) onRemoveFavorite(manga)
-                                        },
-                                        onDragCancel = {
-                                            draggedFavorite = null
-                                            dragPoint = Offset.Unspecified
-                                        },
-                                    )
-                                }
+                            items(rows, key = { "shelf-${it.first().id}" }) { books ->
+                                BookshelfRow(
+                                    books, repository, progressById, opening,
+                                    bookWidth, bookHeight, managedId,
+                                    draggedId = draggedFavorite?.id,
+                                    deleteArmed = trashArmed,
+                                    onOpen = onOpen,
+                                    onDetails = onDetails,
+                                    onRemove = onRemoveFavorite,
+                                    onManage = { if (it != null) onCancelOpen(); managedId = it },
+                                    onDragStart = { manga, point ->
+                                        onCancelOpen()
+                                        managedId = null
+                                        draggedFavorite = manga
+                                        dragPoint = point
+                                    },
+                                    onDragMove = { dragPoint = it },
+                                    onDragEnd = { manga, point ->
+                                        val remove = draggedFavorite?.id == manga.id && isTrashDrop(point)
+                                        draggedFavorite = null
+                                        dragPoint = Offset.Unspecified
+                                        if (remove) onRemoveFavorite(manga)
+                                    },
+                                    onDragCancel = {
+                                        draggedFavorite = null
+                                        dragPoint = Offset.Unspecified
+                                    },
+                                )
                             }
                         }
                     }
@@ -268,18 +240,18 @@ fun LibraryScreen(
 @Composable
 private fun BookshelfRow(
     books: List<Manga>, repository: MangaRepository, progress: Map<String, ReadingProgress>,
-    shelfStates: Map<String, ShelfState>, opening: LibraryOpenState?,
+    opening: LibraryOpenState?,
     bookWidth: Dp, bookHeight: Dp, managedId: String?,
     draggedId: String?, deleteArmed: Boolean,
     onOpen: (Manga) -> Unit, onDetails: (Manga) -> Unit, onRemove: (Manga) -> Unit,
-    onManage: (String?) -> Unit, onShelfState: (Manga, ShelfState) -> Unit,
+    onManage: (String?) -> Unit,
     onDragStart: (Manga, Offset) -> Unit, onDragMove: (Offset) -> Unit,
     onDragEnd: (Manga, Offset) -> Unit, onDragCancel: () -> Unit,
 ) {
     val draggingHere = books.any { it.id == draggedId }
     Column(Modifier.fillMaxWidth().zIndex(if (draggingHere) 8f else 0f)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).zIndex(if (draggingHere) 8f else 0f),
-            horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.Bottom) {
+            horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
             books.forEach { manga ->
                 key(manga.id) {
                     Box(Modifier.width(bookWidth).zIndex(if (draggedId == manga.id) 8f else 0f)) {
@@ -302,72 +274,41 @@ private fun BookshelfRow(
                 }
             }
         }
-        BookshelfPlank(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(12.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             books.forEach { manga ->
                 key(manga.id) {
                     val interaction = remember(manga.id) { MutableInteractionSource() }
                     val saved = progress[manga.id]
-                    val shelfState = shelfStates[manga.id] ?: ShelfState.NORMAL
-                    val stateLabel = when (shelfState) {
-                        ShelfState.NORMAL -> ""
-                        ShelfState.FOLLOWING -> "追更"
-                        ShelfState.HOARDING -> "养肥"
-                        ShelfState.PAUSED -> "搁置"
-                    }
-                    val hasKnownUpdate = shelfState == ShelfState.FOLLOWING && saved != null &&
-                        manga.latestChapter.isNotBlank() && saved.chapterTitle.isNotBlank() &&
-                        manga.latestChapter != saved.chapterTitle
                     Box(Modifier.width(bookWidth)) {
                         Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
                             .semantics(mergeDescendants = true) { contentDescription = manga.title }
                             .combinedClickable(interactionSource = interaction, indication = null,
                                 onClickLabel = if (saved == null) "开始阅读" else "继续阅读",
-                                onLongClickLabel = "管理收藏", onLongClick = { onManage(manga.id) },
+                                onLongClickLabel = "详情与目录", onLongClick = { onManage(manga.id) },
                                 onClick = { onOpen(manga) })
-                            .padding(top = 3.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            val progressText = when {
-                                saved == null -> "未读"
-                                saved.pageCount > 0 -> "${saved.pageIndex + 1}/${saved.pageCount}"
-                                else -> "已读"
-                            }
-                            Text(progressText, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1,
-                                overflow = TextOverflow.Ellipsis)
-                            val status = if (hasKnownUpdate) "有更新" else stateLabel
-                            if (status.isNotBlank()) Text(status,
+                            .padding(horizontal = 2.dp)) {
+                            Text(manga.title, modifier = Modifier.padding(top = 5.dp),
+                                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
+                                minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            val progressText = saved?.let {
+                                it.chapterTitle.ifBlank { "继续阅读" } +
+                                    if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
+                            } ?: "未读"
+                            Text(progressText, modifier = Modifier.padding(top = 3.dp),
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1,
+                                fontSize = 11.sp, lineHeight = 15.sp, maxLines = 1,
                                 overflow = TextOverflow.Ellipsis)
                         }
                         RecordActionsMenu(
                             managedId == manga.id,
                             onDismiss = { onManage(null) },
                             onDetails = { onDetails(manga) },
-                            shelfState = shelfState,
-                            onShelfState = { onShelfState(manga, it) },
                         )
                     }
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun EmptyShelfGroup(filter: ShelfState?) {
-    val label = when (filter) {
-        ShelfState.FOLLOWING -> "追更"
-        ShelfState.HOARDING -> "养肥"
-        ShelfState.PAUSED -> "搁置"
-        else -> "这个"
-    }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text("${label}分组还是空的", style = MaterialTheme.typography.titleSmall)
-        Text("长按书下进度可调整分组。", style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

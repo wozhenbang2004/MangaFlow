@@ -7,7 +7,15 @@ License: Unlicense; the original full text is in LICENSE.
 
 This directory preserves the six original key source files read for MangaFlow's local shelf. It is not the complete upstream repository: its book data, artwork and deployment files are not bundled. UPSTREAM_README.txt retains the original README bytes as inert reference text. source-manifest.json records original paths, retained paths, addresses and byte identities.
 
-## Mapping
+## Flat collection correction · 2026-11-12 (current)
+
+User: “这个书架别弄 3d 了就弄正常的，以及书架别弄追更等功能”. This supersedes the physical cabinet and spine implementations below. The current collection reuses the actual `CoverTile`/`MangaCover` source in `ui/DiscoverScreen.kt`: ordinary complete cover images using Fit, horizontal two-line titles and one quiet line of real chapter/page progress. A normal phone shows three columns, with fewer columns for narrow space/large text. There are no rotated faces, simulated paper/bindings, vertical spine titles, shelf planks, cabinet frames or invented volumes.
+
+The collection no longer accepts shelf-status UI parameters or shows follow/hoard/pause filters, labels or menu actions. Existing user fields and backup data remain in storage. Direct reading, collection order, separate collection/history positions, image collections and statistics remain. `BookshelfBook` only keeps the existing flat press/drag transforms and opening feedback around `MangaCover`; the outer row, cover row and book slot retain their drag elevation. A lifted cover releases swipe recognition/clipping. Left swipe still deletes only after its 55% release threshold, and long-press drag still requires release inside the measured circular trash target. Cancellation or release elsewhere restores the cover. Horizontal title/progress long press retains the details/catalog entry.
+
+The original files, license and the historical mapping below remain archived; the current flat collection does not claim to render or reproduce virtual-bookshelf. No tests, local build or UI automation was performed. Source/diff review is not device appearance or gesture acceptance.
+
+## Historical mapping (superseded)
 
 | Original implementation | MangaFlow adaptation |
 | --- | --- |
@@ -20,7 +28,7 @@ This directory preserves the six original key source files read for MangaFlow's 
 
 BookshelfPlank is the necessary Compose shelf support for these adapted books. It is now a shallow ledge beneath each real row, with no cabinet back/side boards, top frame or fabricated empty bays. Books pack left rather than expanding to cover-card columns. The light Shelf Expression reference (`https://sangsara.net/2026/05/25/shelf-expression/`) informed its quiet surface and contact shadow only. No Shelf Expression code or assets are redistributed. KOReader's shelf-style documentation (`https://andyhazz.github.io/bookshelf-docs/use/shelf-styles/`) informed earlier cover/spine exploration; no plugin code is bundled and its preview-first workflow is not adopted. Native ratings remain in the existing manga detail rather than repeating below each narrow spine.
 
-## Ordinary shelving correction · 2026-11-12 (current)
+## Ordinary shelving correction · 2026-11-12 (superseded)
 
 The latest request rejects the cover-facing cabinet below: “这个书架还是太丑了做成那种正常放书的那种方式吧”. The actual pinned `.book`, `.spine`, `.spine-title` and `.top` source was reread for this correction. The current spine-facing layout keeps opaque readable bindings, real cover identity and compact saved progress/group state. Width/font scale determines wrapping while order and the independent favorite/history scroll states remain. Three drawing levels raise the dragged shelf row, book row and book slot; the lifted book disables swipe recognition/clipping. Physical left swipe still commits at 55% on release. Long-press drag only removes on release inside the measured circular trash target; cancellation or release elsewhere restores the book. No tests, local build or device rendering was performed.
 

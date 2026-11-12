@@ -135,7 +135,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val libraryOpening by model.libraryOpening.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
     val history by model.library.history.collectAsStateWithLifecycle()
-    val shelfStates by model.library.shelfStates.collectAsStateWithLifecycle()
     val preferences by model.library.preferences.collectAsStateWithLifecycle()
     val downloads by model.downloads.entries.collectAsStateWithLifecycle()
     val refreshingDownloads by model.refreshingDownloads.collectAsStateWithLifecycle()
@@ -439,7 +438,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             }
                             }
                             Box(Modifier.fillMaxSize().padding(top =
-                                if (current.section == Section.DISCOVER) 0.dp else if (compactHeader) 52.dp else 60.dp)) {
+                                if (current.section == Section.DISCOVER || current.section == Section.DOWNLOADS) 0.dp
+                                else if (compactHeader) 52.dp else 60.dp)) {
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
@@ -454,19 +454,19 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onOpen = { model.openManga(it) },
                                     )
                                     Section.LIBRARY -> LibraryScreen(
-                                        favorites = favorites, history = history, shelfStates = shelfStates,
+                                        favorites = favorites, history = history,
                                         libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
                                         repository = model.repository, opening = libraryOpening, active = rootActive,
                                         onOpen = model::readFromLibrary, onDetails = { model.openManga(it) },
                                         onContinue = model::continueReading,
                                         onRemoveFavorite = model::removeFavorite,
                                         onRemoveHistory = model::removeHistory,
-                                        onShelfState = { manga, state -> model.library.setShelfState(manga.id, state) },
                                         onDiscover = { changeSection(Section.DISCOVER) },
                                         onRetryOpen = model::retryLibraryReading, onCancelOpen = model::cancelLibraryReading,
                                     )
-                                    Section.DOWNLOADS -> DownloadsScreen(model.downloads, model::openDownload,
-                                        model::retryDownload, refreshingDownloads)
+                                    Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, onRead = model::openDownload,
+                                        onRetry = model::retryDownload, backdrop = searchBackdrop, toolbar = toolbar,
+                                        refreshingIds = refreshingDownloads)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
                                         onLoginWithCookie = model::loginWithCookie, onLogin = model::login,
@@ -508,7 +508,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 } else Box(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)) {
                                     toolbar()
                                 }
-                            } else toolbar()
+                            } else if (current.section != Section.DOWNLOADS) toolbar()
                         }
                         if (current.section == Section.DISCOVER) ExpandingSearchBar(
                             expanded = searchExpanded,
