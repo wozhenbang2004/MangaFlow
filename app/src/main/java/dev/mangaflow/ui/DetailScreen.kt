@@ -167,6 +167,7 @@ fun DetailScreen(
             .statusBarsPadding().navigationBarsPadding().imePadding(),
     ) {
         val density = LocalDensity.current
+        val coverContentScale = if (maxWidth > maxHeight) ContentScale.Fit else ContentScale.Crop
         val compactHero = maxHeight < 600.dp || density.fontScale >= 1.5f
         val heroHeight = if (compactHero) {
             (maxHeight * .32f).coerceAtMost((maxHeight - 250.dp).coerceAtLeast(0.dp))
@@ -217,7 +218,7 @@ fun DetailScreen(
                 modifier = Modifier.align(Alignment.Center).size(48.dp))
             if (current.coverUrl.isNotBlank()) AsyncImage(
                 model = coverRequest, contentDescription = null, modifier = Modifier.fillMaxSize(),
-                contentScale = if (maxWidth > maxHeight) ContentScale.Fit else ContentScale.Crop,
+                contentScale = coverContentScale,
                 alignment = Alignment.TopCenter,
                 onError = { coverFailed = true }, onSuccess = { coverFailed = false },
             )
