@@ -152,12 +152,16 @@ internal fun ChapterEndComments(
                 lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                     try {
                         delay(MangaMotion.Quick.toLong())
-                        candidates.forEach { row ->
-                            bubbles = (bubbles + row).takeLast(if (singlePreview) 1 else 4)
-                            delay(if (singlePreview) SinglePreviewLifetimeMillis + 250L else row.flight.intervalMillis)
+                        while (true) {
+                            candidates.forEach { row ->
+                                // Keep the field alive while the reader stays at chapter end, but never
+                                // stack the same comment on top of itself when only a few rows are available.
+                                if (bubbles.none { it.key == row.key }) {
+                                    bubbles = (bubbles + row).takeLast(if (singlePreview) 1 else 4)
+                                }
+                                delay(if (singlePreview) SinglePreviewLifetimeMillis + 250L else row.flight.intervalMillis)
+                            }
                         }
-                        delay(if (singlePreview) SinglePreviewLifetimeMillis.toLong()
-                            else MaximumBubbleLifetimeMillis.toLong())
                     } finally {
                         bubbles = emptyList()
                     }
