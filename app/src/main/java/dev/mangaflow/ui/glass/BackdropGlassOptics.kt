@@ -38,14 +38,15 @@ internal class BackdropGlassOptics {
     fun effect(
         width: Float, height: Float, corner: Float, density: Float,
         engagement: Float, surface: Color, light: Boolean, role: GlassSurfaceRole,
+        softCard: Boolean = false,
     ): RenderEffect? {
         if (!available || width <= 0f || height <= 0f) return null
         val shortSide = min(width, height)
         val radius = corner.coerceIn(0f, shortSide * .5f)
-        val frame = LensFrame(width, height, radius, density, engagement, surface.toArgb(), light, role)
+        val frame = LensFrame(width, height, radius, density, engagement, surface.toArgb(), light, role, softCard)
         if (frame == previous) return cached
         return try {
-            val rimDp = when (role) {
+            val rimDp = if (softCard) 10f else when (role) {
                 GlassSurfaceRole.CONTROL -> 14f
                 GlassSurfaceRole.ARTWORK -> 16f
                 GlassSurfaceRole.NAVIGATION -> 18f
@@ -55,7 +56,7 @@ internal class BackdropGlassOptics {
                 GlassSurfaceRole.POPOVER -> 14f
             }
             val rim = min(rimDp * density, shortSide * .28f).coerceAtLeast(.1f)
-            val depth = when (role) {
+            val depth = if (softCard) .28f else when (role) {
                 GlassSurfaceRole.CONTROL -> .82f
                 GlassSurfaceRole.ARTWORK -> .72f
                 GlassSurfaceRole.NAVIGATION -> .52f
@@ -69,10 +70,10 @@ internal class BackdropGlassOptics {
             lens.setFloatUniform("cornerRadii", radius, radius, radius, radius)
             lens.setFloatUniform("refractionHeight", rim)
             // Backdrop's Lens binding uses the negative amount for inward sampling.
-            lens.setFloatUniform("refractionAmount", -rim * (depth + .16f * engagement))
+            lens.setFloatUniform("refractionAmount", -rim * (depth + (if (softCard) .06f else .16f) * engagement))
             lens.setFloatUniform("depthEffect", 0f)
             lens.setColorUniform("surfaceColor", surface.copy(alpha = 1f).toArgb())
-            lens.setFloatUniform("tintOpacity", when (role) {
+            lens.setFloatUniform("tintOpacity", if (softCard) { if (light) .78f else .82f } else when (role) {
                 GlassSurfaceRole.CONTROL -> if (light) .60f else .72f
                 GlassSurfaceRole.ARTWORK -> if (light) .60f else .70f
                 GlassSurfaceRole.NAVIGATION -> if (light) .68f else .76f
@@ -116,6 +117,7 @@ internal class BackdropGlassOptics {
     private data class LensFrame(
         val width: Float, val height: Float, val radius: Float, val density: Float,
         val engagement: Float, val surface: Int, val light: Boolean, val role: GlassSurfaceRole,
+        val softCard: Boolean,
     )
 
     companion object {

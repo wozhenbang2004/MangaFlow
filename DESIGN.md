@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## Borderless soft header cards · 2026-11-12 (current)
+
+User: “那些顶栏那些块请你按照我们审美库要求的无边框，采用低对比度背景颜色和大范围柔和阴影来做卡片分隔”. This supersedes the decorative glass outline/highlight and narrow 2dp header shadow; preserve the separate navigation/control pieces, SEARCH-06's continuous close and all existing content/actions.
+
+| ID | Current decision and reuse | Acceptance boundary |
+| --- | --- | --- |
+| HEADER-SURFACE-01 | Adapt the existing Haze/Backdrop LiquidGlassSurface with a shared soft-card treatment: navigation roles inherit it, and search/reader/artwork top controls opt in. Remove painted outline and edge highlight entirely for these cards. Use a theme-near uniform surface tint, quieter refraction and one broad low-opacity native ambient/spot shadow; small artwork tools use a smaller elevation. | Keep actual captured content and the persisted frosted/liquid choice, foreground contrast, pointer/press feedback, shapes, positions and hit regions. No opaque backing on the supported capture path, hard inner rectangle, new card around every nested control or structural header changes. The inset drawer keeps its explicit zero elevation. |
+| HEADER-SHADOW-01 | Floating header pieces use 16dp native shadow elevation with reduced directional weight, rather than the old 2dp narrow shadow. Place the shadow before the existing shape clip; alpha-faded header/search/tool surfaces use ModulateAlpha so an intermediate alpha layer does not cut off the broad shadow. The search no longer needs its local inward rim-clipping workaround. Detail section tabs adopt the already available borderless Soft treatment. | Native elevation is not a CSS blur radius. Keep separate-card spacing and measured content insets, search foreground/hit clipping, finite exit, retained list/query state and Ovio selector physics. Dark surfaces remain close in tone; text and necessary state/focus indications keep their contrast. |
+
+Visual reference actually viewed: the saved card comparison `user-comparison-1000120740.jpg` (03/04) and Alma's official first screenshot, with `card-light-surfaces-20261103.md` / `alma-soft-shadow-20261104.md`. This reuses the app's current mature glass/shadow implementation; the preset values are an unverified Android adaptation, not Alma's official tokens or a pixel-match claim. Source/diff and independent read-only review confirmed target-role outline removal, matching material/shader cache keys, shadow-before-clip order and retained search foreground clipping/hit bounds/finite exit. Concurrent main `781c868` segmentation, author browsing and comment changes are preserved. No tests, local build, API probes or automated UI validation; direct main and CI-trigger-only delivery, with actual appearance pending user device feedback.
+
 ## Split navigation, quiet comments and author works · 2026-11-12 (current)
 
 User: “这个功能界面删掉吧没啥用啊” (MangaBaka “确认作品” sheet); “那个什么 8/10 这种东西展示毫无意义以及那个评论 filter 毫无动画以及我希望增加一个点击作者名字就可以拿到该作者的漫画”; “而且最新精选也删了别弄这个”; “而且搜索那个点击后再点击手收起原来的顶栏会卡一会再出现很不流畅”; “几个顶栏弄成分段的即左边侧栏的弄一个单独的其他的自己弄一条”. This supersedes conflicting MB-RELATED-01, DETAIL-CONT-06, SEARCH-05 and single-surface header decisions below.

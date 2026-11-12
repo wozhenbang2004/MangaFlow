@@ -51,6 +51,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -105,7 +106,6 @@ internal fun ExpandingSearchBar(
     val density = LocalDensity.current
     val requester = remember { FocusRequester() }
     val foregroundClip = remember { Path() }
-    val opticalClip = remember { Path() }
     val searchInteraction = remember { MutableInteractionSource() }
     var retainedQuery by remember { mutableStateOf(query) }
     var inputFocused by remember { mutableStateOf(false) }
@@ -191,22 +191,14 @@ internal fun ExpandingSearchBar(
             state = backdrop,
             modifier = Modifier.align(Alignment.TopEnd).padding(top = topInset, end = endInset)
                 .width(width.value.coerceAtLeast(44.dp)).height(height.value.coerceAtLeast(44.dp))
-                .graphicsLayer { alpha = reveal.value.coerceIn(0f, 1f) }
-                .drawWithContent {
-                    // Remove this search shell's outer rim without changing the shared material.
-                    // The captured backdrop and rounded refraction remain inside the light edge.
-                    val inset = .85.dp.toPx()
-                    val radius = ((22.dp + 2.dp * progress).toPx() - inset).coerceAtLeast(0f)
-                    opticalClip.reset()
-                    opticalClip.addRoundRect(RoundRect(inset, inset,
-                        (size.width - inset).coerceAtLeast(inset),
-                        (size.height - inset).coerceAtLeast(inset), CornerRadius(radius)))
-                    clipPath(opticalClip) { this@drawWithContent.drawContent() }
+                .graphicsLayer {
+                    alpha = reveal.value.coerceIn(0f, 1f)
+                    compositingStrategy = CompositingStrategy.ModulateAlpha
                 },
             cornerRadius = 22.dp + 2.dp * progress,
             role = if (displayedQuery.isBlank()) GlassSurfaceRole.CONTROL else GlassSurfaceRole.PANEL,
             interactionSource = searchInteraction,
-            elevation = 0.dp,
+            softCard = true,
         ) {}
 
         // Keep the result-position owner composed while closed, but place no hidden hit region.

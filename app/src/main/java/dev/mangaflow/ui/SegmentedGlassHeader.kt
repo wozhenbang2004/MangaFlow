@@ -10,6 +10,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
@@ -26,9 +27,11 @@ internal fun SegmentedGlassHeader(
     Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.Top) {
         LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
-            role = GlassSurfaceRole.NAVIGATION, trackPointer = true, elevation = 2.dp) { navigation() }
-        LiquidGlassSurface(backdrop, Modifier.weight(1f).graphicsLayer { alpha = controlsAlpha() },
-            cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true, elevation = 2.dp) {
+            role = GlassSurfaceRole.NAVIGATION, trackPointer = true) { navigation() }
+        LiquidGlassSurface(backdrop, Modifier.weight(1f).graphicsLayer {
+            alpha = controlsAlpha()
+            compositingStrategy = CompositingStrategy.ModulateAlpha
+        }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
             Column(Modifier.fillMaxWidth().pointerInput(Unit) {}, content = content)
         }
     }

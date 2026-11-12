@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -68,12 +69,15 @@ internal fun LiquidGlassSurface(
     trackPointer: Boolean = false,
     elevation: Dp? = null,
     surfaceColor: Color? = null,
+    softCard: Boolean = role == GlassSurfaceRole.NAVIGATION,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val baseColors = MaterialTheme.colorScheme
     val colors = if (surfaceColor == null) baseColors else baseColors.copy(surface = surfaceColor,
         onSurface = if (surfaceColor.luminance() > .5f) Color(0xFF242426) else Color.White)
     val light = colors.surface.luminance() > .5f
+    val surfaceTint = if (softCard && surfaceColor == null) lerp(baseColors.background, colors.surface, .70f)
+        else colors.surface
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
     val optics = remember(skin) {
         if (skin == GlassSkin.LIQUID && Build.VERSION.SDK_INT >= 33) runCatching { BackdropGlassOptics() }.getOrElse {
@@ -93,13 +97,13 @@ internal fun LiquidGlassSurface(
         if (liquid && motion && (pointerDown || pressed || dragged)) 1f else 0f,
         tween(if (motion) MangaMotion.Quick else 0), label = "glass-engagement",
     )
-    val style = remember(colors.surface, light, liquid, role) {
+    val style = remember(surfaceTint, light, liquid, role, softCard) {
         HazeStyle(
-            backgroundColor = colors.surface,
+            backgroundColor = surfaceTint,
             // An explicit transparent tint prevents inheriting a frosted LocalHazeStyle.
             // Liquid's uniform readability tint is applied after the author's refraction.
             tints = listOf(HazeTint(if (liquid) Color.Transparent
-                else colors.surface.copy(alpha = when (role) {
+                else surfaceTint.copy(alpha = if (softCard) { if (light) .78f else .82f } else when (role) {
                     GlassSurfaceRole.READING_DOCK -> if (light) .40f else .52f
                     GlassSurfaceRole.POPOVER -> if (light) .64f else .72f
                     else -> if (light) .72f else .78f
@@ -114,7 +118,7 @@ internal fun LiquidGlassSurface(
                 else -> if (liquid) 6.dp else 20.dp
             },
             noiseFactor = 0f,
-            fallbackTint = HazeTint(colors.surface.copy(alpha = .96f)),
+            fallbackTint = HazeTint(surfaceTint.copy(alpha = .96f)),
         )
     }
     // Decorative surfaces must stay outside hit testing so touches reach artwork beneath them.
@@ -139,9 +143,10 @@ internal fun LiquidGlassSurface(
     } else Modifier
 
     CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
-        Box(modifier.shadow(elevation ?: if (liquid) 4.dp else 2.dp, shape, clip = false,
-            ambientColor = Color.Black.copy(alpha = .04f),
-            spotColor = Color.Black.copy(alpha = .065f))
+        // Native ambient spread supplies separation; the rounded surface clips only its contents.
+        Box(modifier.shadow(elevation ?: if (softCard) 16.dp else if (liquid) 4.dp else 2.dp, shape, clip = false,
+            ambientColor = Color.Black.copy(alpha = if (softCard) { if (light) .14f else .32f } else .04f),
+            spotColor = Color.Black.copy(alpha = if (softCard) { if (light) .055f else .22f } else .065f))
             .clip(shape).then(pointerTracking)) {
             Box(Modifier.matchParentSize()
                 .drawWithContent {
@@ -149,16 +154,16 @@ internal fun LiquidGlassSurface(
                     // Keep the first/no-source frame and software drawing readable instead.
                     if (drawContext.canvas.nativeCanvas.isHardwareAccelerated &&
                         state.areas.any { it.contentLayer != null }) drawContent()
-                    else drawRect(colors.surface.copy(alpha = .96f))
+                    else drawRect(surfaceTint.copy(alpha = .96f))
                 }
                 .graphicsLayer {
                     renderEffect = if (liquid && Build.VERSION.SDK_INT >= 33 && optics != null) {
                         optics.effect(size.width, size.height, cornerRadius.toPx(), density,
-                            engagement.value, colors.surface, light, role)
+                            engagement.value, surfaceTint, light, role, softCard)
                     } else null
                 }
                 .hazeEffect(state, style) { inputScale = HazeInputScale.Auto })
-            Box(Modifier.matchParentSize().drawBehind {
+            if (!softCard) Box(Modifier.matchParentSize().drawBehind {
                 val stroke = .65.dp.toPx()
                 val inset = stroke * .5f
                 val radius = min(cornerRadius.toPx(), size.minDimension * .5f)

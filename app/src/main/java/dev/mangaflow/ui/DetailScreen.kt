@@ -74,6 +74,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
@@ -118,6 +119,7 @@ import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.motionPress
 import kotlinx.coroutines.Job
@@ -465,8 +467,11 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
     MotionIconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
         Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
             LiquidGlassSurface(backdrop,
-                Modifier.matchParentSize().graphicsLayer { alpha = glassAlpha }, cornerRadius = 16.dp,
-                trackPointer = true, surfaceColor = glassTone) {}
+                Modifier.matchParentSize().graphicsLayer {
+                    alpha = glassAlpha
+                    compositingStrategy = CompositingStrategy.ModulateAlpha
+                }, cornerRadius = 16.dp, elevation = 8.dp,
+                trackPointer = true, surfaceColor = glassTone, softCard = true) {}
             MotionSwap(icon, Modifier.size(21.dp)) { shown ->
                 Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp))
             }
@@ -594,6 +599,7 @@ private fun DetailSections(
         MotionTabs(selected, labels, onSelect, modifier = Modifier.weight(1f),
             foreground = DetailForeground, muted = DetailSecondary, indicator = DetailForeground.copy(alpha = .065f),
             compact = false, fullWidthIndicator = true, indicatorHeight = 36.dp, fontSize = 15.sp,
+            treatment = MotionTabTreatment.Soft,
             itemContent = { index, chosen, color ->
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(labels[index], color = color, fontSize = 15.sp,

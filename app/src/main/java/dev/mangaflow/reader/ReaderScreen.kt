@@ -523,6 +523,7 @@ fun ReaderScreen(
             LiquidGlassSurface(
                 state = readerBackdrop,
                 trackPointer = true,
+                softCard = true,
                 modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             ) {
