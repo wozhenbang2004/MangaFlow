@@ -30,3 +30,18 @@ The supplied 午夜心旋律 screenshot shows two work comments before the catal
 This is an implementation and packaging slice. Read current code, inspect the diff and compile the feature branch before main. Do not run tests, UI automation, emulator checks or fabricated screenshot fixtures. API contracts are unchanged. Real device layout, touch feel and large-font behavior remain pending user experience; source arithmetic and a successful build are not visual acceptance.
 
 The source review found no new blocker in catalog paging, selection, download guards or history continuation. Provider selection and comment-list positions are retained; the existing reply sublist still releases expanded replies when leaving its composition and loads again when reopened. This slice does not claim persistent reply-thread caching.
+
+## Revised detail contract · 2026-11-12 (supersedes DETAIL-02 through DETAIL-05)
+
+The user rejected the three-tab/paginated screenshot and explicitly requested the following:
+
+- Synopsis is two lines beside the artwork. Tapping it opens the full copy in a sheet. Do not restore a dedicated Introduction tab.
+- Chapters and Comments use quiet text tabs with a narrow underline, not a large segmented capsule.
+- The reading action names the actual chapter; continuation keeps its saved page.
+- The chapter grid uses small fixed-height tiles with an adaptive four-column tendency on portrait phones. The whole fetched directory is presented by a lazy grid and scrolls continuously, with no range picker or bottom pagination.
+- Group, order, search and the last-read locator live in an overlay side drawer. A fixed-size toolbar owns the drawer and download icons.
+- Download-mode selection must never insert a status row or resize a tile. The icon changes from download to progress, check or failure in a reserved slot without moving surrounding chapters.
+- Real status/genre/update tags and provider metrics use multiple quiet, low-saturation accents. No fabricated tags, counts, ratings or providers.
+- Keep exact chapter progress, anonymous source use, existing downloads, comments, and cache intact. The grid and comment list remain in a fixed content area beneath the header. No outer detail scroll, test suite or emulator automation for this change.
+
+This section overrides older paging and section-transition advice in the same document. A successful CI build confirms compilation only; device interaction remains unverified.

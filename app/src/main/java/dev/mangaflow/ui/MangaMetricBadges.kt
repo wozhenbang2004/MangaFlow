@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -64,31 +65,47 @@ internal fun MangaMetricBadges(
     ) {
         heat?.let { value ->
             MetricBadge("拷", if (compact) metricCount(value) else "$heatLabel ${metricCount(value)}",
-                "拷贝漫画，$heatLabel $value", foreground, compact)
+                "拷贝漫画，$heatLabel $value", foreground, compact, "copy")
         }
         listOf("bangumi", "anilist").forEach { id ->
             val metric = metrics.firstOrNull { it.sourceId == id }
             metric?.score?.takeIf { it.isFinite() && it > 0 }?.let { score ->
                 MetricBadge(if (id == "bangumi") "bgm" else "AL", metricScore(score),
                     "${metric.name}，${metricScore(score)} 分，满分 ${metric.scoreScale}" +
-                        (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact)
+                        (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact, id)
             }
         }
     }
 }
 
 @Composable
-private fun MetricBadge(mark: String, value: String, description: String, foreground: Color, compact: Boolean) {
+private fun MetricBadge(
+    mark: String,
+    value: String,
+    description: String,
+    foreground: Color,
+    compact: Boolean,
+    sourceId: String,
+) {
+    val onDark = foreground.luminance() > .5f
+    val accent = when (sourceId) {
+        "copy" -> if (onDark) Color(0xFFD8B79E) else Color(0xFF855B43)
+        "bangumi" -> if (onDark) Color(0xFFAFC5E4) else Color(0xFF526D92)
+        "anilist" -> if (onDark) Color(0xFFC8B4DC) else Color(0xFF745C91)
+        else -> foreground
+    }
     Row(
-        modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(foreground.copy(alpha = .055f))
+        modifier = Modifier.clip(RoundedCornerShape(6.dp))
+            .background(accent.copy(alpha = if (onDark) .14f else .085f))
             .semantics(mergeDescendants = true) { contentDescription = description }
-            .padding(horizontal = if (compact) 4.dp else 5.dp, vertical = 3.dp),
+            .padding(horizontal = if (compact) 4.dp else 6.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 5.dp),
     ) {
-        Text(mark, color = foreground.copy(alpha = .56f), fontSize = 10.sp, lineHeight = 14.sp,
+        Text(mark, color = accent, fontSize = 10.sp, lineHeight = 14.sp,
             fontWeight = FontWeight.SemiBold, maxLines = 1)
-        Text(value, color = foreground.copy(alpha = .82f), fontSize = if (compact) 10.sp else 11.sp, lineHeight = 14.sp,
+        Text(value, color = foreground.copy(alpha = .88f),
+            fontSize = if (compact) 10.sp else 11.sp, lineHeight = 14.sp,
             fontWeight = FontWeight.Medium, maxLines = 1)
     }
 }
