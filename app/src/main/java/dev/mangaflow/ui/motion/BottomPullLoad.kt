@@ -22,6 +22,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.size
@@ -77,10 +78,11 @@ private data class BottomPullLoadInputs(
     val actionLabel: String,
 )
 
-/** Unconsumed finger distance owns the threshold; a separate drawing layer supplies resistance. */
+/** Finger distance owns the threshold; a separate drawing layer supplies resistance. */
 @Stable
 internal class BottomPullLoadState private constructor(
     private val thresholdPx: Float,
+    private val orientation: Orientation,
     private val scope: CoroutineScope,
     private val inputs: () -> BottomPullLoadInputs,
 ) {
@@ -89,6 +91,7 @@ internal class BottomPullLoadState private constructor(
     private var feedback by mutableFloatStateOf(0f)
     private var gestureFeedbackOrigin = 0f
     internal val feedbackFraction: Float get() = feedback
+    internal val horizontal: Boolean get() = orientation == Orientation.Horizontal
     internal val contentOffsetPx: Float
         get() = if (inputs().motion) -thresholdPx * .42f * feedback.coerceIn(-.06f, 1.25f) else 0f
     val loading: Boolean get() = inputs().loading
@@ -96,6 +99,7 @@ internal class BottomPullLoadState private constructor(
 
     private var distancePulled = 0f
     private var pointerDown = false
+    private var gestureEligible = false
     private var thresholdAnnounced = false
     private var consumeReleaseVelocity = false
     private var dispatchPending = false
@@ -109,34 +113,33 @@ internal class BottomPullLoadState private constructor(
 
     internal val connection = object : NestedScrollConnection {
         override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-            if (source != NestedScrollSource.UserInput || !pointerDown || !canRequest ||
-                available.y <= 0f || distancePulled <= 0f) return Offset.Zero
-            // Reverse the unfinished pull before allowing the list to move back up.
-            settleJob?.cancel()
-            val consumed = minOf(available.y, distancePulled)
-            distancePulled -= consumed
-            updateGesturePresentation()
-            if (distancePulled < thresholdPx) thresholdAnnounced = false
-            return Offset(0f, consumed)
+            if (source != NestedScrollSource.UserInput || !pointerDown || !gestureEligible || !canRequest)
+                return Offset.Zero
+            val delta = component(available)
+            if (delta > 0f && distancePulled > 0f) {
+                // Reverse the unfinished pull before allowing the content to move back.
+                settleJob?.cancel()
+                val consumed = minOf(delta, distancePulled)
+                distancePulled -= consumed
+                updateGesturePresentation()
+                if (distancePulled < thresholdPx) thresholdAnnounced = false
+                return axisOffset(consumed)
+            }
+            if (horizontal && delta < 0f && !inputs().canScrollForward()) {
+                // The requested physical left-next gesture wins at the final image even
+                // for an RTL pager. Interior pages and zoomed images never enter this path.
+                pullBy(delta)
+                // Keep the pager at its end after resistance caps the visual distance.
+                return axisOffset(delta)
+            }
+            return Offset.Zero
         }
 
         override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-            if (source != NestedScrollSource.UserInput || !pointerDown || available.y >= 0f ||
+            val delta = component(available)
+            if (source != NestedScrollSource.UserInput || !pointerDown || !gestureEligible || delta >= 0f ||
                 !canRequest || inputs().canScrollForward()) return Offset.Zero
-            settleJob?.cancel()
-            // Bottom loading reverses Material3's pull direction; fling deltas never accumulate.
-            val previous = distancePulled
-            distancePulled = (distancePulled - available.y).coerceAtMost(thresholdPx * 1.35f)
-            // The displayed fraction is this gesture's actual distance, without a trailing animation.
-            updateGesturePresentation()
-            if (distancePulled >= thresholdPx && !thresholdAnnounced) {
-                thresholdAnnounced = true
-                inputs().onThresholdReached()
-            } else if (distancePulled < thresholdPx) {
-                thresholdAnnounced = false
-            }
-            val taken = distancePulled - previous
-            return Offset(0f, -taken)
+            return axisOffset(pullBy(delta))
         }
 
         override suspend fun onPreFling(available: Velocity): Velocity {
@@ -145,12 +148,31 @@ internal class BottomPullLoadState private constructor(
             // Only the pointer observer can confirm a real release; fling never loads content.
             if (pointerDown) finishGesture(released = false)
             consumeReleaseVelocity = false
-            return Velocity(0f, if (hadPull) available.y else 0f)
+            return if (!hadPull) Velocity.Zero else if (horizontal) Velocity(available.x, 0f)
+                else Velocity(0f, available.y)
         }
+    }
+
+    private fun component(offset: Offset): Float = if (horizontal) offset.x else offset.y
+    private fun axisOffset(value: Float): Offset = if (horizontal) Offset(value, 0f) else Offset(0f, value)
+
+    private fun pullBy(delta: Float): Float {
+        settleJob?.cancel()
+        // Only finger deltas accumulate. Presentation resistance never changes the threshold.
+        val previous = distancePulled
+        distancePulled = (distancePulled - delta).coerceAtMost(thresholdPx * 1.35f)
+        updateGesturePresentation()
+        if (distancePulled >= thresholdPx && !thresholdAnnounced) {
+            thresholdAnnounced = true
+            inputs().onThresholdReached()
+        } else if (distancePulled < thresholdPx) thresholdAnnounced = false
+        return previous - distancePulled
     }
 
     internal fun beginGesture() {
         pointerDown = true
+        // Reaching the final pager image in this gesture must not also skip that image.
+        gestureEligible = !horizontal || (canRequest && !inputs().canScrollForward())
         thresholdAnnounced = false
         consumeReleaseVelocity = false
         distancePulled = 0f
@@ -169,9 +191,10 @@ internal class BottomPullLoadState private constructor(
 
     internal fun finishGesture(released: Boolean) {
         if (!pointerDown) return
-        val ready = released && distancePulled >= thresholdPx && !inputs().canScrollForward()
+        val ready = released && gestureEligible && distancePulled >= thresholdPx && !inputs().canScrollForward()
         consumeReleaseVelocity = distancePulled > 0f
         pointerDown = false
+        gestureEligible = false
         thresholdAnnounced = false
         distancePulled = 0f
         if (ready && requestMore()) {
@@ -248,6 +271,7 @@ internal class BottomPullLoadState private constructor(
             canScrollForward: () -> Boolean,
             onLoadMore: () -> Unit,
             actionLabel: String,
+            orientation: Orientation,
         ): BottomPullLoadState {
             val haptics = LocalHapticFeedback.current
             val inputs = rememberUpdatedState(BottomPullLoadInputs(
@@ -263,7 +287,9 @@ internal class BottomPullLoadState private constructor(
             ))
             val threshold = with(LocalDensity.current) { 96.dp.toPx() }
             val scope = rememberCoroutineScope()
-            val state = remember(key, threshold) { BottomPullLoadState(threshold, scope) { inputs.value } }
+            val state = remember(key, threshold, orientation) {
+                BottomPullLoadState(threshold, orientation, scope) { inputs.value }
+            }
             LaunchedEffect(state, loading, enabled, inputs.value.motion) { state.updatePresentation() }
             DisposableEffect(state) { onDispose { state.dispose() } }
             return state
@@ -279,8 +305,9 @@ internal fun rememberBottomPullLoadState(
     canScrollForward: () -> Boolean,
     onLoadMore: () -> Unit,
     actionLabel: String = "加载更多",
+    orientation: Orientation = Orientation.Vertical,
 ): BottomPullLoadState = BottomPullLoadState.rememberState(
-    key, enabled, loading, canScrollForward, onLoadMore, actionLabel)
+    key, enabled, loading, canScrollForward, onLoadMore, actionLabel, orientation)
 
 internal fun Modifier.bottomPullLoad(state: BottomPullLoadState): Modifier =
     nestedScroll(state.connection).pointerInput(state) {
@@ -305,7 +332,10 @@ internal fun Modifier.bottomPullLoad(state: BottomPullLoadState): Modifier =
     }.semantics {
         customActions = if (state.loadActionAvailable)
             listOf(CustomAccessibilityAction(state.actionLabel, state::accessibilityLoadMore)) else emptyList()
-    }.graphicsLayer { translationY = state.contentOffsetPx }
+    }.graphicsLayer {
+        translationX = if (state.horizontal) state.contentOffsetPx else 0f
+        translationY = if (state.horizontal) 0f else state.contentOffsetPx
+    }
 
 /** The fixed footer slot contains the moving ring/arrow; progress follows actual drag distance. */
 @Composable
@@ -326,8 +356,9 @@ internal fun BottomPullLoadIndicator(
             else ProgressBarRangeInfo(state.progress, 0f..1f)
     }.graphicsLayer {
         val pull = if (motion) state.feedbackFraction.coerceIn(0f, 1f) else 0f
-        scaleX = 1f + .08f * pull
-        scaleY = 1f - .04f * pull
+        val scale = 1f + .04f * pull
+        scaleX = scale
+        scaleY = scale
     }
     if (state.loading && motion) {
         CircularProgressIndicator(modifier = indicator, color = color, strokeWidth = 2.dp)
@@ -345,16 +376,17 @@ internal fun BottomPullLoadIndicator(
             val checked = ready.value.coerceIn(0f, 1f)
             val unit = (size.minDimension * .16f).coerceAtLeast(1f)
             fun point(x: Float, y: Float) = center + Offset(x * unit, y * unit)
+            fun arrowPoint(x: Float, y: Float) = if (state.horizontal) point(y, -x) else point(x, y)
             fun morph(arrow: Offset, check: Offset) = arrow + (check - arrow) * checked
-            val a = morph(point(-.65f, -.05f), point(-.85f, -.05f))
-            val b = morph(point(0f, -.7f), point(-.2f, .55f))
-            val c = morph(point(.65f, -.05f), point(.9f, -.65f))
+            val a = morph(arrowPoint(-.65f, -.05f), point(-.85f, -.05f))
+            val b = morph(arrowPoint(0f, -.7f), point(-.2f, .55f))
+            val c = morph(arrowPoint(.65f, -.05f), point(.9f, -.65f))
             rotate(if (motion) -18f * fraction * (1f - checked) else 0f, pivot = center) {
                 val glyph = color.copy(alpha = .62f + .38f * fraction)
                 drawLine(glyph, a, b, 1.7.dp.toPx(), StrokeCap.Round)
                 drawLine(glyph, b, c, 1.7.dp.toPx(), StrokeCap.Round)
                 if (checked < 1f) drawLine(glyph.copy(alpha = glyph.alpha * (1f - checked)),
-                    point(0f, -.7f), point(0f, .8f), 1.7.dp.toPx(), StrokeCap.Round)
+                    arrowPoint(0f, -.7f), arrowPoint(0f, .8f), 1.7.dp.toPx(), StrokeCap.Round)
             }
         }
     }

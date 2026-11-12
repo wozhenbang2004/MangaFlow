@@ -16,8 +16,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.rememberScrollableState
-import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.clickable
@@ -911,20 +909,25 @@ private fun ChapterPages(
             groups.indexOfFirst { it.contains(startPage) }.coerceAtLeast(0)
         }
         val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size })
-        val pull = rememberBottomPullLoadState(
-            key = pager,
-            enabled = active && onNext != null && pager.settledPage == groups.lastIndex && !pager.isScrollInProgress,
-            loading = false,
-            canScrollForward = { false },
-            onLoadMore = { onNext?.invoke() },
-            actionLabel = "进入下一话",
-        )
+        val swipeReadyPages = remember { mutableStateMapOf<Int, Boolean>() }
         val atEnd by remember(pager, groups) {
             derivedStateOf {
                 pager.settledPage == groups.lastIndex && pager.currentPage == groups.lastIndex &&
                     kotlin.math.abs(pager.currentPageOffsetFraction) < .01f && loadedPages[pages.lastIndex] == true
             }
         }
+        val endReady = groups.last().let { group ->
+            swipeReadyPages[group.first] == true && (group.second == null || swipeReadyPages[group.second] == true)
+        }
+        val pull = rememberBottomPullLoadState(
+            key = pager,
+            enabled = active && onNext != null && atEnd && endReady,
+            loading = false,
+            canScrollForward = { !atEnd || !endReady },
+            onLoadMore = { onNext?.invoke() },
+            actionLabel = "进入下一话",
+            orientation = Orientation.Horizontal,
+        )
         LaunchedEffect(atEnd) { atEndChanged(atEnd) }
         LaunchedEffect(pager, groups) {
             snapshotFlow { groups.getOrNull(pager.currentPage)?.first ?: pages.lastIndex }
@@ -964,8 +967,7 @@ private fun ChapterPages(
             val shown = groups.getOrNull(pager.currentPage)
             (shown?.first ?: pages.lastIndex) to (shown?.last ?: pages.lastIndex)
         }
-        Box(Modifier.fillMaxSize().bottomPullLoad(pull)
-            .scrollable(rememberScrollableState { 0f }, Orientation.Vertical, enabled = active && atEnd)) {
+        Box(Modifier.fillMaxSize().bottomPullLoad(pull)) {
             HorizontalPager(
                 state = pager,
                 modifier = Modifier.fillMaxSize(),
@@ -982,6 +984,9 @@ private fun ChapterPages(
                                 onMeasured = { loadedPages[imageIndex] = true },
                                 onComposed = { present -> if (present) composedPages[imageIndex] = true else composedPages.remove(imageIndex) },
                                 prefetch = prefetchRequests[imageIndex],
+                                onChapterSwipeReadyChanged = { ready ->
+                                    if (ready) swipeReadyPages[imageIndex] = true else swipeReadyPages.remove(imageIndex)
+                                },
                             )
                         }
                     }
@@ -1144,6 +1149,7 @@ private fun ReaderPage(
     knownDimensions: IntSize? = null,
     onDimensionsKnown: (IntSize) -> Unit = {},
     onLayoutReady: (Boolean) -> Unit = {},
+    onChapterSwipeReadyChanged: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -1155,6 +1161,7 @@ private fun ReaderPage(
     val heightMeasured by rememberUpdatedState(onHeightMeasured)
     val dimensionsMeasured by rememberUpdatedState(onDimensionsKnown)
     val layoutReady by rememberUpdatedState(onLayoutReady)
+    val chapterSwipeReadyChanged by rememberUpdatedState(onChapterSwipeReadyChanged)
     // Lazy layout recycling must not collapse a measured page back to its placeholder height.
     var aspect by rememberSaveable(page.index) { mutableFloatStateOf(
         knownDimensions?.readerAspectRatio()
@@ -1280,6 +1287,14 @@ private fun ReaderPage(
             if (request != null && !waitingForPrefetch && imageError == null) key(reload) {
                 if (paged) {
                     val imageState = rememberZoomableImageState()
+                    LaunchedEffect(imageState) {
+                        snapshotFlow {
+                            imageState.isImageDisplayed &&
+                                (imageState.zoomableState.zoomFraction ?: 0f) <= .001f &&
+                                !imageState.zoomableState.isAnimationRunning
+                        }.distinctUntilChanged().collect { chapterSwipeReadyChanged(it) }
+                    }
+                    DisposableEffect(imageState) { onDispose { chapterSwipeReadyChanged(false) } }
                     ZoomableAsyncImage(
                         model = request,
                         state = imageState,

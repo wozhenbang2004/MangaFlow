@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## Round pull feedback and horizontal chapter end · 2026-11-12 (current)
+
+User: “上滑那个圈都扁了。以及左右滑的漫画也得左滑下一话”. Screenshots `1000121423.jpg` and `1000121424.jpg` show the chapter-end upward action and a stretched browse loading ring. This corrects GESTURE-04's unequal indicator scaling and adds the requested physical left swipe at the final horizontal image.
+
+| ID | Current decision | Acceptance boundary |
+| --- | --- | --- |
+| PULL-04 | Keep the shared 32dp indicator circular throughout pulling, readiness and return: any scale is uniform on both axes. Retain direct distance progress, the arrow/check transition, bounded content displacement and damped return. | Browse loading and chapter-end feedback use the same correction. Do not distort the ring or text to express resistance; preserve real-release-only dispatch, reversal, cancellation and reduced motion. |
+| READER-END-02 | Horizontal single/double-page reading uses physical left drag on the original final image to enter the next chapter, with a left arrow and “左滑进入下一话” hint. Reuse the existing distance/release state and pager nested-scroll chain; vertical reading keeps upward pull. | Start only on the settled, loaded final image, at base zoom; a gesture that merely arrives at the last page cannot also skip it. Reach 96dp, then release to navigate once; reversal below the threshold, cancellation, extra fingers, inertia, zoom/pan or an inactive reader cannot navigate. Interior pages retain their reading direction. At the final image this explicit left-next action takes precedence over the RTL pager's left-to-previous movement; previous remains accessible in the reader controls. Never append a synthetic page or change original page/spread indexes or saved progress. |
+
+Implemented in the shared BottomPullLoad state/indicator, ReaderScreen and ChapterEndFooter. Source/diff and independent read-only review confirmed equal-axis scaling, physical nested-scroll direction before pager reversal, down-time eligibility, release/cancellation behavior and per-image Telephoto 0.16.0 display/zoom/animation guards (both images for a spread). Original vertical loading and pager image counts remain. No tests, local build or automatic UI validation; direct main and CI-trigger-only delivery remain. Circular appearance and horizontal gesture feel require user device feedback.
+
 ## Flat collection and glass downloads · 2026-11-12 (current)
 
 User: “下载页顶部也做成发现页那样的玻璃顶部，以及这个书架别弄 3d 了就弄正常的，以及书架别弄追更等功能”. Screenshot `1000121422.jpg` shows the flat downloads title/summary/filter above the list. This explicitly supersedes SHELF-08 and every earlier physical shelf/cabinet/spine decision and shelf-status feature.

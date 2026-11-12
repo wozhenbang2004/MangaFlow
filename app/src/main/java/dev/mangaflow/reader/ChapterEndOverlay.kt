@@ -87,6 +87,7 @@ internal fun ChapterEndFooter(
                 onNext == null -> unavailableMessage
                 pull.loading -> "正在打开下一话"
                 pull.progress >= 1f -> "松手进入下一话"
+                pull.horizontal -> "左滑进入下一话"
                 else -> "上拉进入下一话"
             },
                 color = foreground.copy(alpha = .72f), fontSize = 12.sp,
