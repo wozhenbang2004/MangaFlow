@@ -82,6 +82,7 @@ internal class MangaDexReviewProvider(private val http: ReviewProviderHttp) : Ex
             ratingCount = count,
             aliases = titles,
             externalIds = externalIds,
+            hasWorkReviews = false,
             message = if (score != null && weighted != null) "MangaDex 加权评分，满分 10 分。"
                 else if (score != null) "MangaDex 用户平均评分，满分 10 分。"
                 else "MangaDex 尚无可用评分；论坛讨论正文暂未接入。",

@@ -52,10 +52,54 @@ references do not grant a new license over upstream users' content.
   not a service-operator availability guarantee. The documented fixed public `appauth`
   handshake carries no MangaFlow user's account credential. Rejections and rate limits are
   returned normally; there is no key/identity rotation or private-service fallback.
+- Tencent Comics: saved public search HTML and original adapter evidence at
+  `https://github.com/Kinremtus/mediatracker/tree/a338f11d6e333d9bb2e0a65354a1a5d999ba6af4`
+  (`tests/fixtures/acqq_search.html`, `src/services/external/official_acqq.rs`), and saved
+  detail HTML `https://github.com/lidavidm/rssfly/blob/3266e4375ba931f4b8899826d324cd56a868b929/test_data/acqq.646277.html`.
+  Search capture: October 2026; detail capture: January 2021. The independently written
+  adapter uses complete titles, verified comic IDs, authors and the displayed vote count.
+  It preserves the raw score without asserting an unverified maximum. No comment script,
+  vote submission, account or alternate access route is used.
+- Bahamut ACG: original metadata parser `https://github.com/XuHaoJun/gamer-crawler/blob/master/index.js`;
+  native rating selectors documented by the original author at
+  `https://gist.github.com/david082321/b5f998e609b3b4fb72c771a71763528c`;
+  numeric identity/search address reference `https://www.wikidata.org/wiki/Property:P6367`.
+  The manga platform and author labels are checked before retaining a 5-point average.
+  Historical metadata selectors and public link formats are source evidence, not a current
+  connectivity claim. No forum text or the reference script's alternative scoring formula is imported.
+- Manhuagui: public reader configuration
+  `https://github.com/venera-app/venera-configs/blob/a04e05591f7832f7166d6660546613c114d6738a/manhuagui.js`
+  and original reader API implementation
+  `https://github.com/Aoi-hosizora/manhuagui_api/tree/f6fe73d1f37d5d5b8b9881b92614a09b1319ab77`
+  (`internal/service/search.go`, `author.go`, `manga.go`, `http.go` and `internal/pkg/static/url.go`).
+  Only the documented read operation and actual five vote buckets are used. The adapter's
+  calculated 10-point mean is explicitly labelled 投票均分; the displayed HTML placeholder
+  is not a count. Voting, user cookies and private endpoints are excluded.
+- MangaBaka: official static OpenAPI `https://mangabaka.org/api.json`, mapping guide
+  `https://mangabaka.org/developers`, and attribution guidance
+  `https://mangabaka.org/developers/concepts/license-and-attribution`.
+  Only active comic titles, authors and supported source IDs assist identity matching;
+  the adapter does not import rating copies, cover images or review bodies.
 
 These additions were checked by reading contracts and implementation only. No current
 service response, compilation, device appearance or runtime reliability is claimed from
 that review. Existing license notices below remain unchanged.
+
+## MangaBaka data attribution
+
+Identity metadata is provided by MangaBaka and its contributors, `https://mangabaka.org`.
+MangaBaka-original data is licensed under Creative Commons Attribution-NonCommercial-ShareAlike
+4.0 International (CC BY-NC-SA 4.0), `https://creativecommons.org/licenses/by-nc-sa/4.0/`.
+Data terms and the disclaimer of warranties: `https://mangabaka.org/about/data-license`.
+MangaFlow selects matching fields and converts identifier formats; it does not bundle or
+redistribute a database. Source content is supplied without warranties and no endorsement
+of MangaFlow is implied. This notice also appears visibly in the project README.
+
+Upstream AniList, MyAnimeList, Kitsu, MangaUpdates and Shikimori identifiers retain their
+respective provider attribution and terms. MangaBaka's license does not sublicense their
+content. Original scores and comments are read through those providers' own implemented
+channels. The integration is for personal, non-commercial use; commercial use needs the
+applicable separate rights. All attribution URIs remain plain text in the app and notices.
 
 ## Ovio avatar and Liquid Tabs patterns
 

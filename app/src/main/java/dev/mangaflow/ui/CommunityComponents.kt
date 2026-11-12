@@ -128,7 +128,7 @@ internal fun CommunityPanel(
         }
     }
     val loadable = sources.filter {
-        it.status == ReviewStatus.READY && it.nextPage != null &&
+        it.hasWorkReviews && it.status == ReviewStatus.READY && it.nextPage != null &&
             !it.loadingMore && it.reviewsError == null
     }
     LaunchedEffect(mangaId, sources, nearEnd, loading) {
@@ -176,9 +176,10 @@ internal fun CommunityPanel(
 /** Failures belong beside the affected content, without a separate management screen. */
 @Composable
 private fun CommentLoadNotice(source: ReviewSource, onRetry: (String) -> Unit) {
+    val content = if (source.hasWorkReviews) "评论" else "条目资料"
     val message = source.reviewsError?.takeIf(String::isNotBlank)
         ?: source.message.takeIf { source.status == ReviewStatus.UNAVAILABLE && it.isNotBlank() }
-        ?: "评论暂时无法读取，请稍后重试。"
+        ?: "${content}暂时无法读取，请稍后重试。"
     var expanded by rememberSaveable(source.id, message) { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().animateContentSize(
         animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(),
@@ -190,7 +191,7 @@ private fun CommentLoadNotice(source: ReviewSource, onRetry: (String) -> Unit) {
                 .clickable(role = Role.Button,
                     onClickLabel = if (expanded) "收起失败原因" else "查看失败原因") { expanded = !expanded }
                 .padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(if (source.loadingMore) "正在重新读取评论" else "评论暂时无法读取",
+                Text(if (source.loadingMore) "正在重新读取$content" else "${content}暂时无法读取",
                     color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
                 MotionSwap(expanded, Modifier.size(16.dp)) { open ->
                     Icon(if (open) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
@@ -198,7 +199,7 @@ private fun CommentLoadNotice(source: ReviewSource, onRetry: (String) -> Unit) {
                 }
             }
             MotionIconButton(onClick = { onRetry(source.id) }, enabled = !source.loadingMore) {
-                Icon(Icons.Outlined.Refresh, if (source.id == "copy") "重新读取评论" else "重试${providerName(source.id)}评论", tint = CommunityMuted,
+                Icon(Icons.Outlined.Refresh, "重新读取$content", tint = CommunityMuted,
                     modifier = Modifier.size(18.dp))
             }
         }
@@ -210,16 +211,17 @@ private fun CommentLoadNotice(source: ReviewSource, onRetry: (String) -> Unit) {
 /** Only an explicit choice can add reviews for an uncertain title match. */
 @Composable
 internal fun CommentMatchChoice(source: ReviewSource, onMatch: (String, String) -> Unit) {
+    val content = if (source.hasWorkReviews) "评论" else "条目资料"
     var expanded by rememberSaveable(source.id, source.candidates) { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().animateContentSize(
         animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap(),
     )) {
         Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(8.dp))
             .clickable(enabled = !source.loadingMore, role = Role.Button,
-                onClickLabel = if (expanded) "收起漫画选择" else "选择对应漫画以查看评论") { expanded = !expanded },
+                onClickLabel = if (expanded) "收起漫画选择" else "选择对应漫画以查看$content") { expanded = !expanded },
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             CommentSourceBadge(source.id)
-            Text(if (source.loadingMore) "正在读取评论" else "选择对应漫画以查看评论",
+            Text(if (source.loadingMore) "正在读取$content" else "选择对应漫画以查看$content",
                 color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
             MotionSwap(expanded, Modifier.size(32.dp)) { open ->
                 Icon(if (open) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
@@ -230,7 +232,7 @@ internal fun CommentMatchChoice(source: ReviewSource, onMatch: (String, String) 
             source.candidates.forEach { candidate ->
                 Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(9.dp))
                     .clickable(enabled = !source.loadingMore, role = Role.Button,
-                        onClickLabel = "查看${candidate.title}的评论") {
+                        onClickLabel = "选择${candidate.title}") {
                         expanded = false
                         onMatch(source.id, candidate.id)
                     }.padding(horizontal = 8.dp, vertical = 9.dp),

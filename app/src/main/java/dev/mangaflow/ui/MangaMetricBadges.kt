@@ -75,10 +75,13 @@ internal fun MangaMetricBadges(
         visible.forEach { metric ->
             metric.score?.let { score ->
                 val provider = ReviewProviders.find(metric.sourceId)
+                val nativeScore = metricScore(score) +
+                    (if (metric.scoreScale > 0) "/${metric.scoreScale}" else "")
                 val value = if (!compact && metric.scoreLabel.isNotBlank())
-                    "${metricScore(score)} · ${metric.scoreLabel}" else metricScore(score)
+                    "$nativeScore · ${metric.scoreLabel}" else nativeScore
                 MetricBadge(provider?.mark ?: metric.sourceId, value,
-                    "${metric.name}，${metric.scoreLabel}${metricScore(score)} 分，满分 ${metric.scoreScale}" +
+                    "${metric.name}，${metric.scoreLabel}${metricScore(score)} 分" +
+                        (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "") +
                         (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact, metric.sourceId)
             }
         }

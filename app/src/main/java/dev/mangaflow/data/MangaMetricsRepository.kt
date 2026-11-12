@@ -162,7 +162,8 @@ class MangaMetricsRepository(
                 ReviewStatus.UNAVAILABLE -> previous?.metric
                 ReviewStatus.NO_MATCH -> null
                 ReviewStatus.READY -> MangaMetric(source.id, source.name,
-                    source.score?.takeIf { it.isFinite() && it in 0.0..source.scoreScale.toDouble() },
+                    source.score?.takeIf { it.isFinite() && it >= 0 &&
+                        (source.scoreScale == 0 || it <= source.scoreScale.toDouble()) },
                     source.scoreScale, source.ratingCount?.takeIf { it >= 0 }, source.popularity?.takeIf { it >= 0 },
                     source.scoreLabel)
                     .takeIf { it.score != null || it.popularity != null }
@@ -210,7 +211,8 @@ class MangaMetricsRepository(
                             val next = value.optLong("nextFetchAt")
                             if (source !in SOURCE_IDS || checked <= 0 || checked > now + RETRY_TTL || now - checked > MAX_AGE) continue
                             val scale = ReviewProviders.find(source)?.scoreScale ?: 10
-                            val score = value.number("score")?.takeIf { it.isFinite() && it in 0.0..scale.toDouble() }
+                            val score = value.number("score")?.takeIf { it.isFinite() && it >= 0 &&
+                                (scale == 0 || it <= scale.toDouble()) }
                             val heat = value.nonNegativeLong("popularity")?.takeIf { source == "copy" }
                             val count = value.nonNegativeLong("ratingCount")?.takeIf { it <= Int.MAX_VALUE }?.toInt()
                             val label = value.optString("scoreLabel").take(40)

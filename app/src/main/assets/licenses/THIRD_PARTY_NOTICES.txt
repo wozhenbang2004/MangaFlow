@@ -1,5 +1,23 @@
 # Third-party notices
 
+## Virtual bookshelf
+
+The local collection's `ui/BookshelfBook.kt` adapts Petar Gyurov's
+`virtual-bookshelf`, fixed commit `3c1073227df161d87eb48e7286bb7748cd22cd4d`:
+`https://github.com/petargyurov/virtual-bookshelf/tree/3c1073227df161d87eb48e7286bb7748cd22cd4d`.
+
+The upstream `.spine`, `.cover`, `.top`, vertical title and bottom-anchored
+rotation/translation are adapted to Compose drawing and the app's existing motion.
+The app uses real manga covers, stable book slots, direct reading and accessible
+press/long-press actions; upstream random appearance and desktop-only hover are
+removed. No upstream book data or cover artwork is bundled. This is a source
+adaptation, not the original website running inside the app.
+
+The original key source files, byte manifest, full **Unlicense** text and precise
+adaptation map are retained in `third_party/virtual-bookshelf/`. No additional
+runtime library is required. Source retention and review do not establish Android
+compilation, appearance or user acceptance.
+
 ## Public rating and comment contracts · 2026-11-12
 
 MangaFlow's additional adapters are independently implemented against public documentation
@@ -34,15 +52,59 @@ references do not grant a new license over upstream users' content.
   not a service-operator availability guarantee. The documented fixed public `appauth`
   handshake carries no MangaFlow user's account credential. Rejections and rate limits are
   returned normally; there is no key/identity rotation or private-service fallback.
+- Tencent Comics: saved public search HTML and original adapter evidence at
+  `https://github.com/Kinremtus/mediatracker/tree/a338f11d6e333d9bb2e0a65354a1a5d999ba6af4`
+  (`tests/fixtures/acqq_search.html`, `src/services/external/official_acqq.rs`), and saved
+  detail HTML `https://github.com/lidavidm/rssfly/blob/3266e4375ba931f4b8899826d324cd56a868b929/test_data/acqq.646277.html`.
+  Search capture: October 2026; detail capture: January 2021. The independently written
+  adapter uses complete titles, verified comic IDs, authors and the displayed vote count.
+  It preserves the raw score without asserting an unverified maximum. No comment script,
+  vote submission, account or alternate access route is used.
+- Bahamut ACG: original metadata parser `https://github.com/XuHaoJun/gamer-crawler/blob/master/index.js`;
+  native rating selectors documented by the original author at
+  `https://gist.github.com/david082321/b5f998e609b3b4fb72c771a71763528c`;
+  numeric identity/search address reference `https://www.wikidata.org/wiki/Property:P6367`.
+  The manga platform and author labels are checked before retaining a 5-point average.
+  Historical metadata selectors and public link formats are source evidence, not a current
+  connectivity claim. No forum text or the reference script's alternative scoring formula is imported.
+- Manhuagui: public reader configuration
+  `https://github.com/venera-app/venera-configs/blob/a04e05591f7832f7166d6660546613c114d6738a/manhuagui.js`
+  and original reader API implementation
+  `https://github.com/Aoi-hosizora/manhuagui_api/tree/f6fe73d1f37d5d5b8b9881b92614a09b1319ab77`
+  (`internal/service/search.go`, `author.go`, `manga.go`, `http.go` and `internal/pkg/static/url.go`).
+  Only the documented read operation and actual five vote buckets are used. The adapter's
+  calculated 10-point mean is explicitly labelled 投票均分; the displayed HTML placeholder
+  is not a count. Voting, user cookies and private endpoints are excluded.
+- MangaBaka: official static OpenAPI `https://mangabaka.org/api.json`, mapping guide
+  `https://mangabaka.org/developers`, and attribution guidance
+  `https://mangabaka.org/developers/concepts/license-and-attribution`.
+  Only active comic titles, authors and supported source IDs assist identity matching;
+  the adapter does not import rating copies, cover images or review bodies.
 
 These additions were checked by reading contracts and implementation only. No current
 service response, compilation, device appearance or runtime reliability is claimed from
 that review. Existing license notices below remain unchanged.
 
+## MangaBaka data attribution
+
+Identity metadata is provided by MangaBaka and its contributors, `https://mangabaka.org`.
+MangaBaka-original data is licensed under Creative Commons Attribution-NonCommercial-ShareAlike
+4.0 International (CC BY-NC-SA 4.0), `https://creativecommons.org/licenses/by-nc-sa/4.0/`.
+Data terms and the disclaimer of warranties: `https://mangabaka.org/about/data-license`.
+MangaFlow selects matching fields and converts identifier formats; it does not bundle or
+redistribute a database. Source content is supplied without warranties and no endorsement
+of MangaFlow is implied. This notice also appears visibly in the project README.
+
+Upstream AniList, MyAnimeList, Kitsu, MangaUpdates and Shikimori identifiers retain their
+respective provider attribution and terms. MangaBaka's license does not sublicense their
+content. Original scores and comments are read through those providers' own implemented
+channels. The integration is for personal, non-commercial use; commercial use needs the
+applicable separate rights. All attribution URIs remain plain text in the app and notices.
+
 ## Ovio avatar and Liquid Tabs patterns
 
 The comment avatar's initials-under-photo fallback is adapted for Compose and Coil from
-[JanaSundar/ovio](https://github.com/JanaSundar/ovio/blob/81a1bcb6737356038163728b3b2a657c9dcffa32/components/shared/avatar.tsx),
+JanaSundar/ovio（`https://github.com/JanaSundar/ovio/blob/81a1bcb6737356038163728b3b2a657c9dcffa32/components/shared/avatar.tsx`）,
 commit `81a1bcb6737356038163728b3b2a657c9dcffa32`.
 The image is decorative beside its author's name, keeps the fallback on failure, and is loaded only with the visible comment.
 The remaining comment layout belongs to MangaFlow.
@@ -79,7 +141,7 @@ SOFTWARE.
 ## beUI motion roles and panel presence
 
 Shared press, icon-swap and panel motion in `ui/motion/MangaMotion.kt` is adapted from
-[beUI / starc007/ui-components](https://github.com/starc007/ui-components/tree/a866cb2f37ce68c3fc0c66425e86e3f31566e4be),
+beUI / starc007/ui-components（`https://github.com/starc007/ui-components/tree/a866cb2f37ce68c3fc0c66425e86e3f31566e4be`）,
 commit `a866cb2f37ce68c3fc0c66425e86e3f31566e4be`:
 `lib/ease.ts`, `lib/presence-gate.tsx` and `components/motion/morphing-modal.tsx`.
 The Compose adaptation converts the source spring stiffness, damping and mass to
@@ -124,7 +186,7 @@ SOFTWARE.
 
 The root navigation drawer's progress-coupled background transformation in
 `ui/MangaFlowApp.kt` is adapted from
-[emilkowalski/vaul](https://github.com/emilkowalski/vaul/tree/3e97aac6a38e4481bade71d7233ed6002e80f9b0),
+emilkowalski/vaul（`https://github.com/emilkowalski/vaul/tree/3e97aac6a38e4481bade71d7233ed6002e80f9b0`）,
 commit `3e97aac6a38e4481bade71d7233ed6002e80f9b0` (version 1.1.2):
 `src/use-scale-background.ts` and the drag/background mapping in `src/index.tsx`.
 The Compose adaptation follows the actual side-drawer offset in a drawing layer,
@@ -146,7 +208,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 The bottom loading gesture in `ui/motion/BottomPullLoad.kt` is adapted from
 AndroidX Material3 `1.3.2`, `commonMain/androidx/compose/material3/pulltorefresh/PullToRefresh.kt`,
-in the [published source archive](https://dl.google.com/dl/android/maven2/androidx/compose/material3/material3/1.3.2/material3-1.3.2-sources.jar).
+in the published source archive（`https://dl.google.com/dl/android/maven2/androidx/compose/material3/material3/1.3.2/material3-1.3.2-sources.jar`）.
 The source file SHA-256 is `a46039a6805195abfc47accc103f1cf254ae451524f2e5eeb4dc4ee57479335d`.
 Copyright 2023 The Android Open Source Project, licensed under Apache-2.0.
 MangaFlow reverses the drag direction for the bottom edge and fills a fixed footer ring directly
@@ -162,7 +224,7 @@ The source header is retained. The complete Apache-2.0 text is already bundled i
 ## Mihon compact manga header
 
 The compact horizontal cover/information composition in `CompactBookHeader` is adapted from
-[MangaAndSourceTitlesSmall](https://github.com/mihonapp/mihon/blob/524fa53043f2f5b2321ea13027e44f093ab4245c/app/src/main/java/eu/kanade/presentation/manga/components/MangaInfoHeader.kt),
+MangaAndSourceTitlesSmall（`https://github.com/mihonapp/mihon/blob/524fa53043f2f5b2321ea13027e44f093ab4245c/app/src/main/java/eu/kanade/presentation/manga/components/MangaInfoHeader.kt`）,
 Mihon commit `524fa53043f2f5b2321ea13027e44f093ab4245c`, licensed under Apache-2.0.
 MangaFlow changes the cover dimensions, text limits and spacing, reuses its own image requests,
 and places metadata inside its bounded detail layout. It does not include Mihon's navigation,
@@ -171,7 +233,7 @@ The complete license is included in `app/src/main/assets/licenses/Mihon-APACHE-2
 
 ## BoardUI pagination
 
-The controlled chapter pager is adapted from [BoardUI Pagination](https://www.boardui.com/zh-hans/components/pagination),
+The controlled chapter pager is adapted from BoardUI Pagination（`https://www.boardui.com/zh-hans/components/pagination`）,
 `components/base/pagination/pagination.tsx`, the source saved on 2026-11-01
 (SHA256 `47fbc308182f5ad32415f6c51d917241db02a9b340c6f2fb536554ce784b33ac`).
 MangaFlow keeps controlled page selection, disabled first/last boundaries and compact arrows;

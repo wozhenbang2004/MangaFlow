@@ -82,15 +82,18 @@ internal class SourceHttp(private val client: OkHttpClient = sourceClient()) {
                                                 (if (pause > 0) " ${pause} 秒后可重试。" else ""),
                                             publicUrl,
                                             pause,
+                                            httpStatus = current.code,
                                         )
                                     }
                                 }
                                 401, 403 -> if (!readAccountErrors) {
-                                    throw SourceException("$operation 被来源拒绝，请查看原站访问提示。", publicUrl)
+                                    throw SourceException("$operation 被来源拒绝，请查看原站访问提示。", publicUrl,
+                                        httpStatus = current.code)
                                 }
                             }
                             if (!current.isSuccessful && !(readAccountErrors && current.code in ACCOUNT_ERROR_CODES)) {
-                                throw SourceException("$operation 暂时不可用（HTTP ${current.code}）。", publicUrl)
+                                throw SourceException("$operation 暂时不可用（HTTP ${current.code}）。", publicUrl,
+                                    httpStatus = current.code)
                             }
                             val body = current.body ?: throw SourceException("$operation 返回了空响应。", publicUrl)
                             if (body.contentLength() > MAX_TEXT_BYTES) throw SourceException("$operation 响应过大。", publicUrl)

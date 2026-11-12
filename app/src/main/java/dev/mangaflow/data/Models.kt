@@ -43,6 +43,7 @@ class SourceException(
     val sourceUrl: String = "",
     val retryAfterSeconds: Long = 0,
     cause: Throwable? = null,
+    val httpStatus: Int? = null,
 ) : IOException(message, cause)
 
 enum class ReviewStatus { READY, NO_MATCH, UNAVAILABLE }
@@ -73,6 +74,7 @@ data class MangaMetric(
     val sourceId: String,
     val name: String,
     val score: Double? = null,
+    /** Zero preserves a native score whose maximum has not been established. */
     val scoreScale: Int = 10,
     val ratingCount: Int? = null,
     val popularity: Long? = null,
@@ -86,6 +88,7 @@ data class ReviewSource(
     val url: String,
     val matchedTitle: String = "",
     val score: Double? = null,
+    /** Zero means an unknown maximum, never a normalized or zero-point scale. */
     val scoreScale: Int = 10,
     val ratingCount: Int? = null,
     val reviews: List<MangaReview> = emptyList(),
@@ -101,6 +104,7 @@ data class ReviewSource(
     val externalIds: Map<String, String> = emptyMap(),
     val supportsReplies: Boolean = false,
     val scoreLabel: String = "",
+    val hasWorkReviews: Boolean = true,
 )
 
 enum class ReviewKind { COMMENT, REVIEW, CHAPTER }

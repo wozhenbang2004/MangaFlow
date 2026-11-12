@@ -406,6 +406,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun clearMetadataCache(): Unit = withContext(Dispatchers.Main.immediate) {
         if (clearingMetadata) return@withContext
         clearingMetadata = true
+        reviewJob?.cancel()
+        reviewPageJobs.values.toList().forEach { it.cancel() }
+        reviewPageJobs.clear()
+        reviewOverrides.clear()
+        _detail.update { current -> current?.copy(reviewsLoading = false,
+            reviews = current.reviews.map { it.copy(loadingMore = false) }) }
         metricsRequestId++
         val jobs = metricJobs.values.toList() + metricWrites.toList() + metricReleaseJobs.values.toList()
         metricJobs.clear()
@@ -452,7 +458,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         cancelLibraryReading()
         detailJob?.cancel()
         reviewJob?.cancel()
-        reviewPageJobs.values.forEach { it.cancel() }
+        reviewPageJobs.values.toList().forEach { it.cancel() }
         reviewPageJobs.clear()
         reviewOverrides.clear()
         val requestId = ++detailRequestId
@@ -542,7 +548,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 if (id !in reviewOverrides && _detail.value?.reviews?.none { it.id == id } == true)
                                     publishReview(manga.id, requestId, ReviewSource(id, name, ReviewStatus.UNAVAILABLE,
                                         provider.homeUrl,
-                                        message = "$name 暂时无法读取"))
+                                        message = "$name 暂时无法读取", hasWorkReviews = provider.hasWorkReviews))
                             }
                         }
                     }
@@ -572,22 +578,28 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val state = _detail.value ?: return
         val source = state.reviews.firstOrNull { it.id == sourceId } ?: return
         val page = source.nextPage ?: return
+        if (!source.hasWorkReviews) return
         if (source.loadingMore || reviewPageJobs[sourceId]?.isActive == true) return
         val requestId = detailRequestId
+        val association = reviews.identityKey(state.manga)
         reviewOverrides.add(sourceId)
         publishReview(state.manga.id, requestId, source.copy(loadingMore = true, reviewsError = null))
         reviewPageJobs[sourceId] = viewModelScope.launch {
             try {
                 val result = if (sourceId == "copy") community.comments(state.manga, source, page)
                     else reviews.loadMore(state.manga, source, page)
+                if (sourceId != "copy" && association != reviews.identityKey(state.manga)) return@launch
                 publishReview(state.manga.id, requestId, source.copy(
                     reviews = (source.reviews + result.items).distinctBy(MangaReview::id),
                     reviewCount = result.total ?: source.reviewCount, nextPage = result.nextPage,
                     loadingMore = false, reviewsError = result.error))
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
+                if (sourceId != "copy" && association != reviews.identityKey(state.manga)) return@launch
                 publishReview(state.manga.id, requestId, source.copy(loadingMore = false,
                     reviewsError = failure.message ?: "评论加载失败，请重试"))
+            } finally {
+                finishReviewRequest(state.manga.id, requestId, sourceId, coroutineContext[Job])
             }
         }
     }
@@ -596,11 +608,23 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val state = _detail.value ?: return
         val source = state.reviews.firstOrNull { it.id == sourceId } ?: return
         if (source.loadingMore || reviewPageJobs[sourceId]?.isActive == true) return
-        if (source.reviews.isNotEmpty() && source.nextPage != null && source.reviewsError != null) {
+        if (source.hasWorkReviews && source.reviews.isNotEmpty() && source.nextPage != null && source.reviewsError != null) {
             moreReviews(sourceId)
             return
         }
         refreshReviewSource(sourceId)
+    }
+
+    private fun finishReviewRequest(mangaId: String, requestId: Long, sourceId: String, job: Job?) {
+        if (job == null || reviewPageJobs[sourceId] !== job) return
+        reviewPageJobs.remove(sourceId)
+        // Cancellation can clear only its own loading flag, never republish old content.
+        _detail.update { current ->
+            if (current?.manga?.id != mangaId || requestId != detailRequestId) current
+            else current.copy(reviews = current.reviews.map {
+                if (it.id == sourceId) it.copy(loadingMore = false) else it
+            })
+        }
     }
 
     fun matchReviews(sourceId: String, subjectId: String) = refreshReviewSource(sourceId, subjectId)
@@ -612,6 +636,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val source = state.reviews.firstOrNull { it.id == sourceId } ?: return
         if (reviewPageJobs[sourceId]?.isActive == true) return
         val requestId = detailRequestId
+        val association = reviews.identityKey(state.manga)
         reviewOverrides.add(sourceId)
         publishReview(state.manga.id, requestId, source.copy(loadingMore = true, reviewsError = null))
         reviewPageJobs[sourceId] = viewModelScope.launch {
@@ -620,7 +645,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     sourceId == "copy" -> community.overview(state.manga, forceRefresh = true)
                     relink -> reviews.relink(state.manga, sourceId)
                     subjectId != null -> reviews.choose(state.manga, sourceId, subjectId)
-                    source.subjectId.isNotBlank() && source.status == ReviewStatus.READY -> {
+                    source.hasWorkReviews && source.subjectId.isNotBlank() && source.status == ReviewStatus.READY -> {
                         val page = reviews.loadMore(state.manga, source, 0)
                         val retained = if (page.error == null) page.items
                             else (page.items + source.reviews).distinctBy(MangaReview::id)
@@ -629,11 +654,46 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     else -> reviews.lookupSource(state.manga, sourceId)
                 }
+                if (sourceId != "copy" && subjectId == null && !relink &&
+                    association != reviews.identityKey(state.manga)) return@launch
                 publishReview(state.manga.id, requestId, result)
+                if ((result.status == ReviewStatus.READY || relink) && requestId == detailRequestId &&
+                    _detail.value?.manga?.id == state.manga.id) {
+                    val recover = linkedSetOf<String>()
+                    if (subjectId != null || relink) {
+                        // Confirming an association invalidates old repository callbacks.
+                        // Resume interrupted/absent providers under the new identity.
+                        reviewPageJobs.toMap().forEach { (id, job) ->
+                            if (id != sourceId && id != "copy" && job.isActive) {
+                                job.cancel()
+                                reviewPageJobs.remove(id)
+                                recover.add(id)
+                            }
+                        }
+                        ReviewProviders.all.filter { provider ->
+                            _detail.value?.reviews.orEmpty().none { it.id == provider.id }
+                        }.forEach { provider ->
+                            publishReview(state.manga.id, requestId, ReviewSource(provider.id, provider.name,
+                                ReviewStatus.NO_MATCH, provider.homeUrl, loadingMore = true,
+                                hasWorkReviews = provider.hasWorkReviews))
+                            recover.add(provider.id)
+                        }
+                    }
+                    if (sourceId == "mangabaka" && result.status == ReviewStatus.READY) {
+                        _detail.value?.reviews.orEmpty().filter {
+                            it.id in result.externalIds && it.status != ReviewStatus.READY
+                        }.forEach { recover.add(it.id) }
+                    }
+                    recover.forEach { refreshReviewSource(it) }
+                }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
+                if (sourceId != "copy" && subjectId == null && !relink &&
+                    association != reviews.identityKey(state.manga)) return@launch
                 publishReview(state.manga.id, requestId, source.copy(loadingMore = false,
                     reviewsError = failure.message ?: "评论加载失败，请重试"))
+            } finally {
+                finishReviewRequest(state.manga.id, requestId, sourceId, coroutineContext[Job])
             }
         }
     }
@@ -649,7 +709,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun closeDetail() {
         detailJob?.cancel()
         reviewJob?.cancel()
-        reviewPageJobs.values.forEach { it.cancel() }
+        reviewPageJobs.values.toList().forEach { it.cancel() }
         reviewPageJobs.clear()
         detailRequestId++
         _detail.value = null
