@@ -148,6 +148,7 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReaderBookmark
 import dev.mangaflow.storage.ReaderPreferences
@@ -210,6 +211,7 @@ fun ReaderScreen(
     var chapterId by rememberSaveable(manga.id) { mutableStateOf(initialChapterId) }
     val chapter = chapters.firstOrNull { it.id == chapterId }
         ?: Chapter(chapterId, libraryStore.progressFor(manga.id)?.takeIf { it.chapterId == chapterId }?.chapterTitle ?: "正在阅读", 0)
+    val localImport = manga.sourceUrl == LOCAL_SOURCE_URL
     val discussionState = rememberChapterDiscussionState(manga, chapter, communityRepository, reviewRepository)
     val siblings = remember(chapters, chapter.group) { chapters.filter { it.group == chapter.group }.sortedBy(Chapter::index) }
     val hasMultipleGroups = remember(chapters) { chapters.map(Chapter::group).distinct().size > 1 }
@@ -262,7 +264,9 @@ fun ReaderScreen(
     val chapterVisible by rememberUpdatedState(onChapterVisible)
     val nearChapterEnd by rememberUpdatedState(onNearChapterEnd)
     val scope = rememberCoroutineScope()
-    val headers = remember(manga.id, chapterId, repository) { repository.imageHeaders(manga.id, chapterId) }
+    val headers = remember(manga.id, chapterId, repository, localImport) {
+        if (localImport) emptyMap() else repository.imageHeaders(manga.id, chapterId)
+    }
     val activeDownload = downloads.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
     val background = preferences.theme.background()
     val colors = MaterialTheme.colorScheme
@@ -274,6 +278,7 @@ fun ReaderScreen(
     }
     val retryPage: suspend (Page) -> Page = remember(manga.id, chapterId, repository, downloadStore) {
         { sourcePage ->
+            if (localImport) throw IllegalStateException("本地文件已损坏，请删除后重新导入")
             val expectedEntry = downloadStore.entryFor(manga.id, readingChapterId)
             if (expectedEntry?.needsSourceRefresh == true) {
                 val refreshed = repository.pages(manga.id, readingChapterId, forceRefresh = true)
@@ -306,7 +311,9 @@ fun ReaderScreen(
             // A stable source manifest represents the chapter, even when only some pages are saved.
             // File selection belongs to each image request and never creates a separate offline mode.
             val stored = downloadStore.storedPages(manga.id, chapterId)
-            val loaded = stored ?: repository.pages(manga.id, chapterId, forceRefresh = retry > 0)
+            val loaded = stored ?: if (localImport) {
+                throw IllegalStateException("本地章节不存在，请重新导入")
+            } else repository.pages(manga.id, chapterId, forceRefresh = retry > 0)
             if (loaded.isEmpty()) throw IllegalStateException("这一章还没有可读取的图片")
             val saved = libraryStore.progressFor(manga.id, chapterId)
             pageIndex = saved?.pageIndex?.coerceIn(0, loaded.lastIndex) ?: 0
@@ -413,7 +420,7 @@ fun ReaderScreen(
                                     onRetry = onRetryChapters.takeIf { !chaptersLoading && (chaptersError != null || chapterIndex < 0) },
                                 )
                             }
-                            if (preferences.mode == ReadingMode.VERTICAL) {
+                            if (preferences.mode == ReadingMode.VERTICAL || localImport) {
                                 footer()
                             } else {
                                 Column(Modifier.fillMaxWidth()) {
@@ -438,7 +445,7 @@ fun ReaderScreen(
             Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
         }
 
-        if (preferences.mode == ReadingMode.VERTICAL && active && !leavingReader && atChapterEnd && !loading && error == null &&
+        if (!localImport && preferences.mode == ReadingMode.VERTICAL && active && !leavingReader && atChapterEnd && !loading && error == null &&
             !showComments && !showSettings && !showChapters && !showSpreadAdjustment) {
             ChapterEndComments(
                 chapterId = chapterId, state = discussionState, backdrop = readerBackdrop,
@@ -549,7 +556,12 @@ fun ReaderScreen(
                         ) {
                             bookmarkEditor = currentBookmark ?: ReaderBookmark(pageIndex)
                         }
-                        ReaderIcon(Icons.Rounded.Forum, "本章评论", enabled = pages.isNotEmpty(), interactive = controlsVisible) {
+                        ReaderIcon(
+                            Icons.Rounded.Forum,
+                            if (localImport) "本地章节没有在线评论" else "本章评论",
+                            enabled = pages.isNotEmpty() && !localImport,
+                            interactive = controlsVisible,
+                        ) {
                             showComments = true
                         }
                         if (preferences.doublePage && (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT)) {
@@ -561,7 +573,7 @@ fun ReaderScreen(
                         val downloaded = activeDownload?.status == DownloadStatus.COMPLETED
                         val downloading = activeDownload?.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
                         MotionIconButton(
-                            enabled = controlsVisible && pages.isNotEmpty() && !downloaded,
+                            enabled = controlsVisible && pages.isNotEmpty() && !downloaded && !localImport,
                             modifier = Modifier.size(48.dp),
                             onClick = {
                                 if (downloading) activeDownload?.let { downloadStore.pause(it.id) }

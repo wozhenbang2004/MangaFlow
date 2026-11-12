@@ -1,5 +1,12 @@
 package dev.mangaflow.ui
 
+import android.content.Context
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -22,9 +29,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Collections
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
@@ -35,6 +46,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -56,7 +68,9 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,6 +80,7 @@ import coil3.compose.AsyncImage
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabContent
@@ -78,6 +93,18 @@ import kotlinx.coroutines.launch
 
 private enum class DownloadFilter(val label: String) { ALL("全部"), ACTIVE("未完成"), SAVED("已下载") }
 
+private sealed interface LocalImportSource {
+    data class Archive(val uri: Uri) : LocalImportSource
+    data class Images(val uris: List<Uri>) : LocalImportSource
+    data class Folder(val uri: Uri) : LocalImportSource
+}
+
+private data class PendingLocalImport(
+    val source: LocalImportSource,
+    val mangaTitle: String,
+    val chapterTitle: String,
+)
+
 @Composable
 fun DownloadsScreen(
     store: DownloadStore,
@@ -85,6 +112,7 @@ fun DownloadsScreen(
     onRetry: (DownloadEntry) -> Unit,
     refreshingIds: Set<String> = emptySet(),
 ) {
+    val context = LocalContext.current
     val entries by store.entries.collectAsStateWithLifecycle()
     val loading by store.loading.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -93,6 +121,9 @@ fun DownloadsScreen(
     var removingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var clearCompleted by remember { mutableStateOf(false) }
     var bulkBusy by remember { mutableStateOf(false) }
+    var showImportSources by remember { mutableStateOf(false) }
+    var pendingImport by remember { mutableStateOf<PendingLocalImport?>(null) }
+    var importBusy by remember { mutableStateOf(false) }
     val allScroll = rememberLazyListState()
     val activeScroll = rememberLazyListState()
     val savedScroll = rememberLazyListState()
@@ -101,15 +132,84 @@ fun DownloadsScreen(
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
     val activeEntries = entries.filter { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
-    val resumableEntries = entries.filter { it.status in setOf(DownloadStatus.PAUSED, DownloadStatus.FAILED) }
+    val resumableEntries = entries.filter {
+        it.status in setOf(DownloadStatus.PAUSED, DownloadStatus.FAILED) && it.manga.sourceUrl != LOCAL_SOURCE_URL
+    }
     val completedEntries = entries.filter { it.status == DownloadStatus.COMPLETED }
     val usedBytes = entries.sumOf { it.downloadedBytes }
     val availableBytes = remember(entries, loading) { store.availableStorageBytes() }
 
+    val archivePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            val base = localDocumentName(context, it).substringBeforeLast('.').ifBlank { "本地漫画" }
+            pendingImport = PendingLocalImport(LocalImportSource.Archive(it), base, "第 1 话")
+        }
+    }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) pendingImport = PendingLocalImport(
+            LocalImportSource.Images(uris), "本地漫画", "第 1 话",
+        )
+    }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let {
+            pendingImport = PendingLocalImport(
+                LocalImportSource.Folder(it), localTreeName(it).ifBlank { "本地漫画" }, "第 1 话",
+            )
+        }
+    }
+
+    fun importLocal(pending: PendingLocalImport, mangaTitle: String, chapterTitle: String) {
+        if (importBusy) return
+        importBusy = true
+        scope.launch {
+            try {
+                val entry = when (val source = pending.source) {
+                    is LocalImportSource.Archive -> store.importArchive(source.uri, mangaTitle, chapterTitle)
+                    is LocalImportSource.Images -> store.importImages(source.uris, mangaTitle, chapterTitle)
+                    is LocalImportSource.Folder -> store.importFolder(source.uri, mangaTitle, chapterTitle)
+                }
+                pendingImport = null
+                filter = DownloadFilter.SAVED
+                snackbar.showSnackbar("已导入 ${entry.manga.title} · ${entry.chapter.title}")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                snackbar.showSnackbar(failure.message ?: "本地漫画导入失败")
+            } finally {
+                importBusy = false
+            }
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 24.dp)) {
-                Text("下载", style = MaterialTheme.typography.headlineLarge, color = foreground, fontWeight = FontWeight.SemiBold)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "下载",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.headlineLarge,
+                        color = foreground,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    DownloadTextAction(
+                        enabled = !importBusy,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        onClick = { showImportSources = true },
+                    ) {
+                        if (importBusy) {
+                            CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = secondary)
+                        } else {
+                            Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(18.dp), tint = foreground)
+                        }
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            if (importBusy) "导入中" else "导入本地",
+                            color = foreground,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 Text(
                     if (entries.isEmpty()) "把喜欢的故事带在身边"
@@ -189,7 +289,7 @@ fun DownloadsScreen(
                                     style = MaterialTheme.typography.titleMedium, color = foreground,
                                 )
                                 Spacer(Modifier.height(8.dp))
-                                Text("在目录选择章节，下载时也能直接开始阅读", style = MaterialTheme.typography.bodySmall, color = secondary)
+                                Text("在目录下载，或导入 CBZ、ZIP、图片与文件夹", style = MaterialTheme.typography.bodySmall, color = secondary)
                             }
                         }
                     } else {
@@ -266,7 +366,158 @@ fun DownloadsScreen(
         )
     }
 
+    if (showImportSources) {
+        AlertDialog(
+            onDismissRequest = { showImportSources = false },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = { Text("导入本地漫画", style = MaterialTheme.typography.titleLarge) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    LocalImportChoice(Icons.Outlined.Inventory2, "CBZ / ZIP", "按文件名自然排序") {
+                        showImportSources = false
+                        archivePicker.launch(arrayOf(
+                            "application/zip", "application/x-zip-compressed", "application/x-cbz",
+                            "application/vnd.comicbook+zip", "application/octet-stream",
+                        ))
+                    }
+                    LocalImportChoice(Icons.Outlined.Collections, "选择多张图片", "一次组成一个章节") {
+                        showImportSources = false
+                        imagePicker.launch(arrayOf("image/*"))
+                    }
+                    LocalImportChoice(Icons.Outlined.FolderOpen, "选择图片文件夹", "递归读取，合并为一个章节") {
+                        showImportSources = false
+                        folderPicker.launch(null)
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                DownloadTextAction(onClick = { showImportSources = false }) {
+                    Text("取消", color = foreground)
+                }
+            },
+        )
+    }
+
+    LocalImportDetailsDialog(
+        pending = pendingImport,
+        busy = importBusy,
+        onDismiss = { if (!importBusy) pendingImport = null },
+        onConfirm = { pending, mangaTitle, chapterTitle -> importLocal(pending, mangaTitle, chapterTitle) },
+    )
+
 }
+
+@Composable
+private fun LocalImportChoice(
+    icon: ImageVector,
+    title: String,
+    detail: String,
+    onClick: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(
+            interactionSource = interaction,
+            indication = null,
+            role = Role.Button,
+            onClick = onClick,
+        ).motionPress(interaction, pressedScale = .985f).padding(vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(38.dp).clip(RoundedCornerShape(12.dp)).background(colors.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp), tint = colors.onSurface)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+            Spacer(Modifier.height(2.dp))
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun LocalImportDetailsDialog(
+    pending: PendingLocalImport?,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (PendingLocalImport, String, String) -> Unit,
+) {
+    if (pending == null) return
+    var mangaTitle by remember(pending.source) { mutableStateOf(pending.mangaTitle) }
+    var chapterTitle by remember(pending.source) { mutableStateOf(pending.chapterTitle) }
+    val colors = MaterialTheme.colorScheme
+    val sourceLabel = when (pending.source) {
+        is LocalImportSource.Archive -> "压缩包"
+        is LocalImportSource.Images -> "${pending.source.uris.size} 张图片"
+        is LocalImportSource.Folder -> "图片文件夹"
+    }
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        shape = RoundedCornerShape(24.dp),
+        containerColor = colors.surface,
+        title = { Text("确认本地章节", style = MaterialTheme.typography.titleLarge) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("来源 · $sourceLabel", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                OutlinedTextField(
+                    value = mangaTitle,
+                    onValueChange = { mangaTitle = it.take(120) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !busy,
+                    singleLine = true,
+                    label = { Text("漫画名称") },
+                )
+                OutlinedTextField(
+                    value = chapterTitle,
+                    onValueChange = { chapterTitle = it.take(120) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !busy,
+                    singleLine = true,
+                    label = { Text("章节名称") },
+                )
+                Text(
+                    "图片会复制到 MangaFlow 私有目录，原文件移动或删除后仍可阅读。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            DownloadTextAction(
+                enabled = !busy && mangaTitle.isNotBlank() && chapterTitle.isNotBlank(),
+                onClick = { onConfirm(pending, mangaTitle, chapterTitle) },
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = colors.onSurface)
+                    Spacer(Modifier.width(7.dp))
+                }
+                Text(if (busy) "正在导入" else "导入", color = colors.onSurface)
+            }
+        },
+        dismissButton = {
+            DownloadTextAction(enabled = !busy, onClick = onDismiss) {
+                Text("取消", color = colors.onSurfaceVariant)
+            }
+        },
+    )
+}
+
+private fun localDocumentName(context: Context, uri: Uri): String = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.getString(0) else null
+    }
+}.getOrNull().orEmpty().ifBlank { Uri.decode(uri.lastPathSegment.orEmpty()).ifBlank { "本地漫画" } }
+
+private fun localTreeName(uri: Uri): String = runCatching {
+    Uri.decode(DocumentsContract.getTreeDocumentId(uri)).substringAfterLast(':').substringAfterLast('/')
+}.getOrDefault("")
 
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -331,6 +582,7 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
     val finished = entry.status == DownloadStatus.COMPLETED
+    val localImport = entry.manga.sourceUrl == LOCAL_SOURCE_URL
     val inProgress = entry.status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING)
     val interaction = remember { MutableInteractionSource() }
     val stateLabel = when (entry.status) {
@@ -338,8 +590,8 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
         DownloadStatus.RUNNING -> "下载中"
         DownloadStatus.WAITING -> "等待恢复"
         DownloadStatus.PAUSED -> "已暂停"
-        DownloadStatus.COMPLETED -> "已下载"
-        DownloadStatus.FAILED -> "未完成"
+        DownloadStatus.COMPLETED -> if (localImport) "本地" else "已下载"
+        DownloadStatus.FAILED -> if (localImport) "文件损坏" else "未完成"
     }
     Box {
         Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(
@@ -379,7 +631,8 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
                 }
                 Spacer(Modifier.width(4.dp))
                 MotionIconButton(onClick = if (inProgress && !entry.needsSourceRefresh) onPause else onRetry,
-                    enabled = !finished && !refreshing, modifier = Modifier.size(44.dp)) {
+                    enabled = !finished && !refreshing && !(localImport && entry.status == DownloadStatus.FAILED),
+                    modifier = Modifier.size(44.dp)) {
                     MotionSwap(Triple(entry.status, entry.needsSourceRefresh, refreshing), Modifier.size(20.dp)) { (status, needsRefresh, busy) ->
                         if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp, color = secondary)
                         else {
@@ -393,6 +646,7 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
                                 status == DownloadStatus.COMPLETED -> "已下载"
                                 needsRefresh -> "刷新图片地址并继续下载"
                                 active -> "暂停下载"
+                                status == DownloadStatus.FAILED && localImport -> "请删除后重新导入"
                                 status == DownloadStatus.FAILED -> "重试下载"
                                 else -> "继续下载"
                             }, modifier = Modifier.size(20.dp), tint = if (status == DownloadStatus.COMPLETED) secondary else foreground)

@@ -27,6 +27,7 @@ import dev.mangaflow.data.SourceException
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.ReaderCatalogStore
@@ -455,6 +456,14 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openManga(manga: Manga, continueChapterId: String? = null) {
+        if (manga.sourceUrl == LOCAL_SOURCE_URL) {
+            val chapters = downloadedChapters(manga.id)
+            val chapter = continueChapterId?.let { id -> chapters.firstOrNull { it.id == id } }
+                ?: chapters.firstOrNull()
+            if (chapter != null) openSavedChapter(manga, chapter.id, chapter.title, chapter)
+            else viewModelScope.launch { messages.send("本地章节不存在，请重新导入。") }
+            return
+        }
         cancelLibraryReading()
         detailJob?.cancel()
         reviewJob?.cancel()
@@ -725,6 +734,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openDownload(entry: DownloadEntry) {
+        if (entry.manga.sourceUrl == LOCAL_SOURCE_URL && entry.status != DownloadStatus.COMPLETED) {
+            viewModelScope.launch { messages.send("本地文件已损坏，请删除后重新导入。") }
+            return
+        }
         openSavedChapter(entry.manga, entry.chapter.id, entry.chapter.title, entry.chapter)
     }
 
@@ -743,6 +756,18 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _libraryOpening.value = LibraryOpenState(manga)
         val request = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
+                if (manga.sourceUrl == LOCAL_SOURCE_URL) {
+                    downloads.awaitReady()
+                    val chapters = downloadedChapters(manga.id)
+                    val first = chapters.firstOrNull()
+                        ?: throw IllegalStateException("本地章节不存在或已损坏，请重新导入。")
+                    if (requestId != libraryOpenRequestId) return@launch
+                    libraryOpenJob = null
+                    _libraryOpening.value = null
+                    closeDetail()
+                    beginReading(ReadingSession(manga, chapters, first.id))
+                    return@launch
+                }
                 val memory = repository.cachedDetail(manga.id)?.takeIf { it.chapters.isNotEmpty() }
                 val saved = if (memory == null) readerCatalogs.read(manga.id) else null
                 if (requestId != libraryOpenRequestId) return@launch
@@ -795,8 +820,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun openSavedChapter(manga: Manga, chapterId: String, chapterTitle: String, fallback: Chapter? = null) {
-        val cached = repository.cachedDetail(manga.id)
-        val offline = knownDownloadChapters(manga.id)
+        val local = manga.sourceUrl == LOCAL_SOURCE_URL
+        val cached = if (local) null else repository.cachedDetail(manga.id)
+        val offline = if (local) downloadedChapters(manga.id) else knownDownloadChapters(manga.id)
         val chapter = cached?.chapters?.firstOrNull { it.id == chapterId }
             ?: offline.firstOrNull { it.id == chapterId }
             ?: fallback
@@ -804,13 +830,14 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val chapters = (cached?.chapters.orEmpty() + offline + chapter).distinctBy(Chapter::id)
             .sortedBy(Chapter::index)
         val hasCurrentCatalog = cached?.chapters?.any { it.id == chapterId } == true
+        val needsCatalog = if (local) offline.isEmpty() else !hasCurrentCatalog
         closeDetail()
         // Reader restores the saved page/offset and checks local files itself.
         // Neither download-store initialization nor a directory request blocks
         // this navigation. A fresh catalog is useful only for adjacent chapters.
-        beginReading(ReadingSession(cached?.manga ?: manga, chapters, chapterId,
-            chaptersLoading = !hasCurrentCatalog))
-        if (!hasCurrentCatalog) loadReadingCatalog()
+        beginReading(ReadingSession(cached?.manga ?: manga, chapters, chapter.id,
+            chaptersLoading = needsCatalog))
+        if (needsCatalog) loadReadingCatalog()
     }
 
     fun retryReadingChapters() {
@@ -822,6 +849,24 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val session = _reading.value ?: return
         val requestId = readingRequestId
         readingCatalogJob?.cancel()
+        if (session.manga.sourceUrl == LOCAL_SOURCE_URL) {
+            readingCatalogJob = viewModelScope.launch {
+                downloads.awaitReady()
+                if (requestId != readingRequestId) return@launch
+                val chapters = downloadedChapters(session.manga.id)
+                _reading.update { current ->
+                    if (current?.manga?.id != session.manga.id) current
+                    else current.copy(
+                        chapters = chapters,
+                        chapterId = current.chapterId.takeIf { selected -> chapters.any { it.id == selected } }
+                            ?: chapters.firstOrNull()?.id ?: current.chapterId,
+                        chaptersLoading = false,
+                        chaptersError = if (chapters.isEmpty()) "本地章节不存在，请重新导入。" else null,
+                    )
+                }
+            }
+            return
+        }
         _reading.update { it?.copy(chaptersLoading = true, chaptersError = null) }
         readingCatalogJob = viewModelScope.launch {
             try {
@@ -870,6 +915,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Only a visible chapter can request its immediate same-group successor. */
     fun prefetchNextChapter(manga: Manga, chapter: Chapter) {
+        if (manga.sourceUrl == LOCAL_SOURCE_URL) return
         val session = _reading.value ?: return
         val visible = visibleReading ?: return
         if (session.manga.id != manga.id || visible.first.id != manga.id) return
@@ -898,6 +944,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun retryDownload(entry: DownloadEntry) {
+        if (entry.manga.sourceUrl == LOCAL_SOURCE_URL) {
+            viewModelScope.launch { messages.send("本地文件已损坏，请删除后重新导入。") }
+            return
+        }
         val expected = downloads.entryFor(entry.manga.id, entry.chapter.id) ?: return
         if (!expected.needsSourceRefresh) {
             downloads.retry(expected.id)
@@ -1144,6 +1194,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun onChapterVisible(manga: Manga, chapter: Chapter) {
         if (_reading.value?.manga?.id != manga.id) return
         visibleReading = manga to chapter
+        if (manga.sourceUrl == LOCAL_SOURCE_URL) return
         if (_account.value.profile == null || _account.value.busy) return
         val version = accountRepository.sessionVersion
         val key = "$version/${manga.id}/${chapter.id}"

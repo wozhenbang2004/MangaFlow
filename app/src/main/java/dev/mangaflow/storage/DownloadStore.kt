@@ -1,7 +1,11 @@
 package dev.mangaflow.storage
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.util.AtomicFile
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
@@ -14,13 +18,17 @@ import androidx.work.workDataOf
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.zip.ZipInputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
@@ -95,6 +103,10 @@ class DownloadStore private constructor(context: Context) {
             try {
                 root.mkdirs()
                 root.listFiles()?.filter(File::isDirectory)?.forEach { directory ->
+                    if (directory.name.startsWith(IMPORT_DIRECTORY_PREFIX)) {
+                        directory.deleteRecursively()
+                        return@forEach
+                    }
                     directory.listFiles()?.filter { it.name.endsWith(".part") }?.forEach { it.delete() }
                     val record = runCatching {
                         val json = JSONObject(AtomicFile(File(directory, "manifest.json")).openRead().bufferedReader().use { it.readText() })
@@ -126,6 +138,224 @@ class DownloadStore private constructor(context: Context) {
     internal suspend fun awaitReady() = initialized.await()
 
     fun availableStorageBytes(): Long = root.usableSpace.coerceAtLeast(0L)
+
+    suspend fun importArchive(uri: Uri, mangaTitle: String, chapterTitle: String): DownloadEntry =
+        importLocalChapter(mangaTitle, chapterTitle) { staging ->
+            extractArchive(uri, staging)
+        }
+
+    suspend fun importImages(uris: List<Uri>, mangaTitle: String, chapterTitle: String): DownloadEntry =
+        importLocalChapter(mangaTitle, chapterTitle) { staging ->
+            val documents = uris.distinct().map { uri ->
+                retainReadPermission(uri)
+                LocalDocument(uri, documentName(uri))
+            }.sortedWith(compareByNatural(LocalDocument::name))
+            copyDocuments(documents, staging)
+        }
+
+    suspend fun importFolder(treeUri: Uri, mangaTitle: String, chapterTitle: String): DownloadEntry =
+        importLocalChapter(mangaTitle, chapterTitle) { staging ->
+            retainReadPermission(treeUri)
+            copyDocuments(collectTreeImages(treeUri), staging)
+        }
+
+    private suspend fun importLocalChapter(
+        mangaTitle: String,
+        chapterTitle: String,
+        writePages: suspend (File) -> List<ImportedPage>,
+    ): DownloadEntry = withContext(Dispatchers.IO) {
+        awaitReady()
+        val cleanMangaTitle = mangaTitle.trim().take(120)
+        val cleanChapterTitle = chapterTitle.trim().take(120)
+        require(cleanMangaTitle.isNotBlank()) { "请填写漫画名称" }
+        require(cleanChapterTitle.isNotBlank()) { "请填写章节名称" }
+
+        val mangaId = "local:${stableDigest(cleanMangaTitle.lowercase(Locale.ROOT))}"
+        val chapterId = "local:${stableDigest("$mangaId\u0000$cleanChapterTitle\u0000${System.currentTimeMillis()}\u0000${UUID.randomUUID()}")}"
+        val id = chapterKey(mangaId, chapterId)
+        val staging = File(root, "$IMPORT_DIRECTORY_PREFIX$id-${UUID.randomUUID()}")
+        val target = directory(id)
+        try {
+            require(staging.mkdirs()) { "无法创建导入空间，请检查存储空间" }
+            val imported = writePages(staging)
+            require(imported.isNotEmpty()) { "没有找到可读取的漫画图片" }
+            require(imported.size <= MAX_IMPORT_PAGES) { "图片数量超过 $MAX_IMPORT_PAGES 页" }
+
+            val chapterIndex = synchronized(lock) {
+                records.values.asSequence()
+                    .filter { it.entry.manga.id == mangaId }
+                    .map { it.entry.chapter.index }
+                    .maxOrNull()?.plus(1) ?: 0
+            }
+            val chapter = Chapter(chapterId, cleanChapterTitle, chapterIndex, "本地")
+            val manga = Manga(
+                id = mangaId,
+                title = cleanMangaTitle,
+                coverUrl = pageFile(id, 0).toURI().toString(),
+                tags = listOf("本地"),
+                latestChapter = cleanChapterTitle,
+                sourceUrl = LOCAL_SOURCE_URL,
+                sourceUuid = LOCAL_SOURCE_UUID,
+            )
+            val pages = imported.mapIndexed { index, page ->
+                Page(index, "$LOCAL_PAGE_SCHEME$id/$index", page.width, page.height)
+            }
+            val bytes = staging.listFiles().orEmpty().sumOf(File::length)
+            val entry = DownloadEntry(
+                id = id,
+                manga = manga,
+                chapter = chapter,
+                status = DownloadStatus.COMPLETED,
+                completedPages = pages.size,
+                totalPages = pages.size,
+                downloadedBytes = bytes,
+            )
+            val record = DownloadRecord(entry, pages, emptyMap())
+            // Publish an import only after both its images and manifest can move into place together.
+            // A process death before the rename leaves a disposable staging directory; after it, startup
+            // can reconstruct the chapter from the already-complete manifest.
+            writeManifest(staging, record)
+
+            changeChapter(id) {
+                require(!target.exists()) { "导入目标已存在，请重试" }
+                if (!staging.renameTo(target)) throw IOException("无法保存导入的漫画")
+                synchronized(lock) {
+                    records[id] = record
+                    availablePages[id] = pages.indices.toMutableSet()
+                    publish()
+                }
+            }
+            entry
+        } finally {
+            staging.deleteRecursively()
+        }
+    }
+
+    private suspend fun extractArchive(uri: Uri, staging: File): List<ImportedPage> {
+        retainReadPermission(uri)
+        val input = context.contentResolver.openInputStream(uri) ?: error("无法读取压缩包")
+        val raw = mutableListOf<RawImportedPage>()
+        var totalBytes = 0L
+        ZipInputStream(BufferedInputStream(input)).use { archive ->
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val entry = archive.nextEntry ?: break
+                if (!entry.isDirectory && isImageName(entry.name)) {
+                    require(raw.size < MAX_IMPORT_PAGES) { "压缩包图片超过 $MAX_IMPORT_PAGES 页" }
+                    val temporary = File(staging, ".raw-${raw.size.toString().padStart(5, '0')}")
+                    val copied = copyLimited(archive, temporary, MAX_IMPORT_PAGE_BYTES)
+                    totalBytes += copied
+                    require(totalBytes <= MAX_IMPORT_BYTES) { "压缩包解压后超过可导入大小" }
+                    val bounds = imageBounds(temporary)
+                        ?: throw IOException("${entry.name.substringAfterLast('/')} 不是可读取的图片")
+                    raw += RawImportedPage(entry.name.replace('\\', '/'), temporary, bounds.first, bounds.second)
+                }
+                archive.closeEntry()
+            }
+        }
+        require(raw.isNotEmpty()) { "压缩包中没有找到漫画图片" }
+        return raw.sortedWith(compareByNatural(RawImportedPage::name)).mapIndexed { index, page ->
+            val destination = File(staging, "${index.toString().padStart(5, '0')}.img")
+            if (!page.file.renameTo(destination)) throw IOException("无法整理导入图片")
+            ImportedPage(page.width, page.height)
+        }
+    }
+
+    private suspend fun copyDocuments(documents: List<LocalDocument>, staging: File): List<ImportedPage> {
+        require(documents.isNotEmpty()) { "没有找到可读取的漫画图片" }
+        require(documents.size <= MAX_IMPORT_PAGES) { "图片数量超过 $MAX_IMPORT_PAGES 页" }
+        var totalBytes = 0L
+        return documents.mapIndexed { index, document ->
+            currentCoroutineContext().ensureActive()
+            retainReadPermission(document.uri)
+            val destination = File(staging, "${index.toString().padStart(5, '0')}.img")
+            val input = context.contentResolver.openInputStream(document.uri)
+                ?: throw IOException("无法读取 ${document.name}")
+            val copied = input.use { copyLimited(it, destination, MAX_IMPORT_PAGE_BYTES) }
+            totalBytes += copied
+            require(totalBytes <= MAX_IMPORT_BYTES) { "导入内容超过可用的大小限制" }
+            val bounds = imageBounds(destination)
+                ?: throw IOException("${document.name} 不是可读取的图片")
+            ImportedPage(bounds.first, bounds.second)
+        }
+    }
+
+    private suspend fun collectTreeImages(treeUri: Uri): List<LocalDocument> {
+        val resolver = context.contentResolver
+        val rootId = DocumentsContract.getTreeDocumentId(treeUri)
+        val documents = mutableListOf<LocalDocument>()
+        suspend fun visit(parentId: String, path: String, depth: Int) {
+            currentCoroutineContext().ensureActive()
+            require(depth <= MAX_IMPORT_DEPTH) { "文件夹层级过深" }
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId)
+            val childDirectories = mutableListOf<Pair<String, String>>()
+            resolver.query(childrenUri, arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+            ), null, null, null)?.use { cursor ->
+                val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                while (cursor.moveToNext()) {
+                    currentCoroutineContext().ensureActive()
+                    val id = cursor.getString(idColumn)
+                    val name = cursor.getString(nameColumn).orEmpty().ifBlank { id.substringAfterLast('/') }
+                    val childPath = if (path.isBlank()) name else "$path/$name"
+                    val mime = cursor.getString(mimeColumn).orEmpty()
+                    if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                        childDirectories += id to childPath
+                    } else if (mime.startsWith("image/") || isImageName(name)) {
+                        val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
+                        documents += LocalDocument(uri, childPath)
+                        require(documents.size <= MAX_IMPORT_PAGES) { "文件夹图片超过 $MAX_IMPORT_PAGES 页" }
+                    }
+                }
+            } ?: throw IOException("无法读取所选文件夹")
+            // Some document providers allow only a small number of active cursors. Release the
+            // parent cursor before descending so large nested libraries do not exhaust the provider.
+            childDirectories.sortedWith(compareByNatural { it.second }).forEach { (id, childPath) ->
+                visit(id, childPath, depth + 1)
+            }
+        }
+        visit(rootId, "", 0)
+        return documents.sortedWith(compareByNatural(LocalDocument::name))
+    }
+
+    private fun retainReadPermission(uri: Uri) {
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+
+    private fun documentName(uri: Uri): String = runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }.getOrNull().orEmpty().ifBlank { uri.lastPathSegment.orEmpty().ifBlank { "图片" } }
+
+    private suspend fun copyLimited(input: java.io.InputStream, destination: File, limit: Long): Long {
+        var copied = 0L
+        BufferedOutputStream(destination.outputStream()).use { output ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 2)
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val count = input.read(buffer)
+                if (count < 0) break
+                copied += count
+                require(copied <= limit) { "单张图片超过可导入大小" }
+                output.write(buffer, 0, count)
+            }
+        }
+        require(copied > 0L) { "图片文件为空" }
+        return copied
+    }
+
+    private fun imageBounds(file: File): Pair<Int, Int>? {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, options)
+        return if (options.outWidth > 0 && options.outHeight > 0) options.outWidth to options.outHeight else null
+    }
 
     /** Only explicit download actions create records; opening a reader reuses existing ones. */
     suspend fun enqueue(
@@ -198,6 +428,10 @@ class DownloadStore private constructor(context: Context) {
             try {
                 val change = synchronized(lock) {
                     val record = records[id] ?: return@changeChapter
+                    if (record.entry.manga.sourceUrl == LOCAL_SOURCE_URL) {
+                        if (record.entry.status == DownloadStatus.COMPLETED) return@changeChapter
+                        throw IOException("本地文件已损坏，请删除后重新导入")
+                    }
                     if (record.entry.needsSourceRefresh || record.entry.status in setOf(DownloadStatus.COMPLETED, DownloadStatus.RUNNING, DownloadStatus.QUEUED) ||
                         (!includePaused && record.entry.status == DownloadStatus.PAUSED)) return@changeChapter
                     generation = record.generation
@@ -395,7 +629,8 @@ class DownloadStore private constructor(context: Context) {
                         completedPages = present.size,
                         downloadedBytes = present.sumOf { pageFile(snapshot.entry.id, it).length() },
                         status = if (current.entry.status == DownloadStatus.COMPLETED) DownloadStatus.FAILED else current.entry.status,
-                        error = "本地章节不完整，继续下载可修复",
+                        error = if (current.entry.manga.sourceUrl == LOCAL_SOURCE_URL)
+                            "本地文件已损坏，请删除后重新导入" else "本地章节不完整，继续下载可修复",
                     )))
                 }
             }
@@ -550,8 +785,9 @@ class DownloadStore private constructor(context: Context) {
                             status = DownloadStatus.FAILED,
                             completedPages = files.size,
                             downloadedBytes = files.sumOf(File::length),
-                            needsSourceRefresh = snapshot.pages.isEmpty(),
-                            error = "本地章节不完整，继续下载可修复",
+                            needsSourceRefresh = snapshot.pages.isEmpty() && snapshot.entry.manga.sourceUrl != LOCAL_SOURCE_URL,
+                            error = if (snapshot.entry.manga.sourceUrl == LOCAL_SOURCE_URL)
+                                "本地文件已损坏，请删除后重新导入" else "本地章节不完整，继续下载可修复",
                         )))
                         active && !hasLiveWork && complete -> save(snapshot.copy(entry = snapshot.entry.copy(
                             status = DownloadStatus.COMPLETED,
@@ -606,9 +842,15 @@ class DownloadStore private constructor(context: Context) {
     }
 
     private fun save(record: DownloadRecord) {
+        writeManifest(directory(record.entry.id), record)
+        records[record.entry.id] = record
+        publish()
+    }
+
+    private fun writeManifest(targetDirectory: File, record: DownloadRecord) {
         try {
-            val directory = directory(record.entry.id).apply { mkdirs() }
-            val atomic = AtomicFile(File(directory, "manifest.json"))
+            targetDirectory.mkdirs()
+            val atomic = AtomicFile(File(targetDirectory, "manifest.json"))
             val stream = atomic.startWrite()
             try {
                 stream.write(record.toJson().toString().toByteArray(Charsets.UTF_8))
@@ -620,8 +862,6 @@ class DownloadStore private constructor(context: Context) {
         } catch (failure: IOException) {
             throw DownloadStorageException("无法保存下载状态，请检查可用空间", failure)
         }
-        records[record.entry.id] = record
-        publish()
     }
 
     private fun publish() { _entries.value = records.values.map(DownloadRecord::entry).sortedByDescending(DownloadEntry::createdAt) }
@@ -635,6 +875,14 @@ class DownloadStore private constructor(context: Context) {
 
     companion object {
         const val DOWNLOAD_TAG = "mangaflow-chapter-download"
+        const val LOCAL_SOURCE_URL = "local://import"
+        const val LOCAL_SOURCE_UUID = "local-import"
+        private const val LOCAL_PAGE_SCHEME = "local-import://"
+        private const val IMPORT_DIRECTORY_PREFIX = ".import-"
+        private const val MAX_IMPORT_PAGES = 5_000
+        private const val MAX_IMPORT_DEPTH = 16
+        private const val MAX_IMPORT_PAGE_BYTES = 128L * 1024L * 1024L
+        private const val MAX_IMPORT_BYTES = 1_500L * 1024L * 1024L
         private val ACTIVE_STATUSES = setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
         internal val transferGate = Mutex()
         @Volatile private var instance: DownloadStore? = null
@@ -644,7 +892,52 @@ class DownloadStore private constructor(context: Context) {
         private fun workName(id: String) = "mangaflow-download-$id"
         private fun chapterKey(mangaId: String, chapterId: String) = MessageDigest.getInstance("SHA-256")
             .digest("$mangaId\u0000$chapterId".toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        private fun stableDigest(value: String) = MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
     }
+}
+
+private data class ImportedPage(val width: Int, val height: Int)
+private data class RawImportedPage(val name: String, val file: File, val width: Int, val height: Int)
+private data class LocalDocument(val uri: Uri, val name: String)
+
+private fun isImageName(name: String): Boolean = name.substringAfterLast('.', "").lowercase(Locale.ROOT) in setOf(
+    "jpg", "jpeg", "png", "webp", "gif", "bmp", "avif",
+)
+
+private fun <T> compareByNatural(selector: (T) -> String): Comparator<T> = Comparator { left, right ->
+    naturalCompare(selector(left), selector(right))
+}
+
+private fun naturalCompare(left: String, right: String): Int {
+    var leftIndex = 0
+    var rightIndex = 0
+    while (leftIndex < left.length && rightIndex < right.length) {
+        val leftChar = left[leftIndex]
+        val rightChar = right[rightIndex]
+        if (leftChar.isDigit() && rightChar.isDigit()) {
+            val leftStart = leftIndex
+            val rightStart = rightIndex
+            while (leftIndex < left.length && left[leftIndex].isDigit()) leftIndex++
+            while (rightIndex < right.length && right[rightIndex].isDigit()) rightIndex++
+            val leftNumber = left.substring(leftStart, leftIndex).trimStart('0')
+            val rightNumber = right.substring(rightStart, rightIndex).trimStart('0')
+            val normalizedLeft = leftNumber.ifEmpty { "0" }
+            val normalizedRight = rightNumber.ifEmpty { "0" }
+            val lengthOrder = normalizedLeft.length.compareTo(normalizedRight.length)
+            if (lengthOrder != 0) return lengthOrder
+            val numberOrder = normalizedLeft.compareTo(normalizedRight)
+            if (numberOrder != 0) return numberOrder
+            val zeroOrder = (leftIndex - leftStart).compareTo(rightIndex - rightStart)
+            if (zeroOrder != 0) return zeroOrder
+        } else {
+            val charOrder = leftChar.lowercaseChar().compareTo(rightChar.lowercaseChar())
+            if (charOrder != 0) return charOrder
+            leftIndex++
+            rightIndex++
+        }
+    }
+    return (left.length - leftIndex).compareTo(right.length - rightIndex)
 }
 
 private fun DownloadRecord.toJson() = JSONObject().apply {
