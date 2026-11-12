@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import android.view.accessibility.AccessibilityManager
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
@@ -29,6 +31,11 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -46,6 +53,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -60,6 +68,8 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,11 +80,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -92,24 +106,31 @@ import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
 import dev.mangaflow.storage.ReadingProgress
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DiscoverScreen(
     state: BrowseState,
-    history: List<ReadingProgress>,
+    searchExpanded: Boolean,
+    onCloseSearch: () -> Unit,
+    canAutoAdvance: Boolean,
     repository: MangaRepository,
     onQuery: (String) -> Unit,
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onMore: () -> Unit,
     onOpen: (Manga) -> Unit,
-    onContinue: (ReadingProgress) -> Unit,
     onMode: (DiscoveryMode) -> Unit,
     onPeriod: (RankPeriod) -> Unit,
     onAudience: (RankAudience) -> Unit,
 ) {
     val keyboard = LocalSoftwareKeyboardController.current
+    val searchFocus = remember { FocusRequester() }
+    BackHandler(searchExpanded) { keyboard?.hide(); onCloseSearch() }
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
     val retainedGrid = remember(state.cacheKey) {
         val saved = positions.remove(state.cacheKey) ?: LazyGridState()
@@ -120,23 +141,12 @@ fun DiscoverScreen(
     val loadingGrid = remember(state.cacheKey) { LazyGridState() }
     // Let the disk snapshot hydrate before the short loading layout can clamp a saved position.
     val grid = if (state.loading && state.items.isEmpty()) loadingGrid else retainedGrid
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(144.dp), state = grid,
-        contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(20.dp),
-        modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding(),
-    ) {
-        item(span = { GridItemSpan(maxLineSpan) }, key = "heading") {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("发现", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                if (state.updatedAt > 0) Text(browseUpdatedAt(state.updatedAt),
-                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                IconButton(onClick = onRefresh, enabled = !state.loading && !state.refreshing) {
-                    Icon(Icons.Outlined.Refresh, "刷新漫画", Modifier.size(21.dp))
-                }
-            }
-        }
-        item(span = { GridItemSpan(maxLineSpan) }, key = "search") {
+    val heroVisible by remember(grid) {
+        derivedStateOf { grid.layoutInfo.visibleItemsInfo.any { it.key == "hero" } }
+    }
+    Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
+        if (searchExpanded) {
+            LaunchedEffect(Unit) { searchFocus.requestFocus(); keyboard?.show() }
             OutlinedTextField(
                 value = state.query, onValueChange = onQuery, singleLine = true,
                 placeholder = { Text("搜索漫画、作者", style = MaterialTheme.typography.bodyMedium) },
@@ -155,14 +165,21 @@ fun DiscoverScreen(
                     focusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
                     unfocusedBorderColor = Color.Transparent,
                 ),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 12.dp).focusRequester(searchFocus),
             )
         }
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(3), state = grid,
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 0.dp, bottom = 32.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+        ) {
         if (state.query.isBlank()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "discovery-tabs") {
                 Column {
                     // Continuous underline follows the selected peer, keeping navigation separate from filters.
-                    TabRow(selectedTabIndex = state.mode.ordinal, containerColor = Color.Transparent,
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    TabRow(selectedTabIndex = state.mode.ordinal, modifier = Modifier.weight(1f), containerColor = Color.Transparent,
                         contentColor = MaterialTheme.colorScheme.onSurface, divider = {},
                         indicator = { positions ->
                             TabRowDefaults.SecondaryIndicator(
@@ -176,6 +193,12 @@ fun DiscoverScreen(
                                 text = { Text(mode.label, fontSize = 15.sp,
                                     fontWeight = if (state.mode == mode) FontWeight.SemiBold else FontWeight.Normal) })
                         }
+                    }
+                    IconButton(onClick = onRefresh, enabled = !state.loading && !state.refreshing) {
+                        Icon(Icons.Outlined.Refresh,
+                            if (state.updatedAt > 0) "刷新漫画，${browseUpdatedAt(state.updatedAt)}" else "刷新漫画",
+                            Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     }
                     if (state.refreshing) LinearProgressIndicator(
                         modifier = Modifier.fillMaxWidth().height(1.dp),
@@ -197,11 +220,6 @@ fun DiscoverScreen(
                 }
             }
         }
-        if (state.query.isBlank() && state.mode == DiscoveryMode.RECOMMENDED && history.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }, key = "continue") {
-                ContinueRow(history.first(), repository, onContinue)
-            }
-        }
         if (state.loading && state.items.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "loading") { QuietLoading("正在翻开书页…") }
         } else if (state.items.isEmpty() && state.error != null) {
@@ -216,7 +234,7 @@ fun DiscoverScreen(
         } else {
             if (state.query.isBlank() && state.mode == DiscoveryMode.RECOMMENDED) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "hero") {
-                    FeaturedManga(state.items.first(), repository, onOpen)
+                    FeaturedCarousel(state.items.take(6), repository, heroVisible && canAutoAdvance, onOpen)
                 }
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
@@ -241,8 +259,7 @@ fun DiscoverScreen(
                     RankRow(manga, repository, state.period) { onOpen(manga) }
                 }
             } else {
-                val visible = if (state.query.isBlank() && state.mode == DiscoveryMode.RECOMMENDED) state.items.drop(1) else state.items
-                items(visible, key = Manga::id) { manga -> CoverTile(manga, repository) { onOpen(manga) } }
+                items(state.items, key = Manga::id) { manga -> CoverTile(manga, repository, dense = true) { onOpen(manga) } }
             }
             if (state.error != null) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "more-error") {
@@ -261,21 +278,54 @@ fun DiscoverScreen(
             }
         }
     }
+    }
 }
 
 @Composable
-private fun FeaturedManga(manga: Manga, repository: MangaRepository, onOpen: (Manga) -> Unit) {
-    Box(Modifier.fillMaxWidth().height(236.dp).clip(RoundedCornerShape(22.dp))
-        .background(Color(0xFF242426)).clickable { onOpen(manga) }) {
+private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, visible: Boolean, onOpen: (Manga) -> Unit) {
+    val pager = rememberPagerState(pageCount = { manga.size })
+    val dragged by pager.interactionSource.collectIsDraggedAsState()
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val accessibility = LocalContext.current.getSystemService(AccessibilityManager::class.java)
+    val autoAdvance = manga.size > 1 && visible && !dragged && !pressed &&
+        accessibility?.isTouchExplorationEnabled != true
+    LaunchedEffect(autoAdvance, pager, manga.map { it.id }, lifecycle) {
+        if (autoAdvance) lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                delay(6_000)
+                pager.animateScrollToPage((pager.currentPage + 1) % manga.size)
+            }
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        HorizontalPager(state = pager, key = { manga[it].id },
+            contentPadding = PaddingValues(end = if (manga.size > 1) 26.dp else 0.dp),
+            pageSpacing = 10.dp, beyondViewportPageCount = 1,
+            modifier = Modifier.fillMaxWidth().semantics { stateDescription = "推荐 ${pager.currentPage + 1} / ${manga.size}" },
+        ) { page -> FeaturedManga(manga[page], repository, interaction, onOpen) }
+        if (manga.size > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically) {
+            repeat(manga.size) { index ->
+                Box(Modifier.padding(horizontal = 3.dp).width(if (pager.currentPage == index) 14.dp else 4.dp)
+                    .height(4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.onSurface.copy(
+                        alpha = if (pager.currentPage == index) .65f else .15f)))
+            }
+        }
+    }
+}
+
+@Composable
+private fun FeaturedManga(manga: Manga, repository: MangaRepository, interaction: MutableInteractionSource, onOpen: (Manga) -> Unit) {
+    Box(Modifier.fillMaxWidth().height(204.dp).clip(RoundedCornerShape(22.dp))
+        .background(Color(0xFF242426)).clickable(interactionSource = interaction, indication = null) { onOpen(manga) }) {
         MangaCover(manga, repository, Modifier.fillMaxSize(), ContentScale.Crop)
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
             0f to Color.Black.copy(alpha = 0.04f), 0.4f to Color.Transparent,
             0.75f to Color.Black.copy(alpha = 0.5f), 1f to Color.Black.copy(alpha = 0.84f))))
-        Text("拷贝推荐", color = Color.White.copy(alpha = 0.92f), style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.align(Alignment.TopStart).padding(20.dp)
-                .clip(RoundedCornerShape(100)).background(Color.Black.copy(alpha = 0.23f)).padding(horizontal = 12.dp, vertical = 7.dp))
-        Column(Modifier.align(Alignment.BottomStart).padding(20.dp)) {
-            Text(manga.title, color = Color.White, fontSize = 24.sp, lineHeight = 31.sp, fontWeight = FontWeight.SemiBold,
+        Column(Modifier.align(Alignment.BottomStart).padding(18.dp)) {
+            Text(manga.title, color = Color.White, fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 9.dp), foreground = Color.White)
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -283,7 +333,7 @@ private fun FeaturedManga(manga: Manga, repository: MangaRepository, onOpen: (Ma
                     color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Icon(Icons.AutoMirrored.Outlined.ArrowForward, "查看漫画", tint = Color.White,
-                    modifier = Modifier.clip(CircleShape).background(Color.White.copy(alpha = 0.17f)).padding(12.dp).size(20.dp))
+                    modifier = Modifier.padding(start = 12.dp).size(20.dp))
             }
         }
     }
@@ -342,8 +392,41 @@ internal fun ContinueRow(progress: ReadingProgress, repository: MangaRepository,
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun CoverTile(manga: Manga, repository: MangaRepository, onClick: () -> Unit) {
+internal fun RecentReadingSheet(
+    history: List<ReadingProgress>,
+    repository: MangaRepository,
+    onDismiss: () -> Unit,
+    onContinue: (ReadingProgress) -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background,
+        tonalElevation = 0.dp) {
+        Text("最近阅读", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(start = 24.dp, bottom = 16.dp))
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            items(history, key = { it.manga.id }) { progress ->
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .clickable { onContinue(progress) }.padding(horizontal = 4.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    MangaCover(progress.manga, repository, Modifier.width(36.dp).height(50.dp).clip(RoundedCornerShape(6.dp)))
+                    Column(Modifier.weight(1f).padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(progress.manga.title, style = MaterialTheme.typography.titleSmall,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Icon(Icons.Outlined.PlayArrow, "继续阅读", Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun CoverTile(manga: Manga, repository: MangaRepository, dense: Boolean = false, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.965f else 1f, spring(dampingRatio = 0.8f, stiffness = 550f), label = "cover-press")
@@ -351,9 +434,10 @@ internal fun CoverTile(manga: Manga, repository: MangaRepository, onClick: () ->
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)) {
         MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(0.7f).clip(RoundedCornerShape(12.dp)))
         Text(manga.title, modifier = Modifier.padding(top = 9.dp, start = 2.dp, end = 2.dp),
-            style = MaterialTheme.typography.titleSmall, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            style = if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
         MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 6.dp, start = 2.dp, end = 2.dp), compact = true)
-        val secondary = manga.latestChapter.ifBlank { manga.authors.firstOrNull().orEmpty() }
+        val secondary = manga.latestChapter.ifBlank { if (dense) "" else manga.authors.firstOrNull().orEmpty() }
         if (secondary.isNotBlank()) Text(secondary, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -409,3 +493,4 @@ private val BrowsePositionsSaver = listSaver<LinkedHashMap<String, LazyGridState
         }
     } },
 )
+

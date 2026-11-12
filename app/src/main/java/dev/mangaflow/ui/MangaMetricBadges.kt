@@ -63,31 +63,32 @@ internal fun MangaMetricBadges(
         maxItemsInEachRow = if (compact) 2 else Int.MAX_VALUE,
     ) {
         heat?.let { value ->
-            MetricBadge("拷", "$heatLabel ${metricCount(value)}", "拷贝漫画，$heatLabel $value", foreground)
+            MetricBadge("拷", if (compact) metricCount(value) else "$heatLabel ${metricCount(value)}",
+                "拷贝漫画，$heatLabel $value", foreground, compact)
         }
         listOf("bangumi", "anilist").forEach { id ->
             val metric = metrics.firstOrNull { it.sourceId == id }
             metric?.score?.takeIf { it.isFinite() && it > 0 }?.let { score ->
                 MetricBadge(if (id == "bangumi") "bgm" else "AL", metricScore(score),
                     "${metric.name}，${metricScore(score)} 分，满分 ${metric.scoreScale}" +
-                        (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground)
+                        (metric.ratingCount?.let { "，$it 人评分" } ?: ""), foreground, compact)
             }
         }
     }
 }
 
 @Composable
-private fun MetricBadge(mark: String, value: String, description: String, foreground: Color) {
+private fun MetricBadge(mark: String, value: String, description: String, foreground: Color, compact: Boolean) {
     Row(
         modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(foreground.copy(alpha = .055f))
             .semantics(mergeDescendants = true) { contentDescription = description }
-            .padding(horizontal = 5.dp, vertical = 3.dp),
+            .padding(horizontal = if (compact) 4.dp else 5.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 4.dp),
     ) {
         Text(mark, color = foreground.copy(alpha = .56f), fontSize = 10.sp, lineHeight = 14.sp,
             fontWeight = FontWeight.SemiBold, maxLines = 1)
-        Text(value, color = foreground.copy(alpha = .82f), fontSize = 11.sp, lineHeight = 14.sp,
+        Text(value, color = foreground.copy(alpha = .82f), fontSize = if (compact) 10.sp else 11.sp, lineHeight = 14.sp,
             fontWeight = FontWeight.Medium, maxLines = 1)
     }
 }
@@ -100,3 +101,4 @@ private fun metricCount(value: Long): String = when {
     value >= 10_000 -> String.format(Locale.ROOT, "%.1f万", value / 10_000.0)
     else -> value.toString()
 }
+

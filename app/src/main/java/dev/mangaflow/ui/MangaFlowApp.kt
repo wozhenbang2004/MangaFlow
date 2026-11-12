@@ -34,6 +34,9 @@ import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
@@ -64,6 +67,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -108,6 +112,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val savedState = rememberSaveableStateHolder()
+    var searchExpanded by rememberSaveable { mutableStateOf(false) }
+    var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
+    val keyboard = LocalSoftwareKeyboardController.current
 
     LaunchedEffect(Unit) { model.events.collect { snackbar.showSnackbar(it) } }
     LaunchedEffect(openUpdatesRequest) {
@@ -135,6 +142,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)
+    if (recentReadingOpen && frame is Frame.Root && section == Section.DISCOVER) {
+        RecentReadingSheet(history, model.repository,
+            onDismiss = { recentReadingOpen = false },
+            onContinue = { recentReadingOpen = false; model.continueReading(it) })
+    }
     val activity = LocalContext.current.activityOrNull()
     val darkSystem = isSystemInDarkTheme()
     SideEffect {
@@ -240,15 +252,29 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 if (update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)) {
                                     TextButton(onClick = { sectionName = Section.SETTINGS.name }) { Text("有新版本", style = MaterialTheme.typography.labelMedium) }
                                 }
+                                if (current.section == Section.DISCOVER) {
+                                    if (history.isNotEmpty()) IconButton(onClick = { keyboard?.hide(); recentReadingOpen = true }) {
+                                        Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
+                                    }
+                                    IconButton(onClick = {
+                                        searchExpanded = !searchExpanded
+                                        if (!searchExpanded) { keyboard?.hide(); model.setQuery("") }
+                                    }) {
+                                        Icon(if (searchExpanded) Icons.Outlined.Close else Icons.Outlined.Search,
+                                            if (searchExpanded) "关闭搜索" else "搜索漫画、作者", Modifier.size(22.dp))
+                                    }
+                                }
                             }
                             Box(Modifier.weight(1f).fillMaxWidth()) {
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
-                                        state = browse, history = history, repository = model.repository,
+                                        state = browse, repository = model.repository,
+                                        searchExpanded = searchExpanded,
+                                        canAutoAdvance = !drawer.isOpen && !recentReadingOpen && !searchExpanded && frame is Frame.Root,
+                                        onCloseSearch = { searchExpanded = false; model.setQuery("") },
                                         onQuery = model::setQuery, onRefresh = model::refresh,
                                         onRetry = model::retryBrowse, onMore = model::loadMore,
                                         onOpen = { model.openManga(it) },
-                                        onContinue = model::continueReading,
                                         onMode = { model.selectDiscovery(it) },
                                         onPeriod = { model.selectDiscovery(browse.mode, period = it) },
                                         onAudience = { model.selectDiscovery(browse.mode, audience = it) },
@@ -290,3 +316,4 @@ private tailrec fun Context.activityOrNull(): Activity? = when (this) {
     is ContextWrapper -> baseContext.activityOrNull()
     else -> null
 }
+
