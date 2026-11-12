@@ -37,7 +37,10 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -50,6 +53,8 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
+import dev.mangaflow.storage.GlassSkin
+import dev.mangaflow.ui.LocalGlassSkin
 
 /** Ovio Minimal Liquid Tabs, 81a1bcb: two independent edges, with stationary labels/hit regions. */
 @Composable
@@ -77,11 +82,19 @@ internal fun MotionTabs(
     val left = remember { Animatable(index.toFloat()) }
     val right = remember { Animatable(index + 1f) }
     val motion = LocalMotionEnabled.current
+    val liquid = LocalGlassSkin.current == GlassSkin.LIQUID
+    val light = MaterialTheme.colorScheme.surface.luminance() > .5f
     val tabWidths = remember(labels.size) { mutableStateMapOf<Int, Int>() }
     val height = if (compact) 38.dp else 48.dp
     val textMeasurer = rememberTextMeasurer()
     val textStyle = LocalTextStyle.current.copy(fontSize = fontSize)
     val density = LocalDensity.current
+    val labelWidths = labels.map { label ->
+        maxOf(
+            textMeasurer.measure(label, textStyle.copy(fontWeight = selectedFontWeight), maxLines = 1).size.width,
+            textMeasurer.measure(label, textStyle.copy(fontWeight = unselectedFontWeight), maxLines = 1).size.width,
+        ).toFloat()
+    }
     LaunchedEffect(motion, labels.size) {
         snapshotFlow { latest.value }.collect { target ->
             val toRight = target > left.value
@@ -108,38 +121,49 @@ internal fun MotionTabs(
         .clip(if (compact) RectangleShape else RoundedCornerShape(14.dp)).background(track)
         .drawBehind {
             val slot = size.width / labels.size
-            val inset = if (underline) (slot * .26f).coerceAtMost(24.dp.toPx()) else 4.dp.toPx()
-            val start: Float
-            val end: Float
-            if (compact) {
-                if (tabWidths.size != labels.size) return@drawBehind
-                var x = 0f
-                val centers = labels.indices.map { i ->
+            if (compact && tabWidths.size != labels.size) return@drawBehind
+            var x = if (compact) 10.dp.toPx() else 0f
+            val centers = labels.indices.map { i ->
+                if (compact) {
                     val width = tabWidths.getValue(i).toFloat()
                     (x + width / 2f).also { x += width + 22.dp.toPx() }
-                }
-                fun centerAt(position: Float): Float {
-                    val value = position.coerceIn(0f, labels.lastIndex.toFloat())
-                    val from = value.toInt()
-                    val to = (from + 1).coerceAtMost(labels.lastIndex)
-                    return centers[from] + (centers[to] - centers[from]) * (value - from)
-                }
-                start = centerAt(left.value) - 16.dp.toPx()
-                end = centerAt(right.value - 1f) + 16.dp.toPx()
-            } else {
-                start = left.value.coerceIn(0f, labels.size.toFloat()) * slot + inset
-                end = right.value.coerceIn(0f, labels.size.toFloat()) * slot - inset
+                } else slot * (i + .5f)
             }
+            fun interpolate(position: Float, values: List<Float>): Float {
+                val value = position.coerceIn(0f, labels.lastIndex.toFloat())
+                val from = value.toInt()
+                val to = (from + 1).coerceAtMost(labels.lastIndex)
+                return values[from] + (values[to] - values[from]) * (value - from)
+            }
+            val widths = labels.indices.map { i ->
+                (labelWidths[i] + 24.dp.toPx()).coerceAtMost(
+                    if (compact) labelWidths[i] + 24.dp.toPx() else (slot - 6.dp.toPx()).coerceAtLeast(1f),
+                )
+            }
+            val start = interpolate(left.value, centers) - interpolate(left.value, widths) / 2f
+            val end = interpolate(right.value - 1f, centers) + interpolate(right.value - 1f, widths) / 2f
             val width = (end - start).coerceAtLeast(2.dp.toPx())
-            val stretch = (width / (slot - 2 * inset).coerceAtLeast(1f) - 1f).coerceAtLeast(0f)
-            val h = if (underline || compact) 2.dp.toPx() else
-                (indicatorHeight?.toPx() ?: (size.height - 8.dp.toPx())) * (1f - .06f * stretch).coerceAtLeast(.8f)
-            val drawWidth = if (underline || compact) width else width.coerceAtLeast(h)
-            drawRoundRect(indicator,
-                topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - start - drawWidth else start,
-                    if (underline || compact) size.height - h else (size.height - h) / 2),
-                size = Size(drawWidth, h), cornerRadius = CornerRadius(h / 2))
-        }.selectableGroup(),
+            val stretch = (width / widths[index].coerceAtLeast(1f) - 1f).coerceAtLeast(0f)
+            val h = (indicatorHeight?.toPx() ?: (if (compact) 28.dp else 32.dp).toPx()) *
+                (1f - .06f * stretch).coerceAtLeast(.8f)
+            val topLeft = Offset(if (layoutDirection == LayoutDirection.Rtl) size.width - end else start,
+                (size.height - h) / 2)
+            val pillSize = Size(width, h)
+            val radius = CornerRadius(h / 2)
+            drawRoundRect(if (underline || compact) foreground.copy(alpha = .065f) else indicator,
+                topLeft = topLeft, size = pillSize, cornerRadius = radius)
+            // A small glass rim on the flat navigation surface; text stays outside the material.
+            // Backdrop blur/refraction remains in the existing floating controls over artwork.
+            if (liquid) {
+                drawRoundRect(Brush.linearGradient(
+                    listOf(Color.White.copy(alpha = if (light) .52f else .10f), Color.Transparent,
+                        foreground.copy(alpha = .025f)),
+                    start = topLeft, end = topLeft + Offset(width * .35f, h)),
+                    topLeft = topLeft, size = pillSize, cornerRadius = radius)
+            }
+            drawRoundRect(foreground.copy(alpha = if (liquid) .07f else .04f),
+                topLeft = topLeft, size = pillSize, cornerRadius = radius, style = Stroke(.6.dp.toPx()))
+        }.padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
         horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically,
     ) {

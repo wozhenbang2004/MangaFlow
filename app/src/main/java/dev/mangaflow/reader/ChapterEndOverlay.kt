@@ -6,7 +6,7 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Forum
@@ -35,9 +36,9 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
@@ -62,31 +63,28 @@ import kotlinx.coroutines.delay
 import kotlin.math.PI
 import kotlin.math.sin
 
-/** A small end target belongs to the image list; the discussion itself stays in its sheet. */
+/** A compact next-chapter action floats over the existing last image. */
 @Composable
 internal fun ChapterEndFooter(
     pull: BottomPullLoadState,
     nextTitle: String?,
     unavailableMessage: String,
-    background: Color,
     foreground: Color,
-    onTap: () -> Unit,
     onNext: (() -> Unit)?,
     onRetry: (() -> Unit)?,
 ) {
-    val tap by rememberUpdatedState(onTap)
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 144.dp).background(background)
-            .pointerInput(Unit) { detectTapGestures(onTap = { tap() }) }
-            .padding(start = 24.dp, end = 16.dp, top = 20.dp, bottom = 76.dp),
+        Modifier.fillMaxWidth().heightIn(min = 44.dp)
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = .94f), RoundedCornerShape(14.dp))
+            .padding(start = 10.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (onNext != null) Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
             BottomPullLoadIndicator(pull, Modifier.size(26.dp), color = foreground.copy(alpha = .65f))
             Icon(Icons.Outlined.ArrowUpward, null, Modifier.size(13.dp), tint = foreground.copy(alpha = .65f))
         }
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
             Text(when {
                 onNext == null -> unavailableMessage
                 pull.loading -> "正在打开下一话"
@@ -96,7 +94,7 @@ internal fun ChapterEndFooter(
                 color = foreground.copy(alpha = .72f), fontSize = 12.sp,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (!nextTitle.isNullOrBlank()) Text(nextTitle, color = foreground.copy(alpha = .48f),
-                fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (onNext != null) TextButton(onClick = onNext) {
             Text("下一话", color = foreground.copy(alpha = .8f), fontSize = 12.sp)
@@ -134,32 +132,38 @@ internal fun ChapterEndComments(
         }
     }
     var bubbles by remember(chapterId) { mutableStateOf<List<FloatingComment>>(emptyList()) }
+    val latestCandidates by rememberUpdatedState(candidates)
     val bottom by animateDpAsState(
         if (controlsVisible) 112.dp else 0.dp,
         animationSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap(),
         label = "chapter-comments-anchor",
     )
     LaunchedEffect(state) { state.ensureLoaded() }
-    BoxWithConstraints(modifier.fillMaxWidth().padding(bottom = bottom).height(420.dp)) {
+    BoxWithConstraints(modifier.fillMaxWidth().padding(bottom = bottom).heightIn(max = 380.dp).height(360.dp)) {
         val fieldWidth = maxWidth
         val fieldHeight = maxHeight
         val singlePreview = largeText || fieldHeight < 280.dp
         // Leave the next-chapter action and the comments button unobstructed at the bottom.
-        val launchBottom = if (singlePreview) 76.dp else 100.dp
-        LaunchedEffect(candidates, motion, touchExploration, singlePreview, lifecycle) {
+        val launchBottom = 56.dp
+        LaunchedEffect(chapterId, candidates.isNotEmpty(), motion, touchExploration, singlePreview, lifecycle) {
             bubbles = emptyList()
             if (motion && !touchExploration && candidates.isNotEmpty()) {
                 lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                     try {
-                        delay(MangaMotion.Quick.toLong())
+                        val initial = latestCandidates.take(if (singlePreview) 1 else 3)
+                        bubbles = initial.mapIndexed { index, row ->
+                            row.copy(initialProgress = if (singlePreview) 0f else (initial.lastIndex - index) * .27f)
+                        }
+                        var cursor = initial.size
                         while (true) {
-                            candidates.forEach { row ->
-                                // Keep the field alive while the reader stays at chapter end, but never
-                                // stack the same comment on top of itself when only a few rows are available.
+                            delay(if (singlePreview) SinglePreviewLifetimeMillis + 100L else 380L)
+                            val available = latestCandidates
+                            if (available.isNotEmpty()) {
+                                val row = available[cursor++ % available.size]
                                 if (bubbles.none { it.key == row.key }) {
-                                    bubbles = (bubbles + row).takeLast(if (singlePreview) 1 else 4)
+                                    bubbles = (bubbles + row).takeLast(if (singlePreview) 1 else 8)
                                 }
-                                delay(if (singlePreview) SinglePreviewLifetimeMillis + 250L else row.flight.intervalMillis)
+                                if (!singlePreview) delay(row.flight.intervalMillis - 380L)
                             }
                         }
                     } finally {
@@ -172,8 +176,8 @@ internal fun ChapterEndComments(
             key(bubble.key) {
                 val width = if (singlePreview) minOf(fieldWidth, 320.dp)
                 else (fieldWidth * bubble.flight.widthFraction).coerceIn(
-                    minOf(fieldWidth, 180.dp), minOf(fieldWidth, 264.dp))
-                FloatingCommentBubble(bubble, backdrop,
+                    minOf(fieldWidth, 152.dp), minOf(fieldWidth, 248.dp))
+                FloatingCommentBubble(bubble,
                     modifier = Modifier.align(Alignment.BottomStart).padding(bottom = launchBottom).width(width),
                     fieldWidth = fieldWidth, flightHeight = (fieldHeight - launchBottom).coerceAtLeast(0.dp),
                     singlePreview = singlePreview,
@@ -200,6 +204,7 @@ private data class FloatingComment(
     val review: MangaReview,
     val text: String,
     val flight: BubbleFlight,
+    val initialProgress: Float = 0f,
 )
 
 private data class BubbleFlight(
@@ -211,27 +216,25 @@ private data class BubbleFlight(
     val intervalMillis: Long,
 )
 
-private const val MaximumBubbleLifetimeMillis = 4_700
-private const val SinglePreviewLifetimeMillis = 6_800
+private const val SinglePreviewLifetimeMillis = 4_600
 
 /** Stable variations do not jump when source statuses or unrelated reader state changes. */
 private fun bubbleFlight(key: String, index: Int, textLength: Int): BubbleFlight {
     val seed = key.hashCode().toLong() and 0x7fffffffL
-    val anchor = when (index % 4) { 0 -> .06f; 1 -> .92f; 2 -> .31f; else -> .72f }
+    val anchor = when (index % 6) { 0 -> 0f; 1 -> 1f; 2 -> .08f; 3 -> .94f; 4 -> .22f; else -> .82f }
     return BubbleFlight(
         anchor = anchor,
-        widthFraction = .54f + textLength.coerceAtMost(52) / 52f * .18f,
+        widthFraction = .46f + textLength.coerceAtMost(72) / 72f * .24f,
         sway = 5f + (seed % 5).toFloat(),
         phase = ((seed shr 4) % 100).toFloat() / 100f * (2 * PI).toFloat(),
-        lifetimeMillis = 4_000 + ((seed shr 8) % 701).toInt(),
-        intervalMillis = 1_250L + ((seed shr 12) % 401),
+        lifetimeMillis = 2_900 + ((seed shr 8) % 501).toInt(),
+        intervalMillis = 380L + ((seed shr 12) % 181),
     )
 }
 
 @Composable
 private fun FloatingCommentBubble(
     comment: FloatingComment,
-    backdrop: HazeState,
     modifier: Modifier,
     fieldWidth: Dp,
     flightHeight: Dp,
@@ -243,13 +246,13 @@ private fun FloatingCommentBubble(
     val foreground = MaterialTheme.colorScheme.onSurface
     val flight = comment.flight
     LaunchedEffect(comment.key, singlePreview) {
-        travel.snapTo(0f)
-        travel.animateTo(1f, tween(if (singlePreview) SinglePreviewLifetimeMillis else flight.lifetimeMillis,
+        travel.snapTo(comment.initialProgress)
+        val lifetime = if (singlePreview) SinglePreviewLifetimeMillis else flight.lifetimeMillis
+        travel.animateTo(1f, tween((lifetime * (1f - comment.initialProgress)).toInt(),
             easing = LinearEasing))
         finished()
     }
-    LiquidGlassSurface(
-        state = backdrop,
+    Box(
         modifier = modifier.clearAndSetSemantics {}.graphicsLayer {
             val progress = travel.value
             val enter = (progress / .055f).coerceIn(0f, 1f)
@@ -263,13 +266,14 @@ private fun FloatingCommentBubble(
             translationY = -rise * (.84f * progress + .16f * progress * progress)
             scaleX = .94f + .06f * enter
             scaleY = scaleX
-        },
-        cornerRadius = 18.dp,
+        }.clip(RoundedCornerShape(13.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = .94f))
+            .border(.5.dp, foreground.copy(alpha = .06f), RoundedCornerShape(13.dp)),
     ) {
         // The preview has no pointer handler; scrolling the artwork passes straight through it.
-        Row(Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            CommentAvatar(comment.review, foreground, size = 22.dp)
+        Row(Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            CommentAvatar(comment.review, foreground, size = 18.dp)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -279,7 +283,7 @@ private fun FloatingCommentBubble(
                     CommentSourceBadge(comment.sourceId)
                 }
                 Text(comment.text, color = foreground.copy(alpha = .9f), fontSize = 12.sp,
-                    lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    lineHeight = 16.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
         }
     }

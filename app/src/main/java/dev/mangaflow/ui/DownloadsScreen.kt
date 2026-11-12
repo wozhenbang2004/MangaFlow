@@ -32,7 +32,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Collections
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Inventory2
@@ -42,7 +41,6 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -51,9 +49,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -520,7 +515,6 @@ private fun localTreeName(uri: Uri): String = runCatching {
 }.getOrDefault("")
 
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DownloadSwipeRow(
     entry: DownloadEntry,
@@ -530,49 +524,8 @@ private fun DownloadSwipeRow(
     onRetry: () -> Unit,
     onRemove: () -> Unit,
 ) {
-    val colors = MaterialTheme.colorScheme
-    val state = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (value != SwipeToDismissBoxValue.Settled) onRemove()
-            false
-        },
-        positionalThreshold = { distance -> distance * .58f },
-    )
-    val direction = state.dismissDirection
-    val progress = state.progress.coerceIn(0f, 1f)
-    SwipeToDismissBox(
-        state = state,
-        enableDismissFromStartToEnd = true,
-        enableDismissFromEndToStart = true,
-        backgroundContent = {
-            if (direction != SwipeToDismissBoxValue.Settled) {
-                val armed = progress >= .58f
-                Box(
-                    Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp))
-                        .background(colors.errorContainer.copy(alpha = .18f + .42f * progress)),
-                ) {
-                    Row(
-                        Modifier.align(
-                            if (direction == SwipeToDismissBoxValue.StartToEnd) Alignment.CenterStart
-                            else Alignment.CenterEnd
-                        ).padding(horizontal = 18.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(7.dp),
-                    ) {
-                        Icon(Icons.Outlined.DeleteOutline, contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                            tint = if (armed) colors.error else colors.onErrorContainer.copy(alpha = .72f))
-                        Text(if (armed) "松手删除" else "滑动删除",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (armed) colors.error else colors.onErrorContainer.copy(alpha = .72f))
-                    }
-                }
-            }
-        },
-    ) {
-        Box(Modifier.fillMaxWidth().background(colors.background)) {
-            DownloadRow(entry, refreshing, onRead, onPause, onRetry)
-        }
+    SwipeToRemove(onRemove = onRemove, label = "删除下载") {
+        DownloadRow(entry, refreshing, onRead, onPause, onRetry)
     }
 }
 

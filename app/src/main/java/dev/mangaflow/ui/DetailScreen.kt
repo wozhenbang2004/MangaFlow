@@ -1,6 +1,7 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -197,7 +198,7 @@ fun DetailScreen(
         val heroPixels = with(density) { heroHeight.toPx() }
         val header = rememberTopAppBarState(initialHeightOffsetLimit = -heroPixels)
         val behavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(
-            state = header, snapAnimationSpec = null, flingAnimationSpec = null,
+            state = header, snapAnimationSpec = null, flingAnimationSpec = rememberSplineBasedDecay(),
         )
         SideEffect {
             if (header.heightOffsetLimit != -heroPixels) {
@@ -215,14 +216,10 @@ fun DetailScreen(
                 }
             }
         }
-        val artworkScroll = rememberScrollableState { delta ->
-            contentsJump?.cancel()
-            val previous = header.heightOffset
-            header.heightOffset = (previous + delta).coerceIn(header.heightOffsetLimit, 0f)
-            // Consume exactly the header's movement, including reversal and fling frames.
-            header.heightOffset - previous
-        }
         val emptyCatalogScroll = rememberScrollableState { 0f }
+        // Artwork and chapter surfaces share one scroll mutex and nested header decay.
+        // Remaining fling velocity flows into the grid after the artwork has collapsed.
+        val artworkScroll = catalogGrid?.takeIf { activeSection == 0 } ?: emptyCatalogScroll
         val openContents: () -> Unit = {
             section = 0
             contentsJump?.cancel()
@@ -250,7 +247,7 @@ fun DetailScreen(
             Box(Modifier.fillMaxWidth().height(statusInset + 96.dp)
                 .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .46f), Color.Transparent))))
         }
-        Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().nestedScroll(scrolling)) {
             ArtworkToolbar(
                 header = header, compact = compactHero, title = current.title, backdrop = artworkBackdrop,
                 favorite = isFavorite, coverFailed = coverFailed, active = active,
@@ -274,9 +271,8 @@ fun DetailScreen(
                         }
                     },
             ) {
-                // The empty artwork area and the card are sibling gesture targets. Each
-                // owns one scroll chain; the header must not also consume it in pre-scroll.
-                Box(Modifier.fillMaxSize().scrollable(artworkScroll, Orientation.Vertical))
+                Box(Modifier.fillMaxSize().scrollable(artworkScroll, Orientation.Vertical,
+                    reverseDirection = true, enabled = active))
                 Column(
                     Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.Bottom,
@@ -285,10 +281,12 @@ fun DetailScreen(
                     if (!compactHero) {
                         HeroBookInformation(current, artworkBackdrop, onIntroduction = { fullIntroduction = true },
                             onContents = openContents,
-                            modifier = Modifier.scrollable(artworkScroll, Orientation.Vertical))
+                            modifier = Modifier.scrollable(artworkScroll, Orientation.Vertical,
+                                reverseDirection = true, enabled = active))
                     } else {
                         LiquidGlassSurface(artworkBackdrop,
-                            Modifier.size(48.dp).scrollable(artworkScroll, Orientation.Vertical),
+                            Modifier.size(48.dp).scrollable(artworkScroll, Orientation.Vertical,
+                                reverseDirection = true, enabled = active),
                             cornerRadius = 16.dp, trackPointer = true) {
                             MotionIconButton(onClick = openContents, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Outlined.KeyboardArrowDown, "滑到章节", tint = DetailForeground)
@@ -300,7 +298,6 @@ fun DetailScreen(
             Column(
                 Modifier.weight(1f).fillMaxWidth()
                     .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp))
-                    .nestedScroll(scrolling)
                     // Share the grid's scroll mutex as well as its position: a new drag
                     // on the surrounding surface must cancel an existing grid fling.
                     .scrollable(catalogGrid ?: emptyCatalogScroll, Orientation.Vertical,

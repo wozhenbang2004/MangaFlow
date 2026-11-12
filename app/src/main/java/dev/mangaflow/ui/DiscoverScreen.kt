@@ -349,11 +349,11 @@ private fun RankingAudienceToggle(audience: RankAudience, onAudience: (RankAudie
                         val progress = depth.value
                         val front = if (female) progress else 1f - progress
                         val arc = sin(progress * PI).toFloat()
-                        translationX = (6f - 9f * front + (if (female) 4f else -4f) * arc).dp.toPx()
-                        translationY = (-4f + 6f * front).dp.toPx()
-                        scaleX = .66f + .34f * front
+                        translationX = (3f - 3f * front + (if (female) 9f else -9f) * arc).dp.toPx()
+                        translationY = (-2f + 2f * front).dp.toPx()
+                        scaleX = .48f + .52f * front
                         scaleY = scaleX
-                        alpha = .38f + .62f * front
+                        alpha = .035f + .965f * front * front
                         rotationY = (if (female) -1f else 1f) * 18f * arc
                         cameraDistance = 16.dp.toPx()
                     }, contentAlignment = Alignment.Center) {
@@ -650,18 +650,15 @@ internal fun RecentReadingSheet(
     onContinue: (ReadingProgress) -> Unit,
     onRemoveHistory: (String) -> Unit,
 ) {
-    var managedId by remember { mutableStateOf<String?>(null) }
-    var removal by remember { mutableStateOf<ReadingProgress?>(null) }
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background) { dismiss ->
         Text("最近阅读", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(start = 24.dp, bottom = 16.dp))
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
             items(history, key = { it.manga.id }) { progress ->
-                Box {
+                SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
                     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                        .combinedClickable(onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() },
-                            onLongClickLabel = "管理阅读记录", onLongClick = { managedId = progress.manga.id })
+                        .clickable(onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() })
                         .padding(horizontal = 4.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         MangaCover(progress.manga, repository, Modifier.width(36.dp).height(50.dp).clip(RoundedCornerShape(6.dp)))
@@ -674,18 +671,10 @@ internal fun RecentReadingSheet(
                         }
                         Icon(Icons.Outlined.PlayArrow, "继续阅读", Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    RecordActionsMenu(managedId == progress.manga.id, onDismiss = { managedId = null },
-                        removeLabel = "删除阅读记录", onRemove = { removal = progress })
                 }
             }
         }
     }
-    RecordRemovalDialog(
-        prompt = removal?.let { RecordRemovalPrompt("删除阅读记录？", it.manga.title,
-            "这本漫画的本机阅读进度会一并清除，收藏和下载保留。") },
-        onDismiss = { removal = null },
-        onConfirm = { removal?.let { onRemoveHistory(it.manga.id) }; removal = null },
-    )
 }
 
 @Composable

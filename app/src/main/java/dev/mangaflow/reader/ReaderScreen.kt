@@ -15,6 +15,9 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.stopScroll
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.rememberScrollableState
+import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.clickable
@@ -59,6 +62,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Bookmark
@@ -347,6 +351,11 @@ fun ReaderScreen(
     }
     LaunchedEffect(preferences.dimAmount) { dimPreview.value = null }
     LaunchedEffect(touchExploration) { if (touchExploration) controlsVisible = true }
+    LaunchedEffect(discussionState, pageIndex, pages.size, active, leavingReader, localImport) {
+        if (!localImport && active && !leavingReader && pages.isNotEmpty() && pageIndex >= pages.lastIndex - 3) {
+            discussionState.ensureLoaded()
+        }
+    }
     LaunchedEffect(atChapterEnd, touchExploration) {
         if (atChapterEnd && !touchExploration) controlsVisible = false
     }
@@ -403,7 +412,7 @@ fun ReaderScreen(
                         onAtEndChanged = { atChapterEnd = it },
                         onNext = openNextChapter,
                         endContent = { pull ->
-                            val footer: @Composable () -> Unit = {
+                            if (!controlsVisible && !showComments && !showSettings && !showChapters && !showSpreadAdjustment) {
                                 ChapterEndFooter(
                                     pull = pull,
                                     nextTitle = nextChapter?.title,
@@ -413,29 +422,12 @@ fun ReaderScreen(
                                         chapterIndex < 0 -> "目录暂不可用"
                                         else -> "已到最后一话"
                                     },
-                                    background = background,
-                                    foreground = preferences.theme.foreground(),
-                                    onTap = { controlsVisible = !controlsVisible },
+                                    foreground = colors.onSurface,
                                     onNext = openNextChapter,
                                     onRetry = onRetryChapters.takeIf { !chaptersLoading && (chaptersError != null || chapterIndex < 0) },
                                 )
                             }
-                            if (preferences.mode == ReadingMode.VERTICAL || localImport) {
-                                footer()
-                            } else {
-                                Column(Modifier.fillMaxWidth()) {
-                                    ChapterEndComments(
-                                        chapterId = chapterId,
-                                        state = discussionState,
-                                        backdrop = readerBackdrop,
-                                        controlsVisible = false,
-                                        touchExploration = touchExploration,
-                                        onOpen = { showComments = true },
-                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                                    )
-                                    footer()
-                                }
-                            }
+
                         },
                     )
                 }
@@ -445,7 +437,7 @@ fun ReaderScreen(
             Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
         }
 
-        if (!localImport && preferences.mode == ReadingMode.VERTICAL && active && !leavingReader && atChapterEnd && !loading && error == null &&
+        if (!localImport && active && !leavingReader && atChapterEnd && !loading && error == null &&
             !showComments && !showSettings && !showChapters && !showSpreadAdjustment) {
             ChapterEndComments(
                 chapterId = chapterId, state = discussionState, backdrop = readerBackdrop,
@@ -500,18 +492,16 @@ fun ReaderScreen(
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
                 slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
         ) {
-            LiquidGlassSurface(
-                state = readerBackdrop,
-                trackPointer = true,
+            ReaderSurface(
                 modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
                     .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 8.dp),
+                shape = RoundedCornerShape(20.dp),
             ) {
                 Column(Modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 8.dp, vertical = 2.dp)) {
                     if (pages.isNotEmpty()) key(chapterId) {
                         ReaderProgressSlider(
                             pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
                             enabled = controlsVisible,
-                            backdrop = readerBackdrop,
                             onSeek = { destination ->
                                 if (destination != pageIndex) {
                                     returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
@@ -520,26 +510,19 @@ fun ReaderScreen(
                                 }
                             },
                             onOpenNavigator = { showPageNavigator = true },
+                            onReturn = if (returnLocation == null) null else {
+                                {
+                                    returnLocation?.let { previous ->
+                                        val current = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
+                                        targetOffset = previous.scrollOffset
+                                        targetPage = previous.pageIndex
+                                        returnLocation = current
+                                    }
+                                }
+                            },
                             onInteractionChanged = { progressInteracting = it },
                         )
-                        AnimatedVisibility(visible = returnLocation != null) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                TextButton(
-                                    enabled = controlsVisible,
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                    onClick = {
-                                        returnLocation?.let { previous ->
-                                            val current = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
-                                            targetOffset = previous.scrollOffset
-                                            targetPage = previous.pageIndex
-                                            returnLocation = current
-                                        }
-                                    },
-                                ) {
-                                    Text("返回刚才", color = colors.onSurfaceVariant, fontSize = 11.sp)
-                                }
-                            }
-                        }
+
                     }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween) {
@@ -547,12 +530,12 @@ fun ReaderScreen(
                             enabled = chapterIndex > 0, interactive = controlsVisible) {
                             siblings.getOrNull(chapterIndex - 1)?.let { chapterId = it.id }
                         }
-                        ReaderIcon(Icons.Rounded.MenuBook, "章节目录", interactive = controlsVisible) { showChapters = true }
+                        ReaderIcon(Icons.Rounded.MenuBook, "章节目录", interactive = controlsVisible, emphasis = 1f) { showChapters = true }
                         val currentBookmark = bookmarks.firstOrNull { it.pageIndex == pageIndex }
                         ReaderIcon(
                             if (currentBookmark == null) Icons.Rounded.BookmarkBorder else Icons.Rounded.Bookmark,
                             if (currentBookmark == null) "添加页书签" else "编辑页书签",
-                            enabled = pages.isNotEmpty(), interactive = controlsVisible,
+                            enabled = pages.isNotEmpty(), interactive = controlsVisible, emphasis = .52f,
                         ) {
                             bookmarkEditor = currentBookmark ?: ReaderBookmark(pageIndex)
                         }
@@ -628,8 +611,8 @@ fun ReaderScreen(
             }
         }
 
-        if (!controlsVisible && pages.isNotEmpty()) Text(
-            if (atChapterEnd && preferences.mode != ReadingMode.VERTICAL) "章节末" else "${pageIndex + 1} / ${pages.size}",
+        if (!controlsVisible && pages.isNotEmpty() && !atChapterEnd) Text(
+            "${pageIndex + 1} / ${pages.size}",
             color = colors.onSurfaceVariant, fontSize = 11.sp,
             modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility).padding(12.dp)
                 .clip(RoundedCornerShape(8.dp)).background(colors.surface.copy(alpha = .9f)).padding(horizontal = 8.dp, vertical = 4.dp)
@@ -779,15 +762,16 @@ private fun ChapterPages(
             onLoadMore = { onNext?.invoke() },
             actionLabel = "进入下一话",
         )
-        LaunchedEffect(list, endRevealPx) {
-            snapshotFlow {
+        val atEnd by remember(list) {
+            derivedStateOf {
                 val layout = list.layoutInfo
                 !restoring && endLayoutReady() && layout.visibleItemsInfo.any {
-                    it.key == "chapter-end" && it.offset < layout.viewportEndOffset - endRevealPx &&
-                        it.offset + it.size > layout.viewportStartOffset
+                    it.index == pages.lastIndex && it.offset < layout.viewportEndOffset &&
+                        it.offset + it.size <= layout.viewportEndOffset + endRevealPx
                 }
-            }.distinctUntilChanged().collect { atEndChanged(it) }
+            }
         }
+        LaunchedEffect(atEnd) { atEndChanged(atEnd) }
         val dragging by list.interactionSource.collectIsDraggedAsState()
         LaunchedEffect(restoring, targetHeight) {
             if (restoring && targetHeight > 0) {
@@ -841,23 +825,25 @@ private fun ChapterPages(
             val anchor = list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex)
             (visible.firstOrNull()?.index ?: anchor) to (visible.lastOrNull()?.index ?: anchor)
         }
-        LazyColumn(state = list, modifier = Modifier.fillMaxSize().bottomPullLoad(pull),
-            verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
-            itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
-                ReaderPage(
-                    page, headers, resolvePage = resolvePage, retryPage = retryPage, paged = false, onTap = onTap,
-                    onMeasured = { loadedPages[index] = true },
-                    onHeightMeasured = { if (index == startPage) targetHeight = it },
-                    onComposed = { present -> if (present) composedPages[index] = true else composedPages.remove(index) },
-                    prefetch = prefetchRequests[index],
-                    knownDimensions = pageDimensions[page.url],
-                    onDimensionsKnown = { pageDimensions[page.url] = it },
-                    onLayoutReady = { pageLayoutReady[index] = it },
-                )
+        Box(Modifier.fillMaxSize().bottomPullLoad(pull)) {
+            LazyColumn(state = list, modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
+                itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
+                    ReaderPage(
+                        page, headers, resolvePage = resolvePage, retryPage = retryPage, paged = false, onTap = onTap,
+                        onMeasured = { loadedPages[index] = true },
+                        onHeightMeasured = { if (index == startPage) targetHeight = it },
+                        onComposed = { present -> if (present) composedPages[index] = true else composedPages.remove(index) },
+                        prefetch = prefetchRequests[index],
+                        knownDimensions = pageDimensions[page.url],
+                        onDimensionsKnown = { pageDimensions[page.url] = it },
+                        onLayoutReady = { pageLayoutReady[index] = it },
+                    )
+                }
             }
-            item("chapter-end", contentType = "chapter-end") {
-                endContent(pull)
-            }
+            if (atEnd) Box(Modifier.align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+                .padding(start = 72.dp, end = 16.dp, bottom = 12.dp)) { endContent(pull) }
         }
     } else {
         val groups = remember(pages, preferences.doublePage, preferences.coverAlone, manualSingles) {
@@ -867,22 +853,22 @@ private fun ChapterPages(
         val startingGroup = remember(groups, startPage) {
             groups.indexOfFirst { it.contains(startPage) }.coerceAtLeast(0)
         }
-        val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size + 1 })
-        val endList = rememberLazyListState()
+        val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size })
         val pull = rememberBottomPullLoadState(
             key = pager,
-            enabled = active && onNext != null && pager.settledPage == groups.size && !pager.isScrollInProgress,
+            enabled = active && onNext != null && pager.settledPage == groups.lastIndex && !pager.isScrollInProgress,
             loading = false,
-            canScrollForward = { endList.canScrollForward },
+            canScrollForward = { false },
             onLoadMore = { onNext?.invoke() },
             actionLabel = "进入下一话",
         )
-        LaunchedEffect(pager, groups) {
-            snapshotFlow {
-                pager.settledPage == groups.size && pager.currentPage == groups.size &&
-                    kotlin.math.abs(pager.currentPageOffsetFraction) < .01f
-            }.distinctUntilChanged().collect { atEndChanged(it) }
+        val atEnd by remember(pager, groups) {
+            derivedStateOf {
+                pager.settledPage == groups.lastIndex && pager.currentPage == groups.lastIndex &&
+                    kotlin.math.abs(pager.currentPageOffsetFraction) < .01f && loadedPages[pages.lastIndex] == true
+            }
         }
+        LaunchedEffect(atEnd) { atEndChanged(atEnd) }
         LaunchedEffect(pager, groups) {
             snapshotFlow { groups.getOrNull(pager.currentPage)?.first ?: pages.lastIndex }
                 .distinctUntilChanged().collect { index -> location(index, 0) }
@@ -918,54 +904,56 @@ private fun ChapterPages(
             val shown = groups.getOrNull(pager.currentPage)
             (shown?.first ?: pages.lastIndex) to (shown?.last ?: pages.lastIndex)
         }
-        HorizontalPager(
-            state = pager,
-            modifier = Modifier.fillMaxSize(),
-            reverseLayout = preferences.mode == ReadingMode.RIGHT_TO_LEFT,
-            beyondViewportPageCount = 1,
-            key = { index -> groups.getOrNull(index)?.first?.let { "image:$it" } ?: "chapter-end" },
-        ) { index ->
-            val group = groups.getOrNull(index)
-            if (group != null) {
-                val renderImage: @Composable (Int, Modifier, Alignment) -> Unit = { imageIndex, modifier, alignment ->
-                    Box(modifier) {
-                        ReaderPage(
-                            pages[imageIndex], headers, resolvePage = resolvePage, retryPage = retryPage, paged = true, pagedAlignment = alignment, onTap = onTap,
-                            onMeasured = { loadedPages[imageIndex] = true },
-                            onComposed = { present -> if (present) composedPages[imageIndex] = true else composedPages.remove(imageIndex) },
-                            prefetch = prefetchRequests[imageIndex],
-                        )
+        Box(Modifier.fillMaxSize().bottomPullLoad(pull)
+            .scrollable(rememberScrollableState { 0f }, Orientation.Vertical, enabled = active && atEnd)) {
+            HorizontalPager(
+                state = pager,
+                modifier = Modifier.fillMaxSize(),
+                reverseLayout = preferences.mode == ReadingMode.RIGHT_TO_LEFT,
+                beyondViewportPageCount = 1,
+                key = { index -> "image:${groups[index].first}" },
+            ) { index ->
+                val group = groups.getOrNull(index)
+                if (group != null) {
+                    val renderImage: @Composable (Int, Modifier, Alignment) -> Unit = { imageIndex, modifier, alignment ->
+                        Box(modifier) {
+                            ReaderPage(
+                                pages[imageIndex], headers, resolvePage = resolvePage, retryPage = retryPage, paged = true, pagedAlignment = alignment, onTap = onTap,
+                                onMeasured = { loadedPages[imageIndex] = true },
+                                onComposed = { present -> if (present) composedPages[imageIndex] = true else composedPages.remove(imageIndex) },
+                                prefetch = prefetchRequests[imageIndex],
+                            )
+                        }
                     }
-                }
-                val second = group.second
-                if (second != null) {
-                    // Pair the image edges at the spine, leaving unused space outside the spread.
-                    // Reading direction, rather than the system locale, selects the physical sides.
-                    Row(
-                        Modifier.fillMaxSize(),
-                        horizontalArrangement = Arrangement.Absolute.Left,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        val rightToLeft = preferences.mode == ReadingMode.RIGHT_TO_LEFT
-                        renderImage(
-                            if (rightToLeft) second else group.first,
-                            Modifier.weight(1f).fillMaxHeight(),
-                            AbsoluteAlignment.CenterRight,
-                        )
-                        renderImage(
-                            if (rightToLeft) group.first else second,
-                            Modifier.weight(1f).fillMaxHeight(),
-                            AbsoluteAlignment.CenterLeft,
-                        )
+                    val second = group.second
+                    if (second != null) {
+                        // Pair the image edges at the spine, leaving unused space outside the spread.
+                        // Reading direction, rather than the system locale, selects the physical sides.
+                        Row(
+                            Modifier.fillMaxSize(),
+                            horizontalArrangement = Arrangement.Absolute.Left,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            val rightToLeft = preferences.mode == ReadingMode.RIGHT_TO_LEFT
+                            renderImage(
+                                if (rightToLeft) second else group.first,
+                                Modifier.weight(1f).fillMaxHeight(),
+                                AbsoluteAlignment.CenterRight,
+                            )
+                            renderImage(
+                                if (rightToLeft) group.first else second,
+                                Modifier.weight(1f).fillMaxHeight(),
+                                AbsoluteAlignment.CenterLeft,
+                            )
+                        }
+                    } else {
+                        renderImage(group.first, Modifier.fillMaxSize(), Alignment.Center)
                     }
-                } else {
-                    renderImage(group.first, Modifier.fillMaxSize(), Alignment.Center)
-                }
-            } else {
-                LazyColumn(state = endList, modifier = Modifier.fillMaxSize().bottomPullLoad(pull)) {
-                    item("chapter-end", contentType = "chapter-end") { endContent(pull) }
                 }
             }
+            if (atEnd) Box(Modifier.align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+                .padding(start = 72.dp, end = 16.dp, bottom = 12.dp)) { endContent(pull) }
         }
     }
 }
@@ -1390,9 +1378,9 @@ private fun ReaderProgressSlider(
     pageCount: Int,
     pendingPage: Int?,
     enabled: Boolean,
-    backdrop: HazeState,
     onSeek: (Int) -> Unit,
     onOpenNavigator: () -> Unit,
+    onReturn: (() -> Unit)?,
     onInteractionChanged: (Boolean) -> Unit,
 ) {
     val interactions = remember { MutableInteractionSource() }
@@ -1428,7 +1416,6 @@ private fun ReaderProgressSlider(
             modifier = Modifier.weight(1f).padding(end = 10.dp),
             enabled = enabled && pageCount > 1,
             interactions = interactions,
-            backdrop = backdrop,
             label = "阅读进度，第 ${shown.roundToInt() + 1} 页，共 $pageCount 页",
         )
         Row(
@@ -1439,6 +1426,13 @@ private fun ReaderProgressSlider(
         ) {
             Text("${shown.roundToInt() + 1}", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             Text(" / $pageCount", color = colors.onSurface.copy(alpha = .86f), fontSize = 12.sp)
+        }
+        Box(Modifier.width(32.dp).height(40.dp), contentAlignment = Alignment.Center) {
+            if (onReturn != null) MotionIconButton(onClick = onReturn, enabled = enabled,
+                modifier = Modifier.size(32.dp)) {
+                Icon(Icons.AutoMirrored.Rounded.Undo, "返回刚才", Modifier.size(16.dp),
+                    tint = colors.onSurfaceVariant.copy(alpha = .62f))
+            }
         }
     }
 }
@@ -1566,7 +1560,6 @@ private fun ReaderSettingsDialog(
                             value = dimAmount, onValueChange = { dimAmount = it; onDimPreview(it) },
                             onValueChangeFinished = { update(preferences.copy(dimAmount = dimAmount)) },
                             valueRange = 0f..0.65f, modifier = Modifier.fillMaxWidth(), label = "降低阅读亮度",
-                            backdrop = backdrop,
                         )
                     }
                 }
@@ -1736,8 +1729,9 @@ private fun ReaderPanelHeading(title: String, closeLabel: String, onDismiss: () 
 }
 
 @Composable
-private fun ReaderIcon(icon: ImageVector, label: String, enabled: Boolean = true, interactive: Boolean = true, onClick: () -> Unit) {
-    val tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) .82f else .25f)
+private fun ReaderIcon(icon: ImageVector, label: String, enabled: Boolean = true, interactive: Boolean = true,
+    emphasis: Float = .82f, onClick: () -> Unit) {
+    val tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) emphasis else .25f)
     MotionIconButton(onClick = onClick, enabled = enabled && interactive, modifier = Modifier.size(48.dp)) {
         Icon(icon, label, Modifier.size(21.dp), tint = tint)
     }

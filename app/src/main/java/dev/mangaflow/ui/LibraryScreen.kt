@@ -82,7 +82,6 @@ fun LibraryScreen(
     val shelfFilters = listOf<ShelfState?>(null, ShelfState.FOLLOWING, ShelfState.HOARDING, ShelfState.PAUSED)
     val shelfFilter = shelfFilters.firstOrNull { it?.name.orEmpty() == shelfFilterName }
     var managedId by remember { mutableStateOf<String?>(null) }
-    var historyRemoval by remember { mutableStateOf<Manga?>(null) }
     var draggedFavorite by remember { mutableStateOf<Manga?>(null) }
     var dragPoint by remember { mutableStateOf(Offset.Unspecified) }
     var rootOrigin by remember { mutableStateOf(Offset.Zero) }
@@ -100,7 +99,6 @@ fun LibraryScreen(
     val progressById = remember(history) { history.associateBy { it.manga.id } }
     LaunchedEffect(active, showHistory) {
         managedId = null
-        historyRemoval = null
         draggedFavorite = null
         dragPoint = Offset.Unspecified
         if (!active || showHistory) onCancelOpen()
@@ -128,12 +126,11 @@ fun LibraryScreen(
                             EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
                         }
                         items(history, key = { "history-${it.manga.id}" }) { progress ->
-                            Box {
+                            SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
                                 ContinueRow(progress, repository, onContinue,
                                     onManage = { onCancelOpen(); managedId = progress.manga.id })
                                 RecordActionsMenu(managedId == progress.manga.id,
-                                    onDismiss = { managedId = null }, removeLabel = "删除阅读记录",
-                                    onRemove = { historyRemoval = progress.manga },
+                                    onDismiss = { managedId = null },
                                     onDetails = { onDetails(progress.manga) })
                             }
                         }
@@ -187,6 +184,7 @@ fun LibraryScreen(
                                         deleteArmed = trashArmed,
                                         onOpen = onOpen,
                                         onDetails = onDetails,
+                                        onRemove = onRemoveFavorite,
                                         onManage = { if (it != null) onCancelOpen(); managedId = it },
                                         onShelfState = onShelfState,
                                         onDragStart = { manga, point ->
@@ -243,20 +241,6 @@ fun LibraryScreen(
             }
         }
     }
-    RecordRemovalDialog(
-        prompt = historyRemoval?.let {
-            RecordRemovalPrompt(
-                "删除阅读记录？",
-                it.title,
-                "这本漫画的本机阅读进度会一并清除，收藏和下载保留。",
-            )
-        },
-        onDismiss = { historyRemoval = null },
-        onConfirm = {
-            historyRemoval?.let { onRemoveHistory(it.id) }
-            historyRemoval = null
-        },
-    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -266,7 +250,7 @@ private fun BookshelfRow(
     shelfStates: Map<String, ShelfState>, opening: LibraryOpenState?,
     bookWidth: Dp, bookHeight: Dp, managedId: String?,
     draggedId: String?, deleteArmed: Boolean,
-    onOpen: (Manga) -> Unit, onDetails: (Manga) -> Unit,
+    onOpen: (Manga) -> Unit, onDetails: (Manga) -> Unit, onRemove: (Manga) -> Unit,
     onManage: (String?) -> Unit, onShelfState: (Manga, ShelfState) -> Unit,
     onDragStart: (Manga, Offset) -> Unit, onDragMove: (Offset) -> Unit,
     onDragEnd: (Manga, Offset) -> Unit, onDragCancel: () -> Unit,
@@ -277,18 +261,21 @@ private fun BookshelfRow(
             books.forEach { manga ->
                 key(manga.id) {
                     Box(Modifier.width(bookWidth)) {
-                        BookshelfBook(
-                            manga, repository, progress[manga.id],
-                            opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
-                            onOpen = { onOpen(manga) },
-                            dragging = draggedId == manga.id,
-                            deleteArmed = draggedId == manga.id && deleteArmed,
-                            onDragStart = { onDragStart(manga, it) },
-                            onDragMove = onDragMove,
-                            onDragEnd = { onDragEnd(manga, it) },
-                            onDragCancel = onDragCancel,
-                            modifier = Modifier.fillMaxWidth().height(bookHeight),
-                        )
+                        SwipeToRemove(onRemove = { onRemove(manga) }, label = "删除收藏",
+                            enabled = draggedId != manga.id) {
+                            BookshelfBook(
+                                manga, repository, progress[manga.id],
+                                opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
+                                onOpen = { onOpen(manga) },
+                                dragging = draggedId == manga.id,
+                                deleteArmed = draggedId == manga.id && deleteArmed,
+                                onDragStart = { onDragStart(manga, it) },
+                                onDragMove = onDragMove,
+                                onDragEnd = { onDragEnd(manga, it) },
+                                onDragCancel = onDragCancel,
+                                modifier = Modifier.fillMaxWidth().height(bookHeight),
+                            )
+                        }
                         RecordActionsMenu(
                             managedId == manga.id,
                             onDismiss = { onManage(null) },
