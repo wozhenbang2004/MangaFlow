@@ -143,13 +143,11 @@ internal fun DetailCatalog(
                         chosenGroup = it
                     }, modifier = Modifier.weight(1f),
                 )
+            } else if (downloadMode) {
+                Text("点按立即下载", color = DetailForeground,
+                    fontSize = 12.sp, modifier = Modifier.weight(1f))
             } else {
-                Text(
-                    if (downloadMode) "点选章节下载" else
-                        shown.size.toString() + if (shown.isNotEmpty() && shown.all { isVolumeGroup(it.group) }) " 卷" else " 话",
-                    color = if (downloadMode) DetailForeground else DetailMuted,
-                    fontSize = 12.sp, modifier = Modifier.weight(1f),
-                )
+                Spacer(Modifier.weight(1f))
             }
             if (error != null) {
                 DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { shownError = error })
@@ -158,7 +156,7 @@ internal fun DetailCatalog(
             }
             DetailAction(
                 if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
-                if (downloadMode) "完成选择下载" else "选择章节下载",
+                if (downloadMode) "退出连续下载" else "连续下载章节",
                 selected = downloadMode,
                 onClick = { downloadMode = !downloadMode },
             )

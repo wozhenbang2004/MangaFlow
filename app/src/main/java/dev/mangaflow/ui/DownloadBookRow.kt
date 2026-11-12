@@ -45,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
@@ -59,6 +60,7 @@ import dev.mangaflow.ui.motion.motionPress
 @Composable
 internal fun DownloadBookRow(
     entries: List<DownloadEntry>,
+    repository: MangaRepository,
     expanded: Boolean,
     managing: Boolean,
     selected: Boolean,
@@ -88,19 +90,25 @@ internal fun DownloadBookRow(
             onLongClickLabel = "管理这部作品的下载", onLongClick = onManage,
         ).motionPress(interaction, pressedScale = .99f).padding(vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            AsyncImage(manga.coverUrl, null, contentScale = ContentScale.Fit,
-                modifier = Modifier.size(48.dp, 68.dp).mangaCoverCard(8.dp).background(colors.surfaceVariant))
+            if (manga.sourceUrl == LOCAL_SOURCE_URL) {
+                AsyncImage(manga.coverUrl, null, contentScale = ContentScale.Fit,
+                    modifier = Modifier.size(48.dp, 68.dp).mangaCoverCard(8.dp)
+                        .background(colors.surfaceVariant))
+            } else {
+                MangaCover(manga, repository, Modifier.size(48.dp, 68.dp).mangaCoverCard(8.dp),
+                    scale = ContentScale.Fit)
+            }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(manga.title, fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium,
                     color = colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                val bytes = downloadBytes(entries.sumOf { it.downloadedBytes })
                 Text(when {
-                    entries.size == 1 -> "${entries.first().chapter.title} · ${if (allSaved) pages else "$completedPages/$pages"} 页"
-                    allSaved -> "${entries.size} 话 · $pages 页"
+                    entries.size == 1 -> "${entries.first().chapter.title} · ${if (allSaved) pages else "$completedPages/$pages"} 页 · $bytes"
+                    allSaved -> "${entries.size} 话 · $pages 页 · $bytes"
                     else -> "$saved/${entries.size} 话已保存 · $completedPages/$pages 页"
                 }, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
-                val bytes = downloadBytes(entries.sumOf { it.downloadedBytes })
                 val status = when {
                     failed > 0 -> "$failed 话未完成"
                     entries.any { it.status == DownloadStatus.RUNNING } -> "下载中"
@@ -109,7 +117,7 @@ internal fun DownloadBookRow(
                     entries.any { it.status == DownloadStatus.PAUSED } -> "已暂停"
                     else -> null
                 }
-                Text(status?.let { "$it · $bytes" } ?: bytes,
+                if (status != null) Text("$status · $bytes",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (failed > 0) colors.error else colors.onSurfaceVariant.copy(alpha = .8f),
                     maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -191,6 +191,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
 import me.saket.telephoto.zoomable.rememberZoomableImageState
@@ -235,7 +236,14 @@ fun ReaderScreen(
         } ?: savedPreferences
     }
     val pageCollections by libraryStore.pageCollections.collectAsStateWithLifecycle()
-    val downloads by downloadStore.entries.collectAsStateWithLifecycle()
+    // Changes to unrelated downloads must not invalidate this reader's controls.
+    val activeDownload by remember(downloadStore, manga.id, chapterId) {
+        downloadStore.entries.map { items ->
+            items.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
+        }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = downloadStore.entries.value.firstOrNull {
+        it.manga.id == manga.id && it.chapter.id == chapterId
+    })
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     val readerForeground = active && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
     var restartPending by rememberSaveable(manga.id, initialChapterId, initialCollection?.key) {
@@ -302,7 +310,6 @@ fun ReaderScreen(
     val headers = remember(manga.id, chapterId, repository, localImport) {
         if (localImport) emptyMap() else repository.imageHeaders(manga.id, chapterId)
     }
-    val activeDownload = downloads.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
     val background = preferences.theme.background()
     val colors = MaterialTheme.colorScheme
     val lightChrome = colors.surface.luminance() > .5f
@@ -1248,10 +1255,13 @@ private fun ReaderPage(
     val layoutReady by rememberUpdatedState(onLayoutReady)
     val chapterSwipeReadyChanged by rememberUpdatedState(onChapterSwipeReadyChanged)
     // Lazy layout recycling must not collapse a measured page back to its placeholder height.
-    var aspect by rememberSaveable(page.index) { mutableFloatStateOf(
-        knownDimensions?.readerAspectRatio()
+    val cachedDimensions = remember(page.url) { ReaderDimensionCache.get(page.url) }
+    var aspect by rememberSaveable(page.url) { mutableFloatStateOf(
+        (knownDimensions ?: cachedDimensions)?.readerAspectRatio()
             ?: if (page.width > 0 && page.height > 0) page.width.toFloat() / page.height else 0.7f) }
-    var hasDimensions by rememberSaveable(page.index) { mutableStateOf(knownDimensions != null || (page.width > 0 && page.height > 0)) }
+    var hasDimensions by rememberSaveable(page.url) {
+        mutableStateOf(knownDimensions != null || cachedDimensions != null || (page.width > 0 && page.height > 0))
+    }
     var observedDimensions by remember(page.url) { mutableStateOf<IntSize?>(null) }
     var measuredHeight by remember { mutableIntStateOf(0) }
     var error by remember(page.url) { mutableStateOf<String?>(null) }
@@ -1288,6 +1298,7 @@ private fun ReaderPage(
         }
         aspect = measuredAspect
         hasDimensions = true
+        ReaderDimensionCache.put(page.url, size)
     }
     val delayedLoading = rememberDelayedBusy(loading)
     var prefetchError by remember(page.url) { mutableStateOf<String?>(null) }
@@ -1358,7 +1369,7 @@ private fun ReaderPage(
         val imageError = error ?: prefetchError.takeUnless { resource?.url?.startsWith("file:") == true }
         val naturalHeight = maxWidth / aspect
         val naturalHeightPx = with(density) { naturalHeight.roundToPx() }
-        val pendingAspect = (knownDimensions ?: observedDimensions)?.readerAspectRatio()
+        val pendingAspect = (knownDimensions ?: observedDimensions ?: cachedDimensions)?.readerAspectRatio()
         LaunchedEffect(paged, hasDimensions, pendingAspect, aspect, naturalHeightPx, measuredHeight) {
             if (!paged) layoutReady(hasDimensions && (pendingAspect == null || pendingAspect == aspect) &&
                 measuredHeight == naturalHeightPx && measuredHeight > 0)

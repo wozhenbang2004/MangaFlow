@@ -733,7 +733,7 @@ private fun FeaturedManga(
             onOpen(manga)
         }.motionPress(interaction, pressedScale = .988f)
         .background(MaterialTheme.colorScheme.surfaceVariant)) {
-        MangaCover(manga, repository, Modifier.matchParentSize().blur(22.dp).graphicsLayer { alpha = .38f }
+        MangaCover(manga, repository, Modifier.matchParentSize().blur(14.dp).graphicsLayer { alpha = .38f }
             .clearAndSetSemantics { }, ContentScale.Crop)
         MangaCover(manga, repository, Modifier.matchParentSize()
             .then(if (emphasis() >= .98f) Modifier.mangaSharedCover(manga.id, "discovery-featured") else Modifier)
@@ -825,7 +825,15 @@ internal fun ContinueRow(
             Text(progress.manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            MangaMetricBadges(progress.manga)
+            if (progress.pageCount > 0) {
+                val fraction = ((progress.pageIndex + 1).toFloat() / progress.pageCount).coerceIn(0f, 1f)
+                Box(Modifier.fillMaxWidth().padding(top = 5.dp).height(2.dp)
+                    .clip(RoundedCornerShape(1.dp))
+                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .07f))) {
+                    Box(Modifier.fillMaxWidth(fraction).height(2.dp)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = .62f)))
+                }
+            }
         }
         if (onHistory != null) MotionIconButton(onClick = onHistory, modifier = Modifier.size(44.dp)) {
             Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)

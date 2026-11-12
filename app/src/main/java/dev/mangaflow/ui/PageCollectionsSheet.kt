@@ -75,7 +75,7 @@ internal fun PageCollectionsSheet(
                 Icon(Icons.Outlined.Close, "关闭画面收藏", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             }
         }
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp).navigationBarsPadding(),
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)) {
             if (collections.isEmpty()) item(key = "empty-pictures") {
@@ -109,15 +109,15 @@ private fun PageCollectionRow(collection: PageCollection, repository: MangaRepos
     val pages = if (collection.spread) "第 ${collection.firstPage + 1}–${collection.lastPage + 1} 页 · 跨页"
         else "第 ${collection.firstPage + 1} 页"
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val previewWidth = (maxWidth * .34f).coerceIn(76.dp, 120.dp)
+        val previewWidth = (maxWidth * .28f).coerceIn(72.dp, 104.dp)
         Row(Modifier.fillMaxWidth()
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = "阅读收藏画面", onClick = onClick)
             .motionPress(interaction, pressedScale = .99f)
-            .padding(horizontal = 4.dp, vertical = 10.dp),
+            .padding(horizontal = 4.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically) {
             CollectionPreview(collection, repository,
-                Modifier.width(previewWidth).height(84.dp).mangaCoverCard(6.dp)
+                Modifier.width(previewWidth).height(76.dp).mangaCoverCard(6.dp)
                     .background(colors.onSurface.copy(alpha = .035f)))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {

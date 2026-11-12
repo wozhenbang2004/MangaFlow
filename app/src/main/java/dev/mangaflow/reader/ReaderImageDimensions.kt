@@ -11,13 +11,27 @@ import java.net.URI
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+/** Cache intrinsic sizes across chapter navigation without retaining decoded bitmaps. */
+internal object ReaderDimensionCache {
+    private const val MaxEntries = 512
+    private val entries = object : java.util.LinkedHashMap<String, IntSize>(MaxEntries, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, IntSize>?): Boolean =
+            size > MaxEntries
+    }
+    @Synchronized fun get(url: String): IntSize? = entries[url]
+    @Synchronized fun put(url: String, dimensions: IntSize) {
+        if (dimensions.width > 0 && dimensions.height > 0) entries[url] = dimensions
+    }
+}
+
 /** Read headers from bytes we already have; never fetch an image just to measure it. */
 internal suspend fun readerImageDimensions(
     imageLoader: ImageLoader,
     page: Page,
     diskCacheKey: String? = page.url,
 ): IntSize? = withContext(Dispatchers.IO) {
-    try {
+    ReaderDimensionCache.get(page.url)?.let { return@withContext it }
+    val dimensions = try {
         if (page.url.startsWith("file:")) {
             imageDimensions(File(URI(page.url)))
         } else {
@@ -32,6 +46,7 @@ internal suspend fun readerImageDimensions(
     } catch (_: IllegalArgumentException) {
         null
     }
+    dimensions?.also { ReaderDimensionCache.put(page.url, it) }
 }
 
 private fun imageDimensions(file: File): IntSize? {

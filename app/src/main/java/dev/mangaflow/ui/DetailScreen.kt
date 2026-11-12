@@ -291,9 +291,9 @@ fun DetailScreen(
                     }.getOrNull()?.let { coverLight = it }
                 },
             )
-            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(heroHeight * .72f)
+            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(heroHeight * .60f)
                 .background(Brush.verticalGradient(0f to Color.Transparent,
-                    .48f to Color.Black.copy(alpha = .46f), 1f to Color.Black.copy(alpha = .86f))))
+                    .48f to Color.Black.copy(alpha = .40f), 1f to Color.Black.copy(alpha = .74f))))
             // The whole visible cover yields to the neutral scene together; no toolbar-only white band.
             Box(Modifier.matchParentSize().graphicsLayer {
                 alpha = if (compactHero) 1f else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)

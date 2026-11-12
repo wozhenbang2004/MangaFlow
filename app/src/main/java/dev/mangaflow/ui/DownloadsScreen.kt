@@ -79,6 +79,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
+import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
@@ -117,6 +118,7 @@ private data class PendingLocalImport(
 @Composable
 fun DownloadsScreen(
     store: DownloadStore,
+    repository: MangaRepository,
     onRead: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
     backdrop: HazeState,
@@ -297,7 +299,7 @@ fun DownloadsScreen(
                                 Box(placement) {
                                     SwipeToRemove(enabled = !managing,
                                         label = "删除这部作品的 ${chapters.size} 话下载", onRemove = { removeWithUndo(chapters) }) {
-                                        DownloadBookRow(chapters, expanded, managing,
+                                        DownloadBookRow(chapters, repository, expanded, managing,
                                             selected = chapters.all { it.id in selectedIds }, refreshingIds = refreshingIds,
                                             onRead = {
                                                 val resume = history.firstOrNull { it.manga.id == mangaId }

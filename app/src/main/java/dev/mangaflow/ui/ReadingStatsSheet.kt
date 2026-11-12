@@ -3,6 +3,7 @@ package dev.mangaflow.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -32,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -89,8 +91,12 @@ internal fun ReadingStatsSheet(
             item(key = "totals") {
                 Row(Modifier.fillMaxWidth().padding(bottom = 22.dp),
                     horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    ReadingTimeValue("累计阅读", total, Modifier.weight(1f))
-                    ReadingTimeValue("近两周", fortnight, Modifier.weight(1f))
+                    ReadingTimeValue("累计阅读", readingDuration(total), Modifier.weight(1f))
+                    ReadingTimeValue(
+                        if (total == fortnight) "近两周活跃" else "近两周",
+                        if (total == fortnight) "${daily.count { it > 0L }} 天" else readingDuration(fortnight),
+                        Modifier.weight(1f),
+                    )
                 }
             }
             item(key = "daily-time") {
@@ -134,10 +140,10 @@ internal fun ReadingStatsSheet(
 }
 
 @Composable
-private fun ReadingTimeValue(label: String, millis: Long, modifier: Modifier) {
+private fun ReadingTimeValue(label: String, value: String, modifier: Modifier) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-        Text(readingDuration(millis), color = MaterialTheme.colorScheme.onSurface,
+        Text(value, color = MaterialTheme.colorScheme.onSurface,
             fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold)
     }
 }
@@ -147,15 +153,25 @@ private fun DailyReadingChart(dates: List<LocalDate>, values: List<Long>) {
     val colors = MaterialTheme.colorScheme
     val ink = colors.onSurface
     val peak = values.maxOrNull()?.coerceAtLeast(0L) ?: 0L
+    var selectedDay by remember(dates) { mutableIntStateOf(-1) }
     val accessibility = dates.zip(values).joinToString("，") { (day, time) ->
         "${day.monthValue}月${day.dayOfMonth}日 ${readingDuration(time)}"
     }
     Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("每日阅读", fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-        Text(if (peak == 0L) "暂无记录" else "单日最多 ${readingDuration(peak)}",
+        Text(if (selectedDay in dates.indices) {
+            "${dates[selectedDay].monthValue}/${dates[selectedDay].dayOfMonth} · ${readingDuration(values[selectedDay])}"
+        } else if (peak == 0L) "暂无记录" else "单日最多 ${readingDuration(peak)}",
             fontSize = 10.sp, color = colors.onSurfaceVariant)
     }
-    Canvas(Modifier.fillMaxWidth().height(66.dp).semantics { contentDescription = accessibility }) {
+    Canvas(Modifier.fillMaxWidth().height(66.dp)
+        .pointerInput(dates, values) {
+            detectTapGestures { position ->
+                selectedDay = (position.x / size.width.coerceAtLeast(1) * values.size).toInt()
+                    .coerceIn(0, values.lastIndex)
+            }
+        }
+        .semantics { contentDescription = accessibility }) {
         val count = values.size.coerceAtLeast(1)
         val slot = size.width / count
         val width = (slot * .62f).coerceAtMost(14.dp.toPx())
@@ -164,7 +180,7 @@ private fun DailyReadingChart(dates: List<LocalDate>, values: List<Long>) {
         if (peak > 0L) values.forEachIndexed { index, value ->
             if (value > 0L) {
                 val height = (floor * (value.toDouble() / peak).toFloat()).coerceAtLeast(.7.dp.toPx())
-                drawRoundRect(ink.copy(alpha = if (index == values.lastIndex) .8f else .35f),
+                drawRoundRect(ink.copy(alpha = if (index == selectedDay) .88f else if (selectedDay < 0 && index == values.lastIndex) .8f else .35f),
                     topLeft = Offset(slot * index + (slot - width) / 2f, floor - height),
                     size = Size(width, height), cornerRadius = CornerRadius(3.dp.toPx()))
             }

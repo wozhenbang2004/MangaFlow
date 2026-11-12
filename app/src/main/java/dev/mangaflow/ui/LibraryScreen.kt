@@ -23,6 +23,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -33,6 +37,10 @@ import androidx.compose.material.icons.outlined.Collections
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -42,6 +50,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.key
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -77,7 +86,11 @@ import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
     favorites: List<Manga>, history: List<ReadingProgress>,
@@ -108,9 +121,43 @@ fun LibraryScreen(
         return (point - bounds.center).getDistanceSquared() <= radius * radius
     }
     val trashArmed = draggedFavorite != null && isTrashDrop(dragPoint)
-    val favoritesPosition = rememberLazyListState()
+    val favoritesPosition = rememberLazyGridState()
     val historyPosition = rememberLazyListState()
     val progressById = remember(history) { history.associateBy { it.manga.id } }
+    val snackbar = remember { SnackbarHostState() }
+    val removalScope = rememberCoroutineScope()
+    var pendingFavorites by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var pendingHistory by remember { mutableStateOf<Set<String>>(emptySet()) }
+    fun removeFavoriteWithUndo(manga: Manga) {
+        if (manga.id in pendingFavorites) return
+        pendingFavorites = pendingFavorites + manga.id
+        snackbar.currentSnackbarData?.dismiss()
+        removalScope.launch {
+            var undone = false
+            try {
+                undone = snackbar.showSnackbar("已移出书架", actionLabel = "撤销",
+                    withDismissAction = true, duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
+            } finally {
+                if (!undone) withContext(NonCancellable) { onRemoveFavorite(manga) }
+                pendingFavorites = pendingFavorites - manga.id
+            }
+        }
+    }
+    fun removeHistoryWithUndo(mangaId: String) {
+        if (mangaId in pendingHistory) return
+        pendingHistory = pendingHistory + mangaId
+        snackbar.currentSnackbarData?.dismiss()
+        removalScope.launch {
+            var undone = false
+            try {
+                undone = snackbar.showSnackbar("已移除阅读记录", actionLabel = "撤销",
+                    withDismissAction = true, duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
+            } finally {
+                if (!undone) withContext(NonCancellable) { onRemoveHistory(mangaId) }
+                pendingHistory = pendingHistory - mangaId
+            }
+        }
+    }
     LaunchedEffect(active, showHistory) {
         managedId = null
         draggedFavorite = null
@@ -141,8 +188,8 @@ fun LibraryScreen(
                         if (history.isEmpty()) item(key = "empty-history") {
                             EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
                         }
-                        items(history, key = { "history-${it.manga.id}" }) { progress ->
-                            SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
+                        items(history.filterNot { it.manga.id in pendingHistory }, key = { "history-${it.manga.id}" }) { progress ->
+                            SwipeToRemove(onRemove = { removeHistoryWithUndo(progress.manga.id) }, label = "删除阅读记录") {
                                 ContinueRow(progress, repository, onContinue,
                                     onManage = { onCancelOpen(); managedId = progress.manga.id },
                                     onHistory = { onCancelOpen(); managedId = null; chapterHistoryManga = progress.manga })
@@ -161,44 +208,78 @@ fun LibraryScreen(
                         val perShelf = ((available + gap) / (minimumWidth + gap)).toInt().coerceIn(1, 3)
                         val bookWidth = (available - gap * (perShelf - 1)) / perShelf
                         val bookHeight = bookWidth / .7f
-                        val rows = remember(favorites, perShelf) { favorites.chunked(perShelf) }
-                        LazyColumn(
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(perShelf),
                             state = favoritesPosition,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(top = headerPadding + 8.dp, bottom = 32.dp),
+                            contentPadding = PaddingValues(start = 16.dp, end = 16.dp,
+                                top = headerPadding + 8.dp, bottom = 32.dp),
+                            horizontalArrangement = Arrangement.spacedBy(gap),
                             verticalArrangement = Arrangement.spacedBy(18.dp),
                         ) {
-                            if (favorites.isEmpty()) item(key = "empty-collection") {
-                                EmptyBookshelf(onDiscover)
-                            }
-                            items(rows, key = { "shelf-${it.first().id}" }) { books ->
-                                BookshelfRow(
-                                    books, repository, progressById, opening,
-                                    bookWidth, bookHeight, managedId,
-                                    draggedId = draggedFavorite?.id,
-                                    deleteArmed = trashArmed,
-                                    onOpen = onOpen,
-                                    onDetails = onDetails,
-                                    onRemove = onRemoveFavorite,
-                                    onManage = { if (it != null) onCancelOpen(); managedId = it },
-                                    onDragStart = { manga, point ->
-                                        onCancelOpen()
-                                        managedId = null
-                                        draggedFavorite = manga
-                                        dragPoint = point
-                                    },
-                                    onDragMove = { dragPoint = it },
-                                    onDragEnd = { manga, point ->
-                                        val remove = draggedFavorite?.id == manga.id && isTrashDrop(point)
-                                        draggedFavorite = null
-                                        dragPoint = Offset.Unspecified
-                                        if (remove) onRemoveFavorite(manga)
-                                    },
-                                    onDragCancel = {
-                                        draggedFavorite = null
-                                        dragPoint = Offset.Unspecified
-                                    },
-                                )
+                            if (favorites.isEmpty()) item(key = "empty-collection", span = {
+                                androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                            }) { EmptyBookshelf(onDiscover) }
+                            gridItems(favorites.filterNot { it.id in pendingFavorites }, key = Manga::id) { manga ->
+                                val saved = progressById[manga.id]
+                                val dragged = draggedFavorite?.id == manga.id
+                                val interaction = remember(manga.id) { MutableInteractionSource() }
+                                Column(Modifier.fillMaxWidth().animateItem().zIndex(if (dragged) 8f else 0f)) {
+                                    SwipeToRemove(onRemove = { removeFavoriteWithUndo(manga) },
+                                        label = "删除收藏", enabled = !dragged) {
+                                        BookshelfBook(
+                                            manga, repository, saved,
+                                            opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
+                                            onOpen = { onOpen(manga) },
+                                            dragging = dragged,
+                                            deleteArmed = dragged && trashArmed,
+                                            onDragStart = { point ->
+                                                onCancelOpen()
+                                                managedId = null
+                                                draggedFavorite = manga
+                                                dragPoint = point
+                                            },
+                                            onDragMove = { dragPoint = it },
+                                            onDragEnd = { point ->
+                                                val shouldRemove = draggedFavorite?.id == manga.id && isTrashDrop(point)
+                                                draggedFavorite = null
+                                                dragPoint = Offset.Unspecified
+                                                if (shouldRemove) removeFavoriteWithUndo(manga)
+                                            },
+                                            onDragCancel = {
+                                                draggedFavorite = null
+                                                dragPoint = Offset.Unspecified
+                                            },
+                                            modifier = Modifier.fillMaxWidth().height(bookHeight),
+                                        )
+                                    }
+                                    Box(Modifier.fillMaxWidth()) {
+                                        Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                                            .semantics(mergeDescendants = true) { contentDescription = manga.title }
+                                            .combinedClickable(interactionSource = interaction, indication = null,
+                                                onClickLabel = if (saved == null) "开始阅读" else "继续阅读",
+                                                onLongClickLabel = "详情与目录",
+                                                onLongClick = { onCancelOpen(); managedId = manga.id },
+                                                onClick = { onOpen(manga) })
+                                            .padding(horizontal = 2.dp)) {
+                                            Text(manga.title, modifier = Modifier.padding(top = 5.dp),
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Medium,
+                                                minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                            val progressText = saved?.let {
+                                                it.chapterTitle.ifBlank { "继续阅读" } +
+                                                    if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
+                                            } ?: "未读"
+                                            Text(progressText, modifier = Modifier.padding(top = 3.dp),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 11.sp, lineHeight = 15.sp,
+                                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                        RecordActionsMenu(managedId == manga.id,
+                                            onDismiss = { managedId = null },
+                                            onDetails = { onDetails(manga) })
+                                    }
+                                }
                             }
                         }
                     }
@@ -271,84 +352,11 @@ fun LibraryScreen(
                 }
             }
         }
+        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+            .padding(horizontal = 20.dp, vertical = 12.dp))
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun BookshelfRow(
-    books: List<Manga>, repository: MangaRepository, progress: Map<String, ReadingProgress>,
-    opening: LibraryOpenState?,
-    bookWidth: Dp, bookHeight: Dp, managedId: String?,
-    draggedId: String?, deleteArmed: Boolean,
-    onOpen: (Manga) -> Unit, onDetails: (Manga) -> Unit, onRemove: (Manga) -> Unit,
-    onManage: (String?) -> Unit,
-    onDragStart: (Manga, Offset) -> Unit, onDragMove: (Offset) -> Unit,
-    onDragEnd: (Manga, Offset) -> Unit, onDragCancel: () -> Unit,
-) {
-    val draggingHere = books.any { it.id == draggedId }
-    Column(Modifier.fillMaxWidth().zIndex(if (draggingHere) 8f else 0f)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).zIndex(if (draggingHere) 8f else 0f),
-            horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
-            books.forEach { manga ->
-                key(manga.id) {
-                    Box(Modifier.width(bookWidth).zIndex(if (draggedId == manga.id) 8f else 0f)) {
-                        SwipeToRemove(onRemove = { onRemove(manga) }, label = "删除收藏",
-                            enabled = draggedId != manga.id) {
-                            BookshelfBook(
-                                manga, repository, progress[manga.id],
-                                opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
-                                onOpen = { onOpen(manga) },
-                                dragging = draggedId == manga.id,
-                                deleteArmed = draggedId == manga.id && deleteArmed,
-                                onDragStart = { onDragStart(manga, it) },
-                                onDragMove = onDragMove,
-                                onDragEnd = { onDragEnd(manga, it) },
-                                onDragCancel = onDragCancel,
-                                modifier = Modifier.fillMaxWidth().height(bookHeight),
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            books.forEach { manga ->
-                key(manga.id) {
-                    val interaction = remember(manga.id) { MutableInteractionSource() }
-                    val saved = progress[manga.id]
-                    Box(Modifier.width(bookWidth)) {
-                        Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                            .semantics(mergeDescendants = true) { contentDescription = manga.title }
-                            .combinedClickable(interactionSource = interaction, indication = null,
-                                onClickLabel = if (saved == null) "开始阅读" else "继续阅读",
-                                onLongClickLabel = "详情与目录", onLongClick = { onManage(manga.id) },
-                                onClick = { onOpen(manga) })
-                            .padding(horizontal = 2.dp)) {
-                            Text(manga.title, modifier = Modifier.padding(top = 5.dp),
-                                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
-                                minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            val progressText = saved?.let {
-                                it.chapterTitle.ifBlank { "继续阅读" } +
-                                    if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
-                            } ?: "未读"
-                            Text(progressText, modifier = Modifier.padding(top = 3.dp),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 11.sp, lineHeight = 15.sp, maxLines = 1,
-                                overflow = TextOverflow.Ellipsis)
-                        }
-                        RecordActionsMenu(
-                            managedId == manga.id,
-                            onDismiss = { onManage(null) },
-                            onDetails = { onDetails(manga) },
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun EmptyBookshelf(onDiscover: () -> Unit) {

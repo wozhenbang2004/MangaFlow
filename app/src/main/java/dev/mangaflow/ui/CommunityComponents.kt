@@ -423,7 +423,7 @@ private fun CommentContent(
     val hasForeignText = remember(translationText) { hasForeignCommentText(translationText) }
     val canTranslate = revealed && hasForeignText
     Row(modifier.fillMaxWidth().animateContentSize(
-        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Quick) else snap())
+        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap())
         .then(if (expandable) Modifier.clickable(role = Role.Button,
             onClickLabel = if (expanded) "收起评论" else "展开评论", onClick = toggleContent) else Modifier),
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {

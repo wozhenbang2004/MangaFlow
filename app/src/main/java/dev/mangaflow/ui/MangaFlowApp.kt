@@ -496,7 +496,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onDiscover = { changeSection(Section.DISCOVER) },
                                         onRetryOpen = model::retryLibraryReading, onCancelOpen = model::cancelLibraryReading,
                                     )
-                                    Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, onRead = model::openDownload,
+                                    Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, repository = model.repository, onRead = model::openDownload,
                                         onRetry = model::retryDownload, backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         refreshingIds = refreshingDownloads, history = history)
                                     Section.ACCOUNT -> AccountScreen(

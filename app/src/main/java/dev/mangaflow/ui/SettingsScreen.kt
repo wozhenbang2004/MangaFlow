@@ -323,7 +323,7 @@ fun SettingsScreen(
     ) {
         item {
             // Keep the import controls composed while scrolling; their in-progress copy owns this lifetime.
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(22.dp)) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 SettingsSection("阅读") {
                     SettingsDisclosure("翻页方式", when (preferences.mode) {
                         ReadingMode.VERTICAL -> "纵向滚动"
@@ -871,7 +871,7 @@ private fun SettingsDisclosure(
             .semantics { stateDescription = "$value，${if (expanded) "已展开" else "已收起"}" }
             .clickable(interactionSource = interaction, indication = null, onClick = onToggle)
             .motionPress(interaction, pressedScale = .99f)
-            .heightIn(min = 52.dp).padding(vertical = 8.dp),
+            .heightIn(min = 48.dp).padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Icon(icon, null, Modifier.size(21.dp), tint = colors.onSurfaceVariant)
@@ -884,9 +884,14 @@ private fun SettingsDisclosure(
         }
         Column(Modifier.fillMaxWidth().clipToBounds().motionInputGate(expanded)
             .layout { measurable, constraints ->
-                val body = measurable.measure(constraints.copy(minHeight = 0))
-                layout(body.width, (body.height * reveal.value).toInt().coerceAtLeast(0)) {
-                    if (reveal.value > 0f) body.placeRelative(0, 0)
+                // Keep the composed child alive for imports, but do not measure it when closed.
+                if (reveal.value <= 0f) {
+                    layout(constraints.minWidth.coerceAtLeast(0), 0) {}
+                } else {
+                    val body = measurable.measure(constraints.copy(minHeight = 0))
+                    layout(body.width, (body.height * reveal.value).toInt().coerceAtLeast(0)) {
+                        body.placeRelative(0, 0)
+                    }
                 }
             }.graphicsLayer { alpha = reveal.value }
             .padding(top = 4.dp, bottom = 12.dp),
@@ -901,7 +906,7 @@ private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onS
         selected = choices.indexOfFirst { it.first == selected }, labels = choices.map { it.second },
         onSelect = { onSelected(choices[it].first) }, role = Role.RadioButton,
         track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface,
-        fullWidthIndicator = true, controlHeight = 52.dp, treatment = MotionTabTreatment.Soft,
+        fullWidthIndicator = true, controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
         fontSize = MaterialTheme.typography.bodyMedium.fontSize,
         selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
     )
@@ -921,7 +926,7 @@ private fun SettingsToggle(title: String, checked: Boolean, leadingInset: Dp = 3
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .toggleable(checked, interactionSource = interaction, indication = null,
-                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = if (compact) 48.dp else 54.dp).padding(vertical = 3.dp),
+                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = if (compact) 48.dp else 50.dp).padding(vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(title, Modifier.weight(1f).padding(start = leadingInset, end = 12.dp),

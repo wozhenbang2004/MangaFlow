@@ -1,5 +1,19 @@
 # MangaFlow detail · 2026-11-12
 
+## UI/UX code review follow-up · 2026-11-13 (UIUX-REVIEW-01)
+
+User explicitly requested an implementation follow-up: “去看现在的代码看看 uiux 还有什么能优化的” followed by “去全部落地”. Preserve the previous screenshot reversals, stable data semantics and existing Ovio/Backdrop/beUI adaptations; this batch is a concrete source refinement rather than a replacement design system.
+
+- Shelf: switch the flat collection from row-first keys to item-stable manga IDs in a lazy grid, preserving covers, title/progress labels, swipe gestures and drag-to-trash. Favorite/history deletion hides the selected record, offers an undo Snackbar and commits only after dismissal. No download files are touched.
+- Download: keep grouping by manga ID and exact chapter transfer semantics. Use the normal source-backed cover loader for online works, retaining the original local-import cover path. Tighten complete-record chapter/page/size metadata into one band when space allows. Do not infer a lost volume or manipulate stored entries from a screenshot-sized capacity difference.
+- Reader: isolate the active chapter's download state to avoid unrelated queue emissions invalidating reader chrome. Memoize 512 intrinsic image dimensions by page URL, using existing stored/disk dimensions before 0.7 placeholders. Preserve the concurrent PERF-03/04 collectLatest/window enabled and idle-deferred resizing, all prefetch caps, exact chapter/page/offset and download recovery.
+- Detail: leave the restored immersive cover layout intact, soften only the local dark gradient and remove redundant single-group chapter count. Rename the existing immediate-download mode honestly, without pretending it batches selections. Keep separate download marks and per-chapter reading progress.
+- Recent reading/statistics: show compact actual page progress rather than pulling full source scores into history rows. The fourteen-day chart selects real day and duration on tap, with an active-day summary when lifetime and fortnight totals are identical. Retain exact time data.
+- Panels: shorten the shared bottom-sheet drag handle, picture collection previews and spacing; keep popup access, scrolling, image jump and non-destructive accessibility. Set disclosure measurements to zero while fully closed but keep their composed children alive so wallpaper imports are not canceled.
+- Motion/performance: use the existing search/list curves for comment text expansion and a lower-radius homepage background blur; maintain native carousel, Ovio segmented-edge motion, cover shared bounds, theming and reduced-motion controls.
+
+Evidence boundary: static source and difference review, not measured speed or device visual verification. Do not write/run tests, local builds, benchmarks or API probes. Commit directly to the latest main with all concurrent changes retained and confirm the main CI workflow was triggered. Installation and interaction acceptance remain with the user.
+
 ## Reading and browsing performance · 2026-11-13 (current)
 
 User: “去优化当前漫画软件的性能用户体验等等各个方面等等”. This batch addresses source-visible redundant work while retaining DETAIL-RESTORE-03, COMMENTS-TRANSLATE-02, HOME-INDICATOR-02 and READER-COLLECT-05. No new UI, dependencies or cache formats are introduced.

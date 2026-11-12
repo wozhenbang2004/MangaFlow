@@ -1,5 +1,7 @@
 # MangaFlow
 
+- Current UI/UX source-review follow-up (2026-11-13): retain actual per-manga keys in the flat shelf, reversible removal for history/favorites, shared remote cover request headers with a local-import fallback, task-first recent progress, quiet detail gradient, honest immediate chapter-download mode, bounded reader dimensions, current-chapter-only transfer state and the newest reader performance prefetch/idle-resize guards. Daily statistics now disclose a selected date; sheet/density changes must not break async wallpaper imports or existing actions. Details: DESIGN.md UIUX-REVIEW-01. Direct main, no local build/tests, check CI trigger and leave device acceptance to the user.
+
 Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 
 ## 当前开发与交付规则 · 2026-11-12
