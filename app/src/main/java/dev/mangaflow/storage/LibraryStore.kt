@@ -268,7 +268,7 @@ class LibraryStore(context: Context) {
         "$LONG_IMAGE_POSITION_PREFIX${mangaId.length}:$mangaId${chapterId.length}:$chapterId:$pageIndex"
 
     private fun spreadKey(mangaId: String, chapterId: String) =
-        "$" + "{SPREAD_PREFIX}$" + "{mangaId.length}:$" + "mangaId$" + "{chapterId.length}:$" + "chapterId"
+        "${SPREAD_PREFIX}${mangaId.length}:$mangaId${chapterId.length}:$chapterId"
 
     private companion object {
         const val SPREAD_PREFIX = "spread_singles:"

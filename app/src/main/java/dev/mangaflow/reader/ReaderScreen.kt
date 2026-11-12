@@ -539,7 +539,7 @@ private fun ChapterPages(
             modifier = Modifier.fillMaxSize(),
             reverseLayout = preferences.mode == ReadingMode.RIGHT_TO_LEFT,
             beyondViewportPageCount = 1,
-            key = { index -> groups.getOrNull(index)?.first?.let { "image:$" + "it" } ?: "chapter-end" },
+            key = { index -> groups.getOrNull(index)?.first?.let { "image:$it" } ?: "chapter-end" },
         ) { index ->
             val group = groups.getOrNull(index)
             if (group != null) {
@@ -936,7 +936,7 @@ private fun ReaderSpreadDialog(
                     Text("错页校正", fontSize = 18.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                     ReaderIcon(Icons.Rounded.Close, "关闭校正", onClick = onDismiss)
                 }
-                Text("当前显示从第 $" + "{first + 1} 页开始", color = Color.White.copy(alpha = .75f), fontSize = 13.sp)
+                Text("当前显示从第 ${first + 1} 页开始", color = Color.White.copy(alpha = .75f), fontSize = 13.sp)
                 Text("两张图拼接错位时，将这一页设为独页，后续页会自动重新配对。不会更改原始图片顺序。",
                     color = Color.White.copy(alpha = .56f), fontSize = 12.sp)
                 ReaderToggle("封面独页", preferences.coverAlone) {
@@ -955,8 +955,8 @@ private fun ReaderSpreadDialog(
                         onCorrection(next)
                         onDismiss()
                     }) {
-                        Text(if (first in manualSingles) "恢复第 $" + "{first + 1} 页的自动拼接"
-                            else "第 $" + "{first + 1} 页独立，后续重新配对", color = Color.White, fontSize = 13.sp)
+                        Text(if (first in manualSingles) "恢复第 ${first + 1} 页的自动拼接"
+                            else "第 ${first + 1} 页独立，后续重新配对", color = Color.White, fontSize = 13.sp)
                     }
                 }
                 if (manualSingles.isNotEmpty()) {
