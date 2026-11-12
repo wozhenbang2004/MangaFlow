@@ -1,11 +1,18 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -59,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -68,6 +76,7 @@ import coil3.request.crossfade
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -82,6 +91,8 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.motionInputGate
+import dev.mangaflow.ui.motion.motionPress
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
@@ -385,6 +396,7 @@ private fun CommentContent(
     showReplyCount: Boolean,
     sourceId: String? = null,
     comfortable: Boolean = false,
+    compactReply: Boolean = false,
 ) {
     val text = review.body.ifBlank { review.summary }.trim()
     val reviewHeading = review.summary.trim().takeIf {
@@ -415,7 +427,7 @@ private fun CommentContent(
         .then(if (expandable) Modifier.clickable(role = Role.Button,
             onClickLabel = if (expanded) "收起评论" else "展开评论", onClick = toggleContent) else Modifier),
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        CommentAvatar(review, foreground, size = if (comfortable) 30.dp else 28.dp)
+        CommentAvatar(review, foreground, size = if (compactReply) 24.dp else if (comfortable) 30.dp else 28.dp)
         Column(Modifier.weight(1f)) {
             Row(Modifier.fillMaxWidth().heightIn(min = 18.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -479,7 +491,7 @@ private fun CommentContent(
                     }
                     if (showReplyCount && (review.replyCount ?: 0) > 0) {
                         Text("${review.replyCount} 条回复", color = muted, fontSize = 11.sp,
-                            modifier = Modifier.align(Alignment.CenterVertically).padding(vertical = 8.dp))
+                            modifier = Modifier.align(Alignment.CenterVertically).padding(vertical = 4.dp))
                     }
                 }
             }
@@ -520,12 +532,13 @@ internal fun CommunityDiscussionComment(
 ) {
     val hasReplies = ((source.id == "copy" && review.kind == ReviewKind.COMMENT) || source.supportsReplies) &&
         source.subjectId.isNotBlank() && (review.replyCount ?: if (review.canLoadReplies) 1 else 0) > 0
-    Column(Modifier.fillMaxWidth().padding(vertical = if (comfortable) 9.dp else 6.dp)) {
+    Column(Modifier.fillMaxWidth().padding(vertical = if (comfortable) 7.dp else 6.dp)) {
         CommentContent(review, Modifier, foreground, muted,
             showReplyCount = !hasReplies, sourceId = source.id, comfortable = comfortable)
         if (hasReplies) {
             key(source.id, source.subjectId, review.id, source.externalIds) {
-                CommentReplies(source, review, loadReplies, foreground, muted)
+                CommentReplies(source, review, loadReplies, foreground, muted,
+                    leadingInset = if (comfortable) 38.dp else 36.dp)
             }
         }
     }
@@ -538,6 +551,7 @@ private fun CommentReplies(
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
     foreground: Color,
     muted: Color,
+    leadingInset: Dp,
 ) {
     var expanded by remember { mutableStateOf(false) }
     var rows by remember { mutableStateOf<List<MangaReview>>(emptyList()) }
@@ -580,27 +594,41 @@ private fun CommentReplies(
         }
     }
 
-    TextButton(onClick = {
-        expanded = !expanded
-        if (expanded && !loaded) load(0)
-        else if (!expanded) {
-            requestVersion++
-            request?.cancel()
-            busy = false
-        }
-    }, modifier = Modifier.padding(start = 36.dp), contentPadding = PaddingValues(end = 10.dp)) {
+    val motion = LocalMotionEnabled.current
+    val chevron = animateFloatAsState(if (expanded) 180f else 0f,
+        tween(if (motion) MangaMotion.Quick else 0), label = "comment-replies-chevron")
+    val interaction = remember { MutableInteractionSource() }
+    Row(Modifier.padding(start = leadingInset, top = 3.dp)
+        .clip(RoundedCornerShape(6.dp))
+        .semantics { stateDescription = if (expanded) "回复已展开" else "回复已收起" }
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = {
+            expanded = !expanded
+            if (expanded && !loaded) load(0)
+            else if (!expanded) {
+                requestVersion++
+                request?.cancel()
+                busy = false
+            }
+        }).motionPress(interaction, pressedScale = .98f)
+        .heightIn(min = 28.dp).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(if (expanded) "收起回复" else review.replyCount?.let { "$it 条回复" } ?: "查看回复",
-            color = muted, fontSize = 12.sp)
+            color = muted, fontSize = 12.sp, lineHeight = 16.sp)
         Spacer(Modifier.width(4.dp))
-        Icon(if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
-            null, tint = muted, modifier = Modifier.size(15.dp))
+        Icon(Icons.Outlined.KeyboardArrowDown,
+            null, tint = muted, modifier = Modifier.size(14.dp).graphicsLayer { rotationZ = chevron.value })
     }
-    if (expanded) {
-        Column(Modifier.fillMaxWidth().padding(start = 36.dp)) {
+    AnimatedVisibility(expanded,
+        enter = expandVertically(tween(if (motion) MangaMotion.Content else 0), expandFrom = Alignment.Top) +
+            fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
+        exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0), shrinkTowards = Alignment.Top) +
+            fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
+        Column(Modifier.fillMaxWidth().motionInputGate(expanded)
+            .padding(start = leadingInset, top = 3.dp, bottom = 2.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
             rows.forEach { reply ->
                 key(source.subjectId, review.id, reply.id) {
-                    CommunityComment(reply, Modifier.padding(bottom = 10.dp), foreground, muted,
-                        sourceId = source.id)
+                    CommentContent(reply, Modifier, foreground, muted, showReplyCount = true,
+                        sourceId = source.id, compactReply = true)
                 }
             }
             if (error != null) CommentFailure(error.orEmpty(), busy) { load(failedPage) }

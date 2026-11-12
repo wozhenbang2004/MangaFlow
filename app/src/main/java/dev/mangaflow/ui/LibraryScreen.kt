@@ -229,9 +229,11 @@ fun LibraryScreen(
                         onSelect = { index ->
                             if (showHistory != (index == 1)) onCancelOpen()
                             showHistory = index == 1
-                        }, modifier = Modifier.weight(1f), controlHeight = 44.dp, indicatorHeight = 28.dp,
+                        }, modifier = Modifier.weight(1f), controlHeight = 44.dp, indicatorHeight = 36.dp,
+                        fullWidthIndicator = true,
                         treatment = MotionTabTreatment.Soft,
-                        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .045f), fontSize = 14.sp,
+                        indicator = MaterialTheme.colorScheme.primary.copy(alpha = .10f), fontSize = 14.sp,
+                        foreground = MaterialTheme.colorScheme.primary,
                         selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
                         itemContent = { index, selected, color ->
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {

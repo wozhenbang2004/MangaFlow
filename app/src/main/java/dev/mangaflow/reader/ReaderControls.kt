@@ -2,7 +2,6 @@ package dev.mangaflow.reader
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
@@ -36,7 +35,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -116,7 +114,7 @@ internal fun ReaderSeekBar(
     )
     val fraction = ((value - valueRange.start) /
         (valueRange.endInclusive - valueRange.start).coerceAtLeast(.001f)).coerceIn(0f, 1f)
-    val foreground = colors.onSurface.copy(alpha = if (enabled) .72f else .24f)
+    val foreground = colors.primary.copy(alpha = if (enabled) .86f else .24f)
     val pageCount = remember(label) {
         Regex("""共\s*(\d+)\s*页""").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
     }
@@ -163,7 +161,6 @@ internal fun ReaderSeekBar(
             shape = RoundedCornerShape(9.dp),
             color = colors.surface.copy(alpha = .96f),
             contentColor = colors.onSurface,
-            border = BorderStroke(.5.dp, colors.outlineVariant.copy(alpha = .38f)),
             shadowElevation = if (engaged) 2.dp else 0.dp,
             tonalElevation = 0.dp,
         ) {

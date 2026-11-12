@@ -347,12 +347,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         active = current.key == frame.key,
                     )
                     is Frame.Detail -> savedState.SaveableStateProvider(current.key) {
+                        val chapterPositions = rememberChapterPositions(current.state.manga, model.library,
+                            active = current.key == frame.key)
                         DetailScreen(
                             manga = current.state.manga, detail = current.state.detail,
                             loading = current.state.loading, error = current.state.error,
                             reviews = current.state.reviews, reviewsLoading = current.state.reviewsLoading,
                             isFavorite = favorites.any { it.id == current.state.manga.id },
                             progress = history.firstOrNull { it.manga.id == current.state.manga.id },
+                            chapterPositions = chapterPositions,
                             downloadEntries = downloads,
                             loadVolumeCover = { chapter, refresh -> model.volumeCover(current.state.manga.id, chapter, refresh) },
                             volumeImageHeaders = { chapter -> model.repository.imageHeaders(current.state.manga.id, chapter.id) },
@@ -485,7 +488,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     )
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, onRead = model::openDownload,
                                         onRetry = model::retryDownload, backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
-                                        refreshingIds = refreshingDownloads)
+                                        refreshingIds = refreshingDownloads, history = history)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
                                         onLoginWithCookie = model::loginWithCookie, onLogin = model::login,

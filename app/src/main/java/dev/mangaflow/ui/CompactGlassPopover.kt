@@ -1,0 +1,136 @@
+package dev.mangaflow.ui
+
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
+import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.motionInputGate
+import dev.mangaflow.ui.motion.motionPress
+
+/** Reuse DetailCommentFilter's retained glass presence for compact contextual action menus. */
+@Composable
+internal fun CompactGlassPopover(
+    visible: Boolean,
+    backdrop: HazeState,
+    onDismiss: () -> Unit,
+    onPresenceChange: (Boolean) -> Unit = {},
+    aboveAnchor: Boolean = false,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val motion = LocalMotionEnabled.current
+    val density = LocalDensity.current
+    val direction = LocalLayoutDirection.current
+    val presence = remember { MutableTransitionState(false) }
+    presence.targetState = visible
+    val transition = updateTransition(presence, label = "reader-actions")
+    val alpha = transition.animateFloat(transitionSpec = {
+        tween(if (motion) if (targetState) MangaMotion.Content else MangaMotion.Quick else 0)
+    }, label = "reader-actions-opacity") { if (it) 1f else 0f }
+    val scale = transition.animateFloat(transitionSpec = {
+        if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap()
+    }, label = "reader-actions-scale") { if (it) 1f else .94f }
+    val present = presence.currentState || presence.targetState || !presence.isIdle
+    val reportPresence by rememberUpdatedState(onPresenceChange)
+    SideEffect { reportPresence(present) }
+    DisposableEffect(Unit) { onDispose { reportPresence(false) } }
+    if (!present) return
+    val position = remember(density, aboveAnchor) {
+        val gap = with(density) { 8.dp.roundToPx() }
+        val margin = with(density) { 12.dp.roundToPx() }
+        object : PopupPositionProvider {
+            override fun calculatePosition(
+                anchorBounds: IntRect,
+                windowSize: IntSize,
+                layoutDirection: LayoutDirection,
+                popupContentSize: IntSize,
+            ): IntOffset {
+                val x = if (layoutDirection == LayoutDirection.Ltr)
+                    anchorBounds.right - popupContentSize.width else anchorBounds.left
+                val below = anchorBounds.bottom + gap
+                val above = anchorBounds.top - popupContentSize.height - gap
+                val desiredY = if (aboveAnchor || below + popupContentSize.height > windowSize.height - margin) above else below
+                return IntOffset(
+                    x.coerceIn(margin, (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)),
+                    desiredY.coerceIn(margin, (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin)),
+                )
+            }
+        }
+    }
+    Popup(popupPositionProvider = position, onDismissRequest = { if (visible) onDismiss() },
+        properties = PopupProperties(focusable = visible)) {
+        LiquidGlassSurface(backdrop,
+            Modifier.width((LocalConfiguration.current.screenWidthDp.dp - 48.dp).coerceAtMost(264.dp))
+                .motionInputGate(visible).graphicsLayer {
+                    this.alpha = alpha.value
+                    scaleX = scale.value; scaleY = scale.value
+                    transformOrigin = TransformOrigin(if (direction == LayoutDirection.Ltr) 1f else 0f, if (aboveAnchor) 1f else 0f)
+                    translationY = (if (aboveAnchor) 6.dp.toPx() else -6.dp.toPx()) * (1f - alpha.value)
+                }, cornerRadius = 18.dp, role = GlassSurfaceRole.POPOVER, softCard = true) {
+            Column(Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp - 64).coerceAtLeast(96).dp)
+                .verticalScroll(rememberScrollState()).padding(6.dp), content = content)
+        }
+    }
+}
+
+@Composable
+internal fun CompactMenuAction(icon: ImageVector, label: String, enabled: Boolean = true, destructive: Boolean = false, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val color = (if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+        .copy(alpha = if (enabled) .86f else .30f)
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        .clickable(enabled = enabled, interactionSource = interaction, indication = null,
+            role = Role.Button, onClick = onClick)
+        .motionPress(interaction, enabled, pressedScale = .98f)
+        .heightIn(min = 48.dp).padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, Modifier.size(19.dp), tint = color)
+        Text(label, Modifier.padding(start = 12.dp), color = color, fontSize = 13.sp, lineHeight = 19.sp)
+    }
+}
+

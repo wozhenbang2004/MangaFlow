@@ -4,9 +4,11 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -20,20 +22,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Collections
-import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -41,18 +41,17 @@ import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -66,13 +65,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -85,13 +79,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
-import coil3.compose.AsyncImage
+import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
@@ -99,9 +94,13 @@ import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
-private enum class DownloadFilter(val label: String) { ALL("全部"), ACTIVE("未完成"), SAVED("已下载") }
+private enum class DownloadFilter(val label: String) { ALL("全部"), ACTIVE("进行中"), SAVED("已下载") }
 
 private sealed interface LocalImportSource {
     data class Archive(val uri: Uri) : LocalImportSource
@@ -124,6 +123,7 @@ fun DownloadsScreen(
     navigation: @Composable () -> Unit,
     toolbar: @Composable (@Composable () -> Unit) -> Unit,
     refreshingIds: Set<String> = emptySet(),
+    history: List<ReadingProgress> = emptyList(),
 ) {
     val context = LocalContext.current
     val entries by store.entries.collectAsStateWithLifecycle()
@@ -132,8 +132,10 @@ fun DownloadsScreen(
     val snackbar = remember { SnackbarHostState() }
     var filter by rememberSaveable { mutableStateOf(DownloadFilter.ALL) }
     var removingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var clearCompleted by remember { mutableStateOf(false) }
-    var bulkBusy by remember { mutableStateOf(false) }
+    var pendingDeletion by remember { mutableStateOf<List<DownloadEntry>?>(null) }
+    var managing by rememberSaveable { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var expandedBooks by rememberSaveable { mutableStateOf(listOf<String>()) }
     var showImportSources by remember { mutableStateOf(false) }
     var showQueueActions by remember { mutableStateOf(false) }
     var pendingImport by remember { mutableStateOf<PendingLocalImport?>(null) }
@@ -148,13 +150,18 @@ fun DownloadsScreen(
     val contentTopPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
-    val activeEntries = entries.filter { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
-    val resumableEntries = entries.filter {
+    val manageableEntries = entries.filterNot { it.id in removingIds }
+    val selectedEntries = manageableEntries.filter { it.id in selectedIds }
+    val motion = LocalMotionEnabled.current
+    val activeEntries = manageableEntries.filter { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
+    val resumableEntries = manageableEntries.filter {
         it.status in setOf(DownloadStatus.PAUSED, DownloadStatus.FAILED) && it.manga.sourceUrl != LOCAL_SOURCE_URL
     }
-    val completedEntries = entries.filter { it.status == DownloadStatus.COMPLETED }
+    val completedEntries = manageableEntries.filter { it.status == DownloadStatus.COMPLETED }
     val usedBytes = entries.sumOf { it.downloadedBytes }
     val availableBytes = remember(entries, loading) { store.availableStorageBytes() }
+
+    BackHandler(enabled = managing) { managing = false; selectedIds = emptySet() }
 
     val archivePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
@@ -198,6 +205,37 @@ fun DownloadsScreen(
         }
     }
 
+    fun toggleSelection(targets: List<DownloadEntry>) {
+        val ids = targets.map(DownloadEntry::id).toSet()
+        selectedIds = if (ids.all { it in selectedIds }) selectedIds - ids else selectedIds + ids
+    }
+
+    fun removeWithUndo(targets: List<DownloadEntry>) {
+        val ids = targets.map(DownloadEntry::id).toSet() - removingIds
+        if (ids.isEmpty()) return
+        removingIds = removingIds + ids
+        snackbar.currentSnackbarData?.dismiss()
+        scope.launch {
+            var undone = false
+            var failed = 0
+            try {
+                undone = snackbar.showSnackbar("已移除 ${ids.size} 话", actionLabel = "撤销",
+                    withDismissAction = true, duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
+            } finally {
+                // Page navigation commits an already requested removal; undo never recreates deleted files.
+                if (!undone) withContext(NonCancellable) {
+                    ids.forEach { id ->
+                        try { store.remove(id) }
+                        catch (_: Exception) { failed++ }
+                    }
+                }
+                removingIds = removingIds - ids
+                if (failed > 0 && currentCoroutineContext().isActive)
+                    snackbar.showSnackbar("$failed 话未能删除，请重试")
+            }
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
         // Only the original scrolling lists feed the glass; controls remain foreground siblings.
         Box(Modifier.fillMaxSize().hazeSource(backdrop)) {
@@ -205,9 +243,9 @@ fun DownloadsScreen(
             MotionTabContent(filter.ordinal, Modifier.fillMaxSize()) { index ->
                 val pageFilter = DownloadFilter.entries[index]
                 val visible = when (pageFilter) {
-                    DownloadFilter.ALL -> entries
-                    DownloadFilter.ACTIVE -> entries.filter { it.status != DownloadStatus.COMPLETED }
-                    DownloadFilter.SAVED -> entries.filter { it.status == DownloadStatus.COMPLETED }
+                    DownloadFilter.ALL -> manageableEntries
+                    DownloadFilter.ACTIVE -> manageableEntries.filter { it.status != DownloadStatus.COMPLETED }
+                    DownloadFilter.SAVED -> manageableEntries.filter { it.status == DownloadStatus.COMPLETED }
                 }
                 val scroll = when (pageFilter) {
                     DownloadFilter.ALL -> allScroll
@@ -248,31 +286,51 @@ fun DownloadsScreen(
                             }
                         }
                     } else {
-                        items(visible, key = DownloadEntry::id) { entry ->
-                            DownloadSwipeRow(
-                                entry = entry,
-                                refreshing = entry.id in refreshingIds,
-                                onRead = { onRead(entry) },
-                                onPause = { store.pause(entry.id) },
-                                onRetry = { onRetry(entry) },
-                                onRemove = {
-                                    if (entry.id !in removingIds) {
-                                        removingIds = removingIds + entry.id
-                                        scope.launch {
-                                            try {
-                                                store.remove(entry.id)
-                                            } catch (cancelled: CancellationException) {
-                                                throw cancelled
-                                            } catch (failure: Exception) {
-                                                snackbar.showSnackbar(failure.message ?: "删除未完成，请重试")
-                                            } finally {
-                                                removingIds = removingIds - entry.id
-                                            }
-                                        }
+                        visible.groupBy { it.manga.id }.forEach { (mangaId, workEntries) ->
+                            val chapters = workEntries.groupBy { it.chapter.group }.values.flatMap { group -> group.sortedBy { it.chapter.index } }
+                            val expanded = mangaId in expandedBooks && chapters.size > 1
+                            item(key = "work:$mangaId", contentType = "download-work") {
+                                val placement = Modifier.animateItem(
+                                    fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
+                                    placementSpec = if (motion) tween(MangaMotion.Content) else null,
+                                    fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)
+                                Box(placement) {
+                                    SwipeToRemove(enabled = !managing,
+                                        label = "删除这部作品的 ${chapters.size} 话下载", onRemove = { removeWithUndo(chapters) }) {
+                                        DownloadBookRow(chapters, expanded, managing,
+                                            selected = chapters.all { it.id in selectedIds }, refreshingIds = refreshingIds,
+                                            onRead = {
+                                                val resume = history.firstOrNull { it.manga.id == mangaId }
+                                                val target = chapters.firstOrNull { it.chapter.id == resume?.chapterId }
+                                                    ?: chapters.firstOrNull { it.status == DownloadStatus.COMPLETED }
+                                                    ?: chapters.firstOrNull { it.completedPages > 0 } ?: chapters.first()
+                                                onRead(target)
+                                            },
+                                            onSelect = { toggleSelection(chapters) },
+                                            onManage = { if (managing) toggleSelection(chapters) else { managing = true; selectedIds = chapters.map(DownloadEntry::id).toSet() } },
+                                            onExpand = { expandedBooks = if (expanded) expandedBooks - mangaId else expandedBooks + mangaId },
+                                            onPause = { store.pause(it.id) }, onRetry = onRetry)
                                     }
-                                },
-                            )
-                            HorizontalDivider(Modifier.padding(vertical = 8.dp), color = colors.outlineVariant.copy(alpha = .45f))
+                                }
+                            }
+                            if (expanded) items(chapters, key = { "chapter:${it.id}" }, contentType = { "download-chapter" }) { entry ->
+                                Box(Modifier.animateItem(
+                                    fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
+                                    placementSpec = if (motion) tween(MangaMotion.Content) else null,
+                                    fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)) {
+                                    SwipeToRemove(enabled = !managing, label = "删除 ${entry.chapter.title} 下载",
+                                        onRemove = { removeWithUndo(listOf(entry)) }) {
+                                        DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
+                                            onRead = { onRead(entry) }, onSelect = { toggleSelection(listOf(entry)) },
+                                            onManage = { if (managing) toggleSelection(listOf(entry)) else { managing = true; selectedIds = setOf(entry.id) } },
+                                            onPause = { store.pause(it.id) }, onRetry = onRetry)
+                                    }
+                                }
+                            }
+                            item(key = "space:$mangaId", contentType = "download-separator") {
+                                HorizontalDivider(Modifier.padding(start = 60.dp, top = 5.dp, bottom = 5.dp),
+                                    color = foreground.copy(alpha = .05f))
+                            }
                         }
                     }
                 }
@@ -280,44 +338,62 @@ fun DownloadsScreen(
         }
         Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
             .onSizeChanged { headerHeightPx = it.height }) {
-            PageTitleHeader("下载", backdrop, navigation, actions = {
+            PageTitleHeader("下载", backdrop, navigation,
+                summary = {
+                    Text(if (managing) "已选 ${selectedEntries.size} 话" else "${downloadBytes(usedBytes)} 已保存",
+                        style = MaterialTheme.typography.bodySmall, color = secondary, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                }, actions = {
                 toolbar {
-                    MotionIconButton(enabled = !importBusy, modifier = Modifier.size(44.dp),
-                        onClick = { showImportSources = true }) {
-                        if (importBusy) CircularProgressIndicator(Modifier.size(16.dp)
-                            .semantics { contentDescription = "正在导入" }, strokeWidth = 1.5.dp, color = secondary)
-                        else Icon(Icons.Outlined.Add, "导入漫画", Modifier.size(21.dp), tint = foreground)
-                    }
-                    Box {
-                        MotionIconButton(onClick = { showQueueActions = true },
-                            enabled = !bulkBusy, modifier = Modifier.size(44.dp)) {
-                            Icon(Icons.Outlined.MoreHoriz, "下载详情与队列操作", Modifier.size(21.dp), tint = secondary)
+                    if (managing) {
+                        MotionIconButton(onClick = {
+                            val visible = when (filter) {
+                                DownloadFilter.ALL -> manageableEntries
+                                DownloadFilter.ACTIVE -> manageableEntries.filter { it.status != DownloadStatus.COMPLETED }
+                                DownloadFilter.SAVED -> completedEntries
+                            }
+                            toggleSelection(visible)
+                        }, modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.SelectAll, "全选当前列表", Modifier.size(20.dp), tint = foreground) }
+                        MotionIconButton(enabled = selectedEntries.isNotEmpty(), onClick = { pendingDeletion = selectedEntries },
+                            modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.DeleteOutline, "删除选中的 ${selectedEntries.size} 话", Modifier.size(20.dp),
+                                tint = if (selectedEntries.isNotEmpty()) colors.error else secondary.copy(alpha = .4f)) }
+                        MotionIconButton(onClick = { managing = false; selectedIds = emptySet() }, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Outlined.Close, "退出管理", Modifier.size(20.dp), tint = secondary)
                         }
-                        DropdownMenu(expanded = showQueueActions,
-                            onDismissRequest = { showQueueActions = false },
-                            modifier = Modifier.widthIn(min = 164.dp, max = 240.dp),
-                            shape = RoundedCornerShape(18.dp), containerColor = colors.surfaceContainerLow,
-                            tonalElevation = 0.dp, shadowElevation = 4.dp) {
-                            DropdownMenuItem(enabled = false, onClick = {}, text = {
-                                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                    Text(if (loading) "正在恢复下载" else "${completedEntries.size} / ${entries.size} 章已下载",
-                                        color = foreground, style = MaterialTheme.typography.labelMedium)
-                                    Text("${downloadBytes(usedBytes)} · ${downloadBytes(availableBytes)} 可用",
-                                        color = secondary, style = MaterialTheme.typography.labelSmall)
+                    } else {
+                        MotionIconButton(enabled = !importBusy, modifier = Modifier.size(44.dp),
+                            onClick = { showImportSources = true }) {
+                            if (importBusy) CircularProgressIndicator(Modifier.size(16.dp)
+                                .semantics { contentDescription = "正在导入" }, strokeWidth = 1.5.dp, color = secondary)
+                            else Icon(Icons.Outlined.Add, "导入漫画", Modifier.size(21.dp), tint = foreground)
+                        }
+                        Box {
+                            MotionIconButton(onClick = { showQueueActions = !showQueueActions }, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Outlined.MoreHoriz, "存储与下载管理", Modifier.size(21.dp), tint = secondary)
+                            }
+                            CompactGlassPopover(visible = showQueueActions, backdrop = backdrop,
+                                onDismiss = { showQueueActions = false }) {
+                                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text("存储空间", style = MaterialTheme.typography.bodySmall, color = secondary)
+                                    Text(downloadBytes(usedBytes), style = MaterialTheme.typography.titleMedium, color = foreground)
+                                    Text("${downloadBytes(availableBytes)} 可用", style = MaterialTheme.typography.bodySmall, color = secondary)
                                 }
-                            })
-                            if (activeEntries.isNotEmpty()) DropdownMenuItem(
-                                text = { Text("全部暂停") }, leadingIcon = { Icon(Icons.Outlined.Pause, null) },
-                                enabled = !bulkBusy,
-                                onClick = { showQueueActions = false; activeEntries.forEach { store.pause(it.id) } })
-                            if (resumableEntries.isNotEmpty()) DropdownMenuItem(
-                                text = { Text("继续未完成") }, leadingIcon = { Icon(Icons.Outlined.PlayArrow, null) },
-                                enabled = !bulkBusy,
-                                onClick = { showQueueActions = false; resumableEntries.forEach(onRetry) })
-                            if (completedEntries.isNotEmpty()) DropdownMenuItem(
-                                text = { Text("清理已下载") }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
-                                enabled = !bulkBusy,
-                                onClick = { showQueueActions = false; clearCompleted = true })
+                                CompactMenuAction(Icons.Outlined.Inventory2, "管理下载", enabled = manageableEntries.isNotEmpty()) {
+                                    showQueueActions = false; managing = true; selectedIds = emptySet()
+                                }
+                                if (activeEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.Pause, "全部暂停") {
+                                    showQueueActions = false; activeEntries.forEach { store.pause(it.id) }
+                                }
+                                if (resumableEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.PlayArrow, "继续未完成") {
+                                    showQueueActions = false; resumableEntries.forEach(onRetry)
+                                }
+                                if (completedEntries.isNotEmpty()) {
+                                    Spacer(Modifier.height(4.dp))
+                                    CompactMenuAction(Icons.Outlined.DeleteOutline, "清理已下载", destructive = true) {
+                                        showQueueActions = false; pendingDeletion = completedEntries
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -327,9 +403,9 @@ fun DownloadsScreen(
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     MotionTabs(
                         selected = filter.ordinal, labels = DownloadFilter.entries.map { it.label },
-                        onSelect = { filter = DownloadFilter.entries[it] }, modifier = Modifier.weight(1f),
-                        controlHeight = 44.dp, treatment = MotionTabTreatment.Underline,
-                        foreground = foreground, muted = secondary, indicator = foreground.copy(alpha = .78f),
+                        onSelect = { filter = DownloadFilter.entries[it]; selectedIds = emptySet() }, modifier = Modifier.weight(1f),
+                        controlHeight = 44.dp, indicatorHeight = 32.dp, fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+                        foreground = colors.primary, muted = secondary, indicator = colors.primary.copy(alpha = .10f),
                         fontSize = MaterialTheme.typography.labelLarge.fontSize,
                         selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
                     )
@@ -339,44 +415,24 @@ fun DownloadsScreen(
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
     }
 
-    if (clearCompleted) {
-        AlertDialog(
-            onDismissRequest = { if (!bulkBusy) clearCompleted = false },
-            shape = RoundedCornerShape(24.dp),
-            containerColor = MaterialTheme.colorScheme.surface,
-            title = { Text("清理全部已下载章节？", style = MaterialTheme.typography.titleLarge) },
+    pendingDeletion?.let { targets ->
+        AlertDialog(onDismissRequest = { pendingDeletion = null }, shape = RoundedCornerShape(22.dp),
+            containerColor = colors.surface,
+            title = { Text("删除 ${targets.size} 话下载？", style = MaterialTheme.typography.titleMedium) },
             text = {
-                Text(
-                    "${completedEntries.size} 章 · ${downloadBytes(completedEntries.sumOf { it.downloadedBytes })}\n阅读记录、收藏和未完成任务保留。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = secondary,
-                )
+                val titles = targets.map { it.manga.title }.distinct()
+                Text("${titles.take(3).joinToString("、")}${if (titles.size > 3) "等 ${titles.size} 部作品" else ""}\n" +
+                    "${targets.size} 话 · ${downloadBytes(targets.sumOf { it.downloadedBytes })}\n阅读记录和收藏保留。",
+                    style = MaterialTheme.typography.bodyMedium, color = secondary)
             },
             confirmButton = {
-                DownloadTextAction(enabled = !bulkBusy, onClick = {
-                    val ids = completedEntries.map(DownloadEntry::id)
-                    bulkBusy = true
-                    scope.launch {
-                        var failed = 0
-                        ids.forEach { id ->
-                            try { store.remove(id) }
-                            catch (cancelled: CancellationException) { throw cancelled }
-                            catch (_: Exception) { failed++ }
-                        }
-                        bulkBusy = false
-                        clearCompleted = false
-                        if (failed > 0) snackbar.showSnackbar("$failed 个章节未能清理，请重试")
-                    }
-                }) {
-                    Text(if (bulkBusy) "正在清理" else "清理", color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = {
-                DownloadTextAction(enabled = !bulkBusy, onClick = { clearCompleted = false }) {
-                    Text("取消", color = foreground)
-                }
-            },
-        )
+                DownloadTextAction(onClick = {
+                    pendingDeletion = null
+                    managing = false
+                    selectedIds = emptySet()
+                    removeWithUndo(targets)
+                }) { Text("删除", color = colors.error) }
+            }, dismissButton = { DownloadTextAction(onClick = { pendingDeletion = null }) { Text("取消", color = secondary) } })
     }
 
     if (showImportSources) {
@@ -534,107 +590,6 @@ private fun localTreeName(uri: Uri): String = runCatching {
 
 
 @Composable
-private fun DownloadSwipeRow(
-    entry: DownloadEntry,
-    refreshing: Boolean,
-    onRead: () -> Unit,
-    onPause: () -> Unit,
-    onRetry: () -> Unit,
-    onRemove: () -> Unit,
-) {
-    SwipeToRemove(onRemove = onRemove, label = "删除下载") {
-        DownloadRow(entry, refreshing, onRead, onPause, onRetry)
-    }
-}
-
-@Composable
-private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () -> Unit, onPause: () -> Unit, onRetry: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    val foreground = colors.onSurface
-    val secondary = colors.onSurfaceVariant
-    val finished = entry.status == DownloadStatus.COMPLETED
-    val localImport = entry.manga.sourceUrl == LOCAL_SOURCE_URL
-    val inProgress = entry.status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING)
-    val interaction = remember { MutableInteractionSource() }
-    val stateLabel = when (entry.status) {
-        DownloadStatus.QUEUED -> "排队中"
-        DownloadStatus.RUNNING -> "下载中"
-        DownloadStatus.WAITING -> "等待恢复"
-        DownloadStatus.PAUSED -> "已暂停"
-        DownloadStatus.COMPLETED -> if (localImport) "本地" else "已下载"
-        DownloadStatus.FAILED -> if (localImport) "文件损坏" else "未完成"
-    }
-    Box {
-        Column(Modifier.fillMaxWidth().clickable(
-            interactionSource = interaction, indication = null, role = Role.Button,
-            onClickLabel = "阅读 ${entry.chapter.title}", onClick = onRead,
-        )) {
-            Row(Modifier.fillMaxWidth().motionPress(interaction, pressedScale = .99f).padding(vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                AsyncImage(
-                    model = entry.manga.coverUrl,
-                    contentDescription = null,
-                    modifier = Modifier.size(width = 48.dp, height = 68.dp).mangaCoverCard(8.dp).background(colors.surfaceVariant),
-                    contentScale = ContentScale.Crop,
-                )
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(entry.manga.title, style = MaterialTheme.typography.titleSmall, color = foreground, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(4.dp))
-                    Text(entry.chapter.title, style = MaterialTheme.typography.bodySmall, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    // Reserve this slot when the transfer completes so the row never jumps.
-                    Box(Modifier.fillMaxWidth().height(7.dp).drawBehind {
-                        if (!finished) {
-                            val y = size.height / 2f
-                            val fraction = if (entry.totalPages > 0)
-                                (entry.completedPages.toFloat() / entry.totalPages).coerceIn(0f, 1f) else 0f
-                            drawLine(secondary.copy(alpha = .12f), Offset(0f, y), Offset(size.width, y), 2.dp.toPx(), StrokeCap.Round)
-                            if (fraction > 0f) drawLine(secondary.copy(alpha = .62f), Offset(0f, y), Offset(size.width * fraction, y), 2.dp.toPx(), StrokeCap.Round)
-                        }
-                    })
-                    Text(
-                        if (finished) "$stateLabel · ${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
-                        else "$stateLabel · ${entry.completedPages}/${entry.totalPages} 页",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (entry.status == DownloadStatus.FAILED) colors.error else secondary,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Spacer(Modifier.width(4.dp))
-                MotionIconButton(onClick = if (inProgress && !entry.needsSourceRefresh) onPause else onRetry,
-                    enabled = !finished && !refreshing && !(localImport && entry.status == DownloadStatus.FAILED),
-                    modifier = Modifier.size(44.dp)) {
-                    MotionSwap(Triple(entry.status, entry.needsSourceRefresh, refreshing), Modifier.size(20.dp)) { (status, needsRefresh, busy) ->
-                        if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp, color = secondary)
-                        else {
-                            val active = status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING)
-                            Icon(when {
-                                status == DownloadStatus.COMPLETED -> Icons.Outlined.Check
-                                needsRefresh || status == DownloadStatus.FAILED -> Icons.Outlined.Refresh
-                                active -> Icons.Outlined.Pause
-                                else -> Icons.Outlined.PlayArrow
-                            }, contentDescription = when {
-                                status == DownloadStatus.COMPLETED -> "已下载"
-                                needsRefresh -> "刷新图片地址并继续下载"
-                                active -> "暂停下载"
-                                status == DownloadStatus.FAILED && localImport -> "请删除后重新导入"
-                                status == DownloadStatus.FAILED -> "重试下载"
-                                else -> "继续下载"
-                            }, modifier = Modifier.size(20.dp), tint = if (status == DownloadStatus.COMPLETED) secondary else foreground)
-                        }
-                    }
-                }
-            }
-            if (entry.error.isNotBlank()) {
-                Text(entry.error, Modifier.padding(start = 60.dp, end = 8.dp, bottom = 6.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (entry.status == DownloadStatus.FAILED) colors.error else secondary)
-            }
-        }
-    }
-}
-
-@Composable
 private fun DownloadTextAction(
     onClick: () -> Unit,
     enabled: Boolean = true,
@@ -648,7 +603,7 @@ private fun DownloadTextAction(
     }
 }
 
-private fun downloadBytes(bytes: Long): String = when {
+internal fun downloadBytes(bytes: Long): String = when {
     bytes >= 1024L * 1024 * 1024 -> String.format(Locale.getDefault(), "%.1f GB", bytes / (1024.0 * 1024 * 1024))
     bytes >= 1024L * 1024 -> String.format(Locale.getDefault(), "%.1f MB", bytes / (1024.0 * 1024))
     bytes >= 1024 -> String.format(Locale.getDefault(), "%.0f KB", bytes / 1024.0)

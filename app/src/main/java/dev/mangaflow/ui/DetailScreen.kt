@@ -144,6 +144,7 @@ fun DetailScreen(
     reviewsLoading: Boolean,
     isFavorite: Boolean,
     progress: ReadingProgress?,
+    chapterPositions: Map<String, ReadingProgress>?,
     downloadEntries: List<DownloadEntry>,
     loadVolumeCover: suspend (Chapter, Boolean) -> Page,
     volumeImageHeaders: (Chapter) -> Map<String, String>,
@@ -369,7 +370,8 @@ fun DetailScreen(
                         when (targetSection) {
                             0 -> DetailCatalog(
                                 mangaId = current.id, chapters = chapters, downloaded = downloaded,
-                                progress = resume, loading = loading, error = error,
+                                progress = resume, chapterPositions = chapterPositions,
+                                loading = loading, error = error,
                                 active = active && targetSection == activeSection,
                                 onScrollTarget = { catalogGrid = it },
                                 onRetry = onRetry, onRead = onRead, onDownload = onDownload,

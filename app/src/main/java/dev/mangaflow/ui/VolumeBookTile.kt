@@ -67,6 +67,8 @@ internal fun VolumeBookTile(
     imageHeaders: () -> Map<String, String>,
     entry: DownloadEntry?,
     progress: ReadingProgress?,
+    progressKnown: Boolean,
+    current: Boolean,
     downloadMode: Boolean,
     enabled: Boolean,
     onRead: () -> Unit,
@@ -99,7 +101,8 @@ internal fun VolumeBookTile(
             onLongClick = onActions,
         ).motionPress(interaction, enabled = enabled).semantics {
             contentDescription = chapter.title + "，" + chapter.group
-            stateDescription = chapterStatus(entry, progress)
+            stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
+                .filter(String::isNotBlank).joinToString("，")
         },
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
@@ -119,13 +122,15 @@ internal fun VolumeBookTile(
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 1.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(chapter.title, color = if (progress != null) DetailForeground else DetailSecondary,
+            Text(chapter.title, color = if (current) DetailForeground else DetailSecondary,
                 fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                fontWeight = if (progress != null) FontWeight.SemiBold else FontWeight.Medium,
+                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
                 modifier = Modifier.weight(1f))
-            ChapterDownloadMark(entry, downloadMode && entry == null)
+            ChapterReadMark(progress, progressKnown)
+            if (entry != null || downloadMode) ChapterDownloadMark(entry, downloadMode && entry == null)
         }
-        if (progress != null) Text("读至第 ${progress.pageIndex + 1} 页",
+        if (progress != null) Text(if (progress.pageCount > 0 && progress.pageIndex >= progress.pageCount - 1) "已读完"
+            else "读至第 ${progress.pageIndex + 1} 页",
             color = DetailMuted, fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1,
             modifier = Modifier.padding(horizontal = 1.dp))
     }

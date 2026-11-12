@@ -101,6 +101,7 @@ internal fun DetailCatalog(
     chapters: List<Chapter>,
     downloaded: Map<String, DownloadEntry>,
     progress: ReadingProgress?,
+    chapterPositions: Map<String, ReadingProgress>?,
     loading: Boolean,
     error: String?,
     active: Boolean,
@@ -260,7 +261,9 @@ internal fun DetailCatalog(
                                     mangaId = mangaId, chapter = chapter, cover = cover,
                                     imageHeaders = { volumeImageHeaders(chapter) },
                                     entry = downloaded[chapter.id],
-                                    progress = progress?.takeIf { it.chapterId == chapter.id },
+                                    progress = chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id },
+                                    progressKnown = chapterPositions != null,
+                                    current = progress?.chapterId == chapter.id,
                                     downloadMode = downloadMode,
                                     enabled = !downloadMode || canDownload(downloaded[chapter.id]),
                                     onRead = { onRead(chapter) }, onDownload = { onDownload(chapter) },
@@ -276,7 +279,9 @@ internal fun DetailCatalog(
                             } else ChapterTile(
                                 chapter = chapter,
                                 entry = downloaded[chapter.id],
-                                progress = progress?.takeIf { it.chapterId == chapter.id },
+                                progress = chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id },
+                                current = progress?.chapterId == chapter.id,
+                                progressKnown = chapterPositions != null,
                                 downloadMode = downloadMode,
                                 height = tileHeight,
                                 onRead = { onRead(chapter) },
@@ -324,7 +329,7 @@ internal fun DetailCatalog(
                 Text(chapter.title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 26.sp)
                 Text(
                     listOf(chapter.group, chapterStatus(entry,
-                        progress?.takeIf { it.chapterId == chapter.id }))
+                        chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id }))
                         .filter(String::isNotBlank).joinToString(" · "),
                     color = DetailMuted, fontSize = 12.sp,
                     modifier = Modifier.padding(vertical = 10.dp),
@@ -402,6 +407,8 @@ private fun ChapterTile(
     chapter: Chapter,
     entry: DownloadEntry?,
     progress: ReadingProgress?,
+    current: Boolean,
+    progressKnown: Boolean,
     downloadMode: Boolean,
     height: Dp,
     onRead: () -> Unit,
@@ -422,25 +429,29 @@ private fun ChapterTile(
             )
             .motionPress(interaction, enabled = enabled)
             .clip(RoundedCornerShape(9.dp))
-            .background(DetailForeground.copy(alpha = if (progress != null) .12f else .055f))
+            .background(DetailForeground.copy(alpha = if (current) .12f else .055f))
             .semantics {
                 contentDescription = chapter.title
-                stateDescription = chapterStatus(entry, progress)
+                stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
+                    .filter(String::isNotBlank).joinToString("，")
             }
             .padding(horizontal = 7.dp, vertical = 5.dp),
         verticalArrangement = Arrangement.Center,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                chapter.title, color = if (progress != null) DetailForeground else if (enabled) DetailSecondary else DetailMuted,
+                chapter.title, color = if (current) DetailForeground else if (enabled) DetailSecondary else DetailMuted,
                 fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                fontWeight = if (progress != null) FontWeight.SemiBold else FontWeight.Normal,
+                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
                 modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(3.dp))
-            // Reserve the icon's space even before download: no resizing when a job starts.
-            ChapterDownloadMark(entry, downloadMode && entry == null)
+            // Reading and downloading have separate fixed positions, without widening the tile.
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                ChapterReadMark(progress, progressKnown)
+                if (entry != null || downloadMode) ChapterDownloadMark(entry, downloadMode && entry == null)
+            }
         }
     }
 }
@@ -474,7 +485,7 @@ private fun canDownload(entry: DownloadEntry?): Boolean = entry?.status !in setO
 )
 
 internal fun chapterStatus(entry: DownloadEntry?, progress: ReadingProgress?): String = listOfNotNull(
-    progress?.let { "上次读到第 " + (it.pageIndex + 1) + " 页" },
+    progress?.let { chapterReadingStatus(it) },
     when (entry?.status) {
         DownloadStatus.RUNNING -> "正在下载 " + entry.completedPages + "/" + entry.totalPages
         DownloadStatus.QUEUED -> "等待下载"

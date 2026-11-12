@@ -13,8 +13,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 private val LightColors = lightColorScheme(
-    primary = Color(0xFF28282A), onPrimary = Color(0xFFFAFAF9),
-    primaryContainer = Color(0xFFECECEA), onPrimaryContainer = Color(0xFF252527),
+    primary = Color(0xFF586F8D), onPrimary = Color(0xFFFAFAFC),
+    primaryContainer = Color(0xFFE7ECF2), onPrimaryContainer = Color(0xFF293C54),
     secondary = Color(0xFF626267), secondaryContainer = Color(0xFFEEEEEC),
     onSecondaryContainer = Color(0xFF343436),
     background = Color(0xFFF8F8F6), onBackground = Color(0xFF242426),
@@ -26,8 +26,8 @@ private val LightColors = lightColorScheme(
     surfaceContainerHigh = Color(0xFFECECE9),
 )
 private val DarkColors = darkColorScheme(
-    primary = Color(0xFFEAEAE7), onPrimary = Color(0xFF242426),
-    primaryContainer = Color(0xFF303033), onPrimaryContainer = Color(0xFFEAEAE7),
+    primary = Color(0xFFADBFD5), onPrimary = Color(0xFF203148),
+    primaryContainer = Color(0xFF2B3848), onPrimaryContainer = Color(0xFFDFE8F3),
     secondary = Color(0xFFB7B7BB), secondaryContainer = Color(0xFF303033),
     onSecondaryContainer = Color(0xFFEAEAE7),
     background = Color(0xFF171719), onBackground = Color(0xFFEAEAE7),
