@@ -108,3 +108,14 @@ User: "没事 ci 触发了就行别管了你去改新的这个问题漫画详情
 - Source review is required; tests and UI automation remain prohibited. Per the latest explicit instruction, verify CI triggered and stop waiting. Compilation, actual device layout, image crop and gesture feel remain unverified until build/user feedback; do not call the new design visually accepted.
 
 The shared-motion integration retains this large-artwork contract, its nested-scroll and shortcut cancellation behavior, and all Material theme roles. It only replaces the existing tab indicator, button feedback, icon swaps and sheet presence with the shared motion components. The original landscape Fit/Crop condition is cached at the outer layout scope to fix its Kotlin receiver error; artwork size and scrolling are unchanged by that repair.
+
+
+## Mixed-source comments · 2026-11-12
+
+The latest review screenshot rejects a source-by-source Comments tab that spends its first screen on three repeated rating cards and the matched manga title. This supersedes the previous standalone review-source carousel:
+
+- The default Comments tab is one mixed LazyColumn of confirmed Copy, Bangumi and AniList reviews, in newest-first order using each provider's reported date. Never include unconfirmed matches, unrelated anime entries or fabricated content.
+- Keep stable native provider/comment/reply IDs, author/avatar/date, original score scales, spoiler handling, and exact-source reply requests. Every row shows a compact, low-saturation source badge that adapts to light/dark backgrounds.
+- Hide the large repeated score row and subject title in a secondary Source bottom sheet, alongside source errors, retry, manually confirmed matching and relinking. The detail header already shows metrics.
+- Use a compact 28dp avatar, 8dp row padding and readable 13sp comment text. Auto-load the next eligible provider page when the user nears the merged feed's end; never request multiple providers at once or imply that loaded count is the total site count.
+- Keep authentication, API protocols, caching and chapter discussions unchanged. Direct main submission followed by the existing main CI/CD build is the delivery process; the user alone verifies on-device appearance and behavior. No tests are added or run.
