@@ -34,9 +34,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.storage.ReaderPreferences
-import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.ui.GlassSkinPicker
+import dev.mangaflow.ui.PaperThemePicker
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialog
@@ -58,7 +58,6 @@ internal fun ReaderSettingsDialog(
     val motion = LocalMotionEnabled.current
     val modes = listOf(ReadingMode.VERTICAL to "纵向",
         ReadingMode.RIGHT_TO_LEFT to "右翻", ReadingMode.LEFT_TO_RIGHT to "左翻")
-    val themes = listOf(ReaderTheme.PAPER, ReaderTheme.SEPIA, ReaderTheme.INK)
     val availableHeight = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(160).dp
     LaunchedEffect(visible, preferences.dimAmount) { if (visible) dimAmount = preferences.dimAmount }
 
@@ -77,7 +76,7 @@ internal fun ReaderSettingsDialog(
                             foreground = colors.onSurface,
                             muted = colors.onSurfaceVariant,
                             track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
-                            fullWidthIndicator = true, fontSize = 13.sp, role = Role.RadioButton,
+                            fullWidthIndicator = true, controlHeight = 52.dp, fontSize = 14.sp, role = Role.RadioButton,
                             selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
                         )
                         Column(Modifier.fillMaxWidth().animateContentSize(
@@ -96,16 +95,9 @@ internal fun ReaderSettingsDialog(
                     }
 
                     ReaderSettingsSection("外观") {
-                        ReaderSettingsChoiceRow("纸面") {
-                            MotionTabs(
-                                selected = themes.indexOf(preferences.theme), labels = listOf("纸白", "暖纸", "墨黑"),
-                                onSelect = { update(preferences.copy(theme = themes[it])) },
-                                foreground = colors.onSurface, muted = colors.onSurfaceVariant,
-                                track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
-                                fullWidthIndicator = true, fontSize = 13.sp, role = Role.RadioButton,
-                                selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
-                            )
-                        }
+                        Text("阅读底色", color = colors.onSurface, fontSize = 14.sp,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 4.dp))
+                        PaperThemePicker(preferences.theme) { update(preferences.copy(theme = it)) }
                         ReaderSettingsChoiceRow("材质") {
                             GlassSkinPicker(
                                 selected = preferences.glassSkin,
@@ -138,7 +130,7 @@ internal fun ReaderSettingsDialog(
 
 @Composable
 private fun ReaderSettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(title, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .8f),
             fontSize = 12.sp, fontWeight = FontWeight.Medium)
         content()

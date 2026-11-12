@@ -46,6 +46,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.Dp
@@ -70,6 +71,7 @@ internal fun MotionTabs(
     underline: Boolean = false,
     compact: Boolean = false,
     fullWidthIndicator: Boolean = false,
+    controlHeight: Dp? = null,
     fontSize: TextUnit = 13.sp,
     indicatorHeight: Dp? = null,
     selectedFontWeight: FontWeight = FontWeight.Medium,
@@ -86,10 +88,12 @@ internal fun MotionTabs(
     val liquid = LocalGlassSkin.current == GlassSkin.LIQUID
     val light = MaterialTheme.colorScheme.surface.luminance() > .5f
     val tabWidths = remember(labels.size) { mutableStateMapOf<Int, Int>() }
-    val height = if (compact) 38.dp else 48.dp
     val textMeasurer = rememberTextMeasurer()
     val textStyle = LocalTextStyle.current.copy(fontSize = fontSize)
     val density = LocalDensity.current
+    val wrapLabels = controlHeight != null && itemContent == null && density.fontScale > 1.3f
+    val height = maxOf(controlHeight ?: if (compact) 38.dp else 48.dp,
+        with(density) { fontSize.toDp() * (if (wrapLabels) 2.6f else 1.3f) + 16.dp })
     val labelWidths = labels.map { label ->
         maxOf(
             textMeasurer.measure(label, textStyle.copy(fontWeight = selectedFontWeight), maxLines = 1).size.width,
@@ -199,8 +203,10 @@ internal fun MotionTabs(
                 contentAlignment = Alignment.Center) {
                 if (itemContent != null) itemContent(i, i == index, labelColor)
                 else Text(label, color = labelColor, fontSize = fontSize,
+                        modifier = if (controlHeight != null) Modifier.padding(horizontal = 8.dp) else Modifier,
+                        textAlign = TextAlign.Center,
                         fontWeight = if (i == index) selectedFontWeight else unselectedFontWeight,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        maxLines = if (wrapLabels) 2 else 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }

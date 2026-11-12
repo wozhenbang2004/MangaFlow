@@ -7,6 +7,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.ui.motion.MotionTabs
 
@@ -28,10 +29,11 @@ internal fun GlassSkinPicker(
         },
         modifier = modifier.semantics { contentDescription = "玻璃皮肤" },
         role = Role.RadioButton,
-        track = colors.surfaceContainerHigh,
+        track = colors.onSurface.copy(alpha = .045f),
         indicator = colors.surface,
         fullWidthIndicator = true,
-        fontSize = MaterialTheme.typography.labelLarge.fontSize,
+        controlHeight = 52.dp,
+        fontSize = MaterialTheme.typography.bodyMedium.fontSize,
         selectedFontWeight = FontWeight.SemiBold,
         unselectedFontWeight = FontWeight.Normal,
     )

@@ -11,7 +11,6 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
@@ -20,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -38,7 +38,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDownward
-import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Pause
@@ -46,7 +45,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -85,7 +83,6 @@ import dev.mangaflow.BuildConfig
 import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
-import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.storage.WebDavBackupConfig
 import dev.mangaflow.storage.WebDavBackupStore
@@ -282,224 +279,179 @@ fun SettingsScreen(
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background),
-        contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 36.dp),
-        verticalArrangement = Arrangement.spacedBy(0.dp),
+        modifier = Modifier.fillMaxSize().background(
+            if (LocalWallpaperActive.current) Color.Transparent else colors.background),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 32.dp),
     ) {
         item {
-            Text("设置", style = MaterialTheme.typography.headlineLarge, color = foreground, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(6.dp))
-            Text("找到舒服的阅读方式", style = MaterialTheme.typography.bodyMedium, color = secondary)
-            Spacer(Modifier.height(32.dp))
-            SettingsSectionLabel("外观")
-            Spacer(Modifier.height(18.dp))
-            Text("玻璃皮肤", style = MaterialTheme.typography.bodyLarge, color = foreground)
-            Spacer(Modifier.height(12.dp))
-            GlassSkinPicker(
-                selected = preferences.glassSkin,
-                onSelected = { skin ->
-                    val current = libraryStore.preferences.value
-                    if (skin != current.glassSkin) libraryStore.updatePreferences(current.copy(glassSkin = skin))
-                },
-            )
-            Text(
-                when {
-                    preferences.glassSkin == GlassSkin.FROSTED -> "柔和扩散，背景更安静"
-                    Build.VERSION.SDK_INT < 33 -> "此设备会使用柔和的毛玻璃效果"
-                    else -> "边缘折射，轻盈通透"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = secondary,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-            Spacer(Modifier.height(20.dp))
-            WallpaperSettings()
-            Spacer(Modifier.height(24.dp))
-            HorizontalDivider(color = colors.outlineVariant)
-            Spacer(Modifier.height(28.dp))
-            SettingsSectionLabel("阅读")
-            Spacer(Modifier.height(18.dp))
-            Text("翻页方式", style = MaterialTheme.typography.bodyLarge, color = foreground)
-            Spacer(Modifier.height(12.dp))
-            SettingsChoices(
-                choices = listOf(ReadingMode.VERTICAL to "纵向",
-                    ReadingMode.LEFT_TO_RIGHT to "左至右", ReadingMode.RIGHT_TO_LEFT to "右至左"),
-                selected = preferences.mode,
-                onSelected = { libraryStore.updatePreferences(preferences.copy(mode = it)) },
-            )
-            Spacer(Modifier.height(24.dp))
-            Text("阅读底色", style = MaterialTheme.typography.bodyLarge, color = foreground)
-            Spacer(Modifier.height(12.dp))
-            SettingsThemeChoices(preferences.theme) { theme ->
-                libraryStore.updatePreferences(preferences.copy(theme = theme))
-            }
-            Spacer(Modifier.height(12.dp))
-            SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn) { libraryStore.updatePreferences(preferences.copy(keepScreenOn = it)) }
-            SettingsToggle("图片之间留白", preferences.pageGap) { libraryStore.updatePreferences(preferences.copy(pageGap = it)) }
-            Spacer(Modifier.height(20.dp))
-            HorizontalDivider(color = colors.outlineVariant)
-            Spacer(Modifier.height(28.dp))
-            SettingsSectionLabel("数据与迁移")
-            Spacer(Modifier.height(8.dp))
-            SettingsLinkRow(
-                "导出阅读备份",
-                if (backupBusy == "export") "正在导出…" else "收藏、进度、画面收藏与阅读统计",
-            ) {
-                if (backupBusy == null) exportBackup.launch("MangaFlow-backup.json")
-            }
-            SettingsLinkRow(
-                "恢复阅读备份",
-                if (backupBusy == "inspect" || backupBusy == "restore") "正在处理…" else "从备份文件覆盖本机阅读数据",
-            ) {
-                if (backupBusy == null) importBackup.launch(arrayOf("application/json", "text/plain"))
-            }
-            SettingsLinkRow(
-                "WebDAV 阅读备份",
-                webDavStatusDetail(webDavConfig, backupBusy),
-            ) {
-                if (backupBusy == null) {
-                    webDavNotice = null
-                    showWebDav = true
-                }
-            }
-            Text(
-                "文件与 WebDAV 备份都不包含账号登录态、WebDAV 密码、缓存和已下载图片；恢复前会再次确认。",
-                style = MaterialTheme.typography.bodySmall,
-                color = secondary,
-                modifier = Modifier.padding(top = 2.dp),
-            )
-            backupNotice?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
-                    modifier = Modifier.padding(top = 8.dp))
-            }
-            webDavNotice?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
-                    modifier = Modifier.padding(top = 8.dp))
-            }
-            Spacer(Modifier.height(26.dp))
-            HorizontalDivider(color = colors.outlineVariant)
-            Spacer(Modifier.height(28.dp))
-            SettingsSectionLabel("缓存")
-            Spacer(Modifier.height(8.dp))
-            listOf("browse" to "推荐与热榜", "metadata" to "目录、评分与评论", "images" to "图片与头像").forEach { (key, label) ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(label, style = MaterialTheme.typography.bodyLarge, color = foreground)
-                        Text(cacheSizes[key]?.let(::settingsBytes) ?: "正在统计…",
-                            style = MaterialTheme.typography.bodySmall, color = secondary,
-                            modifier = Modifier.padding(top = 3.dp))
+            // Keep the import controls composed while scrolling; their in-progress copy owns this lifetime.
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(26.dp)) {
+                SettingsSection("阅读") {
+                    Text("翻页方式", style = MaterialTheme.typography.bodyLarge, color = foreground)
+                    SettingsChoices(
+                        choices = listOf(ReadingMode.VERTICAL to "纵向",
+                            ReadingMode.LEFT_TO_RIGHT to "左至右", ReadingMode.RIGHT_TO_LEFT to "右至左"),
+                        selected = preferences.mode,
+                        onSelected = { libraryStore.updatePreferences(preferences.copy(mode = it)) },
+                    )
+                    Text("阅读底色", style = MaterialTheme.typography.bodyLarge, color = foreground,
+                        modifier = Modifier.padding(top = 4.dp))
+                    PaperThemePicker(preferences.theme) { theme ->
+                        libraryStore.updatePreferences(preferences.copy(theme = theme))
                     }
-                    val showBusy = rememberDelayedBusy(clearingCache == key)
-                    SettingsTextAction(enabled = clearingCache == null && cacheSizes[key] != null,
-                        onClick = { clearCache(key, label) }) {
-                        MotionSwap(showBusy, Modifier.size(16.dp)) { busy ->
-                            if (busy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                    Column {
+                        SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn) {
+                            libraryStore.updatePreferences(preferences.copy(keepScreenOn = it))
                         }
-                        Spacer(Modifier.width(4.dp))
-                        Text("清理", color = secondary)
+                        SettingsToggle("图片之间留白", preferences.pageGap) {
+                            libraryStore.updatePreferences(preferences.copy(pageGap = it))
+                        }
                     }
                 }
-            }
-            Text("图片最多保留 256 MB；书架、阅读记录和已下载章节独立保存。",
-                style = MaterialTheme.typography.bodySmall, color = secondary, modifier = Modifier.padding(top = 8.dp))
-            cacheNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
-                modifier = Modifier.padding(top = 8.dp)) }
-            Spacer(Modifier.height(26.dp))
-            HorizontalDivider(color = colors.outlineVariant)
-            Spacer(Modifier.height(28.dp))
-            SettingsSectionLabel("应用更新")
-            Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(44.dp).clip(RoundedCornerShape(14.dp)).background(colors.primary), contentAlignment = Alignment.Center) {
-                    Text("流", style = MaterialTheme.typography.titleLarge, color = colors.onPrimary, fontWeight = FontWeight.SemiBold)
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("漫流", style = MaterialTheme.typography.titleMedium, color = foreground)
-                    Text("${BuildConfig.VERSION_NAME} · ${BuildConfig.VERSION_CODE}", style = MaterialTheme.typography.labelMedium, color = secondary)
-                }
-            }
-            Spacer(Modifier.height(18.dp))
-            update.release?.let { release ->
-                Text("新版本 ${release.versionName}", style = MaterialTheme.typography.titleSmall, color = foreground)
-                if (release.notes.isNotBlank()) {
-                    Spacer(Modifier.height(8.dp))
+                SettingsSection("外观") {
+                    Text("玻璃材质", style = MaterialTheme.typography.bodyLarge, color = foreground)
+                    GlassSkinPicker(
+                        selected = preferences.glassSkin,
+                        onSelected = { skin ->
+                            val current = libraryStore.preferences.value
+                            if (skin != current.glassSkin) libraryStore.updatePreferences(current.copy(glassSkin = skin))
+                        },
+                    )
                     Text(
-                        release.notes,
-                        modifier = Modifier.clickable { expandedNotes = !expandedNotes },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = secondary,
-                        maxLines = if (expandedNotes) Int.MAX_VALUE else 3,
-                        overflow = TextOverflow.Ellipsis,
+                        when {
+                            preferences.glassSkin == GlassSkin.FROSTED -> "柔和扩散，背景更安静"
+                            Build.VERSION.SDK_INT < 33 -> "此设备使用毛玻璃效果"
+                            else -> "边缘折射，轻盈通透"
+                        },
+                        style = MaterialTheme.typography.bodySmall, color = secondary,
+                    )
+                    WallpaperSettings(modifier = Modifier.padding(top = 6.dp))
+                }
+                SettingsSection("数据") {
+                    Column {
+                        SettingsLinkRow("导出阅读备份",
+                            if (backupBusy == "export") "正在导出…" else "书架、进度、画面收藏与阅读统计") {
+                            if (backupBusy == null) exportBackup.launch("MangaFlow-backup.json")
+                        }
+                        SettingsLinkRow("恢复阅读备份",
+                            if (backupBusy == "inspect" || backupBusy == "restore") "正在处理…" else "从备份文件恢复本机阅读数据") {
+                            if (backupBusy == null) importBackup.launch(arrayOf("application/json", "text/plain"))
+                        }
+                        SettingsLinkRow("WebDAV 阅读备份", webDavStatusDetail(webDavConfig, backupBusy)) {
+                            if (backupBusy == null) { webDavNotice = null; showWebDav = true }
+                        }
+                    }
+                    Text("备份不包含账号、密码、缓存与漫画文件；恢复前会再次确认。",
+                        style = MaterialTheme.typography.bodySmall, color = secondary)
+                    backupNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
+                    webDavNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
+                }
+                SettingsSection("缓存") {
+                    Column {
+                        listOf("browse" to "推荐与热榜", "metadata" to "目录、评分与评论", "images" to "图片与头像").forEach { (key, label) ->
+                            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                    Text(label, style = MaterialTheme.typography.bodyLarge, color = foreground)
+                                    Text(cacheSizes[key]?.let(::settingsBytes) ?: "正在统计…",
+                                        style = MaterialTheme.typography.bodySmall, color = secondary)
+                                }
+                                val showBusy = rememberDelayedBusy(clearingCache == key)
+                                SettingsTextAction(enabled = clearingCache == null && cacheSizes[key] != null,
+                                    onClick = { clearCache(key, label) }) {
+                                    MotionSwap(showBusy, Modifier.size(16.dp)) { busy ->
+                                        if (busy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                                    }
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("清理", color = secondary)
+                                }
+                            }
+                        }
+                    }
+                    Text("图片缓存最多 256 MB。书架、阅读记录与下载章节独立保存。",
+                        style = MaterialTheme.typography.bodySmall, color = secondary)
+                    cacheNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
+                }
+                SettingsSection("更新") {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("当前版本", style = MaterialTheme.typography.bodyLarge, color = foreground,
+                            modifier = Modifier.weight(1f))
+                        Text(BuildConfig.VERSION_NAME, style = MaterialTheme.typography.bodyMedium, color = secondary)
+                    }
+                    update.release?.let { release ->
+                        Text("新版本 ${release.versionName}", style = MaterialTheme.typography.titleSmall, color = foreground)
+                        if (release.notes.isNotBlank()) {
+                            Text(
+                                release.notes,
+                                modifier = Modifier.clickable { expandedNotes = !expandedNotes },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = secondary,
+                                maxLines = if (expandedNotes) Int.MAX_VALUE else 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    Text(update.message, style = MaterialTheme.typography.bodyMedium, color = if (update.phase == UpdatePhase.ERROR) MaterialTheme.colorScheme.error else secondary)
+                    when (update.phase) {
+                        UpdatePhase.DOWNLOADING -> {
+                            LinearProgressIndicator(progress = { update.progress }, modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape), color = colors.primary, trackColor = colors.outlineVariant)
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${settingsBytes(update.downloaded)} / ${settingsBytes(update.total)}", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = secondary)
+                                SettingsTextAction(onClick = updateManager::cancelDownload) {
+                                    Icon(Icons.Outlined.Pause, contentDescription = null, tint = foreground, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("暂停", color = foreground)
+                                }
+                            }
+                        }
+                        UpdatePhase.CHECKING, UpdatePhase.VERIFYING -> {
+                            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                                CircularProgressIndicator(Modifier.size(18.dp), color = foreground, strokeWidth = 1.8.dp)
+                                Spacer(Modifier.width(10.dp))
+                                Text(if (update.phase == UpdatePhase.CHECKING) "正在检查" else "正在核对安装包", style = MaterialTheme.typography.labelLarge, color = foreground)
+                            }
+                        }
+                        UpdatePhase.AVAILABLE -> {
+                            SettingsAction(onClick = updateManager::download) {
+                                Icon(Icons.Outlined.ArrowDownward, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(if (update.downloaded > 0) "继续下载" else "下载更新 · ${settingsBytes(update.release?.bytes ?: 0)}")
+                            }
+                        }
+                        UpdatePhase.READY -> {
+                            val activity = context.settingsActivity()
+                            SettingsAction(enabled = activity != null, onClick = { activity?.let(updateManager::install) }) { Text("安装新版本") }
+                        }
+                        else -> SettingsAction(onClick = { updateManager.check() }) { Text("检查更新") }
+                    }
+                    if (update.lastChecked > 0) {
+                        Text(
+                            "上次检查 ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()).format(Date(update.lastChecked))}",
+                            style = MaterialTheme.typography.labelSmall, color = secondary,
+                        )
+                    }
+                    SettingsToggle("自动检查更新", automatic) {
+                        automatic = it
+                        updateManager.setAutomatic(it)
+                    }
+                    SettingsLinkRow(
+                        title = "更新提醒",
+                        detail = if (notifications) "已开启" else "未开启",
+                        onClick = {
+                            if (notifications) {
+                                runCatching {
+                                    context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                        .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                                }.onFailure { Toast.makeText(context, "暂时无法打开通知设置", Toast.LENGTH_SHORT).show() }
+                            } else onRequestNotifications()
+                        },
                     )
                 }
-                Spacer(Modifier.height(10.dp))
-            }
-            Text(update.message, style = MaterialTheme.typography.bodyMedium, color = if (update.phase == UpdatePhase.ERROR) MaterialTheme.colorScheme.error else secondary)
-            Spacer(Modifier.height(14.dp))
-            when (update.phase) {
-                UpdatePhase.DOWNLOADING -> {
-                    LinearProgressIndicator(progress = { update.progress }, modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape), color = colors.primary, trackColor = colors.outlineVariant)
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("${settingsBytes(update.downloaded)} / ${settingsBytes(update.total)}", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = secondary)
-                        SettingsTextAction(onClick = updateManager::cancelDownload) {
-                            Icon(Icons.Outlined.Pause, contentDescription = null, tint = foreground, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("暂停", color = foreground)
-                        }
-                    }
+                SettingsSection("关于") {
+                    SettingsLinkRow("项目主页", "MangaFlow", external = true) { context.openProjectPage() }
                 }
-                UpdatePhase.CHECKING, UpdatePhase.VERIFYING -> {
-                    Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                        CircularProgressIndicator(Modifier.size(18.dp), color = foreground, strokeWidth = 1.8.dp)
-                        Spacer(Modifier.width(10.dp))
-                        Text(if (update.phase == UpdatePhase.CHECKING) "正在检查" else "正在核对安装包", style = MaterialTheme.typography.labelLarge, color = foreground)
-                    }
-                }
-                UpdatePhase.AVAILABLE -> {
-                    SettingsAction(onClick = updateManager::download) {
-                        Icon(Icons.Outlined.ArrowDownward, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (update.downloaded > 0) "继续下载" else "下载更新 · ${settingsBytes(update.release?.bytes ?: 0)}")
-                    }
-                }
-                UpdatePhase.READY -> {
-                    val activity = context.settingsActivity()
-                    SettingsAction(enabled = activity != null, onClick = { activity?.let(updateManager::install) }) { Text("安装新版本") }
-                }
-                else -> SettingsAction(onClick = { updateManager.check() }) { Text("检查更新") }
             }
-            if (update.lastChecked > 0) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "上次检查 ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()).format(Date(update.lastChecked))}",
-                    style = MaterialTheme.typography.labelSmall, color = secondary,
-                )
-            }
-            Spacer(Modifier.height(12.dp))
-            SettingsToggle("自动检查更新", automatic) {
-                automatic = it
-                updateManager.setAutomatic(it)
-            }
-            SettingsLinkRow(
-                title = "更新提醒",
-                detail = if (notifications) "已开启" else "未开启",
-                onClick = {
-                    if (notifications) {
-                        runCatching {
-                            context.startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                                .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                        }.onFailure { Toast.makeText(context, "暂时无法打开通知设置", Toast.LENGTH_SHORT).show() }
-                    } else onRequestNotifications()
-                },
-            )
-            Spacer(Modifier.height(20.dp))
-            HorizontalDivider(color = colors.outlineVariant)
-            Spacer(Modifier.height(28.dp))
-            SettingsSectionLabel("关于")
-            Spacer(Modifier.height(12.dp))
-            SettingsLinkRow("MangaFlow", "项目主页", external = true) { context.openProjectPage() }
         }
     }
 
@@ -785,8 +737,13 @@ private fun settingsInputColors() = OutlinedTextFieldDefaults.colors(
 )
 
 @Composable
-private fun SettingsSectionLabel(text: String) {
-    Text(text, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Medium)
+private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(title, style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .8f),
+            fontWeight = FontWeight.Medium, modifier = Modifier.padding(bottom = 2.dp))
+        content()
+    }
 }
 
 @Composable
@@ -795,38 +752,10 @@ private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onS
     MotionTabs(
         selected = choices.indexOfFirst { it.first == selected }, labels = choices.map { it.second },
         onSelect = { onSelected(choices[it].first) }, role = Role.RadioButton,
-        track = colors.surfaceContainerHigh, indicator = colors.surface,
-        fontSize = MaterialTheme.typography.labelLarge.fontSize,
+        track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface,
+        fullWidthIndicator = true, controlHeight = 52.dp,
+        fontSize = MaterialTheme.typography.bodyMedium.fontSize,
         selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
-    )
-}
-
-@Composable
-private fun SettingsThemeChoices(selected: ReaderTheme, onSelected: (ReaderTheme) -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    val choices = listOf(
-        Triple(ReaderTheme.INK, "墨黑", Color(0xFF171719)),
-        Triple(ReaderTheme.PAPER, "纸白", Color(0xFFFAFAF8)),
-        Triple(ReaderTheme.SEPIA, "暖纸", Color(0xFFEADFC8)),
-    )
-    MotionTabs(
-        selected = choices.indexOfFirst { it.first == selected }, labels = choices.map { it.second },
-        onSelect = { onSelected(choices[it].first) }, role = Role.RadioButton,
-        indicator = colors.surfaceContainerHigh,
-        itemContent = { index, chosen, labelColor ->
-            val (theme, label, swatch) = choices[index]
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                Box(Modifier.size(22.dp).clip(CircleShape).background(swatch)
-                    .border(0.5.dp, colors.outline, CircleShape), contentAlignment = Alignment.Center) {
-                    MotionSwap(chosen, Modifier.size(14.dp)) { checked ->
-                        if (checked) Icon(Icons.Outlined.Check, contentDescription = null,
-                            tint = if (theme == ReaderTheme.INK) Color.White else Color(0xFF242426), modifier = Modifier.size(14.dp))
-                    }
-                }
-                Spacer(Modifier.width(7.dp))
-                Text(label, style = MaterialTheme.typography.labelLarge, color = labelColor)
-            }
-        },
     )
 }
 
@@ -837,7 +766,7 @@ private fun SettingsToggle(title: String, checked: Boolean, onCheckedChange: (Bo
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .toggleable(checked, interactionSource = interaction, indication = null,
-                role = Role.Switch, onValueChange = onCheckedChange).padding(vertical = 5.dp),
+                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 54.dp).padding(vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
@@ -859,11 +788,15 @@ private fun SettingsLinkRow(title: String, detail: String, external: Boolean = f
     val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-        .motionPress(interaction, pressedScale = .99f).padding(vertical = 18.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-        Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-        Spacer(Modifier.width(6.dp))
-        Icon(if (external) Icons.Outlined.OpenInNew else Icons.Outlined.ChevronRight, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(17.dp))
+        .motionPress(interaction, pressedScale = .99f).heightIn(min = 56.dp).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+            if (detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant)
+        }
+        Icon(if (external) Icons.Outlined.OpenInNew else Icons.Outlined.ChevronRight,
+            contentDescription = null, tint = colors.onSurfaceVariant.copy(alpha = .7f), modifier = Modifier.size(18.dp))
     }
 }
 
@@ -872,7 +805,7 @@ private fun SettingsAction(enabled: Boolean = true, onClick: () -> Unit, content
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Button(
-        onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().height(48.dp),
+        onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
         interactionSource = interaction,
         shape = RoundedCornerShape(15.dp),
         colors = ButtonDefaults.buttonColors(containerColor = colors.primary, contentColor = colors.onPrimary,

@@ -2,6 +2,10 @@ package dev.mangaflow.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.VideoFile
 import androidx.compose.material3.CircularProgressIndicator
@@ -42,6 +47,8 @@ import coil3.compose.AsyncImage
 import dev.mangaflow.storage.WallpaperKind
 import dev.mangaflow.storage.WallpaperStore
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -57,6 +64,11 @@ internal fun WallpaperSettings(
     val scope = rememberCoroutineScope()
     var importing by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var formatDetails by remember { mutableStateOf(false) }
+    val motion = LocalMotionEnabled.current
+    val detailsRotation = animateFloatAsState(if (formatDetails) 180f else 0f,
+        if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
+        label = "wallpaper-format-details")
     val colors = MaterialTheme.colorScheme
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null && !importing) {
@@ -70,7 +82,9 @@ internal fun WallpaperSettings(
             }
         }
     }
-    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(modifier.fillMaxWidth().animateContentSize(
+        animationSpec = tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing)),
+        verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text("壁纸", style = MaterialTheme.typography.bodyLarge)
@@ -93,15 +107,13 @@ internal fun WallpaperSettings(
         }
         if (selected.mediaPath != null) {
             val preview = if (selected.kind == WallpaperKind.VIDEO) selected.posterPath else selected.mediaPath
-            Box(Modifier.fillMaxWidth().height(96.dp).clip(RoundedCornerShape(14.dp))
+            Box(Modifier.fillMaxWidth().height(80.dp).clip(RoundedCornerShape(12.dp))
                 .background(colors.surfaceContainerLow), contentAlignment = Alignment.Center) {
                 if (preview != null) AsyncImage(model = File(preview), contentDescription = "当前壁纸静态预览",
                     contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().graphicsLayer { alpha = selected.strength })
-                Text("保留一点背景，让内容更清楚", style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant)
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("显现强度", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Text("背景浓度", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                 Text("${(selected.strength * 100).roundToInt()}%", style = MaterialTheme.typography.labelMedium,
                     color = colors.onSurfaceVariant)
             }
@@ -109,7 +121,7 @@ internal fun WallpaperSettings(
                 onValueChange = { store.setStrength(it, persist = false) },
                 onValueChangeFinished = { store.setStrength(store.state.value.strength) },
                 modifier = Modifier.fillMaxWidth())
-            if (selected.kind == WallpaperKind.VIDEO) Text("静音循环；离开页面、切后台或减少动态效果时暂停。",
+            if (selected.kind == WallpaperKind.VIDEO) Text("静音循环，切后台自动暂停",
                 style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         }
         val problem = notice ?: selected.error
@@ -117,7 +129,15 @@ internal fun WallpaperSettings(
             Text(problem, style = MaterialTheme.typography.bodySmall, color = colors.error, modifier = Modifier.weight(1f))
             if (selected.error != null && !importing) TextButton(onClick = { store.retry(); notice = null }) { Text("重试") }
         }
-        Text("支持设备可解码的图片、MP4 等视频（最多 512 MB）。Wallpaper Engine 请选原图片或视频，.pkg / .mpkg / project.json 无法直接导入。",
-            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant.copy(alpha = .84f))
+        TextButton(onClick = { formatDetails = !formatDetails }) {
+            Text(if (formatDetails) "收起格式说明" else "支持哪些格式", color = colors.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium)
+            Icon(Icons.Outlined.ExpandMore, contentDescription = null, tint = colors.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp).size(16.dp).graphicsLayer { rotationZ = detailsRotation.value })
+        }
+        if (formatDetails) Text(
+            "支持此设备可解码的图片、MP4 等视频，单个文件最多 512 MB。\nWallpaper Engine 请选原图片或视频；.pkg、.mpkg 和 project.json 不能直接导入。",
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+
     }
 }

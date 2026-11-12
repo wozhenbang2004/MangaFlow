@@ -1,14 +1,9 @@
 package dev.mangaflow.ui
 
 import android.view.accessibility.AccessibilityManager
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -143,14 +138,13 @@ fun DiscoverScreen(
     backgroundState: BrowseState,
     searchExpanded: Boolean,
     searchBackdrop: HazeState,
+    contentTopPadding: Dp,
     canAutoAdvance: Boolean,
     repository: MangaRepository,
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onMore: () -> Unit,
     onOpen: (Manga) -> Unit,
-    onPeriod: (RankPeriod) -> Unit,
-    onAudience: (RankAudience) -> Unit,
     active: Boolean = true,
 ) {
     val motion = LocalMotionEnabled.current
@@ -164,20 +158,10 @@ fun DiscoverScreen(
     SideEffect { if (!holdingContent) retainedBrowse = browse }
     val retainedAlpha = animateFloatAsState(if (holdingContent) .48f else 1f,
         if (motion) tween(MangaMotion.Content) else snap(), label = "browse-pending-content")
-    Column(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(searchBackdrop)
+    Box(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(searchBackdrop)
         .motionInputGate(active && !searchExpanded)) {
-        // Filters stay outside the changing list, so their indicator keeps its velocity.
-        AnimatedVisibility(
-            visible = browse.mode == DiscoveryMode.RANKING,
-            enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) +
-                expandVertically(tween(if (motion) MangaMotion.Content else 0)),
-            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
-                shrinkVertically(tween(if (motion) MangaMotion.Content else 0)),
-        ) {
-            RankingControls(browse, onPeriod, onAudience, onRefresh,
-                Modifier.motionInputGate(active && !searchExpanded && browse.mode == DiscoveryMode.RANKING))
-        }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        // The root header samples only these scrolling pixels, never its own controls.
+        Box(Modifier.fillMaxSize()) {
             MotionTabContent(
                 selected = displayedBrowse,
                 modifier = Modifier.fillMaxSize().graphicsLayer { alpha = retainedAlpha.value },
@@ -190,12 +174,13 @@ fun DiscoverScreen(
                 DiscoveryPane(pane, positions, repository,
                     active = active && !searchExpanded && !holdingContent && pane.cacheKey == browse.cacheKey,
                     canAutoAdvance = canAutoAdvance,
-                    onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen)
+                    onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
+                    topPadding = contentTopPadding)
             }
             if (holdingContent) {
                 val label = if (browse.mode == DiscoveryMode.RANKING)
                     "${browse.audience.label} · ${browse.period.label}" else browse.mode.label
-                Row(Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 20.dp)
+                Row(Modifier.align(Alignment.TopEnd).padding(top = contentTopPadding + 8.dp, end = 20.dp)
                     .clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surface.copy(alpha = .96f))
                     .padding(horizontal = 10.dp, vertical = 6.dp),
@@ -299,7 +284,7 @@ internal fun DiscoverySearchResults(
 }
 
 @Composable
-private fun RankingControls(
+internal fun RankingControls(
     state: BrowseState,
     onPeriod: (RankPeriod) -> Unit,
     onAudience: (RankAudience) -> Unit,
@@ -408,6 +393,7 @@ private fun DiscoveryPane(
     onRetry: () -> Unit,
     onMore: () -> Unit,
     onOpen: (Manga) -> Unit,
+    topPadding: Dp,
 ) {
     val retainedGrid = remember(state.cacheKey) {
         val saved = positions.remove(state.cacheKey) ?: LazyGridState()
@@ -432,7 +418,7 @@ private fun DiscoveryPane(
     )
     LazyVerticalGrid(
         columns = GridCells.Fixed(3), state = grid,
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 0.dp, bottom = 32.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = topPadding, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(if (ranking) 8.dp else 16.dp),
         modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),

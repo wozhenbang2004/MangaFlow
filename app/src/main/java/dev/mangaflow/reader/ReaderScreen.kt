@@ -567,7 +567,6 @@ fun ReaderScreen(
                     if (pages.isNotEmpty()) key(chapterId) {
                         ReaderProgressSlider(
                             pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
-                            clock = clock,
                             enabled = controlsVisible,
                             onSeek = { destination ->
                                 if (destination != pageIndex) {
@@ -1404,7 +1403,6 @@ private fun ReaderProgressSlider(
     pageIndex: Int,
     pageCount: Int,
     pendingPage: Int?,
-    clock: String,
     enabled: Boolean,
     onSeek: (Int) -> Unit,
     onOpenNavigator: () -> Unit,
@@ -1418,7 +1416,7 @@ private fun ReaderProgressSlider(
     var preview by remember { mutableStateOf<Float?>(null) }
     val lastPage = (pageCount - 1).coerceAtLeast(0)
     val shown = (preview ?: pendingPage?.toFloat() ?: pageIndex.toFloat()).coerceIn(0f, lastPage.toFloat())
-    val numberWidth = with(LocalDensity.current) { 12.sp.toDp() * (pageCount.toString().length * 2 + 3) * .65f } + 48.dp
+    val numberWidth = with(LocalDensity.current) { 12.sp.toDp() * (pageCount.toString().length * 2 + 3) * .65f } + 12.dp
 
     LaunchedEffect(pressed, dragged, enabled) {
         interactionChanged(enabled && (pressed || dragged))
@@ -1452,7 +1450,6 @@ private fun ReaderProgressSlider(
                 .padding(vertical = 5.dp),
             horizontalArrangement = Arrangement.Center,
         ) {
-            Text("$clock · ", color = colors.onSurfaceVariant, fontSize = 11.sp)
             Text("${shown.roundToInt() + 1}", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             Text(" / $pageCount", color = colors.onSurface.copy(alpha = .86f), fontSize = 12.sp)
         }

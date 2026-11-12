@@ -20,9 +20,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -33,14 +35,18 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Collections
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Inventory2
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -117,6 +123,7 @@ fun DownloadsScreen(
     var clearCompleted by remember { mutableStateOf(false) }
     var bulkBusy by remember { mutableStateOf(false) }
     var showImportSources by remember { mutableStateOf(false) }
+    var showQueueActions by remember { mutableStateOf(false) }
     var pendingImport by remember { mutableStateOf<PendingLocalImport?>(null) }
     var importBusy by remember { mutableStateOf(false) }
     val allScroll = rememberLazyListState()
@@ -178,60 +185,52 @@ fun DownloadsScreen(
 
     Box(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
         Column(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 24.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "下载",
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.headlineLarge,
-                        color = foreground,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    DownloadTextAction(
-                        enabled = !importBusy,
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(if (loading) "正在恢复下载" else "${completedEntries.size} / ${entries.size} 章已下载",
+                            color = foreground, style = MaterialTheme.typography.labelLarge,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${downloadBytes(usedBytes)} · ${downloadBytes(availableBytes)} 可用",
+                            color = secondary, style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    DownloadTextAction(enabled = !importBusy,
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                        onClick = { showImportSources = true },
-                    ) {
-                        if (importBusy) {
-                            CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = secondary)
-                        } else {
-                            Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(18.dp), tint = foreground)
+                        onClick = { showImportSources = true }) {
+                        if (importBusy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = secondary)
+                        else Icon(Icons.Outlined.Add, null, Modifier.size(18.dp), tint = foreground)
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (importBusy) "导入中" else "导入", color = foreground,
+                            style = MaterialTheme.typography.labelMedium)
+                    }
+                    Box {
+                        MotionIconButton(onClick = { showQueueActions = true },
+                            enabled = entries.isNotEmpty() && !bulkBusy, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Outlined.MoreHoriz, "下载队列操作", Modifier.size(21.dp), tint = secondary)
                         }
-                        Spacer(Modifier.width(5.dp))
-                        Text(
-                            if (importBusy) "导入中" else "导入本地",
-                            color = foreground,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
+                        // Reuse the record-menu skin without a permanent extra toolbar row.
+                        DropdownMenu(expanded = showQueueActions && entries.isNotEmpty(),
+                            onDismissRequest = { showQueueActions = false },
+                            modifier = Modifier.widthIn(min = 164.dp, max = 240.dp),
+                            shape = RoundedCornerShape(18.dp), containerColor = colors.surfaceContainerLow,
+                            tonalElevation = 0.dp, shadowElevation = 4.dp) {
+                            if (activeEntries.isNotEmpty()) DropdownMenuItem(
+                                text = { Text("全部暂停") }, leadingIcon = { Icon(Icons.Outlined.Pause, null) },
+                                enabled = !bulkBusy,
+                                onClick = { showQueueActions = false; activeEntries.forEach { store.pause(it.id) } })
+                            if (resumableEntries.isNotEmpty()) DropdownMenuItem(
+                                text = { Text("继续未完成") }, leadingIcon = { Icon(Icons.Outlined.PlayArrow, null) },
+                                enabled = !bulkBusy,
+                                onClick = { showQueueActions = false; resumableEntries.forEach(onRetry) })
+                            if (completedEntries.isNotEmpty()) DropdownMenuItem(
+                                text = { Text("清理已下载") }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
+                                enabled = !bulkBusy,
+                                onClick = { showQueueActions = false; clearCompleted = true })
+                        }
                     }
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    if (entries.isEmpty()) "把喜欢的故事带在身边"
-                    else "${completedEntries.size} 章已下载 · ${downloadBytes(usedBytes)} 已用 · ${downloadBytes(availableBytes)} 可用",
-                    style = MaterialTheme.typography.bodyMedium, color = secondary,
-                )
-                if (entries.isNotEmpty()) {
-                    Spacer(Modifier.height(7.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (activeEntries.isNotEmpty()) DownloadTextAction(
-                            enabled = !bulkBusy,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                            onClick = { activeEntries.forEach { store.pause(it.id) } },
-                        ) { Text("全部暂停", color = secondary, style = MaterialTheme.typography.labelMedium) }
-                        if (resumableEntries.isNotEmpty()) DownloadTextAction(
-                            enabled = !bulkBusy,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                            onClick = { resumableEntries.forEach(onRetry) },
-                        ) { Text("继续未完成", color = secondary, style = MaterialTheme.typography.labelMedium) }
-                        if (completedEntries.isNotEmpty()) DownloadTextAction(
-                            enabled = !bulkBusy,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                            onClick = { clearCompleted = true },
-                        ) { Text("清理已下载", color = secondary, style = MaterialTheme.typography.labelMedium) }
-                    }
-                }
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(4.dp))
                 MotionTabs(
                     selected = filter.ordinal, labels = DownloadFilter.entries.map { it.label },
                     onSelect = { filter = DownloadFilter.entries[it] }, underline = true, compact = true,
@@ -239,7 +238,7 @@ fun DownloadsScreen(
                     fontSize = MaterialTheme.typography.labelLarge.fontSize,
                     selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(6.dp))
             }
             // The filter owns the transition; progress updates keep the existing list in place.
             MotionTabContent(filter.ordinal, Modifier.weight(1f).fillMaxWidth()) { index ->
