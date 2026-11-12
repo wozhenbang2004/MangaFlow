@@ -39,8 +39,23 @@ User feedback: “图一顶上这块占用空间太大了图二信息密度太�
 | --- | --- | --- |
 | DENSITY-01 | Put Recommend / Ranking / Latest directly in the 52dp discovery toolbar, with the existing drawer, history and search actions. Reuse the fixed Ovio Liquid Tabs adaptation through `BrowseTabs`, with stationary labels, a quiet 32dp indicator and 48dp tab targets. | No separate brand/header row above discovery tabs. Selecting a tab closes and clears search in one browse-state change. Existing per-query/per-period caches and list positions remain in use. |
 | DENSITY-02 | Ranking has one filter row: day/week/month/total, the current audience menu and refresh. Remove the duplicate period/audience heading and caption. Keep narrow-width period scrolling; the audience control stays visible. | Current period and audience remain identifiable. Male/female selection, refresh and native per-period heat stay available. The reserved 1dp refresh track cannot shift list content. |
-| DENSITY-03 | Ranking rows use 54×76dp covers, a 30dp rank column, 12dp information gutter, 3dp text gaps and 8dp row gaps. Remove decorative forward arrows. | Preserve two-line titles, authors and real source badges. Rows remain wholly clickable. Do not invent metrics or reduce title/body text to create density. |
+| DENSITY-03 | Ranking rows use 54×76dp covers, a minimum 30dp rank column, 12dp information gutter, 3dp text gaps and 8dp row gaps. Remove decorative forward arrows. | Preserve two-line titles, authors and real source badges. Longer ranks grow in one line. Rows remain wholly clickable. Do not invent metrics or reduce title/body text to create density. |
 | DENSITY-04 | The shelf title and cloud action share the 52dp app bar. Below it, keep only the 48dp collection/history tabs. Adapt the existing recent-reading row to remove the card surface and repeated continuation label: 46×64dp cover, title, exact chapter/page and source badges, 6dp vertical padding and 4dp row gaps. | Clicking a history row still calls direct continuation with the original `ReadingProgress`. No detail-screen detour, changed page index or changed storage. Collection/history keep separate saved scroll states. |
 | DENSITY-05 | Collections use the existing dense cover tile, 100dp adaptive minimum width, 16dp side padding and 10dp column gaps; increase the minimum with system font scale. | Ordinary portrait widths fit three covers where space permits; large text may reduce columns. Keep real badges and readable title roles. |
 
 Scope uses the existing MangaFlow components and Ovio source already attributed above. The aesthetic-library proximity/minimum-expression practice supplies the grouping rationale; it does not certify a rendered result. This supersedes the earlier “shelves and ranking rows retain their existing layout” note for these two views only. Account, downloads, settings, reader, source APIs and signing remain outside this slice. Build/package and source review only; no tests, lint, emulator, UI automation or generated screenshot fixtures. Device density, large-font layout and touch feel await user experience.
+
+## Revised detail contract · 2026-11-12 (supersedes DETAIL-02 through DETAIL-05)
+
+The user rejected the three-tab/paginated screenshot and explicitly requested the following:
+
+- Synopsis is two lines beside the artwork. Tapping it opens the full copy in a sheet. Do not restore a dedicated Introduction tab.
+- Chapters and Comments use quiet text tabs with a narrow underline, not a large segmented capsule.
+- The reading action names the actual chapter; continuation keeps its saved page.
+- The chapter grid uses small fixed-height tiles with an adaptive four-column tendency on portrait phones. The whole fetched directory is presented by a lazy grid and scrolls continuously, with no range picker or bottom pagination.
+- Group, order, search and the last-read locator live in an overlay side drawer. A fixed-size toolbar owns the drawer and download icons.
+- Download-mode selection must never insert a status row or resize a tile. The icon changes from download to progress, check or failure in a reserved slot without moving surrounding chapters.
+- Real status/genre/update tags and provider metrics use multiple quiet, low-saturation accents. No fabricated tags, counts, ratings or providers.
+- Keep exact chapter progress, anonymous source use, existing downloads, comments, and cache intact. The grid and comment list remain in a fixed content area beneath the header. No outer detail scroll, test suite or emulator automation for this change.
+
+This section overrides older paging and section-transition advice in the same document. A successful CI build confirms compilation only; device interaction remains unverified.
