@@ -1,14 +1,13 @@
 package dev.mangaflow.account
 
 import android.content.Context
-import android.util.Base64
+import dev.mangaflow.data.CopyAnonymousIdentityStore
 import dev.mangaflow.data.CopyMangaConfig
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceHttp
 import dev.mangaflow.data.SourceResponse
 import dev.mangaflow.data.sourceClient
-import java.security.SecureRandom
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -33,17 +32,18 @@ class CopyAccountRepository(context: Context) {
     private val loginClient = sourceClient()
     private val accountHttp = SourceHttp(accountClient)
     private val loginHttp = SourceHttp(loginClient)
+    private val appContext = context.applicationContext
+    private val appProtocol by lazy { CopyAppAccountProtocol(CopyAnonymousIdentityStore.load(appContext)) }
     private val requests = Mutex()
     private val sessionLock = Any()
     private val mutableProfile = MutableStateFlow<AccountProfile?>(null)
     val profile: StateFlow<AccountProfile?> = mutableProfile.asStateFlow()
     @Volatile private var version = 0L
     val sessionVersion: Long get() = version
-    private var sessionToken: String? = null
+    private var sessionCredential: StoredAccountCredential? = null
     private val apiOrigin = "https://api.copy202601.com".toHttpUrl()
     private val websiteOrigin = "https://copy4000.com".toHttpUrl()
-    private val loginUrl = "https://copy4000.com/api/kb/web/login".toHttpUrl()
-    private val profileUrl = "https://copy4000.com/api/v2/web/user/info".toHttpUrl()
+    private val webProfileUrl = "https://copy4000.com/api/v2/web/user/info".toHttpUrl()
     private val publicConfig = CopyMangaConfig()
 
     suspend fun restore(): AccountProfile? {
@@ -59,10 +59,10 @@ class CopyAccountRepository(context: Context) {
                     ensureVersion(expected)
                     return@withLock current
                 }
-                val token = store.read()
+                val credential = store.read()
                 ensureVersion(expected)
-                if (token == null) return@withLock null
-                val lease = SessionLease(expected, token, committed = false)
+                if (credential == null) return@withLock null
+                val lease = SessionLease(expected, credential, committed = false)
                 val account = verify(lease)
                 commit(lease, account, persist = false)
             }
@@ -74,7 +74,7 @@ class CopyAccountRepository(context: Context) {
         return withContext(Dispatchers.IO) {
             val token = AccountTokenInput.parse(input)
             requests.withLock {
-                val lease = SessionLease(expected, token, committed = false)
+                val lease = SessionLease(expected, StoredAccountCredential(token, AccountChannel.WEB), committed = false)
                 ensureLease(lease)
                 commit(lease, verify(lease), persist = true)
             }
@@ -91,8 +91,8 @@ class CopyAccountRepository(context: Context) {
             }
             requests.withLock {
                 ensureVersion(expected)
-                val token = webLogin(name, password, expected)
-                val lease = SessionLease(expected, token, committed = false)
+                val token = appLogin(name, password, expected)
+                val lease = SessionLease(expected, StoredAccountCredential(token, AccountChannel.APP), committed = false)
                 val account = try { verify(lease) } catch (error: SourceException) {
                     throw SourceException("已收到登录凭据，但账号资料验证未完成。\n${error.message}",
                         retryAfterSeconds = error.retryAfterSeconds, cause = error)
@@ -104,7 +104,7 @@ class CopyAccountRepository(context: Context) {
 
     fun logout() = synchronized(sessionLock) {
         version++
-        sessionToken = null
+        sessionCredential = null
         mutableProfile.value = null
         accountClient.dispatcher.cancelAll()
         loginClient.dispatcher.cancelAll()
@@ -194,9 +194,8 @@ class CopyAccountRepository(context: Context) {
     }
 
     private suspend fun verify(lease: SessionLease): AccountProfile {
-        // The official web login and EasyCopy verify web credentials on this
-        // same-origin endpoint; a legacy App request must not gate web login.
-        val data = accountObject(lease, profileUrl, "登录状态验证")
+        // A candidate is verified only through the protocol that issued it.
+        val data = accountObject(lease, profileUrl(lease), "登录状态验证")
         val username = data.text("username").ifBlank { data.text("mobile") }.ifBlank { data.text("email") }
         val nickname = data.text("nickname").ifBlank { data.text("name") }.ifBlank { username }
         if (username.length !in 1..160 || nickname.length > 160 ||
@@ -206,22 +205,22 @@ class CopyAccountRepository(context: Context) {
         return AccountProfile(username, nickname)
     }
 
-    private suspend fun webLogin(username: String, password: String, expected: Long): String {
-        val salt = (SecureRandom().nextInt(900_000) + 100_000).toString()
-        val salted = "$password-$salt".toByteArray(Charsets.UTF_8)
-        val encoded = try { Base64.encodeToString(salted, Base64.NO_WRAP) } finally { salted.fill(0) }
-        val body = FormBody.Builder().add("username", username).add("password", encoded).add("salt", salt)
-            .add("platform", "2").add("version", "2025.12.10").add("source", "freeSite").build()
-        val request = websiteRequest(loginUrl).post(body).build()
+    private suspend fun appLogin(username: String, password: String, expected: Long): String {
+        val request = appProtocol.loginRequest(username, password)
+        val body = request.body as FormBody
+        val encoded = body.value((0 until body.size).single { body.name(it) == "password" })
         ensureVersion(expected)
         val response = try { loginHttp.request(request, "账号密码登录", readAccountErrors = true) }
             catch (error: Exception) { ensureVersion(expected); throw error }
         ensureVersion(expected)
-        val results = envelope(response, loginUrl, loginHttp, "账号密码登录", 256 * 1024, listOf(password, encoded)) as? JSONObject
+        val results = envelope(response, request.url, loginHttp, "账号密码登录", 256 * 1024, listOf(password, encoded)) as? JSONObject
             ?: throw SourceException("账号密码登录没有返回有效的账号凭据。")
         return AccountTokenInput.validate(results.opt("token") as? String
             ?: throw SourceException("账号密码登录没有返回有效的账号凭据。"))
     }
+
+    private fun profileUrl(lease: SessionLease): HttpUrl =
+        if (lease.channel == AccountChannel.APP) CopyAppAccountProtocol.profileUrl else webProfileUrl
 
     private fun websiteRequest(url: HttpUrl): Request.Builder = Request.Builder().url(url)
             .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
@@ -243,18 +242,31 @@ class CopyAccountRepository(context: Context) {
         body: FormBody? = null, maxChars: Int = 256 * 1024): Any? {
         ensureLease(lease)
         val method = if (body == null) "GET" else "POST"
-        if (!allowed(url, method) || (!lease.committed && url != profileUrl)) {
+        if (!allowed(url, method) || (!lease.committed && url != profileUrl(lease))) {
             throw SourceException("该操作不属于个人账号接口，未发送登录凭据。")
         }
-        val builder = if (url == profileUrl) websiteRequest(url).header("Authorization", "Token ${lease.token}")
-        else Request.Builder().url(url).header("User-Agent", "COPY/3.0.9")
-            .header("Accept", "application/json").header("source", "copyApp").header("platform", "3")
-            .header("version", "3.0.9").header("webp", "1").header("Authorization", "Token ${lease.token}")
-        if (body != null) builder.post(body)
-        val response = try { accountHttp.request(builder.build(), operation, readAccountErrors = true) }
+        val request = if (lease.channel == AccountChannel.APP) {
+            val appUrl = url.newBuilder().removeAllQueryParameters("_t").removeAllQueryParameters("_update")
+                .setQueryParameter("platform", "3").apply {
+                if (CHAPTER_PATH.matches(url.encodedPath)) {
+                    setQueryParameter("in_mainland", "false")
+                    setQueryParameter("request_id", "")
+                }
+            }.build()
+            appProtocol.memberRequest(appUrl, lease.token, body)
+        } else {
+            // Imported and legacy Web sessions retain their original request path.
+            val builder = if (url == webProfileUrl) websiteRequest(url).header("Authorization", "Token ${lease.token}")
+            else Request.Builder().url(url).header("User-Agent", "COPY/3.0.9")
+                .header("Accept", "application/json").header("source", "copyApp").header("platform", "3")
+                .header("version", "3.0.9").header("webp", "1").header("Authorization", "Token ${lease.token}")
+            if (body != null) builder.post(body)
+            builder.build()
+        }
+        val response = try { accountHttp.request(request, operation, readAccountErrors = true) }
             catch (error: Exception) { ensureLease(lease); throw error }
         ensureLease(lease)
-        val result = envelope(response, url, accountHttp, operation, maxChars, listOf(lease.token))
+        val result = envelope(response, request.url, accountHttp, operation, maxChars, listOf(lease.token))
         ensureLease(lease)
         return result
     }
@@ -315,7 +327,8 @@ class CopyAccountRepository(context: Context) {
     private fun allowed(url: HttpUrl, method: String): Boolean {
         if (url.scheme != "https" || url.port != 443 ||
             url.username.isNotEmpty() || url.password.isNotEmpty() || url.fragment != null) return false
-        if (url.host == websiteOrigin.host) return method == "GET" && url == profileUrl
+        if (url.host == websiteOrigin.host) return method == "GET" && url == webProfileUrl
+        if (url == CopyAppAccountProtocol.profileUrl) return method == "GET"
         if (url.host != apiOrigin.host) return false
         val path = url.encodedPath
         if (method == "POST") return path == "/api/v3/member/collect/comic"
@@ -361,13 +374,13 @@ class CopyAccountRepository(context: Context) {
     }
 
     private fun requireSession(): SessionLease = synchronized(sessionLock) {
-        SessionLease(version, sessionToken ?: throw SourceException("请先登录自己的拷贝漫画账号。"), committed = true)
+        SessionLease(version, sessionCredential ?: throw SourceException("请先登录自己的拷贝漫画账号。"), committed = true)
     }
 
     private suspend fun ensureLease(lease: SessionLease) {
         currentCoroutineContext().ensureActive()
         synchronized(sessionLock) {
-            if (version != lease.version || (lease.committed && sessionToken != lease.token)) staleSession()
+            if (version != lease.version || (lease.committed && sessionCredential !== lease.credential)) staleSession()
         }
     }
 
@@ -380,8 +393,8 @@ class CopyAccountRepository(context: Context) {
         currentCoroutineContext().ensureActive()
         return synchronized(sessionLock) {
             if (version != lease.version) staleSession()
-            if (persist) store.write(lease.token)
-            sessionToken = lease.token
+            if (persist) store.write(lease.credential)
+            sessionCredential = lease.credential
             version++
             mutableProfile.value = account
             account
@@ -402,7 +415,10 @@ class CopyAccountRepository(context: Context) {
     private fun JSONObject.integer(name: String): Int? = (opt(name) as? Number)?.toDouble()
         ?.takeIf { it.isFinite() && it >= Int.MIN_VALUE && it <= Int.MAX_VALUE && it % 1.0 == 0.0 }?.toInt()
     private fun staleSession(): Nothing = throw CancellationException("账号会话已改变，已忽略旧请求。")
-    private class SessionLease(val version: Long, val token: String, val committed: Boolean)
+    private class SessionLease(val version: Long, val credential: StoredAccountCredential, val committed: Boolean) {
+        val token: String get() = credential.token
+        val channel: AccountChannel get() = credential.channel
+    }
     private data class AccountRows(val items: List<JSONObject>, val hasMore: Boolean)
 
     private companion object {

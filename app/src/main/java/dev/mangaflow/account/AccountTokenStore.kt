@@ -10,40 +10,56 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import org.json.JSONObject
+
+internal enum class AccountChannel(val value: String) { WEB("web"), APP("app") }
+
+internal class StoredAccountCredential(val token: String, val channel: AccountChannel)
 
 /** Only an authenticated AES/GCM envelope is written to these app-private preferences. */
 internal class AccountTokenStore(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences("copy_account_private", Context.MODE_PRIVATE)
     private val lock = Any()
-    private val associatedData = "MangaFlow.CopyAccount.v1".toByteArray(Charsets.UTF_8)
 
-    fun read(): String? = synchronized(lock) {
+    fun read(): StoredAccountCredential? = synchronized(lock) {
         try {
             val envelope = preferences.getString(TOKEN, null) ?: return@synchronized null
-            if (envelope.length > 8192) invalidSavedSession()
+            if (envelope.length > 16384) invalidSavedSession()
             val parts = envelope.split(':')
-            if (parts.size != 3 || parts[0] != "1") invalidSavedSession()
+            if (parts.size != 3 || parts[0] !in setOf("1", "2")) invalidSavedSession()
             val iv = Base64.decode(parts[1], Base64.NO_WRAP)
             val ciphertext = Base64.decode(parts[2], Base64.NO_WRAP)
-            if (iv.size != 12 || ciphertext.size !in 24..2064) invalidSavedSession()
+            if (iv.size != 12 || ciphertext.size !in 24..8192) invalidSavedSession()
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, existingKey() ?: invalidSavedSession(), GCMParameterSpec(128, iv))
-            cipher.updateAAD(associatedData)
+            cipher.updateAAD(associatedData(parts[0]))
             val plain = cipher.doFinal(ciphertext)
-            try { AccountTokenInput.validate(String(plain, Charsets.UTF_8)) }
+            try {
+                val text = String(plain, Charsets.UTF_8)
+                if (parts[0] == "1") {
+                    StoredAccountCredential(AccountTokenInput.validate(text), AccountChannel.WEB)
+                } else {
+                    val saved = JSONObject(text)
+                    val channel = AccountChannel.entries.singleOrNull { it.value == saved.opt("channel") }
+                        ?: invalidSavedSession()
+                    val token = AccountTokenInput.validate(saved.opt("token") as? String ?: invalidSavedSession())
+                    StoredAccountCredential(token, channel)
+                }
+            }
             finally { plain.fill(0) }
         } catch (error: SourceException) { throw error }
           catch (_: Exception) { invalidSavedSession() }
     }
 
-    fun write(token: String) = synchronized(lock) {
-        val plain = AccountTokenInput.validate(token).toByteArray(Charsets.UTF_8)
+    fun write(credential: StoredAccountCredential) = synchronized(lock) {
+        val plain = JSONObject().put("token", AccountTokenInput.validate(credential.token))
+            .put("channel", credential.channel.value).toString().toByteArray(Charsets.UTF_8)
         try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, existingKey() ?: createKey())
-            cipher.updateAAD(associatedData)
+            cipher.updateAAD(associatedData("2"))
             val ciphertext = cipher.doFinal(plain)
-            val envelope = "1:${Base64.encodeToString(cipher.iv, Base64.NO_WRAP)}:${Base64.encodeToString(ciphertext, Base64.NO_WRAP)}"
+            val envelope = "2:${Base64.encodeToString(cipher.iv, Base64.NO_WRAP)}:${Base64.encodeToString(ciphertext, Base64.NO_WRAP)}"
             if (!preferences.edit().putString(TOKEN, envelope).commit()) {
                 throw SourceException("账号已验证，但设备无法安全保存登录状态，请检查存储空间后重试。")
             }
@@ -64,6 +80,8 @@ internal class AccountTokenStore(context: Context) {
     }
 
     private fun existingKey(): SecretKey? = loadKeyStore().getKey(ALIAS, null) as? SecretKey
+
+    private fun associatedData(version: String) = "MangaFlow.CopyAccount.v$version".toByteArray(Charsets.UTF_8)
 
     private fun loadKeyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 

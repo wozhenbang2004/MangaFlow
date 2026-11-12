@@ -16,6 +16,8 @@ data class CopyAnonymousIdentity(
     val pseudoId: String,
     val umString: String,
 ) {
+    private val loginDate = LOGIN_DATE_FORMAT.format(Instant.now().atZone(ZoneId.systemDefault()))
+
     init {
         require(listOf(device, deviceInfo, pseudoId, umString).all { value ->
             value.isNotBlank() && value.length <= 128 && value.all { it in ' '..'~' }
@@ -31,7 +33,7 @@ data class CopyAnonymousIdentity(
             "User-Agent" to "COPY/$VERSION",
             "source" to "copyApp",
             "version" to VERSION,
-            "versioncode" to "85",
+            "versioncode" to VERSION_CODE,
             "platform" to "3",
             "region" to "0",
             "webp" to "1",
@@ -50,10 +52,34 @@ data class CopyAnonymousIdentity(
         )
     }
 
+    /** Protocol metadata only. Account credentials are added by the isolated account client. */
+    internal fun accountFormFields(): Map<String, String> = mapOf(
+        "platform" to "3",
+        "version" to VERSION,
+        "source" to "copyApp",
+        "region" to "0",
+        "webp" to "1",
+        "userAgent" to "COPY/$VERSION",
+        "isGoogle" to "false",
+        "pseudoID" to pseudoId,
+        "dt" to loginDate,
+        "tapString" to String(PUBLIC_SIGNING_KEY, Charsets.US_ASCII),
+        "umString" to umString,
+        "buildTime" to "2025.05.22",
+        "versionCode" to VERSION_CODE,
+        "androidId" to device,
+        "referer" to "com.copymanga.app-$VERSION",
+        "deviceInfo" to deviceInfo,
+    )
+
     companion object {
         private const val VERSION = "3.1.1"
+        private const val VERSION_CODE = "85"
         private const val HEX = "0123456789abcdef"
         private val DATE_FORMAT = DateTimeFormatter.ofPattern("uuuu.MM.dd", Locale.US)
+        // Neo's App form uses local wall time with a literal Z, distinct from the header date.
+        // buildTime above is its published protocol field, not MangaFlow's build timestamp.
+        private val LOGIN_DATE_FORMAT = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSS'Z'", Locale.US)
 
         // Public protocol constant, not an account credential. Sign the timestamp using
         // the decoded ASCII bytes, not a hex-decoded key:
