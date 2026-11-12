@@ -15,6 +15,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.SnapSpec
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.clickable
@@ -147,6 +148,7 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import java.io.File
@@ -1364,41 +1366,52 @@ private fun ReaderChaptersDialog(
                 )
                 if (!loading && error != null) Text(error, Modifier.padding(vertical = 6.dp),
                     color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                val state = rememberLazyGridState()
-                LaunchedEffect(visible, group, currentId, visibleChapters) {
-                    if (visible) {
-                        val index = visibleChapters.indexOfFirst { it.id == currentId }
-                        state.scrollToItem((index - 6).coerceAtLeast(0))
-                    }
-                }
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(82.dp * fontScale), state = state,
+                MotionTabContent(
+                    selected = group,
                     modifier = Modifier.fillMaxWidth().heightIn(max = minOf(450.dp, availableHeight)),
-                    contentPadding = PaddingValues(top = 10.dp, bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    items(visibleChapters, key = Chapter::id) { chapter ->
-                        val selected = chapter.id == currentId
-                        val entry = saved[chapter.id]
-                        Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
-                            .background(if (selected) colors.onSurface.copy(alpha = .10f) else colors.surfaceVariant.copy(alpha = .65f))
-                            .selectable(selected = selected, role = Role.RadioButton, onClick = { onSelect(chapter.id) })
-                            .padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(chapter.title, Modifier.weight(1f), color = colors.onSurface,
-                                fontSize = 12.sp, lineHeight = 17.sp,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
-                                when (entry?.status) {
-                                    DownloadStatus.COMPLETED -> Icon(Icons.Rounded.Check, "已下载", Modifier.size(12.dp), tint = colors.onSurfaceVariant)
-                                    DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING ->
-                                        CircularProgressIndicator(progress = { (entry?.completedPages ?: 0).toFloat() / (entry?.totalPages ?: 1).coerceAtLeast(1) },
-                                            modifier = Modifier.size(11.dp).semantics { contentDescription = "下载中" },
-                                            strokeWidth = 1.dp, color = colors.onSurfaceVariant,
-                                            trackColor = colors.onSurface.copy(alpha = .10f))
-                                    DownloadStatus.PAUSED -> Icon(Icons.Rounded.Pause, "下载已暂停", Modifier.size(11.dp), tint = colors.onSurfaceVariant)
-                                    DownloadStatus.FAILED -> Icon(Icons.Rounded.Refresh, "下载未完成", Modifier.size(11.dp), tint = colors.error)
-                                    null -> Unit
+                    contentKey = { it }, order = { groups.indexOf(it) },
+                    fillContent = false,
+                ) { targetGroup ->
+                    val active = visible && targetGroup == group
+                    val targetChapters = remember(chapters, targetGroup) {
+                        chapters.filter { it.group == targetGroup }.sortedBy(Chapter::index)
+                    }
+                    val state = rememberLazyGridState()
+                    LaunchedEffect(active, currentId, targetChapters) {
+                        if (active) {
+                            val index = targetChapters.indexOfFirst { it.id == currentId }
+                            state.scrollToItem((index - 6).coerceAtLeast(0))
+                        } else state.stopScroll()
+                    }
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(82.dp * fontScale), state = state,
+                        modifier = Modifier.fillMaxWidth(), userScrollEnabled = active,
+                        contentPadding = PaddingValues(top = 10.dp, bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        items(targetChapters, key = Chapter::id) { chapter ->
+                            val selected = chapter.id == currentId
+                            val entry = saved[chapter.id]
+                            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) colors.onSurface.copy(alpha = .10f) else colors.surfaceVariant.copy(alpha = .65f))
+                                .selectable(selected = selected, role = Role.RadioButton, onClick = { onSelect(chapter.id) })
+                                .padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(chapter.title, Modifier.weight(1f), color = colors.onSurface,
+                                    fontSize = 12.sp, lineHeight = 17.sp,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
+                                    when (entry?.status) {
+                                        DownloadStatus.COMPLETED -> Icon(Icons.Rounded.Check, "已下载", Modifier.size(12.dp), tint = colors.onSurfaceVariant)
+                                        DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING ->
+                                            CircularProgressIndicator(progress = { (entry?.completedPages ?: 0).toFloat() / (entry?.totalPages ?: 1).coerceAtLeast(1) },
+                                                modifier = Modifier.size(11.dp).semantics { contentDescription = "下载中" },
+                                                strokeWidth = 1.dp, color = colors.onSurfaceVariant,
+                                                trackColor = colors.onSurface.copy(alpha = .10f))
+                                        DownloadStatus.PAUSED -> Icon(Icons.Rounded.Pause, "下载已暂停", Modifier.size(11.dp), tint = colors.onSurfaceVariant)
+                                        DownloadStatus.FAILED -> Icon(Icons.Rounded.Refresh, "下载未完成", Modifier.size(11.dp), tint = colors.error)
+                                        null -> Unit
+                                    }
                                 }
                             }
                         }

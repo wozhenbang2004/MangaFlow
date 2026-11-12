@@ -6,6 +6,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloat
@@ -173,26 +174,40 @@ internal fun MotionTabContent(
     selected: Int,
     modifier: Modifier = Modifier,
     content: @Composable (Int) -> Unit,
+) = MotionTabContent(selected, modifier, contentKey = { it }, order = { it }, content = content)
+
+/** Keep the leaving selection's data while updates to the current key stay in place. */
+@Composable
+internal fun <T> MotionTabContent(
+    selected: T,
+    modifier: Modifier = Modifier,
+    contentKey: (T) -> Any,
+    order: (T) -> Int,
+    fillContent: Boolean = true,
+    content: @Composable (T) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
     val distance = with(LocalDensity.current) { 10.dp.roundToPx() }
     val layoutDirection = LocalLayoutDirection.current
-    AnimatedContent(targetState = selected, modifier = modifier.clipToBounds(),
+    AnimatedContent(targetState = selected, contentKey = contentKey, modifier = modifier.clipToBounds(),
         contentAlignment = Alignment.TopStart,
         transitionSpec = {
-            if (!motion) (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
+            val transform = if (!motion) fadeIn(snap()) togetherWith fadeOut(snap())
             else {
-                val order = if (targetState > initialState) 1 else -1
-                val direction = if (layoutDirection == LayoutDirection.Rtl) -order else order
+                val step = if (order(targetState) > order(initialState)) 1 else -1
+                val direction = if (layoutDirection == LayoutDirection.Rtl) -step else step
                 ((fadeIn(tween(MangaMotion.Content)) +
                     slideInHorizontally(tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing)) { direction * distance }) togetherWith
                     (fadeOut(tween(MangaMotion.Quick)) +
                         slideOutHorizontally(tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)) { -direction * distance / 2 }))
-                    .using(null)
             }
+            transform.using(if (motion && !fillContent) SizeTransform(clip = false) { _, _ ->
+                tween(MangaMotion.Content, easing = MangaMotion.EnterEasing)
+            } else null)
         }, label = "tab-content",
     ) { target ->
-        Box(Modifier.fillMaxSize().motionInputGate(target == selected)) { content(target) }
+        val bounds = if (fillContent) Modifier.fillMaxSize() else Modifier
+        Box(bounds.motionInputGate(contentKey(target) == contentKey(selected))) { content(target) }
     }
 }
 

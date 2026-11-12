@@ -8,7 +8,7 @@ commit `81a1bcb6737356038163728b3b2a657c9dcffa32`.
 The image is decorative beside its author's name, keeps the fallback on failure, and is loaded only with the visible comment.
 The remaining comment layout belongs to MangaFlow.
 
-The shared detail, discovery, shelf, download, settings and reader selectors in `ui/motion/MotionTabs.kt`
+The shared detail, discovery, local/cloud shelf, download, settings and reader selectors in `ui/motion/MotionTabs.kt`
 and `ui/BrowseTabs.kt` are adapted from the same fixed Ovio version:
 `components/ovio/liquid-tabs/use-liquid.ts` and
 `components/ovio/liquid-tabs/worlds/minimal.tsx`.
@@ -92,6 +92,19 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## AndroidX bottom pull continuation
+
+The bottom loading gesture in `ui/motion/BottomPullLoad.kt` is adapted from
+AndroidX Material3 `1.3.2`, `commonMain/androidx/compose/material3/pulltorefresh/PullToRefresh.kt`,
+in the [published source archive](https://dl.google.com/dl/android/maven2/androidx/compose/material3/material3/1.3.2/material3-1.3.2-sources.jar).
+The source file SHA-256 is `a46039a6805195abfc47accc103f1cf254ae451524f2e5eeb4dc4ee57479335d`.
+Copyright 2023 The Android Open Source Project, licensed under Apache-2.0.
+MangaFlow reverses the drag direction for the bottom edge, retains the half-distance resistance,
+fills a fixed footer ring, and requests the next page when full rather than waiting for release.
+A per-gesture guard prevents repeat requests; Foundation `1.8.2` owns drag/fling/cancel dispatch.
+The source header is retained. The complete Apache-2.0 text is already bundled in
+`app/src/main/assets/licenses/Mihon-APACHE-2.0.txt`.
 
 ## Mihon compact manga header
 

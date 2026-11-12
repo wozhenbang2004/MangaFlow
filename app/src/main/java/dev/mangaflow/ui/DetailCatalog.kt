@@ -1,12 +1,10 @@
 package dev.mangaflow.ui
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -23,15 +21,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
@@ -50,7 +45,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -75,16 +70,16 @@ import dev.mangaflow.data.Chapter
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
-import dev.mangaflow.ui.motion.LocalMotionEnabled
-import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.MotionTabContent
+import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 
 /**
- * One stable, lazily-composed chapter grid, with groups and download selection in a
- * fixed toolbar. Changing download mode never inserts a row or shifts the chapters.
+ * Group panes share one fixed toolbar. Changing download mode never inserts a row
+ * or shifts chapters, and each pane owns its grid while a group change animates.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -102,6 +97,7 @@ internal fun DetailCatalog(
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
+    var groupVisit by rememberSaveable(mangaId) { mutableIntStateOf(0) }
     // A temporarily empty directory must not clear a restored group or its scroll position.
     val group = chosenGroup?.takeIf { groups.isEmpty() || it in groups }
     var downloadMode by rememberSaveable(mangaId) { mutableStateOf(false) }
@@ -109,20 +105,9 @@ internal fun DetailCatalog(
     var selectedChapterId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var closingChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
 
-    val grid = rememberLazyGridState()
     val showBusy = rememberDelayedBusy(loading)
     val shown = remember(chapters, group) {
         if (group == null) chapters else chapters.filter { it.group == group }
-    }
-
-    // Restore the same grid position after visiting Comments or the reader.
-    // Only a different chapter group returns to the start of the directory.
-    var appliedGroup by rememberSaveable(mangaId) { mutableStateOf(group) }
-    LaunchedEffect(group) {
-        if (appliedGroup != group) {
-            grid.scrollToItem(0)
-            appliedGroup = group
-        }
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -133,7 +118,10 @@ internal fun DetailCatalog(
             if (groups.size > 1) {
                 ChapterGroups(
                     groups = groups, total = chapters.size, selected = group,
-                    onSelect = { chosenGroup = it }, modifier = Modifier.weight(1f),
+                    onSelect = {
+                        if (group != it) groupVisit++
+                        chosenGroup = it
+                    }, modifier = Modifier.weight(1f),
                 )
             } else {
                 Text(
@@ -158,45 +146,64 @@ internal fun DetailCatalog(
             if (showBusy) LinearProgressIndicator(
                 modifier = Modifier.fillMaxSize(), color = DetailSecondary, trackColor = Color.Transparent)
         }
-        if (shown.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth().nestedScroll(scrolling)
-                .scrollable(rememberScrollableState { 0f }, Orientation.Vertical),
-                contentAlignment = Alignment.Center) {
-                Text(
-                    when {
-                        loading && chapters.isEmpty() -> "正在读取章节"
-                        error != null && chapters.isEmpty() -> "目录暂不可用，点击顶部重试"
-                        else -> "暂无章节"
-                    },
-                    color = DetailMuted, fontSize = 13.sp,
-                    modifier = Modifier.padding(24.dp),
-                )
+        MotionTabContent(
+            selected = group, modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentKey = { if (it == null) "all" else "group:$it" },
+            order = { if (it == null) 0 else groups.keys.indexOf(it) + 1 },
+        ) { targetGroup ->
+            val active = targetGroup == group
+            val grid = rememberLazyGridState()
+            val visibleChapters = remember(chapters, targetGroup) {
+                if (targetGroup == null) chapters else chapters.filter { it.group == targetGroup }
             }
-        } else {
-            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-            val showGroup = group == null && groups.size > 1
-            val tileHeight = (if (showGroup) 58f else 47f).times(fontScale).dp
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = (74f * fontScale).dp),
-                state = grid,
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)
-                    .nestedScroll(scrolling),
-                contentPadding = PaddingValues(top = 5.dp, bottom = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                items(shown, key = Chapter::id) { chapter ->
-                    ChapterTile(
-                        chapter = chapter,
-                        entry = downloaded[chapter.id],
-                        progress = progress?.takeIf { it.chapterId == chapter.id },
-                        showGroup = showGroup,
-                        downloadMode = downloadMode,
-                        height = tileHeight,
-                        onRead = { onRead(chapter) },
-                        onDownload = { onDownload(chapter) },
-                        onActions = { selectedChapterId = chapter.id },
+            // Comments/reader restoration keeps this visit; even a quick A→B→A is a new visit.
+            var appliedVisit by rememberSaveable(mangaId) { mutableIntStateOf(groupVisit) }
+            LaunchedEffect(active, groupVisit) {
+                if (!active) grid.stopScroll()
+                else if (appliedVisit != groupVisit) {
+                    grid.scrollToItem(0)
+                    appliedVisit = groupVisit
+                }
+            }
+            if (visibleChapters.isEmpty()) {
+                Box(Modifier.fillMaxSize().nestedScroll(scrolling)
+                    .scrollable(rememberScrollableState { 0f }, Orientation.Vertical, enabled = active),
+                    contentAlignment = Alignment.Center) {
+                    Text(
+                        when {
+                            loading && chapters.isEmpty() -> "正在读取章节"
+                            error != null && chapters.isEmpty() -> "目录暂不可用，点击顶部重试"
+                            else -> "暂无章节"
+                        },
+                        color = DetailMuted, fontSize = 13.sp,
+                        modifier = Modifier.padding(24.dp),
                     )
+                }
+            } else {
+                val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+                val showGroup = targetGroup == null && groups.size > 1
+                val tileHeight = (if (showGroup) 58f else 47f).times(fontScale).dp
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = (74f * fontScale).dp),
+                    state = grid, userScrollEnabled = active,
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp).nestedScroll(scrolling),
+                    contentPadding = PaddingValues(top = 5.dp, bottom = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    items(visibleChapters, key = Chapter::id) { chapter ->
+                        ChapterTile(
+                            chapter = chapter,
+                            entry = downloaded[chapter.id],
+                            progress = progress?.takeIf { it.chapterId == chapter.id },
+                            showGroup = showGroup,
+                            downloadMode = downloadMode,
+                            height = tileHeight,
+                            onRead = { onRead(chapter) },
+                            onDownload = { onDownload(chapter) },
+                            onActions = { selectedChapterId = chapter.id },
+                        )
+                    }
                 }
             }
         }
@@ -269,45 +276,24 @@ private fun ChapterGroups(
             groups.forEach { (name, count) -> add(name to count) }
         }
     }
-    val motion = LocalMotionEnabled.current
-    Row(
-        modifier.horizontalScroll(rememberScrollState()).selectableGroup(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
-    ) {
-        choices.forEach { (name, count) ->
-            key(name) {
-                val active = selected == name
-                val label = name?.ifBlank { "未分组" } ?: "全部"
-                val interaction = remember { MutableInteractionSource() }
-                val tint by animateColorAsState(
-                    if (active) DetailForeground.copy(alpha = .075f) else Color.Transparent,
-                    animationSpec = if (motion) tween(MangaMotion.Quick) else snap(),
-                    label = "chapter-group-tint",
-                )
-                Box(
-                    Modifier.height(48.dp).widthIn(min = 48.dp)
-                        .selectable(
-                            selected = active, role = Role.Tab,
-                            interactionSource = interaction, indication = null,
-                            onClick = { onSelect(name) },
-                        ).semantics { contentDescription = "$label，$count 话" },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Row(
-                        Modifier.motionPress(interaction)
-                            .clip(RoundedCornerShape(9.dp)).background(tint)
-                            .padding(horizontal = 9.dp, vertical = 5.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(label, color = if (active) DetailForeground else DetailSecondary,
-                            fontWeight = FontWeight.Medium, fontSize = 12.sp, maxLines = 1)
-                        Text(count.toString(), color = DetailMuted, fontSize = 10.sp, maxLines = 1)
-                    }
+    val labels = choices.map { (name, _) -> name?.ifBlank { "未分组" } ?: "全部" }
+    Box(modifier.horizontalScroll(rememberScrollState()), contentAlignment = Alignment.CenterStart) {
+        MotionTabs(
+            selected = choices.indexOfFirst { it.first == selected }, labels = labels,
+            onSelect = { onSelect(choices[it].first) },
+            foreground = DetailForeground, muted = DetailSecondary, indicator = DetailForeground,
+            underline = true, compact = true, fontSize = 12.sp,
+            itemContent = { index, _, color ->
+                val label = labels[index]
+                val count = choices[index].second
+                Row(Modifier.semantics { contentDescription = "$label，$count 话" },
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(label, color = color, fontWeight = FontWeight.Medium, fontSize = 12.sp, maxLines = 1)
+                    Text(count.toString(), color = DetailMuted, fontSize = 10.sp, maxLines = 1)
                 }
-            }
-        }
+            },
+        )
     }
 }
 

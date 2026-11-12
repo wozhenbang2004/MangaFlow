@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -21,11 +23,14 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.PersonOutline
@@ -37,7 +42,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -47,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -71,6 +76,7 @@ import dev.mangaflow.BuildConfig
 import dev.mangaflow.account.CloudHistoryEntry
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.ui.motion.MotionTabContent
 
 @Composable
 fun AccountScreen(
@@ -129,27 +135,17 @@ fun AccountScreen(
         }
     }
 
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(144.dp),
-        modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding(),
-        contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp),
-    ) {
-        item(span = { GridItemSpan(maxLineSpan) }, key = "account-heading") {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("拷贝账号", style = MaterialTheme.typography.headlineLarge)
-                    if (profile == null) Text("匿名阅读已启用", Modifier.padding(top = 4.dp),
-                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                }
-                if (profile != null) IconButton(onClick = onRefresh, enabled = !state.busy) {
-                    Icon(Icons.Outlined.Refresh, "刷新账号", Modifier.size(21.dp))
-                }
+    if (profile == null) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(144.dp),
+            modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding(),
+            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "account-heading") {
+                AccountHeading(signedIn = false, busy = state.busy, onRefresh = onRefresh)
             }
-        }
-
-        if (profile == null) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "login-form") {
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Text("连接账号，同步个人收藏与阅读记录。", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
@@ -206,88 +202,113 @@ fun AccountScreen(
                     }
                 }
             }
-        } else {
-            item(span = { GridItemSpan(maxLineSpan) }, key = "profile") {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(42.dp).clip(CircleShape).background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Outlined.PersonOutline, null, Modifier.size(22.dp), tint = colors.onSurfaceVariant)
-                        }
-                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                            Text(profile.nickname.ifBlank { profile.username }, style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (profile.nickname.isNotBlank() && profile.nickname != profile.username) {
-                                Text(profile.username, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    } else {
+        key(profile.username) {
+            val favoritesPosition = rememberLazyGridState()
+            val historyPosition = rememberLazyGridState()
+            BoxWithConstraints(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
+                // Long account errors remain reachable without consuming the tabs or list viewport.
+                val profileMaxHeight = (maxHeight - 48.dp).coerceAtLeast(0.dp) * .45f
+                Column(Modifier.fillMaxSize()) {
+                    Column(Modifier.fillMaxWidth().heightIn(max = profileMaxHeight)
+                        .verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = 4.dp)) {
+                        AccountHeading(signedIn = true, busy = state.busy, onRefresh = onRefresh)
+                        Spacer(Modifier.height(24.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(42.dp).clip(CircleShape).background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Outlined.PersonOutline, null, Modifier.size(22.dp), tint = colors.onSurfaceVariant)
+                                }
+                                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                    Text(profile.nickname.ifBlank { profile.username }, style = MaterialTheme.typography.titleMedium,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (profile.nickname.isNotBlank() && profile.nickname != profile.username) {
+                                        Text(profile.username, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                                TextButton(onClick = { clearInputs(); removeFavorite = null; onLogout() }) { Text("退出") }
                             }
-                        }
-                        TextButton(onClick = { clearInputs(); removeFavorite = null; onLogout() }) { Text("退出") }
-                    }
-                    if (state.busy) AccountBusyRow("正在刷新账号…") { clearInputs(); onLogout() }
-                    state.error?.let { AccountError(it, state.busy, onRefresh) }
-                    state.syncMessage?.takeIf(String::isNotBlank)?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                    }
-                    if (state.canRetrySync && !state.busy) {
-                        TextButton(onClick = onRetrySync, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
-                            Text("重试同步", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        FilterChip(selected = !showHistory, onClick = { showHistory = false }, label = { Text("云端收藏") }, shape = RoundedCornerShape(100))
-                        FilterChip(selected = showHistory, onClick = { showHistory = true }, label = { Text("云端记录") }, shape = RoundedCornerShape(100))
-                    }
-                }
-            }
-
-            if (showHistory) {
-                if (state.history.isEmpty()) {
-                    item(span = { GridItemSpan(maxLineSpan) }, key = "history-status") {
-                        when {
-                            state.historyLoading -> QuietLoading("正在读取云端记录…")
-                            state.historyError != null -> AccountError(state.historyError, false, onRefresh)
-                            else -> EmptyMessage("还没有云端记录", "账号中的阅读章节会显示在这里。", "刷新", onRefresh)
-                        }
-                    }
-                } else {
-                    itemsIndexed(state.history, key = { index, entry -> "cloud-history-${entry.manga.id}-${entry.chapterId}-$index" },
-                        span = { _, _ -> GridItemSpan(maxLineSpan) }) { _, entry ->
-                        CloudContinueRow(entry, repository) { onContinue(entry) }
-                    }
-                    if (state.historyLoading || state.historyError != null || state.historyHasMore) {
-                        item(span = { GridItemSpan(maxLineSpan) }, key = "history-more") {
-                            AccountListFooter(state.historyLoading, state.historyError, onMoreHistory)
-                        }
-                    }
-                }
-            } else {
-                if (state.favorites.isEmpty()) {
-                    item(span = { GridItemSpan(maxLineSpan) }, key = "favorites-status") {
-                        when {
-                            state.favoritesLoading -> QuietLoading("正在读取云端收藏…")
-                            state.favoritesError != null -> AccountError(state.favoritesError, false, onRefresh)
-                            else -> EmptyMessage("云端书架还是空的", "账号收藏的漫画会显示在这里。", "刷新", onRefresh)
-                        }
-                    }
-                } else {
-                    items(state.favorites.distinctBy(Manga::id), key = { "cloud-favorite-${it.id}" }) { manga ->
-                        val syncing = manga.id in state.syncingFavorites
-                        Column {
-                            CoverTile(manga, repository) { onOpen(manga) }
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                TextButton(onClick = { removeFavorite = manga }, enabled = !syncing,
-                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp)) {
-                                    if (syncing) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp, color = colors.onSurfaceVariant)
-                                    else Icon(Icons.Outlined.Close, null, Modifier.size(14.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text(if (syncing) "同步中" else "移除", style = MaterialTheme.typography.bodySmall)
+                            if (state.busy) AccountBusyRow("正在刷新账号…") { clearInputs(); onLogout() }
+                            state.error?.let { AccountError(it, state.busy, onRefresh) }
+                            state.syncMessage?.takeIf(String::isNotBlank)?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            }
+                            if (state.canRetrySync && !state.busy) {
+                                TextButton(onClick = onRetrySync, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                                    Text("重试同步", style = MaterialTheme.typography.bodySmall)
                                 }
                             }
                         }
                     }
-                    if (state.favoritesLoading || state.favoritesError != null || state.favoritesHasMore) {
-                        item(span = { GridItemSpan(maxLineSpan) }, key = "favorites-more") {
-                            AccountListFooter(state.favoritesLoading, state.favoritesError, onMoreFavorites)
+                    BrowseTabs(
+                        selected = if (showHistory) 1 else 0,
+                        labels = listOf("云端收藏", "云端记录"),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                    ) { showHistory = it == 1 }
+                    MotionTabContent(if (showHistory) 1 else 0, Modifier.weight(1f).fillMaxWidth()) { tab ->
+                        val historyTab = tab == 1
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(144.dp),
+                            state = if (historyTab) historyPosition else favoritesPosition,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(24.dp),
+                        ) {
+                            if (historyTab) {
+                                if (state.history.isEmpty()) {
+                                    item(span = { GridItemSpan(maxLineSpan) }, key = "history-status") {
+                                        when {
+                                            state.historyLoading -> QuietLoading("正在读取云端记录…")
+                                            state.historyError != null -> AccountError(state.historyError, false, onRefresh)
+                                            else -> EmptyMessage("还没有云端记录", "账号中的阅读章节会显示在这里。", "刷新", onRefresh)
+                                        }
+                                    }
+                                } else {
+                                    itemsIndexed(state.history, key = { index, entry -> "cloud-history-${entry.manga.id}-${entry.chapterId}-$index" },
+                                        span = { _, _ -> GridItemSpan(maxLineSpan) }) { _, entry ->
+                                        CloudContinueRow(entry, repository) { onContinue(entry) }
+                                    }
+                                    if (state.historyLoading || state.historyError != null || state.historyHasMore) {
+                                        item(span = { GridItemSpan(maxLineSpan) }, key = "history-more") {
+                                            AccountListFooter(state.historyLoading, state.historyError, onMoreHistory)
+                                        }
+                                    }
+                                }
+                            } else {
+                                if (state.favorites.isEmpty()) {
+                                    item(span = { GridItemSpan(maxLineSpan) }, key = "favorites-status") {
+                                        when {
+                                            state.favoritesLoading -> QuietLoading("正在读取云端收藏…")
+                                            state.favoritesError != null -> AccountError(state.favoritesError, false, onRefresh)
+                                            else -> EmptyMessage("云端书架还是空的", "账号收藏的漫画会显示在这里。", "刷新", onRefresh)
+                                        }
+                                    }
+                                } else {
+                                    items(state.favorites.distinctBy(Manga::id), key = { "cloud-favorite-${it.id}" }) { manga ->
+                                        val syncing = manga.id in state.syncingFavorites
+                                        Column {
+                                            CoverTile(manga, repository) { onOpen(manga) }
+                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                                TextButton(onClick = { removeFavorite = manga }, enabled = !syncing,
+                                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp)) {
+                                                    if (syncing) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp, color = colors.onSurfaceVariant)
+                                                    else Icon(Icons.Outlined.Close, null, Modifier.size(14.dp))
+                                                    Spacer(Modifier.width(4.dp))
+                                                    Text(if (syncing) "同步中" else "移除", style = MaterialTheme.typography.bodySmall)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (state.favoritesLoading || state.favoritesError != null || state.favoritesHasMore) {
+                                        item(span = { GridItemSpan(maxLineSpan) }, key = "favorites-more") {
+                                            AccountListFooter(state.favoritesLoading, state.favoritesError, onMoreFavorites)
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -309,6 +330,20 @@ fun AccountScreen(
             },
             dismissButton = { TextButton(onClick = { removeFavorite = null }) { Text("取消") } },
         )
+    }
+}
+
+@Composable
+private fun AccountHeading(signedIn: Boolean, busy: Boolean, onRefresh: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("拷贝账号", style = MaterialTheme.typography.headlineLarge)
+            if (!signedIn) Text("匿名阅读已启用", Modifier.padding(top = 4.dp),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (signedIn) IconButton(onClick = onRefresh, enabled = !busy) {
+            Icon(Icons.Outlined.Refresh, "刷新账号", Modifier.size(21.dp))
+        }
     }
 }
 
