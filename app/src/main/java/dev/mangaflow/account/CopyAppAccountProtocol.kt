@@ -1,23 +1,13 @@
 package dev.mangaflow.account
 
 import dev.mangaflow.data.CopyAnonymousIdentity
-import java.security.SecureRandom
-import java.util.Base64
 import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 
-/** App account wire protocol. Public requests never call this credential-bearing builder. */
+/** Existing App sessions keep their issuing protocol; new password login follows Relay's Web flow. */
 internal class CopyAppAccountProtocol(private val identity: CopyAnonymousIdentity) {
-    fun loginRequest(username: String, password: String): Request {
-        val salt = (SecureRandom().nextInt(9000) + 1000).toString()
-        val salted = "$password-$salt".toByteArray(Charsets.UTF_8)
-        val encoded = try { Base64.getEncoder().encodeToString(salted) } finally { salted.fill(0) }
-        val form = FormBody.Builder().add("username", username).add("password", encoded).add("salt", salt).build()
-        return request(loginUrl, token = null, form = form)
-    }
-
     fun memberRequest(url: HttpUrl, token: String, form: FormBody? = null): Request {
         require(allowed(url, if (form == null) "GET" else "POST")) { "该地址不属于个人账号接口。" }
         return request(url, token, form)
@@ -42,10 +32,9 @@ internal class CopyAppAccountProtocol(private val identity: CopyAnonymousIdentit
     }
 
     companion object {
-        // Fixed upstream App endpoints and form metadata are documented in:
+        // Legacy App member endpoints and form metadata are documented in:
         // https://github.com/rchdliang/CopyManga_Neo/tree/36ec484fb6ee166456f8025917963fcf8e9e2ce8
         // No endpoint fallback or credential replay occurs after a rejected submission.
-        val loginUrl = "https://api.copy202602.com/api/v3/login?platform=3".toHttpUrl()
         val profileUrl = "https://api.copy202601.com/api/v3/member/info?platform=3".toHttpUrl()
         private val queryPath = Regex("/api/v3/comic2/[A-Za-z0-9_-]{1,160}/query")
         private val chapterPath = Regex("/api/v3/comic/[A-Za-z0-9_-]{1,160}/chapter2/[0-9a-fA-F-]{36}")

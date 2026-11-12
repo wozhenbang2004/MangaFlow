@@ -22,8 +22,13 @@ import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody
+import okio.BufferedSink
 import org.json.JSONObject
+import java.security.SecureRandom
+import java.util.Base64
 
 /** Relay's owner-only routes. Public catalogs, pages and downloads never use this client. */
 class CopyAccountRepository(context: Context) {
@@ -43,7 +48,9 @@ class CopyAccountRepository(context: Context) {
     private var sessionCredential: StoredAccountCredential? = null
     private val apiOrigin = "https://api.copy202601.com".toHttpUrl()
     private val websiteOrigin = "https://copy4000.com".toHttpUrl()
+    private val webLoginUrl = websiteOrigin.newBuilder().addPathSegments("api/kb/web/login").build()
     private val webProfileUrl = "https://copy4000.com/api/v2/web/user/info".toHttpUrl()
+    private val relayProfileUrl = apiUrl("member/info")
     private val publicConfig = CopyMangaConfig()
 
     suspend fun restore(): AccountProfile? {
@@ -91,8 +98,8 @@ class CopyAccountRepository(context: Context) {
             }
             requests.withLock {
                 ensureVersion(expected)
-                val token = appLogin(name, password, expected)
-                val lease = SessionLease(expected, StoredAccountCredential(token, AccountChannel.APP), committed = false)
+                val token = webLogin(name, password, expected)
+                val lease = SessionLease(expected, StoredAccountCredential(token, AccountChannel.WEB_API), committed = false)
                 val account = try { verify(lease) } catch (error: SourceException) {
                     throw SourceException("已收到登录凭据，但账号资料验证未完成。\n${error.message}",
                         retryAfterSeconds = error.retryAfterSeconds, cause = error)
@@ -194,7 +201,8 @@ class CopyAccountRepository(context: Context) {
     }
 
     private suspend fun verify(lease: SessionLease): AccountProfile {
-        // A candidate is verified only through the protocol that issued it.
+        // Password login follows Relay's Web-login / account-API verification pair.
+        // Legacy imports and existing App sessions retain their original profile path.
         val data = accountObject(lease, profileUrl(lease), "登录状态验证")
         val username = data.text("username").ifBlank { data.text("mobile") }.ifBlank { data.text("email") }
         val nickname = data.text("nickname").ifBlank { data.text("name") }.ifBlank { username }
@@ -205,10 +213,19 @@ class CopyAccountRepository(context: Context) {
         return AccountProfile(username, nickname)
     }
 
-    private suspend fun appLogin(username: String, password: String, expected: Long): String {
-        val request = appProtocol.loginRequest(username, password)
-        val body = request.body as FormBody
-        val encoded = body.value((0 until body.size).single { body.name(it) == "password" })
+    private suspend fun webLogin(username: String, password: String, expected: Long): String {
+        val salt = (SecureRandom().nextInt(900_000) + 100_000).toString()
+        val salted = "$password-$salt".toByteArray(Charsets.UTF_8)
+        val encoded = try { Base64.getEncoder().encodeToString(salted) } finally { salted.fill(0) }
+        val form = FormBody.Builder().add("username", username).add("password", encoded).add("salt", salt)
+            .add("platform", "2").add("version", "2025.12.10").add("source", "freeSite").build()
+        // OkHttp's bridge uses the body's type, so a header alone loses Relay's charset.
+        val body = object : RequestBody() {
+            override fun contentType() = WEB_FORM_TYPE
+            override fun contentLength() = form.contentLength()
+            override fun writeTo(sink: BufferedSink) = form.writeTo(sink)
+        }
+        val request = websiteRequest(webLoginUrl).post(body).build()
         ensureVersion(expected)
         val response = try { loginHttp.request(request, "账号密码登录", readAccountErrors = true) }
             catch (error: Exception) { ensureVersion(expected); throw error }
@@ -219,8 +236,11 @@ class CopyAccountRepository(context: Context) {
             ?: throw SourceException("账号密码登录没有返回有效的账号凭据。"))
     }
 
-    private fun profileUrl(lease: SessionLease): HttpUrl =
-        if (lease.channel == AccountChannel.APP) CopyAppAccountProtocol.profileUrl else webProfileUrl
+    private fun profileUrl(lease: SessionLease): HttpUrl = when (lease.channel) {
+        AccountChannel.APP -> CopyAppAccountProtocol.profileUrl
+        AccountChannel.WEB_API -> relayProfileUrl
+        AccountChannel.WEB -> webProfileUrl
+    }
 
     private fun websiteRequest(url: HttpUrl): Request.Builder = Request.Builder().url(url)
             .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
@@ -328,7 +348,7 @@ class CopyAccountRepository(context: Context) {
         if (url.scheme != "https" || url.port != 443 ||
             url.username.isNotEmpty() || url.password.isNotEmpty() || url.fragment != null) return false
         if (url.host == websiteOrigin.host) return method == "GET" && url == webProfileUrl
-        if (url == CopyAppAccountProtocol.profileUrl) return method == "GET"
+        if (url == CopyAppAccountProtocol.profileUrl || url == relayProfileUrl) return method == "GET"
         if (url.host != apiOrigin.host) return false
         val path = url.encodedPath
         if (method == "POST") return path == "/api/v3/member/collect/comic"
@@ -422,6 +442,7 @@ class CopyAccountRepository(context: Context) {
     private data class AccountRows(val items: List<JSONObject>, val hasMore: Boolean)
 
     private companion object {
+        val WEB_FORM_TYPE = "application/x-www-form-urlencoded; charset=UTF-8".toMediaType()
         val SEGMENT_PATTERN = Regex("[A-Za-z0-9_-]{1,160}")
         val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
         val QUERY_PATH = Regex("/api/v3/comic2/[A-Za-z0-9_-]{1,160}/query")
