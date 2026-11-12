@@ -117,6 +117,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val reading by model.reading.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
     val history by model.library.history.collectAsStateWithLifecycle()
+    val preferences by model.library.preferences.collectAsStateWithLifecycle()
     val downloads by model.downloads.entries.collectAsStateWithLifecycle()
     val refreshingDownloads by model.refreshingDownloads.collectAsStateWithLifecycle()
     val account by model.account.collectAsStateWithLifecycle()
@@ -179,7 +180,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val density = LocalDensity.current
     val drawerWidthPx = with(density) { 296.dp.toPx() }
     val routeTravel = with(density) { 24.dp.roundToPx() }
-    CompositionLocalProvider(LocalMangaMetrics provides MangaMetricState(metrics, model::retainMetrics, model::releaseMetrics)) {
+    CompositionLocalProvider(
+        LocalMangaMetrics provides MangaMetricState(metrics, model::retainMetrics, model::releaseMetrics),
+        LocalGlassSkin provides preferences.glassSkin,
+    ) {
     ModalNavigationDrawer(
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant),
         drawerState = drawer,

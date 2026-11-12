@@ -119,6 +119,7 @@ internal fun ExpandingSearchBar(
             }
             LiquidGlassSurface(
                 state = backdrop,
+                trackPointer = true,
                 modifier = Modifier.align(Alignment.CenterEnd)
                     .width(48.dp + (fullWidth - 48.dp).coerceAtLeast(0.dp) * reveal.value.coerceIn(0f, 1f))
                     .height(48.dp).graphicsLayer { alpha = surfaceAlpha.value },

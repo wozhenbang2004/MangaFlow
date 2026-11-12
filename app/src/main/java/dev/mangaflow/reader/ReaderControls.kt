@@ -1,5 +1,6 @@
 package dev.mangaflow.reader
 
+import android.os.Build
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -46,6 +47,11 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogWindowProvider
+import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.storage.GlassSkin
+import dev.mangaflow.ui.GlassSurfaceRole
+import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.LocalGlassSkin
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 
@@ -73,13 +79,17 @@ internal fun ReaderSurface(
 }
 
 @Composable
-internal fun ReaderDialogSurface(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+internal fun ReaderDialogSurface(
+    modifier: Modifier = Modifier,
+    backdrop: HazeState,
+    content: @Composable () -> Unit,
+) {
     val window = (LocalView.current.parent as? DialogWindowProvider)?.window
     SideEffect { window?.setDimAmount(.12f) }
-    ReaderSurface(modifier = modifier, content = content)
+    LiquidGlassSurface(backdrop, modifier, role = GlassSurfaceRole.PANEL) { content() }
 }
 
-/** Keeps Material's seek, keyboard and accessibility behavior, with a quiet track and round thumb. */
+/** Keeps Material's seek, keyboard and accessibility behavior, with a quiet track and stable thumb slot. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ReaderSeekBar(
@@ -91,6 +101,7 @@ internal fun ReaderSeekBar(
     enabled: Boolean = true,
     label: String,
     interactions: MutableInteractionSource = remember { MutableInteractionSource() },
+    backdrop: HazeState? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val pressed by interactions.collectIsPressedAsState()
@@ -103,6 +114,8 @@ internal fun ReaderSeekBar(
     val fraction = ((value - valueRange.start) /
         (valueRange.endInclusive - valueRange.start).coerceAtLeast(.001f)).coerceIn(0f, 1f)
     val foreground = colors.onSurface.copy(alpha = if (enabled) .72f else .24f)
+    val liquidThumb = LocalGlassSkin.current == GlassSkin.LIQUID && Build.VERSION.SDK_INT >= 33 &&
+        backdrop != null && backdrop.blurEnabled
     Slider(
         value = value.coerceIn(valueRange),
         onValueChange = onValueChange,
@@ -112,11 +125,23 @@ internal fun ReaderSeekBar(
         interactionSource = interactions,
         modifier = modifier.heightIn(min = 48.dp).semantics { contentDescription = label },
         thumb = {
-            // The measured slot stays fixed; only the quiet halo grows during interaction.
-            Canvas(Modifier.size(20.dp)) {
-                drawCircle(foreground.copy(alpha = .10f * engagement.value), radius = 10.dp.toPx())
-                drawCircle(colors.surface, radius = 7.dp.toPx())
-                drawCircle(foreground, radius = (5f + engagement.value).dp.toPx())
+            // Both skins keep the same measured bounds and the Slider owns the drag gesture.
+            Box(Modifier.size(width = 36.dp, height = 24.dp), contentAlignment = Alignment.Center) {
+                if (liquidThumb && backdrop != null) {
+                    LiquidGlassSurface(
+                        state = backdrop, modifier = Modifier.size(width = 30.dp, height = 20.dp),
+                        cornerRadius = 10.dp, role = GlassSurfaceRole.THUMB,
+                        interactionSource = interactions,
+                    ) {
+                        Canvas(Modifier.size(20.dp).align(Alignment.Center)) {
+                            drawCircle(foreground, radius = (2.5f + engagement.value * .5f).dp.toPx())
+                        }
+                    }
+                } else Canvas(Modifier.size(20.dp)) {
+                    drawCircle(foreground.copy(alpha = .10f * engagement.value), radius = 10.dp.toPx())
+                    drawCircle(colors.surface, radius = 7.dp.toPx())
+                    drawCircle(foreground, radius = (5f + engagement.value).dp.toPx())
+                }
             }
         },
         track = {

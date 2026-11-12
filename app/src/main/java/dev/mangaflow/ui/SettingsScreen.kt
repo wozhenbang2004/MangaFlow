@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -67,6 +68,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.BuildConfig
+import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
@@ -168,6 +170,30 @@ fun SettingsScreen(
             Spacer(Modifier.height(6.dp))
             Text("找到舒服的阅读方式", style = MaterialTheme.typography.bodyMedium, color = secondary)
             Spacer(Modifier.height(32.dp))
+            SettingsSectionLabel("外观")
+            Spacer(Modifier.height(18.dp))
+            Text("玻璃皮肤", style = MaterialTheme.typography.bodyLarge, color = foreground)
+            Spacer(Modifier.height(12.dp))
+            GlassSkinPicker(
+                selected = preferences.glassSkin,
+                onSelected = { skin ->
+                    val current = libraryStore.preferences.value
+                    if (skin != current.glassSkin) libraryStore.updatePreferences(current.copy(glassSkin = skin))
+                },
+            )
+            Text(
+                when {
+                    preferences.glassSkin == GlassSkin.FROSTED -> "柔和扩散，背景更安静"
+                    Build.VERSION.SDK_INT < 33 -> "此设备会使用柔和的毛玻璃效果"
+                    else -> "边缘折射，轻盈通透"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = secondary,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Spacer(Modifier.height(24.dp))
+            HorizontalDivider(color = colors.outlineVariant)
+            Spacer(Modifier.height(28.dp))
             SettingsSectionLabel("阅读")
             Spacer(Modifier.height(18.dp))
             Text("翻页方式", style = MaterialTheme.typography.bodyLarge, color = foreground)

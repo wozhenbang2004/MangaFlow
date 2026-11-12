@@ -188,3 +188,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Backdrop liquid-glass optics
+
+The rounded-rectangle refraction and directional-highlight formulas in
+`ui/glass/BackdropShaders.kt` and their Android binding in
+`ui/glass/BackdropGlassOptics.kt` are adapted from Kyant0/AndroidLiquidGlass
+(Backdrop) version 2.0.1, commit `65ab177e90e5c1d8c62e70cf7755841982da65f6`
+(`https://github.com/Kyant0/AndroidLiquidGlass/tree/65ab177e90e5c1d8c62e70cf7755841982da65f6`).
+Upstream source files:
+
+- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/internal/Shaders.kt`
+- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/effects/Lens.kt`
+- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/highlight/HighlightStyle.kt`
+
+Copyright 2025 Kyant
+
+Licensed under the Apache License, Version 2.0.
+The complete upstream license is bundled in
+`app/src/main/assets/licenses/Backdrop-APACHE-2.0.txt`.
+
+MangaFlow preserves the upstream optical formulas and copyright notice, changes
+the Kotlin package and removes IDE-only annotations. Lens and highlight uniforms
+are bound to Android RuntimeShader using the existing Haze 1.6 background capture.
+The adaptation uses uniform corners and bounded reader presets, adds interaction
+lighting, and applies an independent readability wash after refraction.
+Labels and icons remain outside the optical layer. This is a source adaptation;
+the complete Backdrop framework and its sample applications are not included.

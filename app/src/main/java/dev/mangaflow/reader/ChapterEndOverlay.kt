@@ -164,6 +164,7 @@ internal fun ChapterEndComments(
         }
         LiquidGlassSurface(
             state = backdrop,
+            trackPointer = true,
             modifier = Modifier.align(Alignment.BottomStart).size(48.dp),
             cornerRadius = 24.dp,
         ) {

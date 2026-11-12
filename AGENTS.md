@@ -16,6 +16,7 @@ Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 
 ## Working rules
 
+- Glass skins are a global persisted preference: 毛玻璃 / 液态玻璃, default liquid. Settings and reader settings edit the same value. Follow DESIGN.md GLASS-SKIN-01–04 and the pinned Backdrop source notices; do not replace the source adaptation with an uncredited blur-only imitation. Only interactive glass opts into pointer tracking: decorative floating comments must remain touch-transparent. Keep foreground text outside optical effects and preserve page/scroll/download state when switching.
 - Latest corrections are recorded at the top of DESIGN.md as LABEL-02, PULL-03, COMMENTS-03, DETAIL-SCROLL-02 and RANK-03. Keep the floating search, complete carousel covers, single ranking row, chapter-only previews and finger-driven pull progress from the earlier batch. A full pull arms the action; only a real release executes it. Cancellation, reversal below threshold and fling alone must not load or navigate.
 - Comment source badges must retain the real source name, including **“拷贝”**. The user's latest correction supersedes LABEL-01's neutral “读者” label. Remove repeated “本话” and “最新优先” text; preserve author, avatar, source and compact date. Keep source attribution inert and retain native metric names, original review text and required license notices without adding redundant branding to other UI.
 

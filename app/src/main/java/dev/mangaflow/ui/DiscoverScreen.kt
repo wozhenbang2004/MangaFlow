@@ -216,6 +216,7 @@ fun DiscoverScreen(
                 )
                 if (search.query.isNotBlank()) LiquidGlassSurface(
                     state = searchBackdrop,
+                    role = GlassSurfaceRole.PANEL,
                     modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth()
                         .padding(start = 14.dp, end = 14.dp, top = 8.dp)
                         .pointerInput(Unit) {},

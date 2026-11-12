@@ -129,6 +129,7 @@ import coil3.request.ErrorResult
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import coil3.size.Scale
+import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
@@ -144,6 +145,7 @@ import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.GlassSkinPicker
 import dev.mangaflow.ui.motion.BottomPullLoadState
 import dev.mangaflow.ui.motion.bottomPullLoad
 import dev.mangaflow.ui.motion.rememberBottomPullLoadState
@@ -417,6 +419,7 @@ fun ReaderScreen(
         ) {
             LiquidGlassSurface(
                 state = readerBackdrop,
+                trackPointer = true,
                 modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             ) {
@@ -452,6 +455,7 @@ fun ReaderScreen(
         ) {
             LiquidGlassSurface(
                 state = readerBackdrop,
+                trackPointer = true,
                 modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
                     .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 8.dp),
             ) {
@@ -460,6 +464,7 @@ fun ReaderScreen(
                         ReaderProgressSlider(
                             pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
                             enabled = controlsVisible,
+                            backdrop = readerBackdrop,
                             onSeek = { targetPage = it },
                             onInteractionChanged = { progressInteracting = it },
                         )
@@ -556,7 +561,8 @@ fun ReaderScreen(
             }
         }
     }
-    ReaderSettingsDialog(visible = showSettings, preferences = preferences, onDimPreview = { dimPreview.value = it }, update = { next ->
+    ReaderSettingsDialog(visible = showSettings, preferences = preferences, backdrop = readerBackdrop,
+        onDimPreview = { dimPreview.value = it }, update = { next ->
         if (next.mode != preferences.mode || next.doublePage != preferences.doublePage || next.coverAlone != preferences.coverAlone) {
             cursor.scrollOffset = 0
         }
@@ -573,6 +579,7 @@ fun ReaderScreen(
         currentPage = pageIndex,
         preferences = preferences,
         manualSingles = manualSingles,
+        backdrop = readerBackdrop,
         onCoverChange = { cover ->
             cursor.scrollOffset = 0
             libraryStore.updatePreferences(preferences.copy(coverAlone = cover))
@@ -586,6 +593,7 @@ fun ReaderScreen(
     )
     ReaderChaptersDialog(
         visible = showChapters, chapters = chapters, currentId = chapterId,
+        backdrop = readerBackdrop,
         downloads = downloads.filter { it.manga.id == manga.id },
         loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
         onSelect = { chapterId = it; showChapters = false; controlsVisible = true },
@@ -1069,6 +1077,7 @@ private fun ReaderProgressSlider(
     pageCount: Int,
     pendingPage: Int?,
     enabled: Boolean,
+    backdrop: HazeState,
     onSeek: (Int) -> Unit,
     onInteractionChanged: (Boolean) -> Unit,
 ) {
@@ -1105,6 +1114,7 @@ private fun ReaderProgressSlider(
             modifier = Modifier.weight(1f).padding(end = 10.dp),
             enabled = enabled && pageCount > 1,
             interactions = interactions,
+            backdrop = backdrop,
             label = "阅读进度，第 ${shown.roundToInt() + 1} 页，共 $pageCount 页",
         )
         Row(Modifier.width(numberWidth), horizontalArrangement = Arrangement.Center) {
@@ -1170,6 +1180,7 @@ private fun ReaderWindow(keepScreenOn: Boolean, controlsVisible: Boolean, lightC
 private fun ReaderSettingsDialog(
     visible: Boolean,
     preferences: ReaderPreferences,
+    backdrop: HazeState,
     onDimPreview: (Float) -> Unit,
     update: (ReaderPreferences) -> Unit,
     onDismiss: () -> Unit,
@@ -1183,7 +1194,7 @@ private fun ReaderSettingsDialog(
     val availableHeight = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(160).dp
     LaunchedEffect(visible, preferences.dimAmount) { if (visible) dimAmount = preferences.dimAmount }
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth()) {
+        ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth(), backdrop) {
             Column(Modifier.heightIn(max = availableHeight).padding(horizontal = 18.dp)) {
                 ReaderPanelHeading("阅读设置", "关闭设置", onDismiss)
                 Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
@@ -1196,6 +1207,12 @@ private fun ReaderSettingsDialog(
                         foreground = colors.onSurface, muted = colors.onSurfaceVariant,
                         track = colors.onSurface.copy(alpha = .035f), indicator = colors.onSurface.copy(alpha = .08f),
                         fontSize = 12.sp, role = Role.RadioButton,
+                    )
+                    Text("玻璃皮肤", color = colors.onSurfaceVariant, fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp))
+                    GlassSkinPicker(
+                        selected = preferences.glassSkin,
+                        onSelected = { update(preferences.copy(glassSkin = it)) },
                     )
                     Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("纸面", Modifier.weight(1f), fontSize = 14.sp)
@@ -1230,6 +1247,7 @@ private fun ReaderSettingsDialog(
                             value = dimAmount, onValueChange = { dimAmount = it; onDimPreview(it) },
                             onValueChangeFinished = { update(preferences.copy(dimAmount = dimAmount)) },
                             valueRange = 0f..0.65f, modifier = Modifier.fillMaxWidth(), label = "降低阅读亮度",
+                            backdrop = backdrop,
                         )
                     }
                 }
@@ -1245,6 +1263,7 @@ private fun ReaderSpreadDialog(
     currentPage: Int,
     preferences: ReaderPreferences,
     manualSingles: Set<Int>,
+    backdrop: HazeState,
     onCoverChange: (Boolean) -> Unit,
     onCorrection: (Set<Int>) -> Unit,
     onDismiss: () -> Unit,
@@ -1256,7 +1275,7 @@ private fun ReaderSpreadDialog(
     val colors = MaterialTheme.colorScheme
     val availableHeight = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(160).dp
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth()) {
+        ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth(), backdrop) {
             Column(Modifier.heightIn(max = availableHeight).padding(horizontal = 18.dp)) {
                 ReaderPanelHeading("错页校正", "关闭校正", onDismiss)
                 Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
@@ -1292,6 +1311,7 @@ private fun ReaderChaptersDialog(
     visible: Boolean,
     chapters: List<Chapter>,
     currentId: String,
+    backdrop: HazeState,
     downloads: List<DownloadEntry>,
     loading: Boolean,
     error: String?,
@@ -1311,7 +1331,7 @@ private fun ReaderChaptersDialog(
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     LaunchedEffect(visible, currentId, currentGroup) { if (visible) selectedGroup = currentGroup }
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth()) {
+        ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth(), backdrop) {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)

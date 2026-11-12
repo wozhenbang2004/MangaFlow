@@ -238,6 +238,7 @@ class LibraryStore(context: Context) {
             put("doublePage", next.doublePage)
             put("coverAlone", next.coverAlone)
             put("dimAmount", next.dimAmount.toDouble())
+            put("glassSkin", next.glassSkin.name)
         }.toString()).apply()
     }
 
@@ -256,6 +257,7 @@ class LibraryStore(context: Context) {
             doublePage = json.optBoolean("doublePage", false),
             coverAlone = json.optBoolean("coverAlone", true),
             dimAmount = json.optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
+            glassSkin = GlassSkin.entries.firstOrNull { it.name == json.optString("glassSkin") } ?: GlassSkin.LIQUID,
         )
     }.getOrDefault(ReaderPreferences())
 

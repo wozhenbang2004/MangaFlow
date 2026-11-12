@@ -288,7 +288,8 @@ fun DetailScreen(
                             modifier = Modifier.scrollable(artworkScroll, Orientation.Vertical))
                     } else {
                         LiquidGlassSurface(artworkBackdrop,
-                            Modifier.size(48.dp).scrollable(artworkScroll, Orientation.Vertical), cornerRadius = 16.dp) {
+                            Modifier.size(48.dp).scrollable(artworkScroll, Orientation.Vertical),
+                            cornerRadius = 16.dp, trackPointer = true) {
                             MotionIconButton(onClick = openContents, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Outlined.KeyboardArrowDown, "滑到章节", tint = DetailForeground)
                             }
@@ -382,7 +383,8 @@ private fun ArtworkToolbar(
                 onClickLabel = "漫画信息与完整简介", onClick = onIntroduction)
             .clip(RoundedCornerShape(12.dp))) {
             LiquidGlassSurface(backdrop,
-                Modifier.matchParentSize().graphicsLayer { alpha = 1f - progress }, cornerRadius = 12.dp) {}
+                Modifier.matchParentSize().graphicsLayer { alpha = 1f - progress }, cornerRadius = 12.dp,
+                interactionSource = titleInteraction) {}
             Text(title, modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
                 .motionPress(titleInteraction, pressedScale = .985f),
                 color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
@@ -399,7 +401,8 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
     MotionIconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
         Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
             LiquidGlassSurface(backdrop,
-                Modifier.matchParentSize().graphicsLayer { alpha = glassAlpha }, cornerRadius = 14.dp) {}
+                Modifier.matchParentSize().graphicsLayer { alpha = glassAlpha }, cornerRadius = 14.dp,
+                trackPointer = true) {}
             MotionSwap(icon, Modifier.size(21.dp)) { shown ->
                 Icon(shown, description, tint = DetailForeground, modifier = Modifier.size(21.dp))
             }
@@ -415,7 +418,7 @@ private fun HeroBookInformation(
     onContents: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    LiquidGlassSurface(backdrop, modifier.fillMaxWidth(), cornerRadius = 18.dp) {
+    LiquidGlassSurface(backdrop, modifier.fillMaxWidth(), cornerRadius = 18.dp, trackPointer = true) {
         Column(
             Modifier.fillMaxWidth()
                 .padding(horizontal = 14.dp).padding(top = 13.dp, bottom = 5.dp),
