@@ -83,6 +83,18 @@ data class DetailState(
     val reviewsLoading: Boolean = true,
 )
 
+data class AuthorWorksState(
+    val manga: Manga,
+    val name: String,
+    val items: List<Manga> = emptyList(),
+    val loading: Boolean = true,
+    val loadingMore: Boolean = false,
+    val hasMore: Boolean = false,
+    val page: Int = 0,
+    val failedPage: Int? = null,
+    val error: String? = null,
+)
+
 data class ReadingSession(
     val manga: Manga,
     val chapters: List<Chapter>,
@@ -138,6 +150,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private var retainedBrowse: BrowseState? = null
     private val _detail = MutableStateFlow<DetailState?>(null)
     val detail = _detail.asStateFlow()
+    private val _authorWorks = MutableStateFlow<AuthorWorksState?>(null)
+    val authorWorks = _authorWorks.asStateFlow()
+    private var authorJob: Job? = null
+    private var authorRequest = 0L
     private val _reading = MutableStateFlow<ReadingSession?>(null)
     val reading = _reading.asStateFlow()
     private val _libraryOpening = MutableStateFlow<LibraryOpenState?>(null)
@@ -461,7 +477,40 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun openAuthor(manga: Manga, name: String) {
+        closeAuthor()
+        if (name !in manga.authors) return
+        _authorWorks.value = AuthorWorksState(manga, name)
+        loadAuthor(0)
+    }
+
+    fun closeAuthor() { authorRequest++; authorJob?.cancel(); _authorWorks.value = null }
+    fun moreAuthor() {
+        val current = _authorWorks.value ?: return
+        if (current.hasMore && !current.loading && !current.loadingMore && current.error == null) loadAuthor(current.page + 1)
+    }
+    fun retryAuthor() { loadAuthor(_authorWorks.value?.failedPage ?: 0) }
+    private fun loadAuthor(page: Int) {
+        val current = _authorWorks.value ?: return
+        authorJob?.cancel()
+        val request = ++authorRequest
+        _authorWorks.value = current.copy(loading = page == 0, loadingMore = page > 0, error = null, failedPage = null)
+        authorJob = viewModelScope.launch {
+            try {
+                val result = repository.byAuthor(current.manga, current.name, page)
+                if (request != authorRequest) return@launch
+                _authorWorks.value = current.copy(items = (if (page > 0) current.items + result.items else result.items).distinctBy { it.id },
+                    loading = false, loadingMore = false, hasMore = result.hasMore, page = page, error = null, failedPage = null)
+            } catch (cancelled: CancellationException) { throw cancelled }
+              catch (error: Exception) {
+                if (request == authorRequest) _authorWorks.value = current.copy(loading = false, loadingMore = false,
+                    failedPage = page, error = error.message ?: "作者作品暂时无法读取，请重试。")
+            }
+        }
+    }
+
     fun openManga(manga: Manga, continueChapterId: String? = null) {
+        closeAuthor()
         if (manga.sourceUrl == LOCAL_SOURCE_URL) {
             val chapters = downloadedChapters(manga.id)
             val chapter = continueChapterId?.let { id -> chapters.firstOrNull { it.id == id } }
@@ -722,6 +771,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun retryDetail() { _detail.value?.manga?.let { openManga(it) } }
 
     fun closeDetail() {
+        closeAuthor()
         detailJob?.cancel()
         reviewJob?.cancel()
         reviewPageJobs.values.toList().forEach { it.cancel() }

@@ -9,8 +9,6 @@ import dev.mangaflow.data.MangaBakaRelation
 import dev.mangaflow.data.MangaBakaShelf
 import dev.mangaflow.data.MangaBakaStack
 import dev.mangaflow.data.MangaRepository
-import dev.mangaflow.data.ReviewSource
-import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.data.normalizeReviewTitle
 import dev.mangaflow.data.reviewMessage
 import kotlinx.coroutines.CancellationException
@@ -29,7 +27,6 @@ internal sealed interface MangaBakaRoute {
         override val key = "work:$id:$relation"
     }
     data class Stack(val id: String) : MangaBakaRoute { override val key = "stack:$id" }
-    data class Match(val manga: Manga, val names: List<String>) : MangaBakaRoute { override val key = "match:${manga.id}" }
 }
 
 internal data class MangaBakaState(
@@ -70,17 +67,6 @@ internal class MangaBakaExplorer(context: Context, private val reader: MangaRepo
         history.clear()
         mutableState.value = home[shelf]?.copy(canGoBack = false) ?: MangaBakaState(route = MangaBakaRoute.Home(shelf))
         if (!mutableState.value.loaded) load()
-    }
-
-    fun openForManga(manga: Manga, sources: List<ReviewSource>) {
-        stop()
-        history.clear()
-        val mapped = sources.singleOrNull { it.id == "mangabaka" && it.status == ReviewStatus.READY && it.subjectId.isNotBlank() }
-        val route = mapped?.let { MangaBakaRoute.Work(it.subjectId) } ?: MangaBakaRoute.Match(manga,
-            (listOf(manga.title) + sources.filter { it.status == ReviewStatus.READY }.flatMap { it.aliases })
-                .filter(String::isNotBlank).distinctBy(::normalizeReviewTitle).take(3))
-        mutableState.value = MangaBakaState(route = route)
-        load()
     }
 
     fun selectShelf(value: MangaBakaShelf) {
@@ -171,15 +157,6 @@ internal class MangaBakaExplorer(context: Context, private val reader: MangaRepo
                         if (request != generation) return@launch
                         mutableState.update { it.copy(stack = stack) }
                         MangaBakaPage(books = stack.books)
-                    }
-                    is MangaBakaRoute.Match -> {
-                        val candidates = linkedMapOf<String, MangaBakaBook>()
-                        route.names.forEach { name ->
-                            catalog.search(name, force).books.forEach { candidates[it.id] = it }
-                            if (request != generation) return@launch
-                            mutableState.update { it.copy(books = candidates.values.toList()) }
-                        }
-                        MangaBakaPage(books = candidates.values.toList())
                     }
                 }
                 if (request != generation) return@launch

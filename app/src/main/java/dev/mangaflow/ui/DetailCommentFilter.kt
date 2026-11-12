@@ -1,5 +1,18 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +44,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -40,6 +54,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -56,6 +72,10 @@ import androidx.compose.ui.window.PopupProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.motionInputGate
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -71,8 +91,23 @@ internal fun DetailCommentFilter(
     onRetry: (String) -> Unit,
     onMatch: (String, String) -> Unit,
     onDismiss: () -> Unit,
+    visible: Boolean,
+    onPresenceChange: (Boolean) -> Unit,
 ) {
     val density = LocalDensity.current
+    val motion = LocalMotionEnabled.current
+    val presence = remember { MutableTransitionState(false) }
+    presence.targetState = visible
+    val transition = updateTransition(presence, label = "comment-filter")
+    val alpha = transition.animateFloat(transitionSpec = {
+        tween(if (motion) if (targetState) MangaMotion.Content else MangaMotion.Quick else 0)
+    }, label = "filter-opacity") { if (it) 1f else 0f }
+    val scale = transition.animateFloat(transitionSpec = {
+        if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap()
+    }, label = "filter-scale") { if (it) 1f else .94f }
+    val present = presence.currentState || presence.targetState || !presence.isIdle
+    SideEffect { onPresenceChange(present) }
+    if (!present) return
     var sourceSettings by remember { mutableStateOf(false) }
     val pending = sources.filter {
         it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null ||
@@ -80,9 +115,14 @@ internal fun DetailCommentFilter(
     }
     val width = (LocalConfiguration.current.screenWidthDp.dp - 32.dp).coerceAtMost(300.dp)
     val changed = selected != null || longOnly || !hidePromotions
-    Popup(alignment = Alignment.TopEnd, offset = with(density) { IntOffset(-12.dp.roundToPx(), 40.dp.roundToPx()) },
-        onDismissRequest = onDismiss, properties = PopupProperties(focusable = true)) {
-        LiquidGlassSurface(backdrop, Modifier.width(width), cornerRadius = 24.dp, role = GlassSurfaceRole.POPOVER) {
+    Popup(alignment = Alignment.TopEnd, offset = with(density) { IntOffset(-12.dp.roundToPx(), 0) },
+        onDismissRequest = { if (visible) onDismiss() }, properties = PopupProperties(focusable = visible)) {
+        LiquidGlassSurface(backdrop, Modifier.width(width).motionInputGate(visible).graphicsLayer {
+            this.alpha = alpha.value
+            scaleX = scale.value; scaleY = scale.value
+            transformOrigin = TransformOrigin(1f, 0f)
+            translationY = -8.dp.toPx() * (1f - alpha.value)
+        }, cornerRadius = 24.dp, role = GlassSurfaceRole.POPOVER) {
             Column(Modifier.heightIn(max = 328.dp).verticalScroll(rememberScrollState()).padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -112,12 +152,18 @@ internal fun DetailCommentFilter(
                     TextButton(onClick = { sourceSettings = !sourceSettings }, modifier = Modifier.fillMaxWidth()) {
                         Text(if (sourceSettings) "收起来源设置" else "来源设置", color = DetailSecondary, fontSize = 12.sp)
                     }
-                    if (sourceSettings) pending.forEach { source ->
-                        key(source.id) {
-                            if (source.status == ReviewStatus.UNAVAILABLE || source.reviewsError != null) {
-                                CommentLoadNotice(source, onRetry)
-                            } else {
-                                CommentMatchChoice(source, onMatch)
+                    AnimatedVisibility(sourceSettings,
+                        enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) + expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+                        exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) + shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
+                        Column {
+                            pending.forEach { source ->
+                                key(source.id) {
+                                    if (source.status == ReviewStatus.UNAVAILABLE || source.reviewsError != null) {
+                                        CommentLoadNotice(source, onRetry)
+                                    } else {
+                                        CommentMatchChoice(source, onMatch)
+                                    }
+                                }
                             }
                         }
                     }
@@ -131,8 +177,14 @@ internal fun DetailCommentFilter(
 private fun SourceChoice(id: String?, name: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val dark = DetailForeground.luminance() > .5f
     val accent = id?.let { reviewSourceAccent(it, dark) } ?: DetailForeground
+    val motion = LocalMotionEnabled.current
+    val background by animateColorAsState(if (selected) accent.copy(alpha = .12f) else DetailForeground.copy(alpha = .025f),
+        tween(if (motion) MangaMotion.Content else 0), label = "source-selection-color")
+    val emphasis by animateFloatAsState(if (selected) 1f else 0f,
+        if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap(), label = "source-selection")
     Row(modifier.heightIn(min = 38.dp).clip(RoundedCornerShape(12.dp))
-        .background(if (selected) accent.copy(alpha = .12f) else DetailForeground.copy(alpha = .025f))
+        .graphicsLayer { scaleX = 1f + .02f * emphasis; scaleY = scaleX }
+        .background(background)
         .selectable(selected, role = Role.RadioButton, onClick = onClick)
         .semantics(mergeDescendants = true) { contentDescription = name }
         .padding(horizontal = 6.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
@@ -157,7 +209,9 @@ private fun FilterToggle(icon: ImageVector, label: String, checked: Boolean, onC
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
         Icon(icon, null, tint = DetailSecondary, modifier = Modifier.size(16.dp))
         Text(label, color = DetailForeground, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.weight(1f))
-        if (checked) Icon(Icons.Outlined.Check, null, tint = accent, modifier = Modifier.size(16.dp))
-        else Text("关", color = DetailMuted.copy(alpha = .6f), fontSize = 11.sp, lineHeight = 16.sp)
+        MotionSwap(checked, Modifier.size(18.dp)) { value ->
+            if (value) Icon(Icons.Outlined.Check, null, tint = accent, modifier = Modifier.size(16.dp))
+            else Text("关", color = DetailMuted.copy(alpha = .6f), fontSize = 11.sp, lineHeight = 16.sp)
+        }
     }
 }

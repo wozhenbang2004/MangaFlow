@@ -16,6 +16,7 @@ data class Manga(
     val popularity: Long? = null,
     val rank: Int? = null,
     val totalPopularity: Long? = null,
+    val authorPaths: Map<String, String> = emptyMap(),
 )
 
 data class Chapter(

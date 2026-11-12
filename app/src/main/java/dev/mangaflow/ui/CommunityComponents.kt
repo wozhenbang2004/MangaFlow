@@ -3,8 +3,6 @@ package dev.mangaflow.ui
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,7 +29,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
@@ -88,7 +85,6 @@ import dev.mangaflow.ui.motion.MotionSwap
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
-import dev.mangaflow.ui.motion.MotionTabs
 import java.time.LocalDate
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
@@ -131,17 +127,19 @@ internal fun CommunityPanel(
     backdrop: HazeState = rememberHazeState(),
     active: Boolean = true,
     bottomPadding: Dp = 12.dp,
+    filterOpen: Boolean = false,
+    onFilterDismiss: () -> Unit = {},
+    onFilterChanged: (Boolean) -> Unit = {},
 ) {
     var selectedSource by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var longOnly by rememberSaveable(mangaId) { mutableStateOf(false) }
     var hidePromotions by rememberSaveable(mangaId) { mutableStateOf(true) }
-    var order by rememberSaveable(mangaId) { mutableIntStateOf(0) }
-    var filterOpen by remember(mangaId) { mutableStateOf(false) }
+    var filterPresent by remember(mangaId) { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    SideEffect { if (active) onScrollTarget(listState) }
-    LaunchedEffect(active) { if (!active) { filterOpen = false; listState.stopScroll() } }
-    val mixed = remember(sources, selectedSource, longOnly, order) {
+    SideEffect { if (active) { onScrollTarget(listState); onFilterChanged(selectedSource != null || longOnly || !hidePromotions) } }
+    LaunchedEffect(active) { if (!active) { onFilterDismiss(); listState.stopScroll() } }
+    val mixed = remember(sources, selectedSource, longOnly) {
         val rows = sources.asSequence().filter { it.status == ReviewStatus.READY && it.hasWorkReviews }
             .filter { selectedSource == null || it.id == selectedSource }
             .flatMap { source -> source.reviews.mapIndexed { index, review -> MixedReview(source, review, index) }.asSequence() }
@@ -150,9 +148,7 @@ internal fun CommunityPanel(
         val newest = compareByDescending<MixedReview> { reviewDateKey(it.review.date) }
             .thenBy { CommunityProviders.indexOf(it.source.id).let { n -> if (n < 0) 99 else n } }
             .thenBy(MixedReview::order)
-        rows.sortedWith(if (order == 0) newest else
-            compareByDescending<MixedReview> { it.review.upVotes ?: 0 }
-                .thenByDescending { it.review.replyCount ?: 0 }.then(newest)).toList()
+        rows.sortedWith(newest).toList()
     }
     val clusters = remember(mixed) {
         val grouped = linkedMapOf<String, MutableList<MixedReview>>()
@@ -182,27 +178,7 @@ internal fun CommunityPanel(
     }
     val resetPosition = { scope.launch { listState.scrollToItem(0) }; Unit }
     Box(modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().then(if (filterOpen && active) Modifier.hazeSource(backdrop) else Modifier)) {
-            Row(Modifier.fillMaxWidth().height(44.dp).padding(start = 16.dp, end = 8.dp)
-                .scrollable(listState, Orientation.Vertical, reverseDirection = true, enabled = active),
-                verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) {
-                    MotionTabs(order, listOf("最新", "精选"), { order = it; resetPosition() },
-                        compact = true, fontSize = 12.sp, foreground = CommunityWhite, muted = CommunityMuted)
-                }
-                if (selectedSource != null || longOnly) Text(
-                    listOfNotNull(sources.firstOrNull { it.id == selectedSource }?.name,
-                        "长评".takeIf { longOnly }).joinToString(" · "),
-                    color = CommunityMuted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 104.dp))
-                IconButton(onClick = { filterOpen = !filterOpen }, enabled = active,
-                    modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Outlined.FilterList,
-                        if (selectedSource != null || longOnly || !hidePromotions) "评论筛选，已修改" else "筛选评论来源与内容",
-                        tint = if (selectedSource != null || longOnly || !hidePromotions) CommunityWhite else CommunityMuted,
-                        modifier = Modifier.size(19.dp))
-                }
-            }
+        Column(Modifier.fillMaxSize().then(if ((filterOpen || filterPresent) && active) Modifier.hazeSource(backdrop) else Modifier)) {
             LazyColumn(state = listState, userScrollEnabled = active, modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomPadding)) {
                 items(clusters, key = { it.key }) { cluster ->
@@ -225,11 +201,12 @@ internal fun CommunityPanel(
                 }
             }
         }
-        if (filterOpen && active) DetailCommentFilter(backdrop, sources, selectedSource, longOnly, hidePromotions,
+        DetailCommentFilter(backdrop, sources, selectedSource, longOnly, hidePromotions,
+            visible = filterOpen && active, onPresenceChange = { filterPresent = it },
             onSelect = { selectedSource = it; resetPosition() },
             onLongOnly = { longOnly = it; resetPosition() },
             onHidePromotions = { hidePromotions = it; resetPosition() },
-            onRetry = onRetry, onMatch = onMatch, onDismiss = { filterOpen = false })
+            onRetry = onRetry, onMatch = onMatch, onDismiss = onFilterDismiss)
     }
 }
 
@@ -483,14 +460,10 @@ private fun CommentContent(
                     } else 3, overflow = TextOverflow.Ellipsis,
                     onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
             }
-            if (review.score != null || (review.upVotes ?: 0) > 0 || (review.downVotes ?: 0) > 0 ||
+            if ((review.upVotes ?: 0) > 0 || (review.downVotes ?: 0) > 0 ||
                 (revealed && conceal) || canTranslate ||
                 (showReplyCount && (review.replyCount ?: 0) > 0)) {
                 FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    review.score?.let {
-                        Text("${communityScore(it)} / ${review.scoreScale}", color = muted, fontSize = 10.sp,
-                            modifier = Modifier.align(Alignment.CenterVertically).padding(end = 4.dp))
-                    }
                     if (conceal && revealed) TextButton(onClick = toggleContent,
                         contentPadding = PaddingValues(end = 12.dp)) {
                         Text(if (review.kind == ReviewKind.REVIEW) "收起长评" else "隐藏剧透", color = muted, fontSize = 11.sp)
@@ -657,6 +630,3 @@ private fun compactCommentDate(date: String): String {
         if (value.take(4) == LocalDate.now().year.toString()) value.substring(5, 10) else value.take(10)
     } else value
 }
-
-private fun communityScore(score: Double): String =
-    if (score == score.toInt().toDouble()) score.toInt().toString() else String.format(Locale.ROOT, "%.1f", score)

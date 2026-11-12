@@ -121,6 +121,7 @@ fun DownloadsScreen(
     onRead: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
     backdrop: HazeState,
+    navigation: @Composable () -> Unit,
     toolbar: @Composable (@Composable () -> Unit) -> Unit,
     refreshingIds: Set<String> = emptySet(),
 ) {
@@ -277,12 +278,9 @@ fun DownloadsScreen(
                 }
             }
         }
-        LiquidGlassSurface(
-            state = backdrop,
+        SegmentedGlassHeader(backdrop, navigation,
             modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
                 .onSizeChanged { headerHeightPx = it.height },
-            cornerRadius = 24.dp, role = GlassSurfaceRole.NAVIGATION,
-            trackPointer = true, elevation = 2.dp,
         ) {
             Column(Modifier.fillMaxWidth().pointerInput(Unit) {}) {
                 toolbar {

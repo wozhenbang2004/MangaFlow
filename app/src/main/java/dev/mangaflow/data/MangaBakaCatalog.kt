@@ -63,11 +63,6 @@ internal class MangaBakaCatalog(context: Context) {
         }
     }
 
-    suspend fun search(title: String, force: Boolean = false): MangaBakaPage = withContext(Dispatchers.IO) {
-        val data = request("/v2/series/search", comicTypes + listOf("q" to title.take(300), "limit" to "20"), force, search = true)
-        MangaBakaPage(books = rows(data).mapNotNull(::parseBook).distinctBy { it.id })
-    }
-
     suspend fun book(id: String, force: Boolean = false): MangaBakaBook = withContext(Dispatchers.IO) {
         val requested = requireId(id)
         val item = request("/v2/series/$requested", listOf("schema" to "full"), force).optJSONObject("data") ?: invalid()

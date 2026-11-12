@@ -714,6 +714,7 @@ internal fun Manga.toJson(): JSONObject = JSONObject().apply {
     put("title", title)
     put("coverUrl", coverUrl)
     put("authors", JSONArray(authors))
+    put("authorPaths", JSONObject(authorPaths))
     put("description", description)
     put("status", status)
     put("tags", JSONArray(tags))
@@ -726,6 +727,9 @@ internal fun readManga(json: JSONObject): Manga = Manga(
     title = json.getString("title"),
     coverUrl = json.optString("coverUrl"),
     authors = json.optJSONArray("authors").strings(),
+    authorPaths = json.optJSONObject("authorPaths")?.let { paths ->
+        paths.keys().asSequence().mapNotNull { key -> (paths.opt(key) as? String)?.let { key to it } }.toMap()
+    }.orEmpty(),
     description = json.optString("description"),
     status = json.optString("status"),
     tags = json.optJSONArray("tags").strings(),

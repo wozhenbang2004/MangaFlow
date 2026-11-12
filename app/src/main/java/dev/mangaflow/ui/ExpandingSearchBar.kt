@@ -8,6 +8,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -34,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +44,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -90,6 +93,7 @@ internal fun ExpandingSearchBar(
     backdrop: HazeState,
     onExpandedChange: (Boolean) -> Unit,
     onPresenceChange: (Boolean) -> Unit,
+    onForegroundState: (State<Float>) -> Unit,
     onQuery: (String) -> Unit,
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
@@ -130,6 +134,9 @@ internal fun ExpandingSearchBar(
     SideEffect {
         if (expanded) retainedQuery = query
         onPresenceChange(present)
+        // Restore the underlying controls with the foreground's finite exit, not the spring's long tail.
+        // An opening hides them immediately, including the trigger's lead-in, to avoid icon flashes.
+        onForegroundState(foreground)
     }
 
     LaunchedEffect(expanded, motion) {
@@ -175,8 +182,7 @@ internal fun ExpandingSearchBar(
         val endInset = 8.dp
         val topInset = 0.dp
 
-        if (present) Box(Modifier.fillMaxSize().padding(top = 44.dp)
-            .motionInputGate(expanded && active)
+        if (expanded && active) Box(Modifier.fillMaxSize().padding(top = 44.dp)
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
                 onClickLabel = "关闭搜索", onClick = dismiss))
 
@@ -204,14 +210,26 @@ internal fun ExpandingSearchBar(
         ) {}
 
         // Keep the result-position owner composed while closed, but place no hidden hit region.
-        Column(Modifier.align(Alignment.TopEnd).padding(end = 8.dp).width(panelWidth)
-            .heightIn(max = 44.dp + resultsRoom)
-            .onSizeChanged { foregroundHeight = with(density) { it.height.toDp() } }
-            .layout { measurable, constraints ->
-                val placeable = measurable.measure(constraints)
-                layout(placeable.width, placeable.height) { if (present) placeable.place(0, 0) }
-            }
+        Column(Modifier.align(Alignment.TopEnd).padding(end = 8.dp)
+            // Actual pointer bounds shrink with the optical shell; a transparent final-width
+            // foreground must not keep swallowing taps on the restored tabs/history.
+            .clip(RoundedCornerShape(22.dp + 2.dp * progress))
             .motionInputGate(expanded && active)
+            .layout { measurable, constraints ->
+                val fullWidth = panelWidth.roundToPx()
+                val placeable = measurable.measure(constraints.copy(minWidth = fullWidth, maxWidth = fullWidth,
+                    minHeight = 0, maxHeight = (44.dp + resultsRoom).roundToPx()))
+                val foregroundGone = !expanded && foreground.value <= .02f
+                // Use the same threshold as the restored toolbar's input gate. The optical
+                // shell may settle longer, but the invisible foreground owns only its trigger.
+                val liveWidth = (if (foregroundGone) 44.dp else width.value.coerceAtLeast(44.dp)).roundToPx()
+                val liveHeight = (if (foregroundGone) 44.dp else height.value.coerceAtLeast(44.dp)).roundToPx()
+                layout(liveWidth, liveHeight) {
+                    if (present && !foregroundGone) placeable.placeRelative(liveWidth - placeable.width, 0)
+                }
+            }
+            .width(panelWidth).heightIn(max = 44.dp + resultsRoom)
+            .onSizeChanged { foregroundHeight = with(density) { it.height.toDp() } }
             .semantics { paneTitle = "搜索漫画" }
             .pointerInput(Unit) {}
             .graphicsLayer { alpha = foreground.value.coerceIn(0f, 1f) }

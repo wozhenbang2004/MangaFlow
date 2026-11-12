@@ -70,6 +70,31 @@ class CopyMangaRepository(
         catalogPage(apiJson(url, "漫画搜索"), page * 20, 20)
     }
 
+    /** Venera a04e055: /api/v3/comics?author=<author.path_word>, not a title search. */
+    suspend fun byAuthor(manga: Manga, author: String, page: Int = 0): MangaPage = withContext(Dispatchers.IO) {
+        require(page in 0..950)
+        val key = manga.authorPaths[author] ?: run {
+            val comic = comicMetadata(segment(manga.id)).optJSONObject("comic")
+                ?: throw SourceException("暂时无法确认作者资料，请稍后重试。")
+            authorPaths(comic)[author] ?: throw SourceException("来源没有返回这位作者的唯一索引，请稍后重试。")
+        }
+        val offset = page * 21
+        val url = apiOrigin.newBuilder().addPathSegments("api/v3/comics")
+            .addQueryParameter("author", segment(key)).addQueryParameter("ordering", "-datetime_updated")
+            .addQueryParameter("free_type", "1").addQueryParameter("limit", "21")
+            .addQueryParameter("offset", "$offset").addQueryParameter("platform", "3").build()
+        catalogPage(apiJson(url, "作者作品"), offset, 21)
+    }
+
+    private fun authorPaths(comic: JSONObject): Map<String, String> = comic.optJSONArray("author")?.objects().orEmpty()
+        .mapNotNull { row ->
+            val name = row.text("name")
+            val path = runCatching { segment(row.text("path_word")) }.getOrNull()
+            if (name.isBlank() || path == null) null else name to path
+        }.groupBy({ it.first }, { it.second }).mapNotNull { (name, paths) ->
+            paths.distinct().singleOrNull()?.let { name to it }
+        }.toMap()
+
     override suspend fun detail(mangaId: String): MangaDetail = withContext(Dispatchers.IO) {
         // An explicit refresh always obtains a new public directory.
         readCatalog(segment(mangaId)).detail
@@ -250,6 +275,7 @@ class CopyMangaRepository(
                     title = title,
                     coverUrl = cover,
                     authors = authors,
+                    authorPaths = authorPaths(comic),
                     latestChapter = comic.optJSONObject("last_chapter")?.text("name").orEmpty(),
                     sourceUrl = comicUrl(id),
                     totalPopularity = comic.opt("popular")?.toString()?.toLongOrNull()?.takeIf { it >= 0 },
@@ -285,6 +311,7 @@ class CopyMangaRepository(
             title = comic.requiredText("name"),
             coverUrl = optionalCover(comic.text("cover")),
             authors = comic.optJSONArray("author")?.objects()?.mapNotNull { it.text("name").takeIf(String::isNotBlank) }.orEmpty(),
+            authorPaths = authorPaths(comic),
             description = comic.text("brief"),
             status = comic.optJSONObject("status")?.text("display").orEmpty(),
             tags = comic.optJSONArray("theme")?.objects()?.mapNotNull { it.text("name").takeIf(String::isNotBlank) }.orEmpty(),

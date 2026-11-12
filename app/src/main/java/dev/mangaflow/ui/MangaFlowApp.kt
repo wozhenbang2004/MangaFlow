@@ -62,6 +62,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -132,6 +133,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val browse by model.browse.collectAsStateWithLifecycle()
     val metrics by model.metrics.collectAsStateWithLifecycle()
     val detail by model.detail.collectAsStateWithLifecycle()
+    val authorWorks by model.authorWorks.collectAsStateWithLifecycle()
     val reading by model.reading.collectAsStateWithLifecycle()
     val libraryOpening by model.libraryOpening.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
@@ -195,6 +197,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     if (mangaBakaOpen) MangaBakaSheet(model.mangaBaka, model.repository,
         onDismiss = { model.mangaBaka.close(); mangaBakaOpen = false },
         onOpen = { model.openManga(it) })
+    authorWorks?.let { author ->
+        androidx.compose.runtime.key(author.manga.id, author.name) {
+            AuthorWorksSheet(author, model.repository, onDismiss = model::closeAuthor,
+                onMore = model::moreAuthor, onRetry = model::retryAuthor,
+                onOpen = { model.openManga(it) })
+        }
+    }
     val activity = LocalContext.current.activityOrNull()
     val darkSystem = isSystemInDarkTheme()
     SideEffect {
@@ -369,18 +378,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             volumeImageHeaders = { chapter -> model.repository.imageHeaders(current.state.manga.id, chapter.id) },
                             onBack = model::closeDetail, onRetry = model::retryDetail,
                             onToggleFavorite = { model.toggleFavorite(current.state.manga) },
-                            onRead = model::readChapter,
+                            onRead = model::readChapter, onAuthor = model::openAuthor,
                             onRestart = model::restartChapter,
                             onContinue = model::continueReading,
                             onDownload = { onRequestNotifications(); model.downloadChapter(it) },
                             onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                             onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
-                            onFindRelated = {
-                                model.mangaBaka.openForManga(current.state.detail?.manga ?: current.state.manga, current.state.reviews)
-                                mangaBakaOpen = true
-                            },
                             loadReplies = model::reviewReplies,
-                            active = current.key == frame.key && !mangaBakaOpen,
+                            active = current.key == frame.key && !mangaBakaOpen && authorWorks == null,
                         )
                     }
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
@@ -400,7 +405,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val chromePadding = with(chromeDensity) { chromeHeightPx.toDp() } + 4.dp
                         var searchPresent by remember { mutableStateOf(searchExpanded) }
                         val searchVisible = searchExpanded || searchPresent
-                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen && !mangaBakaOpen
+                        var searchForeground by remember { mutableStateOf<State<Float>?>(null) }
+                        val chromeReady by remember {
+                            derivedStateOf { !searchExpanded && (searchForeground?.value ?: 0f) <= .02f }
+                        }
+                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen && !mangaBakaOpen && authorWorks == null
                         val closeSearch: () -> Unit = {
                             keyboard?.hide()
                             focus.clearFocus(force = true)
@@ -409,15 +418,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         }
                         Box(Modifier.fillMaxSize().statusBarsPadding()) {
                         Box(Modifier.fillMaxSize()) {
-                            val compactHeader = current.section in setOf(Section.DISCOVER, Section.LIBRARY,
-                                Section.DOWNLOADS, Section.SETTINGS)
-                            val toolbar: @Composable (@Composable () -> Unit) -> Unit = { actions ->
-                            Row(Modifier.fillMaxWidth().height(if (compactHeader) 44.dp else 60.dp)
-                                .padding(horizontal = if (compactHeader) 8.dp else 12.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
+                            val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
+                            val navigation: @Composable () -> Unit = {
                                 Box {
-                                    MotionIconButton(modifier = Modifier.size(if (compactHeader) 44.dp else 48.dp), onClick = {
+                                    MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
                                         closeSearch()
                                         model.cancelLibraryReading()
                                         scope.launch { drawer.open() }
@@ -428,10 +432,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         Modifier.align(Alignment.TopEnd).padding(8.dp).size(5.dp)
                                             .background(MaterialTheme.colorScheme.onSurface, CircleShape))
                                 }
+                            }
+                            val toolbar: @Composable (@Composable () -> Unit) -> Unit = { actions ->
+                            Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
                                 if (current.section == Section.DISCOVER) {
                                     Row(Modifier.weight(1f).fillMaxHeight()
-                                        .graphicsLayer { alpha = if (searchVisible) 0f else 1f }
-                                        .motionInputGate(rootActive && !searchVisible),
+                                        .motionInputGate(rootActive && chromeReady),
                                         verticalAlignment = Alignment.CenterVertically) {
                                         BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label }, Modifier.weight(1f)) { index ->
                                             closeSearch()
@@ -469,9 +476,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 actions()
                             }
                             }
-                            Box(Modifier.fillMaxSize().padding(top =
-                                if (current.section == Section.DISCOVER || current.section == Section.DOWNLOADS) 0.dp
-                                else if (compactHeader) 44.dp else 60.dp)) {
+                            Box(Modifier.fillMaxSize()
+                                .then(if (current.section != Section.DISCOVER && current.section != Section.DOWNLOADS)
+                                    Modifier.hazeSource(searchBackdrop) else Modifier)
+                                .padding(top = if (current.section == Section.DISCOVER || current.section == Section.DOWNLOADS) 0.dp else chromePadding)) {
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
@@ -497,7 +505,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onRetryOpen = model::retryLibraryReading, onCancelOpen = model::cancelLibraryReading,
                                     )
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, onRead = model::openDownload,
-                                        onRetry = model::retryDownload, backdrop = searchBackdrop, toolbar = toolbar,
+                                        onRetry = model::retryDownload, backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         refreshingIds = refreshingDownloads)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
@@ -514,16 +522,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache)
                                 }
                             }
-                            if (current.section == Section.DISCOVER) {
-                                if (!searchVisible) LiquidGlassSurface(
-                                    state = searchBackdrop,
+                            if (current.section != Section.DOWNLOADS) {
+                                SegmentedGlassHeader(searchBackdrop, navigation,
                                     modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
                                         .onSizeChanged { chromeHeightPx = it.height },
-                                    cornerRadius = 24.dp, role = GlassSurfaceRole.NAVIGATION,
-                                    trackPointer = true, elevation = 2.dp,
-                                ) {
-                                    Column(Modifier.pointerInput(Unit) {}) {
-                                        toolbar {}
+                                    controlsAlpha = {
+                                        if (current.section != Section.DISCOVER) 1f
+                                        else if (searchExpanded) 0f
+                                        else 1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f)
+                                    }) {
+                                    toolbar {}
+                                    if (current.section == Section.DISCOVER) {
                                         AnimatedVisibility(visibleState = rankingPresence,
                                             enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) +
                                                 expandVertically(tween(if (motion) MangaMotion.Content else 0)),
@@ -533,14 +542,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 onPeriod = { model.selectDiscovery(displayedDiscovery.mode, period = it) },
                                                 onAudience = { model.selectDiscovery(displayedDiscovery.mode, audience = it) },
                                                 onRefresh = model::refresh,
-                                                modifier = Modifier.motionInputGate(rootActive && !searchVisible &&
+                                                modifier = Modifier.motionInputGate(rootActive && chromeReady &&
                                                     displayedDiscovery.mode == DiscoveryMode.RANKING))
                                         }
                                     }
-                                } else Box(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)) {
-                                    toolbar {}
                                 }
-                            } else if (current.section != Section.DOWNLOADS) toolbar {}
+                            }
                         }
                         if (current.section == Section.DISCOVER) ExpandingSearchBar(
                             expanded = searchExpanded,
@@ -549,6 +556,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             backdrop = searchBackdrop,
                             onExpandedChange = { if (it) searchExpanded = true else closeSearch() },
                             onPresenceChange = { searchPresent = it },
+                            onForegroundState = { searchForeground = it },
                             onQuery = model::setQuery,
                             onSearch = model::refresh,
                             modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 2.dp),

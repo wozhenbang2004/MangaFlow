@@ -1,5 +1,10 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.core.tween
@@ -15,6 +20,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
@@ -35,10 +42,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Refresh
@@ -144,6 +151,7 @@ fun DetailScreen(
     onRead: (Chapter) -> Unit,
     onContinue: (ReadingProgress) -> Unit,
     onDownload: (Chapter) -> Unit,
+    onAuthor: (Manga, String) -> Unit = { _, _ -> },
     onReviewMore: (String) -> Unit = {},
     onReviewRetry: (String) -> Unit = {},
     onReviewMatch: (String, String) -> Unit = { _, _ -> },
@@ -151,7 +159,6 @@ fun DetailScreen(
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage = { _, _, _ -> ReviewPage(emptyList()) },
     active: Boolean = true,
     onRestart: (Chapter) -> Unit = onRead,
-    onFindRelated: () -> Unit = {},
 ) {
     val current = detail?.manga ?: manga
     val downloaded = remember(downloadEntries, manga.id) {
@@ -168,6 +175,8 @@ fun DetailScreen(
 
     var fullIntroduction by rememberSaveable(manga.id) { mutableStateOf(false) }
     var fullRatings by rememberSaveable(manga.id) { mutableStateOf(false) }
+    var commentFilterOpen by remember(manga.id) { mutableStateOf(false) }
+    var commentFilterChanged by remember(manga.id) { mutableStateOf(false) }
     var dockHidden by remember(manga.id) { mutableStateOf(false) }
     val dockTravel = remember(manga.id) { floatArrayOf(0f) }
     var commentsList by remember(manga.id) { mutableStateOf<LazyListState?>(null) }
@@ -290,7 +299,7 @@ fun DetailScreen(
                 header = header, compact = compactHero, title = current.title, backdrop = artworkBackdrop,
                 favorite = isFavorite, coverFailed = coverFailed, active = active, coverLight = coverLight,
                 comments = activeSection == 1, commentCount = commentCount,
-                onBack = onBack, onIntroduction = { fullIntroduction = true }, onFindRelated = onFindRelated,
+                onBack = onBack, onIntroduction = { fullIntroduction = true },
                 onToggleFavorite = onToggleFavorite, onRetryCover = {
                     coverFailed = false
                     coverRetry++
@@ -319,7 +328,7 @@ fun DetailScreen(
                 ) {
                     if (!compactHero) {
                         HeroBookInformation(current, onIntroduction = { fullIntroduction = true },
-                            onRatings = { fullRatings = true },
+                            onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
                             collapse = { header.collapsedFraction },
                             modifier = Modifier.scrollable(artworkScroll, Orientation.Vertical,
                                 reverseDirection = true, enabled = active))
@@ -349,7 +358,9 @@ fun DetailScreen(
                 DetailSections(
                     selected = activeSection,
                     chapterCount = chapters.size, commentCount = commentCount,
-                    onSelect = { section = it; dockHidden = false; dockTravel[0] = 0f },
+                    onSelect = { section = it; commentFilterOpen = false; dockHidden = false; dockTravel[0] = 0f },
+                    filterOpen = commentFilterOpen, filterChanged = commentFilterChanged,
+                    onToggleFilter = { commentFilterOpen = !commentFilterOpen },
                 )
                 MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth()) { targetSection ->
                     sections.SaveableStateProvider(targetSection) {
@@ -369,6 +380,8 @@ fun DetailScreen(
                                 onRelink = onReviewRelink, loadReplies = loadReplies,
                                 onScrollTarget = { commentsList = it }, backdrop = commentsBackdrop,
                                 active = active && targetSection == activeSection, bottomPadding = readingInset,
+                                filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
+                                onFilterChanged = { commentFilterChanged = it },
                             )
                         }
                     }
@@ -381,7 +394,8 @@ fun DetailScreen(
             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents)
     }
-    if (fullIntroduction) DetailIntroduction(current) { fullIntroduction = false }
+    if (fullIntroduction) DetailIntroduction(current,
+        onAuthor = { fullIntroduction = false; onAuthor(current, it) }, onDismiss = { fullIntroduction = false })
     if (fullRatings) DetailRatingSheet(current) { fullRatings = false }
 }
 
@@ -402,7 +416,6 @@ private fun ArtworkToolbar(
     onIntroduction: () -> Unit,
     onToggleFavorite: () -> Unit,
     onRetryCover: () -> Unit,
-    onFindRelated: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val progress = if (compact) 1f else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
@@ -441,7 +454,6 @@ private fun ArtworkToolbar(
                 modifier = Modifier.fillMaxWidth())
         }
         if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, 1f - progress, tint, glassTone, onRetryCover)
-        ArtworkAction(Icons.Outlined.AutoAwesome, "相似与系列作品", backdrop, 1f - progress, tint, glassTone, onFindRelated)
         ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
             if (favorite) "从书架移除" else "加入书架", backdrop, 1f - progress, tint, glassTone, onToggleFavorite)
     }
@@ -467,6 +479,7 @@ private fun HeroBookInformation(
     manga: Manga,
     onIntroduction: () -> Unit,
     onRatings: () -> Unit,
+    onAuthor: (String) -> Unit,
     collapse: () -> Float,
     modifier: Modifier = Modifier,
 ) {
@@ -479,9 +492,7 @@ private fun HeroBookInformation(
             fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.fillMaxWidth())
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            val metadata = manga.authors.take(2).joinToString(" / ")
-            if (metadata.isNotBlank()) Text(metadata, color = Color.White.copy(alpha = .77f),
-                fontSize = 11.sp, lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            AuthorNames(manga.authors.take(2), Color.White.copy(alpha = .85f), enabled = infoVisible, onAuthor = onAuthor)
             Row(Modifier.fillMaxWidth().heightIn(min = 30.dp)
                 .clickable(enabled = infoVisible, role = Role.Button,
                     onClickLabel = "展开简介与作品信息", onClick = onIntroduction),
@@ -514,7 +525,7 @@ private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: B
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DetailIntroduction(manga: Manga, onDismiss: () -> Unit) {
+private fun DetailIntroduction(manga: Manga, onAuthor: (String) -> Unit, onDismiss: () -> Unit) {
     MotionBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface, contentColor = DetailForeground,
@@ -528,8 +539,7 @@ private fun DetailIntroduction(manga: Manga, onDismiss: () -> Unit) {
             ) {
                 Text(manga.title, fontSize = 20.sp, lineHeight = 28.sp,
                     color = DetailForeground, fontWeight = FontWeight.SemiBold)
-                if (manga.authors.isNotEmpty()) Text(manga.authors.joinToString(" / "),
-                    color = DetailSecondary, fontSize = 13.sp)
+                AuthorNames(manga.authors, DetailSecondary, onAuthor = onAuthor)
                 DetailTags(manga)
                 MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailForeground)
                 Text(manga.description.ifBlank { "来源暂无简介" },
@@ -557,21 +567,48 @@ private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false) {
     )
 }
 
-/** Equal hit regions and a shared Ovio two-edge plate, with secondary real counts. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun DetailSections(selected: Int, chapterCount: Int, commentCount: String?, onSelect: (Int) -> Unit) {
+private fun AuthorNames(authors: List<String>, color: Color, enabled: Boolean = true, onAuthor: (String) -> Unit) {
+    if (authors.isEmpty()) return
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        authors.filter(String::isNotBlank).distinct().forEach { name ->
+            Text(name, color = color, fontSize = 12.sp, lineHeight = 18.sp,
+                modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                    .clickable(enabled = enabled, role = Role.Button, onClickLabel = "查看${name}的漫画") { onAuthor(name) }
+                    .padding(vertical = 4.dp))
+        }
+    }
+}
+
+/** Chapter/comment tabs keep their Ovio selector; the filter belongs beside the comment tab. */
+@Composable
+private fun DetailSections(
+    selected: Int, chapterCount: Int, commentCount: String?, onSelect: (Int) -> Unit,
+    filterOpen: Boolean, filterChanged: Boolean, onToggleFilter: () -> Unit,
+) {
     val labels = listOf("章节", "评论")
-    MotionTabs(selected, labels, onSelect, modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 4.dp),
-        foreground = DetailForeground, muted = DetailSecondary, indicator = DetailForeground.copy(alpha = .065f),
-        compact = false, fullWidthIndicator = true, indicatorHeight = 36.dp, fontSize = 15.sp,
-        itemContent = { index, chosen, color ->
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(labels[index], color = color, fontSize = 15.sp,
-                    fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium)
-                val count = if (index == 0) chapterCount.takeIf { it > 0 }?.toString() else commentCount
-                count?.let { Text(it, color = color.copy(alpha = .65f), fontSize = 11.sp) }
-            }
-        })
+    val motion = LocalMotionEnabled.current
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        MotionTabs(selected, labels, onSelect, modifier = Modifier.weight(1f),
+            foreground = DetailForeground, muted = DetailSecondary, indicator = DetailForeground.copy(alpha = .065f),
+            compact = false, fullWidthIndicator = true, indicatorHeight = 36.dp, fontSize = 15.sp,
+            itemContent = { index, chosen, color ->
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(labels[index], color = color, fontSize = 15.sp,
+                        fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium)
+                    val count = if (index == 0) chapterCount.takeIf { it > 0 }?.toString() else commentCount
+                    count?.let { Text(it, color = color.copy(alpha = .65f), fontSize = 11.sp) }
+                }
+            })
+        AnimatedVisibility(selected == 1,
+            enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) + expandHorizontally(tween(if (motion) MangaMotion.Content else 0)),
+            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) + shrinkHorizontally(tween(if (motion) MangaMotion.Content else 0))) {
+            DetailAction(Icons.Outlined.FilterList, if (filterOpen) "收起评论筛选" else "筛选评论",
+                selected = filterOpen || filterChanged, enabled = selected == 1, onClick = onToggleFilter)
+        }
+    }
 }
 
 @Composable

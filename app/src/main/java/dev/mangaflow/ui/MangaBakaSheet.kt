@@ -92,7 +92,6 @@ internal fun MangaBakaSheet(
                     is MangaBakaRoute.Home -> "找漫画"
                     is MangaBakaRoute.Work -> "相似与系列"
                     is MangaBakaRoute.Stack -> "主题书单"
-                    is MangaBakaRoute.Match -> "确认作品"
                 }, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f).padding(start = if (state.canGoBack) 0.dp else 14.dp))
                 MotionIconButton(onClick = explorer::refresh, enabled = !state.loading && !state.loadingMore) {
@@ -112,7 +111,6 @@ internal fun MangaBakaSheet(
                     is MangaBakaRoute.Home -> route.shelf.ordinal
                     is MangaBakaRoute.Work -> 4 + route.relation.ordinal
                     is MangaBakaRoute.Stack -> 8
-                    is MangaBakaRoute.Match -> 9
                 } }, soft = true) { pane ->
                 positions.SaveableStateProvider(pane.route.key) {
                     CatalogContents(pane, readerRepository, active = pane.route.key == state.route.key,
@@ -154,8 +152,6 @@ private fun CatalogContents(
                     MangaBakaShelf.GEMS -> "评分较好、仍较少人发现的作品"
                     MangaBakaShelf.STACKS -> "读者整理的公开书单"
                 }, color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
-                is MangaBakaRoute.Match -> Text("选择「${route.manga.title}」对应的作品", color = colors.onSurfaceVariant,
-                    fontSize = 13.sp, lineHeight = 19.sp)
                 is MangaBakaRoute.Work -> state.book?.let { book ->
                     BookInformation(book, state, active, onFindReading)
                 }
