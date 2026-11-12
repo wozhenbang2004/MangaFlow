@@ -1,6 +1,7 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,7 +33,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -48,8 +48,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -154,13 +158,13 @@ fun DownloadsScreen(
                                     style = MaterialTheme.typography.titleMedium, color = foreground,
                                 )
                                 Spacer(Modifier.height(8.dp))
-                                Text("在漫画目录选择章节，下载后离线阅读", style = MaterialTheme.typography.bodySmall, color = secondary)
+                                Text("在目录选择章节，下载时也能直接开始阅读", style = MaterialTheme.typography.bodySmall, color = secondary)
                             }
                         }
                     } else {
                         items(visible, key = DownloadEntry::id) { entry ->
                             DownloadRow(entry, refreshing = entry.id in refreshingIds, onRead = { onRead(entry) }, onPause = { store.pause(entry.id) }, onRetry = { onRetry(entry) }, onRemove = { remove = entry })
-                            HorizontalDivider(Modifier.padding(vertical = 18.dp), color = colors.outlineVariant)
+                            HorizontalDivider(Modifier.padding(vertical = 8.dp), color = colors.outlineVariant.copy(alpha = .45f))
                         }
                     }
                 }
@@ -206,75 +210,80 @@ private fun DownloadRow(entry: DownloadEntry, refreshing: Boolean, onRead: () ->
     val secondary = colors.onSurfaceVariant
     val finished = entry.status == DownloadStatus.COMPLETED
     val inProgress = entry.status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING)
-    val showRefreshing = rememberDelayedBusy(refreshing)
-    Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+    val interaction = remember { MutableInteractionSource() }
+    val stateLabel = when (entry.status) {
+        DownloadStatus.QUEUED -> "排队中"
+        DownloadStatus.RUNNING -> "下载中"
+        DownloadStatus.WAITING -> "等待恢复"
+        DownloadStatus.PAUSED -> "已暂停"
+        DownloadStatus.COMPLETED -> "已下载"
+        DownloadStatus.FAILED -> "未完成"
+    }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(
+        interactionSource = interaction, indication = null, role = Role.Button,
+        onClickLabel = "阅读 ${entry.chapter.title}", onClick = onRead,
+    )) {
+        Row(Modifier.fillMaxWidth().motionPress(interaction, pressedScale = .99f).padding(vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically) {
             AsyncImage(
                 model = entry.manga.coverUrl,
                 contentDescription = null,
-                modifier = Modifier.size(width = 54.dp, height = 76.dp).clip(RoundedCornerShape(10.dp)).background(colors.surfaceVariant),
+                modifier = Modifier.size(width = 48.dp, height = 68.dp).clip(RoundedCornerShape(8.dp)).background(colors.surfaceVariant),
                 contentScale = ContentScale.Crop,
             )
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f).padding(top = 1.dp)) {
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
                 Text(entry.manga.title, style = MaterialTheme.typography.titleSmall, color = foreground, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Spacer(Modifier.height(5.dp))
+                Spacer(Modifier.height(4.dp))
                 Text(entry.chapter.title, style = MaterialTheme.typography.bodySmall, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (finished) {
-                        Icon(Icons.Outlined.Check, contentDescription = null, tint = secondary, modifier = Modifier.size(12.dp))
-                        Spacer(Modifier.width(3.dp))
+                // Reserve this slot when the transfer completes so the row never jumps.
+                Box(Modifier.fillMaxWidth().height(7.dp).drawBehind {
+                    if (!finished) {
+                        val y = size.height / 2f
+                        val fraction = if (entry.totalPages > 0)
+                            (entry.completedPages.toFloat() / entry.totalPages).coerceIn(0f, 1f) else 0f
+                        drawLine(secondary.copy(alpha = .12f), Offset(0f, y), Offset(size.width, y), 2.dp.toPx(), StrokeCap.Round)
+                        if (fraction > 0f) drawLine(secondary.copy(alpha = .62f), Offset(0f, y), Offset(size.width * fraction, y), 2.dp.toPx(), StrokeCap.Round)
                     }
-                    Text(
-                        when (entry.status) {
-                            DownloadStatus.QUEUED -> "排队中"
-                            DownloadStatus.RUNNING -> "正在下载"
-                            DownloadStatus.WAITING -> "等待恢复"
-                            DownloadStatus.PAUSED -> "已暂停"
-                            DownloadStatus.COMPLETED -> "已下载"
-                            DownloadStatus.FAILED -> "下载未完成"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (entry.status == DownloadStatus.FAILED) MaterialTheme.colorScheme.error else secondary,
-                    )
+                })
+                Text(
+                    if (finished) "$stateLabel · ${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
+                    else "$stateLabel · ${entry.completedPages}/${entry.totalPages} 页",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (entry.status == DownloadStatus.FAILED) colors.error else secondary,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(4.dp))
+            MotionIconButton(onClick = if (inProgress && !entry.needsSourceRefresh) onPause else onRetry,
+                enabled = !finished && !refreshing, modifier = Modifier.size(44.dp)) {
+                MotionSwap(Triple(entry.status, entry.needsSourceRefresh, refreshing), Modifier.size(20.dp)) { (status, needsRefresh, busy) ->
+                    if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp, color = secondary)
+                    else {
+                        val active = status in setOf(DownloadStatus.RUNNING, DownloadStatus.QUEUED, DownloadStatus.WAITING)
+                        Icon(when {
+                            status == DownloadStatus.COMPLETED -> Icons.Outlined.Check
+                            needsRefresh || status == DownloadStatus.FAILED -> Icons.Outlined.Refresh
+                            active -> Icons.Outlined.Pause
+                            else -> Icons.Outlined.PlayArrow
+                        }, contentDescription = when {
+                            status == DownloadStatus.COMPLETED -> "已下载"
+                            needsRefresh -> "刷新图片地址并继续下载"
+                            active -> "暂停下载"
+                            status == DownloadStatus.FAILED -> "重试下载"
+                            else -> "继续下载"
+                        }, modifier = Modifier.size(20.dp), tint = if (status == DownloadStatus.COMPLETED) secondary else foreground)
+                    }
                 }
             }
-            MotionIconButton(onClick = onRemove, enabled = !refreshing, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Outlined.DeleteOutline, contentDescription = "删除 ${entry.chapter.title}", tint = secondary, modifier = Modifier.size(20.dp))
+            MotionIconButton(onClick = onRemove, enabled = !refreshing, modifier = Modifier.size(44.dp)) {
+                Icon(Icons.Outlined.DeleteOutline, contentDescription = "删除 ${entry.chapter.title}", tint = secondary, modifier = Modifier.size(19.dp))
             }
-        }
-        if (!finished) {
-            Spacer(Modifier.height(13.dp))
-            LinearProgressIndicator(
-                progress = { if (entry.totalPages > 0) (entry.completedPages.toFloat() / entry.totalPages).coerceIn(0f, 1f) else 0f },
-                modifier = Modifier.fillMaxWidth().height(3.dp).clip(CircleShape),
-                color = colors.primary, trackColor = colors.outlineVariant,
-            )
         }
         if (entry.error.isNotBlank()) {
-            Spacer(Modifier.height(8.dp))
-            Text(entry.error, style = MaterialTheme.typography.bodySmall, color = if (entry.status == DownloadStatus.FAILED) MaterialTheme.colorScheme.error else secondary)
-        }
-        Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("${entry.completedPages} / ${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = secondary)
-            DownloadTextAction(onClick = if (finished) onRead else if (inProgress && !entry.needsSourceRefresh) onPause else onRetry, enabled = !refreshing, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
-                val icon = if (entry.needsSourceRefresh || entry.status == DownloadStatus.FAILED) Icons.Outlined.Refresh
-                    else if (inProgress) Icons.Outlined.Pause else Icons.Outlined.PlayArrow
-                MotionSwap(if (showRefreshing) null else icon, Modifier.size(18.dp)) { shown ->
-                    if (shown == null) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.6.dp, color = secondary)
-                    else Icon(shown, contentDescription = null, modifier = Modifier.size(17.dp), tint = foreground)
-                }
-                Spacer(Modifier.width(4.dp))
-                Text(when {
-                    refreshing -> "正在刷新"
-                    finished -> "离线阅读"
-                    entry.needsSourceRefresh -> "刷新并重试"
-                    inProgress -> "暂停"
-                    entry.status == DownloadStatus.FAILED -> "重试"
-                    else -> "继续"
-                }, style = MaterialTheme.typography.labelLarge, color = if (refreshing) secondary else foreground)
-            }
+            Text(entry.error, Modifier.padding(start = 60.dp, end = 8.dp, bottom = 6.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (entry.status == DownloadStatus.FAILED) colors.error else secondary)
         }
     }
 }

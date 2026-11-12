@@ -188,12 +188,15 @@ fun SettingsScreen(
             Spacer(Modifier.height(12.dp))
             SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn) { libraryStore.updatePreferences(preferences.copy(keepScreenOn = it)) }
             SettingsToggle("图片之间留白", preferences.pageGap) { libraryStore.updatePreferences(preferences.copy(pageGap = it)) }
+            SettingsToggle("边看边下", preferences.downloadWhileReading) { libraryStore.updatePreferences(preferences.copy(downloadWhileReading = it)) }
+            Text("自动保存当前打开的一章，可在下载页暂停或删除。",
+                style = MaterialTheme.typography.bodySmall, color = secondary)
             Spacer(Modifier.height(20.dp))
             HorizontalDivider(color = colors.outlineVariant)
             Spacer(Modifier.height(28.dp))
             SettingsSectionLabel("缓存")
             Spacer(Modifier.height(8.dp))
-            listOf("browse" to "推荐与热榜", "metadata" to "评分与评论", "images" to "图片与头像").forEach { (key, label) ->
+            listOf("browse" to "推荐与热榜", "metadata" to "目录、评分与评论", "images" to "图片与头像").forEach { (key, label) ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(label, style = MaterialTheme.typography.bodyLarge, color = foreground)

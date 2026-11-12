@@ -238,6 +238,7 @@ class LibraryStore(context: Context) {
             put("doublePage", next.doublePage)
             put("coverAlone", next.coverAlone)
             put("dimAmount", next.dimAmount.toDouble())
+            put("downloadWhileReading", next.downloadWhileReading)
         }.toString()).apply()
     }
 
@@ -245,12 +246,13 @@ class LibraryStore(context: Context) {
         val json = JSONObject(disk.getString("reader_preferences", "{}") ?: "{}")
         ReaderPreferences(
             mode = ReadingMode.entries.firstOrNull { it.name == json.optString("mode") } ?: ReadingMode.VERTICAL,
-            theme = ReaderTheme.entries.firstOrNull { it.name == json.optString("theme") } ?: ReaderTheme.INK,
+            theme = ReaderTheme.entries.firstOrNull { it.name == json.optString("theme") } ?: ReaderTheme.PAPER,
             keepScreenOn = json.optBoolean("keepScreenOn", true),
             pageGap = json.optBoolean("pageGap", false),
             doublePage = json.optBoolean("doublePage", false),
             coverAlone = json.optBoolean("coverAlone", true),
             dimAmount = json.optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
+            downloadWhileReading = json.optBoolean("downloadWhileReading", true),
         )
     }.getOrDefault(ReaderPreferences())
 

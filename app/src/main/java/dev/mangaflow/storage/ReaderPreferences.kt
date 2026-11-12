@@ -6,10 +6,11 @@ enum class ReaderTheme { INK, PAPER, SEPIA }
 
 data class ReaderPreferences(
     val mode: ReadingMode = ReadingMode.VERTICAL,
-    val theme: ReaderTheme = ReaderTheme.INK,
+    val theme: ReaderTheme = ReaderTheme.PAPER,
     val keepScreenOn: Boolean = true,
     val pageGap: Boolean = false,
     val doublePage: Boolean = false,
     val coverAlone: Boolean = true,
     val dimAmount: Float = 0f,
+    val downloadWhileReading: Boolean = true,
 )

@@ -14,13 +14,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -30,19 +38,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
-import dev.mangaflow.data.MangaReview
+import dev.mangaflow.data.ReviewRepository
+import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.ui.CommunityComment
 import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.rememberDelayedBusy
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-/** Composed only at the chapter end. The discussion never counts as an image or changes page totals. */
+/** Local images and online discussion share this same chapter end; comments never count as pages. */
 @Composable
 internal fun ChapterDiscussion(
     manga: Manga,
@@ -51,104 +61,178 @@ internal fun ChapterDiscussion(
     background: Color,
     foreground: Color,
     onNext: (() -> Unit)?,
+    reviewRepository: ReviewRepository,
+    previewVisible: Boolean = true,
+    onClose: (() -> Unit)? = null,
 ) {
-    var comments by remember(chapter.id) { mutableStateOf<List<MangaReview>>(emptyList()) }
-    var total by remember(chapter.id) { mutableStateOf<Int?>(null) }
-    var nextPage by remember(chapter.id) { mutableStateOf<Int?>(0) }
-    var loading by remember(chapter.id) { mutableStateOf(true) }
-    var error by remember(chapter.id) { mutableStateOf<String?>(null) }
-    var expanded by rememberSaveable(chapter.id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val muted = foreground.copy(alpha = .54f)
-    val delayedLoading = rememberDelayedBusy(loading)
-
-    suspend fun load(page: Int) {
-        loading = true
-        error = null
-        try {
-            val result = repository.chapterComments(manga, chapter, page)
-            comments = (if (page == 0) result.items else comments + result.items).distinctBy(MangaReview::id)
-            total = result.total
-            nextPage = result.nextPage
-        } catch (cancel: CancellationException) { throw cancel }
-        catch (failure: Exception) { error = failure.message ?: "本章讨论暂时无法读取" }
-        finally { loading = false }
+    val state = remember(manga.id, chapter.id, repository, reviewRepository) {
+        ChapterDiscussionState(manga, chapter, repository, reviewRepository, scope)
+    }
+    DisposableEffect(state) { onDispose { state.dispose() } }
+    LaunchedEffect(state) { state.refresh() }
+    var expanded by rememberSaveable(manga.id, chapter.id, previewVisible) { mutableStateOf(!previewVisible) }
+    val mixed = remember(state.sources) { mixedDiscussionRows(state.sources) }
+    val chapterCount = state.sources.firstOrNull { it.isChapter }?.source?.reviewCount
+    val muted = foreground.copy(alpha = .58f)
+    val busy = state.refreshing || state.paging
+    val delayedBusy = rememberDelayedBusy(busy)
+    val notices = state.sources.filter { it.loaded && !it.busy &&
+        (it.source.status != ReviewStatus.READY || it.source.reviewsError != null) }
+    val listState = rememberLazyListState()
+    val nearEnd by remember(listState) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            info.totalItemsCount > 0 &&
+                (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 4
+        }
+    }
+    LaunchedEffect(state, expanded, nearEnd, state.sources, busy) {
+        if (expanded && nearEnd && !busy) state.loadNext()
     }
 
-    LaunchedEffect(manga.id, chapter.id) { load(0) }
-    val loadMore = {
-        if (!loading) nextPage?.let { page -> scope.launch { load(page) } }
-        Unit
-    }
-
-    Column(Modifier.fillMaxWidth().background(background).padding(horizontal = 24.dp)
-        .padding(top = 34.dp, bottom = 100.dp)) {
+    if (previewVisible) Column(Modifier.fillMaxWidth().background(background).padding(horizontal = 20.dp)
+        .padding(top = 20.dp, bottom = 96.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("本章读完了", color = muted, fontSize = 12.sp)
-            Spacer(Modifier.weight(1f))
+            Text("本话读完了", color = muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
             if (onNext != null) TextButton(onClick = onNext) {
-                Text("继续下一章 →", color = foreground, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("下一话 →", color = foreground, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             }
         }
-        Spacer(Modifier.height(22.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("本章讨论", color = foreground, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-            total?.let { Text("  $it", color = muted, fontSize = 12.sp) }
-            Spacer(Modifier.weight(1f))
-            Text("拷贝", color = muted, fontSize = 11.sp)
+        Spacer(Modifier.height(10.dp))
+        DiscussionHeading(chapter, chapterCount, mixed.size, busy, foreground,
+            onRefresh = { state.refresh(forceRefresh = true) })
+        if (mixed.isEmpty()) {
+            if (delayedBusy) DiscussionLoading(muted)
+            else if (!busy && notices.isEmpty() && !state.hasMore) Text("暂时还没有公开讨论", color = muted,
+                fontSize = 13.sp, modifier = Modifier.padding(vertical = 18.dp))
         }
-        Text(chapter.title, color = muted, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp, bottom = 16.dp))
-        if (delayedLoading && comments.isEmpty()) {
-            CircularProgressIndicator(Modifier.padding(vertical = 18.dp).size(18.dp), color = muted, strokeWidth = 1.5.dp)
+        mixed.take(4).forEach { row ->
+            key(row.key) { DiscussionRow(row, foreground) }
+            HorizontalDivider(color = foreground.copy(alpha = .06f), thickness = .5.dp)
         }
-        comments.take(3).forEach { comment ->
-            CommunityComment(comment, foreground = foreground, muted = muted,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp))
+        if (mixed.isEmpty()) {
+            notices.forEach { source ->
+                DiscussionNotice(source, foreground, busy) { state.retry(source.source.id) }
+            }
+        } else if (notices.isNotEmpty()) {
+            Text(notices.joinToString(" · ") { it.source.name } + " 暂未更新",
+                color = muted, fontSize = 11.sp, modifier = Modifier.padding(top = 10.dp))
         }
-        if (!loading && error == null && comments.isEmpty()) {
-            Text("这一章还没有讨论", color = muted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 16.dp))
-        }
-        error?.let { message ->
-            Text(message, color = muted, fontSize = 12.sp)
-            TextButton(onClick = loadMore, enabled = !loading) { Text("重试", color = foreground) }
-        }
-        if (comments.isNotEmpty()) TextButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-            Text(total?.let { "查看全部 $it 条讨论" } ?: "查看全部讨论", color = foreground, fontSize = 13.sp)
+        if (mixed.isNotEmpty() || notices.isNotEmpty() || state.hasMore) TextButton(
+            onClick = { expanded = true }, modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("展开评论", color = foreground, fontSize = 13.sp)
         }
     }
 
     if (expanded) {
-        MotionBottomSheet(onDismissRequest = { expanded = false },
+        MotionBottomSheet(onDismissRequest = { expanded = false; onClose?.invoke() },
             containerColor = background, contentColor = foreground) { dismiss ->
-            Column(Modifier.fillMaxWidth().fillMaxHeight(.90f).navigationBarsPadding()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("本章讨论", color = foreground, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                        Text("${chapter.title} · 拷贝", color = muted, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+            Column(Modifier.fillMaxWidth().fillMaxHeight(.9f).navigationBarsPadding()) {
+                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    DiscussionHeading(chapter, chapterCount, mixed.size, busy, foreground,
+                        modifier = Modifier.weight(1f), onRefresh = {
+                            state.refresh(forceRefresh = true)
+                            scope.launch { listState.scrollToItem(0) }
+                        })
+                    MotionIconButton(onClick = dismiss) {
+                        Icon(Icons.Outlined.Close, "关闭评论", tint = muted, modifier = Modifier.size(20.dp))
                     }
-                    TextButton(onClick = dismiss) { Text("完成", color = foreground, fontSize = 13.sp) }
                 }
-                LazyColumn(modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    items(comments, key = MangaReview::id) { comment ->
-                        CommunityComment(comment, foreground = foreground, muted = muted)
-                        HorizontalDivider(Modifier.padding(top = 14.dp), color = foreground.copy(alpha = .055f))
+                LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp)) {
+                    items(mixed, key = ReaderDiscussionRow::key) { row ->
+                        DiscussionRow(row, foreground)
+                        HorizontalDivider(color = foreground.copy(alpha = .06f), thickness = .5.dp)
                     }
-                    item("discussion-more") {
+                    items(notices, key = { "notice:${it.source.id}" }) { source ->
+                        DiscussionNotice(source, foreground, busy) { state.retry(source.source.id) }
+                    }
+                    item("discussion-footer") {
                         when {
-                            loading -> if (delayedLoading) CircularProgressIndicator(Modifier.size(20.dp), color = muted, strokeWidth = 1.5.dp)
-                            error != null -> Column {
-                                Text(error.orEmpty(), color = muted, fontSize = 12.sp)
-                                TextButton(onClick = loadMore) { Text("重试", color = foreground) }
+                            delayedBusy -> DiscussionLoading(muted)
+                            busy -> Spacer(Modifier.height(40.dp))
+                            state.hasMore -> TextButton(onClick = state::loadNext, modifier = Modifier.fillMaxWidth()) {
+                                Text("加载更多", color = foreground, fontSize = 12.sp)
                             }
-                            nextPage != null -> TextButton(onClick = loadMore, modifier = Modifier.fillMaxWidth()) {
-                                Text("继续加载", color = foreground)
-                            }
-                            else -> Text("已读完全部讨论", color = muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 12.dp))
+                            mixed.isEmpty() && notices.isEmpty() -> Text("暂时还没有公开讨论", color = muted,
+                                fontSize = 12.sp, modifier = Modifier.padding(vertical = 18.dp))
+                            mixed.isNotEmpty() -> Text("已显示当前可获取的讨论", color = muted,
+                                fontSize = 11.sp, modifier = Modifier.padding(vertical = 16.dp))
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DiscussionHeading(
+    chapter: Chapter,
+    chapterCount: Int?,
+    loadedCount: Int,
+    busy: Boolean,
+    foreground: Color,
+    modifier: Modifier = Modifier,
+    onRefresh: () -> Unit,
+) {
+    val muted = foreground.copy(alpha = .58f)
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("评论", color = foreground, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                val count = listOfNotNull(chapterCount?.let { "本话 $it" },
+                    "已加载 $loadedCount".takeIf { loadedCount > 0 }).joinToString(" · ")
+                if (count.isNotEmpty()) Text(count, color = muted, fontSize = 10.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Text("${chapter.title} · 最新优先", color = muted, fontSize = 11.sp, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp, bottom = 8.dp))
+        }
+        MotionIconButton(onClick = onRefresh, enabled = !busy) {
+            Icon(Icons.Outlined.Refresh, "刷新最新评论", tint = muted.copy(alpha = if (busy) .28f else .58f),
+                modifier = Modifier.size(18.dp))
+        }
+    }
+}
+
+@Composable
+private fun DiscussionRow(row: ReaderDiscussionRow, foreground: Color) {
+    CommunityComment(row.review, foreground = foreground, muted = foreground.copy(alpha = .56f),
+        sourceId = row.source.source.id, scopeLabel = if (row.source.isChapter) "本话" else "作品",
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+}
+
+@Composable
+private fun DiscussionNotice(
+    state: ReaderDiscussionSource,
+    foreground: Color,
+    busy: Boolean,
+    onRetry: () -> Unit,
+) {
+    val source = state.source
+    val message = when {
+        source.reviewsError != null -> source.reviewsError
+        source.status == ReviewStatus.NO_MATCH -> "暂未确认对应漫画"
+        else -> source.message.ifBlank { "暂时无法读取评论" }
+    }
+    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("${source.name}${if (state.isChapter) " · 本话" else " · 作品"}  $message",
+            color = foreground.copy(alpha = .58f), fontSize = 11.sp, lineHeight = 17.sp,
+            maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        MotionIconButton(onClick = onRetry, enabled = !busy) {
+            Icon(Icons.Outlined.Refresh, "重新读取${source.name}评论", tint = foreground.copy(alpha = .58f),
+                modifier = Modifier.size(17.dp))
+        }
+    }
+}
+
+@Composable
+private fun DiscussionLoading(color: Color) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 14.dp), horizontalArrangement = Arrangement.Center) {
+        CircularProgressIndicator(Modifier.size(17.dp), color = color, strokeWidth = 1.5.dp)
     }
 }

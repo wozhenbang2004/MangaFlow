@@ -24,9 +24,18 @@ Android manga reader, Kotlin and Jetpack Compose. Package: `dev.mangaflow`.
 - Source failures and rate limits must reach the UI. Never replace failures with fabricated manga, ratings, reviews, or download success.
 - Treat artwork as the focal point. Use quiet surfaces, deliberate spacing, clear type hierarchy, subtle outlines and restrained motion. Do not default to a stack of large cards.
 - Preserve the source URL, attribution and author of external reviews. Do not conflate anime and manga, or attach the first search result without matching titles.
-- Keep source metrics distinct: Copy popularity is heat, Bangumi is out of 10, and AniList is out of 100. Comment reply counts are not likes. Chapter discussions must use the exact chapter UUID and never include whole-work reviews as a substitute.
+- Keep source metrics distinct: Copy popularity is heat, Bangumi is out of 10, and AniList is out of 100. Comment reply counts are not likes. Chapter discussions must use the exact chapter UUID. Confirmed whole-work reviews may join the reader's mixed feed only with an explicit work-scope label; never count them as chapter reviews or invent chapter matches.
 - Reader discussion pages must not increase image page counts or corrupt saved image offsets.
 - Downloads must be resumable, cancellable and usable without network access after completion.
+
+## Unified reader and downloads · 2026-11-12
+
+- Reader controls and dialogs use the app's quiet theme surfaces, independently from the chosen paper background. Preserve compact sliders with stable accessible hit areas, the dense chapter grid and shared motion.
+- Download rows open the ordinary reader directly, including partially downloaded chapters. Do not restore a separate “离线阅读” button or a downloaded-only catalog. Load a retained full directory when available and update it without blocking the chapter.
+- Keep one original page manifest and resolve each image to a valid local file or its source address. Reader and worker share in-flight page transfers; progress updates must not replace image identity, zoom or scroll state. Pause, deletion and newer retry intent supersede older transfers.
+- “边看边下” automatically saves only the opened chapter. Recomposition must not restart an explicitly paused, failed or deleted task. Keep individual pause/retry controls and a persistent preference.
+- The reader's mixed discussion keeps Copy's exact chapter comments distinct from Bangumi/AniList work discussions. Preserve avatars, compact source/scope labels, provider spoiler rules, current chapter totals and explicit latest refresh. Opening comments must leave image progress untouched.
+- This batch follows the current main-only, CI-trigger-only workflow above. Source review is not device validation; no tests or local prebuilds.
 
 ## Shared motion and reader interaction · 2026-11-12
 

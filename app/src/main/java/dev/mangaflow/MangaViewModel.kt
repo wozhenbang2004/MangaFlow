@@ -28,6 +28,7 @@ import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.storage.ReaderCatalogStore
 import dev.mangaflow.storage.BrowseCache
 import dev.mangaflow.storage.BrowseSnapshot
 import dev.mangaflow.update.UpdateManager
@@ -106,7 +107,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val downloads = DownloadStore.get(application)
     val updates = UpdateManager.get(application)
     val community = CopyCommunityRepository(repository)
-    private val reviews = ReviewRepository(application)
+    val reviews = ReviewRepository(application)
+    private val readerCatalogs = ReaderCatalogStore(application)
     private val browseCache = BrowseCache(application)
     private val metricsRepository = MangaMetricsRepository(application, reviews, community)
     private val _metrics = MutableStateFlow<Map<String, List<MangaMetric>>>(emptyMap())
@@ -338,7 +340,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    suspend fun metadataCacheSize(): Long = metricsRepository.cacheSizeBytes()
+    suspend fun metadataCacheSize(): Long = metricsRepository.cacheSizeBytes() + readerCatalogs.sizeBytes()
 
     suspend fun clearMetadataCache() {
         metricsRequestId++
@@ -348,6 +350,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         metricWrites.clear()
         _metrics.value = emptyMap()
         metricsRepository.clearCache()
+        readerCatalogs.clear()
     }
 
     private fun recordDetailMetrics(mangaId: String, detailId: Long) {
@@ -414,6 +417,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         current.copy(manga = updatedManga, detail = loaded.copy(manga = updatedManga), loading = false)
                     }
                 }
+                readerCatalogs.save(loaded)
                 if (requestId != detailRequestId) return@launch
                 recordDetailMetrics(manga.id, requestId)
                 if (continueChapterId != null) {
@@ -578,13 +582,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val current = _detail.value ?: return
         val chapters = current.detail?.chapters ?: downloadedChapters(current.manga.id)
         if (chapters.none { it.id == chapter.id }) return
-        beginReading(ReadingSession(current.manga, chapters, chapter.id))
+        val needsCatalog = current.loading || current.error != null || current.detail == null
+        beginReading(ReadingSession(current.manga, chapters, chapter.id, chaptersLoading = needsCatalog))
+        if (needsCatalog) loadReadingCatalog()
     }
 
     fun openDownload(entry: DownloadEntry) {
-        if (entry.status != DownloadStatus.COMPLETED) return
-        val chapters = downloadedChapters(entry.manga.id)
-        beginReading(ReadingSession(entry.manga, chapters, entry.chapter.id))
+        openSavedChapter(entry.manga, entry.chapter.id, entry.chapter.title, entry.chapter)
     }
 
     fun continueReading(progress: ReadingProgress) {
@@ -600,11 +604,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _reading.value = session
     }
 
-    private fun openSavedChapter(manga: Manga, chapterId: String, chapterTitle: String) {
+    private fun openSavedChapter(manga: Manga, chapterId: String, chapterTitle: String, fallback: Chapter? = null) {
         val cached = repository.cachedDetail(manga.id)
-        val offline = downloadedChapters(manga.id)
+        val offline = knownDownloadChapters(manga.id)
         val chapter = cached?.chapters?.firstOrNull { it.id == chapterId }
             ?: offline.firstOrNull { it.id == chapterId }
+            ?: fallback
             ?: Chapter(chapterId, chapterTitle.ifBlank { "继续阅读" }, 0)
         val chapters = (cached?.chapters.orEmpty() + offline + chapter).distinctBy(Chapter::id)
             .sortedBy(Chapter::index)
@@ -631,18 +636,24 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         readingCatalogJob = viewModelScope.launch {
             try {
                 downloads.awaitReady()
-                val offline = downloadedChapters(session.manga.id)
+                val offline = knownDownloadChapters(session.manga.id)
+                val saved = readerCatalogs.read(session.manga.id)
                 if (requestId != readingRequestId) return@launch
                 _reading.update { current ->
                     if (current?.manga?.id != session.manga.id) current
-                    else current.copy(chapters = (offline + current.chapters).distinctBy(Chapter::id)
-                        .sortedBy(Chapter::index))
+                    else current.copy(
+                        manga = if (current.manga.sourceUuid.isBlank()) current.manga.copy(
+                            sourceUuid = saved?.manga?.sourceUuid.orEmpty()) else current.manga,
+                        chapters = (saved?.chapters.orEmpty() + offline + current.chapters).distinctBy(Chapter::id)
+                            .sortedBy(Chapter::index),
+                    )
                 }
                 val cached = if (forceRefresh) null else repository.cachedDetail(session.manga.id)
                     ?.takeIf { it.chapters.any { chapter -> chapter.id == session.chapterId } }
                 // Downloaded chapters are immediately usable, but they are not
                 // a complete directory for continuing into the next chapter.
                 val loaded = cached ?: repository.detail(session.manga.id)
+                readerCatalogs.save(loaded)
                 if (requestId != readingRequestId) return@launch
                 _reading.update { current ->
                     if (current?.manga?.id != session.manga.id) current
@@ -693,8 +704,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun retryDownload(entry: DownloadEntry) {
-        if (!entry.needsSourceRefresh) {
-            downloads.retry(entry.id)
+        val expected = downloads.entryFor(entry.manga.id, entry.chapter.id) ?: return
+        if (!expected.needsSourceRefresh) {
+            downloads.retry(expected.id)
             return
         }
         val key = "${entry.manga.id}/${entry.chapter.id}"
@@ -703,11 +715,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val pages = repository.pages(entry.manga.id, entry.chapter.id, forceRefresh = true)
-                val current = downloads.entryFor(entry.manga.id, entry.chapter.id)
-                if (current == null || current.createdAt != entry.createdAt || !current.needsSourceRefresh ||
-                    current.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.COMPLETED)) return@launch
-                downloads.enqueue(entry.manga, entry.chapter, pages, repository.imageHeaders(entry.manga.id, entry.chapter.id))
-                messages.send("图片地址已刷新，继续下载")
+                val refreshed = downloads.refreshReadingDownload(entry.manga, entry.chapter, pages,
+                    repository.imageHeaders(entry.manga.id, entry.chapter.id), expectedEntry = expected)
+                if (refreshed) messages.send("图片地址已刷新，继续下载")
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
@@ -996,5 +1006,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun downloadedChapters(mangaId: String): List<Chapter> = downloads.entries.value
         .filter { it.manga.id == mangaId && it.status == DownloadStatus.COMPLETED }
+        .map(DownloadEntry::chapter).distinctBy(Chapter::id).sortedBy(Chapter::index)
+
+    private fun knownDownloadChapters(mangaId: String): List<Chapter> = downloads.entries.value
+        .filter { it.manga.id == mangaId }
         .map(DownloadEntry::chapter).distinctBy(Chapter::id).sortedBy(Chapter::index)
 }

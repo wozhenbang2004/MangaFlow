@@ -290,8 +290,11 @@ fun CommunityComment(
     modifier: Modifier = Modifier,
     foreground: Color = Color.White,
     muted: Color = Color.White.copy(alpha = 0.5f),
+    sourceId: String? = null,
+    scopeLabel: String? = null,
 ) {
-    CommentContent(review, modifier, foreground, muted, showReplyCount = true)
+    CommentContent(review, modifier, foreground, muted, showReplyCount = true,
+        sourceId = sourceId, scopeLabel = scopeLabel)
 }
 
 @Composable
@@ -302,6 +305,7 @@ private fun CommentContent(
     muted: Color,
     showReplyCount: Boolean,
     sourceId: String? = null,
+    scopeLabel: String? = null,
 ) {
     val text = review.body.ifBlank { review.summary }.trim()
     val conceal = review.spoiler || review.kind == ReviewKind.REVIEW
@@ -321,6 +325,8 @@ private fun CommentContent(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false))
                         if (sourceId != null) CommentSourceBadge(sourceId)
+                        if (scopeLabel != null) Text(scopeLabel, color = muted, fontSize = 10.sp,
+                            maxLines = 1)
                     }
                     if (review.date.isNotBlank()) Text(review.date, color = muted, fontSize = 10.sp,
                         modifier = Modifier.padding(top = 2.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)

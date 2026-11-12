@@ -268,7 +268,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         manga = current.session.manga, chapters = current.session.chapters,
                         initialChapterId = current.session.chapterId,
                         repository = model.repository, libraryStore = model.library, downloadStore = model.downloads,
-                        communityRepository = model.community,
+                        communityRepository = model.community, reviewRepository = model.reviews,
                         onBack = model::closeReader, onRequestNotificationPermission = onRequestNotifications,
                         onChapterVisible = model::onChapterVisible,
                         onNearChapterEnd = model::prefetchNextChapter,

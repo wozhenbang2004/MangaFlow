@@ -166,7 +166,19 @@ class CopyCommunityRepository(
         }
     }
 
-    suspend fun chapterComments(manga: Manga, chapter: Chapter, page: Int = 0): ReviewPage = withContext(Dispatchers.IO) {
+    /** The reader can show its exact chapter's last snapshot while refreshing, including offline. */
+    fun cachedChapterComments(chapter: Chapter): ReviewPage? {
+        if (!validUuid(chapter.id)) return null
+        val chapterId = UUID.fromString(chapter.id).toString()
+        return synchronized(commentCache) { commentCache["chapter:$chapterId:0"]?.page }
+    }
+
+    suspend fun chapterComments(
+        manga: Manga,
+        chapter: Chapter,
+        page: Int = 0,
+        forceRefresh: Boolean = false,
+    ): ReviewPage = withContext(Dispatchers.IO) {
         val chapterId = uuid(chapter.id, "章节")
         val publicUrl = webOrigin.newBuilder().addPathSegment("comic").addPathSegment(segment(manga.id))
             .addPathSegment("chapter").addPathSegment(chapterId).build().toString()
@@ -175,7 +187,7 @@ class CopyCommunityRepository(
             .addQueryParameter("limit", COMMENT_SIZE.toString())
             .addQueryParameter("offset", offset(page, COMMENT_SIZE).toString()).build()
         // Chapter UUID is sufficient; do not make an extra work-detail request here.
-        commentPage("chapter:$chapterId:$page") {
+        commentPage("chapter:$chapterId:$page", forceRefresh) {
             readComments(apiJson(url, "拷贝本章讨论", publicUrl), page, publicUrl, chapterId)
         }
     }

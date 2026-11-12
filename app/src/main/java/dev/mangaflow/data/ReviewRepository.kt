@@ -20,6 +20,7 @@ import org.jsoup.Jsoup
 import java.text.Normalizer
 import java.time.Instant
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /** Anonymous, attributed reviews. Each provider keeps its own scale and identity. */
@@ -94,6 +95,14 @@ class ReviewRepository(context: Context) {
     internal fun metricIdentityKey(manga: Manga): String = listOf(manga.id,
         savedId(manga, "bangumi"), savedId(manga, "anilist")).joinToString("\u0000")
 
+    /** Retain the last known snapshot while a reader refreshes; never cross saved associations. */
+    fun cachedSources(manga: Manga): List<ReviewSource> {
+        val key = identityKey(manga)
+        return synchronized(cache) {
+            listOf("bangumi", "anilist").mapNotNull { cache["$key\u0000$it"]?.source }
+        }
+    }
+
     fun clearCache() {
         synchronized(cache) { cacheGeneration++; cache.clear() }
         synchronized(confirmedNames) { confirmedNames.clear() }
@@ -101,7 +110,7 @@ class ReviewRepository(context: Context) {
 
     private fun cachedSource(key: String, sourceId: String): CachedSource? = synchronized(cache) {
         cache["$key\u0000$sourceId"]?.takeIf {
-            val ttl = if (it.source.status == ReviewStatus.UNAVAILABLE || it.source.reviewsError != null) 5 * 60_000L else 60 * 60_000L
+            val ttl = if (it.source.status == ReviewStatus.UNAVAILABLE || it.source.reviewsError != null) 5 * 60_000L else 3 * 60_000L
             System.currentTimeMillis() - it.time in 0L until ttl
         }
     }
@@ -124,6 +133,8 @@ class ReviewRepository(context: Context) {
 
     /** Pages are zero-based in the app, regardless of the provider's pagination scheme. */
     suspend fun loadMore(manga: Manga, source: ReviewSource, page: Int): ReviewPage = withContext(Dispatchers.IO) {
+        val key = identityKey(manga)
+        val epoch = cacheGeneration
         requireSource(source.id)
         val id = requireSubjectId(source.subjectId)
         if (source.status != ReviewStatus.READY || page < 0 || page > Int.MAX_VALUE / PAGE_SIZE - 1) {
@@ -133,11 +144,18 @@ class ReviewRepository(context: Context) {
         if (saved.isNotBlank() && saved != source.subjectId) {
             throw SourceException("作品关联已更改，请重新加载评论。")
         }
-        when (source.id) {
+        val result = when (source.id) {
             "bangumi" -> bangumiComments(id, page)
             "anilist" -> aniListReviews(id, page)
             else -> throw SourceException("不支持这个评价来源。")
         }
+        currentCoroutineContext().ensureActive()
+        if (page == 0 && epoch == cacheGeneration && key == identityKey(manga)) {
+            val names = synchronized(cache) { cache["$key\u0000${source.id}"]?.names }.orEmpty()
+            rememberSource(key, source.copy(reviews = result.items, reviewCount = result.total,
+                nextPage = result.nextPage, reviewsError = null, loadingMore = false), names, epoch)
+        }
+        result
     }
 
     /** Persist only an explicitly chosen, fetched and format-checked provider identity. */
@@ -317,7 +335,7 @@ class ReviewRepository(context: Context) {
         val base = ReviewSource("anilist", "AniList", ReviewStatus.READY, url,
             matchedTitle = mediaNames(media).firstOrNull().orEmpty(),
             score = media.nullableScore("averageScore", 100), scoreScale = 100,
-            ratingCount = total, subjectId = id.toString(), message = "作品长评 · 按读者认可排序 · 可能涉及后续剧情")
+            ratingCount = total, subjectId = id.toString(), message = "作品长评 · 最新发布 · 可能涉及后续剧情")
         return if (includeComments) withFirstPage(base) { aniListReviews(id, 0) } else base
     }
 
@@ -327,7 +345,7 @@ class ReviewRepository(context: Context) {
             query MangaReviews(${'$'}id: Int!, ${'$'}page: Int!, ${'$'}perPage: Int!) {
               Media(id: ${'$'}id, type: MANGA) {
                 id
-                reviews(page: ${'$'}page, perPage: ${'$'}perPage, sort: [RATING_DESC]) {
+                reviews(page: ${'$'}page, perPage: ${'$'}perPage, sort: [ID_DESC]) {
                   pageInfo { hasNextPage }
                   nodes { id summary body(asHtml: false) score private createdAt user { name avatar { large medium } } }
                 }
@@ -477,7 +495,8 @@ class ReviewRepository(context: Context) {
     private fun profileUrl(origin: String, name: String): String = origin.toHttpUrl().newBuilder().addPathSegment("user")
         .addPathSegment(name).build().toString()
     private fun date(seconds: Long): String = if (seconds > 0) try {
-        Instant.ofEpochSecond(seconds).atZone(ZoneId.systemDefault()).toLocalDate().toString()
+        Instant.ofEpochSecond(seconds).atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT))
     } catch (_: Exception) { "" } else ""
 
     private fun normalize(text: String): String {
