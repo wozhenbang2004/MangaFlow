@@ -271,41 +271,45 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Backdrop liquid-glass optics
+## Haze Glass optical material
 
-The rounded-rectangle refraction and directional-highlight formulas in
-`ui/glass/BackdropShaders.kt` and their Android binding in
-`ui/glass/BackdropGlassOptics.kt` are adapted from Kyant0/AndroidLiquidGlass
-(Backdrop) version 2.0.1, commit `65ab177e90e5c1d8c62e70cf7755841982da65f6`
-(`https://github.com/Kyant0/AndroidLiquidGlass/tree/65ab177e90e5c1d8c62e70cf7755841982da65f6`).
-Upstream source files:
+The shared optical material adapts Haze Glass 2.1.0, fixed commit
+`ca21ff2060e52e1882afdb94f9b055f7fc834bd9`:
+`https://github.com/chrisbanes/haze/tree/ca21ff2060e52e1882afdb94f9b055f7fc834bd9`.
 
-- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/internal/Shaders.kt`
-- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/effects/Lens.kt`
-- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/highlight/HighlightStyle.kt`
-- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/shadow/ShadowModifier.kt`
-- `backdrop/src/commonMain/kotlin/com/kyant/backdrop/shadow/Shadow.kt`
-- `backdrop/src/androidMain/kotlin/com/kyant/backdrop/internal/Paint.kt`
+Copyright 2025, Christopher Banes and the Haze project contributors.
+Licensed under Apache-2.0; the complete upstream license is bundled as
+`app/src/main/assets/licenses/Haze-APACHE-2.0.txt`.
 
-Copyright 2025 Kyant
+`ui/glass/HazeGlassShaders.kt` adapts the actual `GlassShaders.kt` edge refraction,
+SDF/surface normals, Fresnel response, gamut-bounded colour grading, localized
+interaction light and rim. `GlassMaterial.kt` adapts Regular/Clear values from
+`GlassOptics.kt`, `GlassDefaults.kt` and `GlassStyle.kt`.
+`HazeGlassOptics.kt` adapts the alpha-only sharp/blur depth composition in
+`GlassRenderEffectFactory.android.kt`; Android's native blur substitutes for
+Haze 2.1's semantic blur. The existing Haze 1.6 transport captures a padded sharp
+backdrop, with content labels/icons kept separate. Source map and exact differences:
+`third_party/haze-glass/ADAPTATION.md`.
 
-Licensed under the Apache License, Version 2.0.
-The complete upstream license is bundled in
+This replaces the former Backdrop edge-only optical adaptation. It is not the
+full Haze 2.1 framework or Apple's renderer. Merged glass bridges and a separate
+sharp edge-detail overlay are not included. Compilation and source reuse do not
+establish device visual equivalence, performance or user acceptance.
+
+## Backdrop soft shadows
+
+`ui/glass/BackdropSoftShadow.kt` adapts Kyant0/AndroidLiquidGlass (Backdrop) 2.0.1,
+fixed commit `65ab177e90e5c1d8c62e70cf7755841982da65f6`:
+`backdrop/src/commonMain/kotlin/com/kyant/backdrop/shadow/ShadowModifier.kt`,
+`shadow/Shadow.kt` and `backdrop/src/androidMain/kotlin/com/kyant/backdrop/internal/Paint.kt`.
+Copyright 2025 Kyant, Apache-2.0. The complete license remains bundled as
 `app/src/main/assets/licenses/Backdrop-APACHE-2.0.txt`.
 
-MangaFlow preserves the upstream optical formulas and copyright notice, changes
-the Kotlin package and removes IDE-only annotations. Lens and highlight uniforms
-are bound to Android RuntimeShader using the existing Haze 1.6 background capture.
-The adaptation uses uniform corners and bounded reader presets, adds interaction
-lighting, and applies an independent uniform readability tint after refraction.
-Labels and icons remain outside the optical layer. This is a source adaptation;
-the complete Backdrop framework and its sample applications are not included.
-`ui/glass/BackdropSoftShadow.kt` additionally adapts the upstream blurred outline
-and clear-center mask for the app's current Compose version. It replaces the
-upstream graphics layer with a bounded, cached software A8 image so Android's
-hardware Canvas cannot ignore BlurMaskFilter. It replaces ShapeProvider with the
-supplied Compose Shape and uses two explicit quiet shadow presets. Only shadows
-use this software mask; background capture, glass and artwork remain accelerated.
+The adaptation retains the blurred outline and clear-centre mask, substitutes a
+bounded cached software A8 image for the upstream graphics layer and uses the
+supplied Compose Shape and two quiet shadow presets. Only the shadow mask uses
+this software path; backdrop capture and glass remain accelerated.
+
 
 ## Source marks
 

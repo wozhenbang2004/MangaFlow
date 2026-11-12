@@ -1,5 +1,19 @@
 # MangaFlow detail · 2026-11-12
 
+## Apple-reference material rework · 2026-11-13 (active)
+
+User: “没达到我们审美库里保存的那个苹果液态玻璃效果啊”. This rejects visual closure of GLASS-MATERIAL-04 / GLASS-LIGHT-04; their opacity/input fixes are historical, not acceptance of the material. The saved Apple Regular/Clear images and the Haze author’s Brush/Stroke frame were opened directly from the unified glass archive (`page_c4faa81b88cc8191b00cbe8fd345bedf`). The concrete gap is the thin lens/stroke without a complete depth, surface-normal, colour and lighting response.
+
+- GLASS-OPTICS-05: adapt the archived Haze Glass 2.1.0 optical/rim formulas at `ca21ff2060e52e1882afdb94f9b055f7fc834bd9`, keeping the existing Haze 1.6 backdrop transport. Replace the old Backdrop edge-only shader, rather than stack both engines. Capture a padded sharp backdrop and compose sharp/blur depth before edge refraction, Fresnel ambient response, gamut-bounded colour grading and a normal-lit rim. Keep foreground labels outside this pipeline. Regular navigation/docks and Clear compact controls retain different authored optics. Large reading panels remain calmer.
+- GLASS-INPUT-05: keep existing Ovio/morph motion and raw-pointer cancellation. Localized press light and refraction follow the pointer without consuming it; interaction-source presses without a pointer use the centre. Reduced motion removes that response. No additional whole-container scaling or new layout.
+- GLASS-BOUNDARY-05: preserve all screenshot reversals, chapter/translation/page-collection changes and concurrent performance work. Keep the frosted and unsupported/software/no-source fallbacks. This is an Android source adaptation, not Apple’s renderer or the full Haze 2.1 runtime. Native Android blur substitutes for the upstream semantic blur; merged material bridges and sharp edge-detail overlays are outside this slice. Do not claim equivalent device appearance without user feedback.
+
+Retain bounded readability as an optical white-point response to sampled luminance, rather than a separate wash/inner plate. Dark appearance must lower bright manga behind white ink; Clear controls must lift dark artwork behind dark ink. These coefficients are app tuning, not measured accessibility results.
+
+Scope: shared glass material, rendering/bindings, source attribution and this design entry. Source/diff review only; no tests, local build or device automation. Publish directly to latest main and confirm the CI trigger. Visual/gesture acceptance remains open until the user tries the resulting APK.
+
+Independent read-only review checked active uniforms, input ownership, padding/origin and fallback bindings. Corrected the unused fold uniform, same-event drag ownership race and pointer-dependent effect rebuilding after engagement reaches zero. This is source evidence only; shader compilation, device appearance and frame rate have not been observed.
+
 ## Motion system v2 implemented · 2026-11-13 (current)
 
 User first requested “去对我们现在的 uiux 动画动效系统进行升级优化先去好好设计下”, then authorized the complete proposed design with “去交给你完全全部落地”. The seven-page `MangaFlow_Motion_Design_20261113.pdf` is the proposal; this section owns the adopted implementation and its limits. Extend MOTION-01–11 and the existing Ovio/beUI/Vaul/Backdrop adaptations, retaining the latest detail/carousel reversals and concurrent PERF-06–09 / GLASS-MATERIAL-04 corrections. No new animation runtime or dependency is introduced.
