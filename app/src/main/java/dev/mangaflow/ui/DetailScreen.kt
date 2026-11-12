@@ -133,6 +133,7 @@ fun DetailScreen(
     ) {
         // The book header yields room on short screens, with the keyboard, or at large font sizes.
         val compactHeader = maxHeight < 620.dp || LocalDensity.current.fontScale >= 1.4f
+        val showHeaderMetrics = maxHeight >= 400.dp
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 DetailAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", onClick = onBack)
@@ -151,7 +152,7 @@ fun DetailScreen(
                 )
             }
             if (!compactHeader) CompactBookHeader(current)
-            if (maxHeight >= 400.dp) {
+            if (showHeaderMetrics) {
                 MangaMetricBadges(current, Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp),
                     foreground = DetailWhite)
             }
