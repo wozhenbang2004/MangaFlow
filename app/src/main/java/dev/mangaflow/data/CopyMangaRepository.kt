@@ -10,8 +10,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.Cookie
-import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -19,12 +17,7 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
 import java.util.UUID
-import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 /** Host changes are explicit configuration, never a retry across mirrors after a refusal. */
 data class CopyMangaConfig(
@@ -33,11 +26,14 @@ data class CopyMangaConfig(
     val trustedImageDomains: Set<String> = setOf("mangafunb.fun"),
 )
 
-class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig()) : MangaRepository {
+class CopyMangaRepository(
+    private val config: CopyMangaConfig = CopyMangaConfig(),
+    private val identityProvider: () -> CopyAnonymousIdentity = { CopyAnonymousIdentity.create() },
+) : MangaRepository {
     private val webOrigin = checkedOrigin(config.websiteOrigin)
     private val apiOrigin = checkedOrigin(config.apiOrigin)
     private val api = SourceHttp()
-    private val websiteClient = sourceClient()
+    private val anonymousIdentity by lazy(identityProvider)
     private val imageDomains = config.trustedImageDomains.map { it.lowercase().trim('.') }.toSet()
     private val catalogCache = LinkedHashMap<String, CachedCatalog>()
     private val pageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -100,12 +96,8 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
         }
         // Account operations need only this public identity. A broken/empty
         // chapter directory must not prevent removing a cloud favorite.
-        val url = comicUrl(mangaId).toHttpUrl()
-        val http = websiteSession()
-        val response = http.request(webRequest(url).build(), "漫画标识", url.toString())
-        demandHtml(response, url, http, "漫画标识")
-        comicUuidFrom(Jsoup.parse(response.text, url.toString()))
-            ?: throw SourceException("官网详情缺少收藏所需的漫画标识，本地收藏已保留。", url.toString())
+        val data = comicMetadata(mangaId)
+        uuid(data.getJSONObject("comic").requiredText("uuid"), "漫画")
     }
 
     override suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
@@ -159,41 +151,39 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
     }
 
     private suspend fun readPages(mangaId: String, id: String): List<Page> {
-        val url = webOrigin.newBuilder().addPathSegment("comic").addPathSegment(mangaId)
-            .addPathSegment("chapter").addPathSegment(id).build()
-        val http = websiteSession()
-        val response = http.request(webRequest(url).header("Referer", comicUrl(mangaId)).build(), "章节内容", url.toString())
-        demandHtml(response, url, http, "章节内容")
-        val document = Jsoup.parse(response.text, url.toString())
-        // The requested UUID stays in the fixed anonymous chapter URL (HTTP
-        // redirects are disabled). The real reader HTML binds its directory
-        // link to this comic, and every decrypted image must also belong to it.
-        // This keeps ownership checks without making a full catalog a reading
-        // prerequisite when resuming a saved chapter.
-        val directoryLinks = document.select(".comicContent-prev.list a[href]")
-            .mapNotNull { url.resolve(it.attr("href")) }.distinct()
-        val expectedDirectory = comicUrl(mangaId).toHttpUrl()
-        if (directoryLinks.isEmpty() || directoryLinks.any {
-                it.scheme != expectedDirectory.scheme || it.host != expectedDirectory.host ||
-                    it.port != expectedDirectory.port || it.encodedPath != expectedDirectory.encodedPath ||
-                    it.username.isNotEmpty() || it.password.isNotEmpty()
-            }) {
-            throw SourceException("正文页面与漫画归属不一致，请重新打开该章节。", url.toString())
+        val url = apiOrigin.newBuilder().addPathSegments("api/v3/comic").addPathSegment(mangaId)
+            .addPathSegment("chapter2").addPathSegment(id).build()
+        val data = apiJson(url, "章节内容")
+        demandReadingAccess(data)
+        val comic = data.optJSONObject("comic") ?: throw SourceException("章节缺少漫画归属信息。", comicUrl(mangaId))
+        val chapter = data.optJSONObject("chapter") ?: throw SourceException("来源未返回章节正文。", comicUrl(mangaId))
+        demandPublic(comic)
+        demandPublic(chapter)
+        if (comic.requiredText("path_word") != mangaId || chapter.requiredText("comic_path_word") != mangaId ||
+            uuid(chapter.requiredText("uuid"), "章节") != id ||
+            uuid(comic.requiredText("uuid"), "漫画") != uuid(chapter.requiredText("comic_id"), "漫画")) {
+            throw SourceException("正文与所选漫画或章节不匹配。", comicUrl(mangaId))
         }
-        val payload = decodePayload(scriptVariable(document, "contentKey"), scriptVariable(document, "cct"), "章节内容")
-        val contents = try { JSONArray(payload) } catch (error: JSONException) {
-            throw SourceException("章节内容格式已变化，请查看原站提示。", url.toString(), cause = error)
+        val contents = chapter.optJSONArray("contents") ?: throw SourceException("来源未返回章节图片。", comicUrl(mangaId))
+        val words = chapter.optJSONArray("words") ?: throw SourceException("来源未返回图片页序。", comicUrl(mangaId))
+        if (contents.length() !in 1..2000 || words.length() != contents.length() ||
+            chapter.optInt("size", -1) != contents.length()) {
+            throw SourceException("来源返回的章节图片为空或不完整，请稍后重试。", comicUrl(mangaId))
         }
-        if (contents.length() !in 1..2000) throw SourceException("来源没有返回有效的章节图片。", url.toString())
+        // App contents are shuffled. Each words entry belongs to the image at
+        // the same array position; sort the pair before assigning reader pages.
+        val seen = hashSetOf<Int>()
         return List(contents.length()) { index ->
             currentCoroutineContext().ensureActive()
-            val item = contents.optJSONObject(index) ?: throw SourceException("章节图片清单不完整。", url.toString())
+            val order = words.optInt(index, -1)
+            if (order < 0 || !seen.add(order)) throw SourceException("章节图片页序无效。", comicUrl(mangaId))
+            val item = contents.optJSONObject(index) ?: throw SourceException("章节图片清单不完整。", comicUrl(mangaId))
             val asset = imageUrl(item.requiredText("url"))
             if (!asset.encodedPath.contains("/$mangaId/")) {
-                throw SourceException("来源返回了阅读提示图，未将它当作漫画正文。", url.toString())
+                throw SourceException("来源返回了阅读提示图，未将它当作漫画正文。", comicUrl(mangaId))
             }
-            Page(index, asset.toString())
-        }
+            order to asset.toString()
+        }.sortedBy { it.first }.mapIndexed { index, (_, asset) -> Page(index, asset) }
     }
 
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> {
@@ -205,14 +195,12 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
     }
 
     private suspend fun apiJson(url: HttpUrl, label: String): JSONObject {
-        val request = Request.Builder().url(url)
-            .header("User-Agent", "COPY/3.0.9")
-            .header("Accept", "application/json")
-            .header("source", "copyApp")
-            .header("platform", "3")
-            .header("version", "3.0.9")
-            .header("webp", "1").build()
-        val result = envelope(api.request(request, label, webOrigin.toString()), url, api, label)
+        val target = url.newBuilder().setQueryParameter("platform", "3")
+            .setQueryParameter("in_mainland", "false").setQueryParameter("request_id", "").build()
+        val request = Request.Builder().url(target).apply {
+            anonymousIdentity.headers().forEach { (name, value) -> header(name, value) }
+        }.build()
+        val result = envelope(api.request(request, label, webOrigin.toString()), target, label)
         return result as? JSONObject ?: throw SourceException("$label 返回了空数据或不完整的数据结构。", webOrigin.toString())
     }
 
@@ -249,125 +237,84 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
         return MangaPage(items.distinctBy(Manga::id), list.length() > 0 && if (total >= 0) next < total else list.length() == size)
     }
 
+    private suspend fun comicMetadata(mangaId: String): JSONObject {
+        val url = apiOrigin.newBuilder().addPathSegments("api/v3/comic2").addPathSegment(mangaId).build()
+        val data = apiJson(url, "漫画详情")
+        val comic = data.optJSONObject("comic") ?: throw SourceException("来源未返回漫画资料。", comicUrl(mangaId))
+        if (comic.requiredText("path_word") != mangaId) {
+            throw SourceException("来源返回的漫画与请求不匹配。", comicUrl(mangaId))
+        }
+        uuid(comic.requiredText("uuid"), "漫画")
+        return data
+    }
+
     private suspend fun readCatalog(mangaId: String, onMetadata: ((Manga) -> Unit)? = null): CachedCatalog {
-        val url = comicUrl(mangaId).toHttpUrl()
-        val http = websiteSession()
-        val response = http.request(webRequest(url).build(), "漫画详情", url.toString())
-        demandHtml(response, url, http, "漫画详情")
-        val document = Jsoup.parse(response.text, url.toString())
-        val key = scriptVariable(document, "ccz")
-        val version = document.select("#dnt").singleOrNull()?.attr("value").orEmpty()
-        if (!version.matches(Regex("[1-9][0-9]{0,8}"))) throw SourceException("来源未提供有效的章节目录，请查看原站提示。", url.toString())
-        val section = document.select(".comicParticulars-title").singleOrNull()
-            ?: throw SourceException("漫画详情页面结构已变化。", url.toString())
-        val title = section.select("h6").singleOrNull()?.text().orEmpty().trim()
-        if (title.isBlank()) throw SourceException("来源没有返回漫画标题。", url.toString())
-        // The collection control is optional website UI. Public catalog identity
-        // comes from build.path_word; a present UUID is an additional cross-check.
-        val comicUuid = comicUuidFrom(document)
-        val coverImage = section.selectFirst(".comicParticulars-left-img img")
-        val cover = coverImage?.attr("data-src")?.takeIf(String::isNotBlank)
-            ?: coverImage?.attr("src")?.takeIf(String::isNotBlank)
-        val status = section.select("li").firstOrNull { row ->
-            row.children().firstOrNull()?.text()?.trim()?.let { it.startsWith("狀態") || it.startsWith("状态") } == true
-        }?.selectFirst(".comicParticulars-right-txt")?.text().orEmpty()
-        val popularityText = section.select("li").firstOrNull { row ->
-            row.children().firstOrNull()?.text()?.trim()?.let { it.startsWith("熱度") || it.startsWith("热度") } == true
-        }?.selectFirst(".comicParticulars-right-txt")?.text().orEmpty()
-        val popularity = Regex("^([0-9]+(?:\\.[0-9]+)?)\\s*([wW万萬亿億kK]?)$")
-            .matchEntire(popularityText.replace(",", "").trim())?.let { match ->
-                val unit = when (match.groupValues[2]) {
-                    "w", "W", "万", "萬" -> 10_000.0
-                    "亿", "億" -> 100_000_000.0
-                    "k", "K" -> 1_000.0
-                    else -> 1.0
-                }
-                match.groupValues[1].toDoubleOrNull()?.times(unit)?.takeIf { it.isFinite() && it >= 0 && it < Long.MAX_VALUE }
-                    ?.toLong()
-            }
+        val data = comicMetadata(mangaId)
+        val comic = data.getJSONObject("comic")
+        demandReadingAccess(data)
+        demandPublic(comic)
+        val comicUuid = uuid(comic.requiredText("uuid"), "漫画")
         val manga = Manga(
             id = mangaId,
-            title = title,
-            coverUrl = optionalCover(cover.orEmpty()),
-            authors = section.select("a[href^=/author/]").map { it.text() }.filter(String::isNotBlank).distinct(),
-            description = document.selectFirst(".comicParticulars-synopsis .intro")?.text().orEmpty(),
-            status = status,
-            tags = section.select(".comicParticulars-tag a").map { it.text().removePrefix("#") }.filter(String::isNotBlank),
-            sourceUrl = url.toString(),
-            sourceUuid = comicUuid.orEmpty(),
-            popularity = popularity,
+            title = comic.requiredText("name"),
+            coverUrl = optionalCover(comic.text("cover")),
+            authors = comic.optJSONArray("author")?.objects()?.mapNotNull { it.text("name").takeIf(String::isNotBlank) }.orEmpty(),
+            description = comic.text("brief"),
+            status = comic.optJSONObject("status")?.text("display").orEmpty(),
+            tags = comic.optJSONArray("theme")?.objects()?.mapNotNull { it.text("name").takeIf(String::isNotBlank) }.orEmpty(),
+            latestChapter = comic.optJSONObject("last_chapter")?.text("name").orEmpty(),
+            sourceUrl = comicUrl(mangaId),
+            sourceUuid = comicUuid,
+            popularity = comic.optLong("popular", -1).takeIf { it >= 0 },
         )
         currentCoroutineContext().ensureActive()
         onMetadata?.invoke(manga)
-        val catalogUrl = webOrigin.newBuilder().addPathSegment("comicdetail").addPathSegment(mangaId).addPathSegment("chapters").build()
-        val catalogResponse = http.request(webRequest(catalogUrl)
-            .header("Accept", "application/json")
-            .header("Referer", url.toString())
-            .header("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-            .header("dnts", version).build(), "章节目录", url.toString())
-        val encrypted = envelope(catalogResponse, catalogUrl, http, "章节目录") as? String
-            ?: throw SourceException("来源没有返回有效目录。", url.toString())
-        val root = try { JSONObject(decodePayload(encrypted, key, "章节目录")) } catch (error: JSONException) {
-            throw SourceException("章节目录格式已变化。", url.toString(), cause = error)
-        }
-        demandPublic(root)
-        val build = root.optJSONObject("build") ?: throw SourceException("章节目录缺少漫画归属信息。", url.toString())
-        demandPublic(build)
-        if (build.requiredText("path_word") != mangaId) throw SourceException("来源章节目录与漫画不匹配。", url.toString())
-        val groups = root.optJSONObject("groups") ?: throw SourceException("章节目录缺少分组。", url.toString())
-        if (groups.length() !in 1..32) throw SourceException("章节目录分组异常。", url.toString())
+        val groups = data.optJSONObject("groups") ?: throw SourceException("来源目录缺少章节分组。", manga.sourceUrl)
+        if (groups.length() !in 1..32) throw SourceException("来源目录未返回有效分组。", manga.sourceUrl)
         val chapters = mutableListOf<Chapter>()
         val seen = hashSetOf<String>()
-        var latest = ""
         val keys = groups.keys().asSequence().toList().sortedBy { if (it == "default") 0 else 1 }
         for (groupId in keys) {
             currentCoroutineContext().ensureActive()
-            val group = groups.optJSONObject(groupId) ?: throw SourceException("章节分组数据不完整。", url.toString())
             segment(groupId)
-            val declaredGroup = group.text("path_word")
-            if (declaredGroup.isNotEmpty() && declaredGroup != groupId) throw SourceException("章节分组标识不一致。", url.toString())
-            val rows = group.optJSONArray("chapters") ?: throw SourceException("章节清单缺失。", url.toString())
-            // The website consumes the complete chapters array. Count is optional
-            // metadata, but an explicitly supplied total must still agree with it.
-            val hasCount = group.has("count") && !group.isNull("count")
-            if ((hasCount && rows.length() != group.optInt("count", -1)) || rows.length() + chapters.size > 20_000) {
-                throw SourceException("来源章节目录尚不完整，请稍后刷新。", url.toString())
-            }
+            val group = groups.optJSONObject(groupId) ?: throw SourceException("章节分组数据不完整。", manga.sourceUrl)
+            if (group.requiredText("path_word") != groupId) throw SourceException("章节分组标识不一致。", manga.sourceUrl)
             val groupName = group.text("name").ifBlank { if (groupId == "default") "正篇" else groupId }
-            val groupIds = hashSetOf<String>()
-            val groupStart = chapters.size
-            for (index in 0 until rows.length()) {
+            var total = group.optInt("count", -1)
+            if (total !in 0..20_000) throw SourceException("章节数量无效。", manga.sourceUrl)
+            var offset = 0
+            while (offset < total) {
                 currentCoroutineContext().ensureActive()
-                val row = rows.optJSONObject(index) ?: throw SourceException("章节数据缺失。", url.toString())
-                // The website builds its directory from this complete array.
-                // App-list metadata is not an availability contract for web
-                // groups or rows. The anonymous chapter request enforces access.
-                val chapterId = uuid(row.requiredText("id"), "章节")
-                if (!seen.add(chapterId)) throw SourceException("来源章节标识重复。", url.toString())
-                groupIds += chapterId
-                chapters += Chapter(chapterId, row.requiredText("name"), chapters.size, groupName)
-            }
-            val last = group.optJSONObject("last_chapter")
-            var publicLatestName = ""
-            if (last != null) {
-                val lastComic = last.text("comic_path_word")
-                val lastGroup = last.text("group_path_word")
-                val lastComicId = last.text("comic_id").takeIf(String::isNotBlank)?.let { uuid(it, "漫画") }
-                val lastId = last.text("uuid").takeIf(String::isNotBlank)?.let { uuid(it, "章节") }
-                if ((lastComic.isNotBlank() && lastComic != mangaId) || (lastGroup.isNotBlank() && lastGroup != groupId) ||
-                    (comicUuid != null && lastComicId != null && lastComicId != comicUuid)) {
-                    throw SourceException("章节目录归属不一致，请刷新后重试。", url.toString())
+                val url = apiOrigin.newBuilder().addPathSegments("api/v3/comic").addPathSegment(mangaId)
+                    .addPathSegment("group").addPathSegment(groupId).addPathSegment("chapters")
+                    .addQueryParameter("limit", "100").addQueryParameter("offset", offset.toString()).build()
+                val page = apiJson(url, "章节目录")
+                demandPublic(page)
+                val rows = page.optJSONArray("list") ?: throw SourceException("来源未返回章节清单。", manga.sourceUrl)
+                val pageTotal = page.optInt("total", -1)
+                if (page.optInt("offset", -1) != offset || pageTotal !in 1..20_000 ||
+                    rows.length() !in 1..100 || offset + rows.length() > pageTotal ||
+                    chapters.size + rows.length() > 20_000) {
+                    throw SourceException("来源章节目录为空或不完整，请稍后刷新。", manga.sourceUrl)
                 }
-                // A last_chapter can refer to a chapter not publicly available
-                // in this directory; it does not invalidate the remaining rows.
-                if (lastId != null && lastId in groupIds) publicLatestName = last.text("name")
-            }
-            if (chapters.size > groupStart && (latest.isBlank() || groupId == "default")) {
-                latest = publicLatestName.ifBlank { chapters.last().title }
+                total = maxOf(total, pageTotal)
+                for (index in 0 until rows.length()) {
+                    currentCoroutineContext().ensureActive()
+                    val row = rows.optJSONObject(index) ?: throw SourceException("章节数据缺失。", manga.sourceUrl)
+                    val id = uuid(row.requiredText("uuid"), "章节")
+                    if (row.requiredText("comic_path_word") != mangaId ||
+                        row.requiredText("group_path_word") != groupId ||
+                        uuid(row.requiredText("comic_id"), "漫画") != comicUuid || !seen.add(id)) {
+                        throw SourceException("来源章节目录归属不一致或出现重复章节。", manga.sourceUrl)
+                    }
+                    chapters += Chapter(id, row.requiredText("name"), chapters.size, groupName)
+                }
+                offset += rows.length()
             }
         }
-        if (chapters.isEmpty()) throw SourceException("官网目录返回了 ${groups.length()} 个分组，但章节清单为空。请稍后刷新或查看原站提示。", url.toString())
-        val catalog = CachedCatalog(MangaDetail(manga.copy(latestChapter = latest), chapters), comicUuid, System.currentTimeMillis())
+        if (chapters.isEmpty()) throw SourceException("来源暂未返回可读章节，请稍后刷新或查看原站提示。", manga.sourceUrl)
+        currentCoroutineContext().ensureActive()
+        val catalog = CachedCatalog(MangaDetail(manga, chapters), comicUuid, System.currentTimeMillis())
         synchronized(catalogCache) {
             catalogCache.remove(mangaId)
             catalogCache[mangaId] = catalog
@@ -376,87 +323,19 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
         return catalog
     }
 
-    private fun websiteSession(): SourceHttp {
-        val jar = object : CookieJar {
-            private val stored = mutableListOf<Cookie>()
-            override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) = synchronized(stored) {
-                if (url.host != webOrigin.host) return@synchronized
-                for (cookie in cookies) {
-                    // Keep cookies issued to this anonymous visit. This jar is
-                    // short-lived and never reads or writes personal credentials.
-                    stored.removeAll { it.name == cookie.name && it.domain == cookie.domain && it.path == cookie.path }
-                    stored += cookie
-                }
-            }
-            override fun loadForRequest(url: HttpUrl): List<Cookie> = synchronized(stored) {
-                if (url.host != webOrigin.host) emptyList() else {
-                    stored.removeAll { it.expiresAt <= System.currentTimeMillis() }
-                    stored.filter { it.matches(url) && it.name != "webp" } +
-                        Cookie.Builder().name("webp").value("1").hostOnlyDomain(webOrigin.host).path("/").secure().build()
-                }
-            }
-        }
-        return SourceHttp(websiteClient.newBuilder().cookieJar(jar).build())
-    }
-
-    private fun webRequest(url: HttpUrl): Request.Builder = Request.Builder().url(url)
-        .header("User-Agent", "Mozilla/5.0").header("Accept", "text/html")
-
-    private fun demandHtml(response: SourceResponse, url: HttpUrl, http: SourceHttp, label: String) {
-        if (response.text.trimStart().startsWith('{')) {
-            envelope(response, url, http, label)
-            throw SourceException("$label 未返回正常网页，请查看原站提示。", url.toString())
-        }
-    }
-
-    private fun envelope(response: SourceResponse, url: HttpUrl, http: SourceHttp, label: String): Any {
+    private fun envelope(response: SourceResponse, url: HttpUrl, label: String): Any {
         val json = try { JSONObject(response.text) } catch (error: JSONException) {
             throw SourceException("$label 响应格式已变化，请查看原站提示。", webOrigin.toString(), cause = error)
         }
         val code = json.optInt("code", -1)
         if (code in setOf(209, 210, 429)) {
-            http.rememberPause(url, response.retryAfterSeconds)
+            api.rememberPause(url, response.retryAfterSeconds)
             throw SourceException("$label 暂时被来源限制（$code），请稍后重试或查看原站。", webOrigin.toString(), response.retryAfterSeconds)
         }
         if (code == 401 || code == 403) throw SourceException("$label 被来源拒绝，请查看原站提示。", webOrigin.toString())
         if (code != 200) throw SourceException("$label 暂时不可用（业务码 $code）。", webOrigin.toString())
         return json.opt("results")?.takeUnless { it == JSONObject.NULL }
             ?: throw SourceException("$label 未返回数据，请稍后重试或查看原站。", webOrigin.toString())
-    }
-
-    private fun scriptVariable(document: Document, variable: String): String {
-        val pattern = Regex("(?m)^[ \\t]*(?:var|let|const)[ \\t]+${Regex.escape(variable)}[ \\t]*=[ \\t]*(['\"])([^'\"\\\\\\r\\n]+)\\1[ \\t]*;?[ \\t\\r]*(?://[^\\r\\n]*)?$")
-        val matches = document.select("script:not([src])").flatMap { pattern.findAll(it.data()).map { match -> match.groupValues[2] }.toList() }
-        return matches.singleOrNull() ?: throw SourceException("来源未提供可读取的目录或正文，请查看原站访问提示。", document.location())
-    }
-
-    private fun comicUuidFrom(document: Document): String? {
-        val pattern = Regex("collect\\(\\s*['\"]([0-9a-fA-F-]{36})['\"]\\s*\\)")
-        val identities = document.select(".comicParticulars-title .collect[onclick]").mapNotNull { element ->
-            pattern.find(element.attr("onclick"))?.groupValues?.get(1)?.let { uuid(it, "漫画") }
-        }.distinct()
-        if (identities.size > 1) throw SourceException("官网详情中的漫画标识不一致，请重新打开。", document.location())
-        return identities.singleOrNull()
-    }
-
-    private fun decodePayload(payload: String, key: String, label: String): String {
-        val keyBytes = key.toByteArray(Charsets.UTF_8)
-        try {
-            if (keyBytes.size !in setOf(16, 24, 32) || payload.length !in 48..(8 * 1024 * 1024) ||
-                (payload.length - 16) % 32 != 0 || payload.take(16).any { it.code !in 0x20..0x7e }) {
-                throw SourceException("$label 编码格式已变化。", webOrigin.toString())
-            }
-            val hex = payload.drop(16)
-            val encrypted = ByteArray(hex.length / 2) { index ->
-                hex.substring(index * 2, index * 2 + 2).toIntOrNull(16)?.toByte()
-                    ?: throw SourceException("$label 编码无效。", webOrigin.toString())
-            }
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(payload.take(16).toByteArray(Charsets.UTF_8)))
-            return cipher.doFinal(encrypted).toString(Charsets.UTF_8)
-        } catch (error: SourceException) { throw error }
-          catch (error: Exception) { throw SourceException("$label 解码失败，请刷新详情后重试。", webOrigin.toString(), cause = error) }
-        finally { keyBytes.fill(0) }
     }
 
     private fun imageUrl(value: String): HttpUrl {
@@ -475,6 +354,14 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
     }
 
     private fun comicUrl(id: String) = webOrigin.newBuilder().addPathSegment("comic").addPathSegment(segment(id)).build().toString()
+    private fun demandReadingAccess(result: JSONObject) {
+        val banned = result.opt("is_banned") as? Boolean
+        val locked = result.opt("is_lock") as? Boolean
+        if (banned == null || locked == null) {
+            throw SourceException("来源未返回可确认的阅读状态，请稍后重试。", webOrigin.toString())
+        }
+        if (banned || locked) throw SourceException("该内容已下架、锁定或需要授权，请查看原站。", webOrigin.toString())
+    }
     private fun demandPublic(value: JSONObject) {
         if (restricted(value)) throw SourceException("该内容已下架、锁定或需要授权，请查看原站。", webOrigin.toString())
     }
@@ -483,8 +370,9 @@ class CopyMangaRepository(private val config: CopyMangaConfig = CopyMangaConfig(
             val flag = value.opt(key)
             if (flag == true || flag is Number && flag.toInt() != 0) return true
         }
-        val ban = value.opt("ban")
-        if (ban is Number && ban.toInt() != 0) return true
+        // comic.ban is numeric metadata, not the App result's is_banned flag.
+        // A real free, unlocked comic can have ban=2; the actual catalog and
+        // chapter response must explicitly permit reading above.
         return value.optJSONObject("free_type")?.let { it.optInt("value", 1) != 1 } ?: false
     }
     private fun JSONObject.text(key: String) = (opt(key) as? String).orEmpty().trim()

@@ -7,6 +7,7 @@ import dev.mangaflow.account.AccountProfile
 import dev.mangaflow.account.CloudHistoryEntry
 import dev.mangaflow.account.CopyAccountRepository
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.CopyAnonymousIdentityStore
 import dev.mangaflow.data.CopyMangaRepository
 import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.DiscoveryMode
@@ -88,7 +89,7 @@ data class AccountUiState(
 )
 
 class MangaViewModel(application: Application) : AndroidViewModel(application) {
-    val repository = CopyMangaRepository()
+    val repository = CopyMangaRepository(identityProvider = { CopyAnonymousIdentityStore.load(application) })
     val library = LibraryStore(application)
     val downloads = DownloadStore.get(application)
     val updates = UpdateManager.get(application)
@@ -211,18 +212,37 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         reviewPageJobs.clear()
         reviewOverrides.clear()
         val requestId = ++detailRequestId
-        _detail.value = DetailState(manga)
-        loadReviews(manga, requestId)
+        val previous = _detail.value?.takeIf { it.manga.id == manga.id }
+        val retained = previous?.detail?.takeIf { it.chapters.isNotEmpty() }
+            ?: repository.cachedDetail(manga.id)
+        val initialManga = (retained?.manga ?: previous?.manga ?: manga).let {
+            it.copy(popularity = it.popularity ?: manga.popularity)
+        }
+        val initialChapters = (retained?.chapters.orEmpty() + downloadedChapters(manga.id))
+            .distinctBy(Chapter::id).sortedBy(Chapter::index)
+        _detail.value = DetailState(initialManga,
+            detail = initialChapters.takeIf { it.isNotEmpty() }?.let { MangaDetail(initialManga, it) })
+        loadReviews(initialManga, requestId)
         detailJob = viewModelScope.launch {
             try {
                 val loaded = repository.detail(manga.id) { metadata ->
-                    _detail.update { if (it?.manga?.id == manga.id && requestId == detailRequestId)
-                        it.copy(manga = metadata.copy(popularity = metadata.popularity ?: it.manga.popularity),
-                            reviews = it.reviews.map { source -> if (source.id == "copy")
-                                source.copy(popularity = metadata.popularity ?: source.popularity) else source }) else it }
+                    _detail.update { current ->
+                        if (current?.manga?.id != manga.id || requestId != detailRequestId) current
+                        else {
+                            val updatedManga = metadata.copy(popularity = metadata.popularity ?: current.manga.popularity)
+                            current.copy(manga = updatedManga, detail = current.detail?.copy(manga = updatedManga),
+                                reviews = current.reviews.map { source -> if (source.id == "copy")
+                                    source.copy(popularity = metadata.popularity ?: source.popularity) else source })
+                        }
+                    }
                 }
-                _detail.update { if (requestId != detailRequestId || it?.manga?.id != manga.id) it else
-                    it.copy(manga = loaded.manga.copy(popularity = loaded.manga.popularity ?: it.manga.popularity), detail = loaded, loading = false) }
+                _detail.update { current ->
+                    if (requestId != detailRequestId || current?.manga?.id != manga.id) current
+                    else {
+                        val updatedManga = loaded.manga.copy(popularity = loaded.manga.popularity ?: current.manga.popularity)
+                        current.copy(manga = updatedManga, detail = loaded.copy(manga = updatedManga), loading = false)
+                    }
+                }
                 if (requestId != detailRequestId) return@launch
                 if (continueChapterId != null) {
                     val chapter = loaded.chapters.firstOrNull { it.id == continueChapterId }
@@ -233,15 +253,17 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 throw cancel
             } catch (failure: Exception) {
                 val offline = downloadedChapters(manga.id)
-                val message = if (offline.isEmpty()) failure.message ?: "暂时无法读取详情"
-                else "暂时无法读取线上目录，下面显示已下载章节。"
                 _detail.update { current ->
                     if (current?.manga?.id != manga.id || requestId != detailRequestId) current
-                    else current.copy(loading = false, error = message,
-                        detail = if (offline.isEmpty()) null else MangaDetail(current.manga, offline))
+                    else {
+                        val chapters = (current.detail?.chapters.orEmpty() + offline)
+                            .distinctBy(Chapter::id).sortedBy(Chapter::index)
+                        current.copy(loading = false, error = failure.message ?: "暂时无法读取线上目录",
+                            detail = chapters.takeIf { it.isNotEmpty() }?.let { MangaDetail(current.manga, it) })
+                    }
                 }
-                if (requestId == detailRequestId && continueChapterId != null && offline.any { it.id == continueChapterId }) {
-                    beginReading(ReadingSession(manga, offline, continueChapterId))
+                if (requestId == detailRequestId && continueChapterId != null) {
+                    _detail.value?.detail?.chapters?.firstOrNull { it.id == continueChapterId }?.let(::readChapter)
                 }
             }
         }

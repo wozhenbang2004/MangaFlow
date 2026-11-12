@@ -259,8 +259,8 @@ class CopyCommunityRepository(
             val flag = value.opt(key)
             if (flag == true || flag is Number && flag.toInt() != 0) return true
         }
-        val ban = value.opt("ban")
-        if (ban is Number && ban.toInt() != 0) return true
+        // Numeric comic.ban metadata is not a Boolean access decision.
+        // Reading validates the source's explicit is_banned/is_lock result.
         return value.optJSONObject("free_type")?.let { it.optInt("value", 1) != 1 } ?: false
     }
 
