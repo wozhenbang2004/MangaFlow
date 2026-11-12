@@ -17,6 +17,7 @@ data class Manga(
     val rank: Int? = null,
     val totalPopularity: Long? = null,
     val authorPaths: Map<String, String> = emptyMap(),
+    val tagPaths: Map<String, String> = emptyMap(),
 )
 
 data class Chapter(
@@ -26,7 +27,7 @@ data class Chapter(
     val group: String = "默认",
 )
 
-data class MangaPage(val items: List<Manga>, val hasMore: Boolean)
+data class MangaPage(val items: List<Manga>, val hasMore: Boolean, val nextPage: Int? = null)
 data class MangaDetail(val manga: Manga, val chapters: List<Chapter>)
 data class Page(val index: Int, val url: String, val width: Int = 0, val height: Int = 0)
 

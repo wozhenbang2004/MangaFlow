@@ -1,10 +1,5 @@
 package dev.mangaflow.ui
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.core.tween
@@ -33,6 +28,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyListState
@@ -45,6 +41,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MenuBook
@@ -155,6 +153,7 @@ fun DetailScreen(
     onContinue: (ReadingProgress) -> Unit,
     onDownload: (Chapter) -> Unit,
     onAuthor: (Manga, String) -> Unit = { _, _ -> },
+    onTag: (Manga, String) -> Unit = { _, _ -> },
     onReviewMore: (String) -> Unit = {},
     onReviewRetry: (String) -> Unit = {},
     onReviewMatch: (String, String) -> Unit = { _, _ -> },
@@ -173,6 +172,7 @@ fun DetailScreen(
     }
     val resume = progress?.takeIf { it.manga.id == manga.id && it.chapterId.isNotBlank() }
     var section by rememberSaveable(manga.id) { mutableIntStateOf(0) }
+    var chapterDownloadMode by rememberSaveable(manga.id) { mutableStateOf(false) }
     val sections = rememberSaveableStateHolder()
     val activeSection = section.coerceIn(0, 1)
 
@@ -334,6 +334,7 @@ fun DetailScreen(
                     if (!compactHero) {
                         HeroBookInformation(current, onIntroduction = { fullIntroduction = true },
                             onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
+                            onTag = { onTag(current, it) },
                             collapse = { header.collapsedFraction },
                             modifier = Modifier.scrollable(artworkScroll, Orientation.Vertical,
                                 reverseDirection = true, enabled = active))
@@ -359,13 +360,16 @@ fun DetailScreen(
                         reverseDirection = true, enabled = active)
                     .background(DetailBackground).padding(top = 8.dp),
             ) {
-                if (compactHero) DetailTags(current, Modifier.padding(horizontal = 16.dp).padding(bottom = 8.dp))
+                if (compactHero) DetailTags(current, Modifier.padding(horizontal = 16.dp).padding(bottom = 8.dp),
+                    enabled = active, onTag = { onTag(current, it) })
                 DetailSections(
                     selected = activeSection,
                     chapterCount = chapters.size, commentCount = commentCount,
                     onSelect = { section = it; commentFilterOpen = false; dockHidden = false; dockTravel[0] = 0f },
                     filterOpen = commentFilterOpen, filterChanged = commentFilterChanged,
                     onToggleFilter = { commentFilterOpen = !commentFilterOpen },
+                    downloadMode = chapterDownloadMode,
+                    onToggleDownload = { chapterDownloadMode = !chapterDownloadMode },
                 )
                 MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth()) { targetSection ->
                     sections.SaveableStateProvider(targetSection) {
@@ -379,6 +383,7 @@ fun DetailScreen(
                                 onRetry = onRetry, onRead = onRead, onDownload = onDownload,
                                 loadVolumeCover = loadVolumeCover, volumeImageHeaders = volumeImageHeaders,
                                 bottomPadding = readingInset,
+                                downloadMode = chapterDownloadMode,
                             )
                             else -> CommunityPanel(
                                 mangaId = current.id, sources = reviews, loading = reviewsLoading,
@@ -401,7 +406,8 @@ fun DetailScreen(
             onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents)
     }
     if (fullIntroduction) DetailIntroduction(current,
-        onAuthor = { fullIntroduction = false; onAuthor(current, it) }, onDismiss = { fullIntroduction = false })
+        onAuthor = { fullIntroduction = false; onAuthor(current, it) },
+        onTag = { fullIntroduction = false; onTag(current, it) }, onDismiss = { fullIntroduction = false })
     if (fullRatings) DetailRatingSheet(current) { fullRatings = false }
 }
 
@@ -489,6 +495,7 @@ private fun HeroBookInformation(
     onIntroduction: () -> Unit,
     onRatings: () -> Unit,
     onAuthor: (String) -> Unit,
+    onTag: (String) -> Unit,
     collapse: () -> Float,
     modifier: Modifier = Modifier,
 ) {
@@ -511,30 +518,38 @@ private fun HeroBookInformation(
                     modifier = Modifier.weight(1f))
                 Text("展开", color = Color.White.copy(alpha = .7f), fontSize = 11.sp)
             }
-            DetailTags(manga, onArtwork = true)
+            DetailTags(manga, onArtwork = true, enabled = infoVisible, onTag = onTag)
             DetailRatingStrip(manga, Color.White, enabled = infoVisible, onExpand = onRatings)
         }
     }
 }
 
 @Composable
-private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: Boolean = false) {
+private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: Boolean = false,
+    enabled: Boolean = true, onTag: (String) -> Unit) {
     val tags = remember(manga.status, manga.tags, manga.latestChapter) {
-        buildList {
-            if (manga.status.isNotBlank()) add(manga.status.trim())
-            addAll(manga.tags.map(String::trim).filter(String::isNotBlank).distinct())
-            if (manga.latestChapter.isNotBlank()) add("更新 · " + manga.latestChapter)
-        }.distinct()
+        buildList<Pair<String, Boolean>> {
+            val status = manga.status.trim()
+            val update = manga.latestChapter.takeIf(String::isNotBlank)?.let { "更新 · $it" }
+            if (status.isNotEmpty()) add(status to false)
+            manga.tags.map(String::trim).filter { it.isNotBlank() && it != status && it != update }
+                .distinct().forEach { add(it to true) }
+            if (update != null) add(update to false)
+        }.distinctBy { it.first }
     }
     if (tags.isNotEmpty()) Row(
         modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 3.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) { tags.forEachIndexed { index, tag -> DetailTag(tag, index, onArtwork) } }
+        verticalAlignment = Alignment.CenterVertically,
+    ) { tags.forEachIndexed { index, (tag, topic) ->
+        DetailTag(tag, index, onArtwork, enabled, onClick = if (topic) ({ onTag(tag) }) else null)
+    } }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DetailIntroduction(manga: Manga, onAuthor: (String) -> Unit, onDismiss: () -> Unit) {
+private fun DetailIntroduction(manga: Manga, onAuthor: (String) -> Unit,
+    onTag: (String) -> Unit, onDismiss: () -> Unit) {
     MotionBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface, contentColor = DetailForeground,
@@ -549,7 +564,7 @@ private fun DetailIntroduction(manga: Manga, onAuthor: (String) -> Unit, onDismi
                 Text(manga.title, fontSize = 20.sp, lineHeight = 28.sp,
                     color = DetailForeground, fontWeight = FontWeight.SemiBold)
                 AuthorNames(manga.authors, DetailSecondary, onAuthor = onAuthor)
-                DetailTags(manga)
+                DetailTags(manga, onTag = onTag)
                 MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailForeground)
                 Text(manga.description.ifBlank { "来源暂无简介" },
                     fontSize = 14.sp, lineHeight = 23.sp, color = DetailSecondary)
@@ -559,7 +574,8 @@ private fun DetailIntroduction(manga: Manga, onAuthor: (String) -> Unit, onDismi
 }
 
 @Composable
-private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false) {
+private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
+    enabled: Boolean = true, onClick: (() -> Unit)? = null) {
     val onDark = onArtwork || DetailForeground.luminance() > .5f
     val accent = when (index % 4) {
         0 -> if (onDark) Color(0xFFD9B49E) else Color(0xFF805C43)
@@ -567,13 +583,23 @@ private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false) {
         2 -> if (onDark) Color(0xFFC7B0DC) else Color(0xFF75588A)
         else -> if (onDark) Color(0xFFD5AFBB) else Color(0xFF865B6B)
     }
-    Text(
-        label,
-        modifier = Modifier.clip(RoundedCornerShape(7.dp))
-            .background(accent.copy(alpha = if (onArtwork) .18f else if (onDark) .12f else .085f))
-            .padding(horizontal = 7.dp, vertical = 4.dp),
-        color = accent, fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1,
-    )
+    val interaction = remember(label) { MutableInteractionSource() }
+    Box(
+        modifier = if (onClick != null) Modifier.heightIn(min = 44.dp).widthIn(min = 44.dp)
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled,
+                role = Role.Button, onClickLabel = "搜索${label}漫画", onClick = onClick)
+            .motionPress(interaction, enabled = enabled)
+            else Modifier,
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.clip(RoundedCornerShape(7.dp))
+                .background(accent.copy(alpha = if (onArtwork) .18f else if (onDark) .12f else .085f))
+                .padding(horizontal = 7.dp, vertical = 4.dp),
+            color = accent, fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1,
+        )
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -590,14 +616,14 @@ private fun AuthorNames(authors: List<String>, color: Color, enabled: Boolean = 
     }
 }
 
-/** Chapter/comment tabs keep their Ovio selector; the filter belongs beside the comment tab. */
+/** One stable action slot serves the current section, without a download-only toolbar below. */
 @Composable
 private fun DetailSections(
     selected: Int, chapterCount: Int, commentCount: String?, onSelect: (Int) -> Unit,
     filterOpen: Boolean, filterChanged: Boolean, onToggleFilter: () -> Unit,
+    downloadMode: Boolean, onToggleDownload: () -> Unit,
 ) {
     val labels = listOf("章节", "评论")
-    val motion = LocalMotionEnabled.current
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically) {
         MotionTabs(selected, labels, onSelect, modifier = Modifier.weight(1f),
@@ -612,12 +638,15 @@ private fun DetailSections(
                     count?.let { Text(it, color = color.copy(alpha = .65f), fontSize = 11.sp) }
                 }
             })
-        AnimatedVisibility(selected == 1,
-            enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) + expandHorizontally(tween(if (motion) MangaMotion.Content else 0)),
-            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) + shrinkHorizontally(tween(if (motion) MangaMotion.Content else 0))) {
-            DetailAction(Icons.Outlined.FilterList, if (filterOpen) "收起评论筛选" else "筛选评论",
-                selected = filterOpen || filterChanged, enabled = selected == 1, onClick = onToggleFilter)
-        }
+        val comments = selected == 1
+        DetailAction(
+            icon = if (comments) Icons.Outlined.FilterList else if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
+            description = if (comments) {
+                if (filterOpen) "收起评论筛选" else "筛选评论"
+            } else if (downloadMode) "退出连续下载" else "连续下载章节",
+            selected = if (comments) filterOpen || filterChanged else downloadMode,
+            onClick = if (comments) onToggleFilter else onToggleDownload,
+        )
     }
 }
 

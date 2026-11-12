@@ -112,13 +112,13 @@ internal fun DetailCatalog(
     loadVolumeCover: suspend (Chapter, Boolean) -> Page,
     volumeImageHeaders: (Chapter) -> Map<String, String>,
     bottomPadding: Dp = 16.dp,
+    downloadMode: Boolean,
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var groupVisit by rememberSaveable(mangaId) { mutableIntStateOf(0) }
     // A temporarily empty directory must not clear a restored group or its scroll position.
     val group = chosenGroup?.takeIf { groups.isEmpty() || it in groups }
-    var downloadMode by rememberSaveable(mangaId) { mutableStateOf(false) }
     var shownError by remember { mutableStateOf<String?>(null) }
     var selectedChapterId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var closingChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
@@ -131,8 +131,8 @@ internal fun DetailCatalog(
     }
 
     Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = 16.dp, end = 8.dp),
+        if (groups.size > 1 || error != null) Row(
+            Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (groups.size > 1) {
@@ -143,9 +143,6 @@ internal fun DetailCatalog(
                         chosenGroup = it
                     }, modifier = Modifier.weight(1f),
                 )
-            } else if (downloadMode) {
-                Text("点按立即下载", color = DetailForeground,
-                    fontSize = 12.sp, modifier = Modifier.weight(1f))
             } else {
                 Spacer(Modifier.weight(1f))
             }
@@ -154,12 +151,6 @@ internal fun DetailCatalog(
                 DetailAction(Icons.Outlined.Refresh, "重新加载目录",
                     enabled = !loading, onClick = onRetry)
             }
-            DetailAction(
-                if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
-                if (downloadMode) "退出连续下载" else "连续下载章节",
-                selected = downloadMode,
-                onClick = { downloadMode = !downloadMode },
-            )
         }
         Box(Modifier.fillMaxWidth().height(2.dp).padding(horizontal = 16.dp)) {
             if (showBusy) LinearProgressIndicator(
@@ -205,7 +196,7 @@ internal fun DetailCatalog(
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val showGroup = targetGroup == null && groups.size > 1
                 val volumesOnly = visibleChapters.all { isVolumeGroup(it.group) }
-                val tileHeight = (54f * fontScale).dp
+                val tileHeight = (44f * fontScale).dp
                 // Source groups are consecutive. Keep that exact order and give each run
                 // its own grid row so a book cover never stretches a normal chapter row.
                 val runs = remember(visibleChapters) {
@@ -217,7 +208,7 @@ internal fun DetailCatalog(
                     }
                 }
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = ((if (volumesOnly) 96f else 84f) * fontScale).dp),
+                    columns = GridCells.Adaptive(minSize = ((if (volumesOnly) 96f else 88f) * fontScale).dp),
                     state = grid, userScrollEnabled = paneActive,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
@@ -227,7 +218,7 @@ internal fun DetailCatalog(
                     runs.forEachIndexed { runIndex, run ->
                         if (showGroup) item(key = "group:$runIndex:${run.first().group}",
                             span = { GridItemSpan(maxLineSpan) }, contentType = "group") {
-                            Text(run.first().group, color = DetailMuted, fontSize = 11.sp,
+                            Text(chapterGroupLabel(run.first().group), color = DetailMuted, fontSize = 11.sp,
                                 modifier = Modifier.padding(top = if (runIndex == 0) 2.dp else 10.dp, bottom = 3.dp))
                         }
                         items(run, key = Chapter::id,
@@ -326,7 +317,7 @@ internal fun DetailCatalog(
                 .padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
                 Text(chapter.title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 26.sp)
                 Text(
-                    listOf(chapter.group, chapterStatus(entry,
+                    listOf(chapter.group.takeUnless(::isDefaultChapterGroup).orEmpty(), chapterStatus(entry,
                         chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id }))
                         .filter(String::isNotBlank).joinToString(" · "),
                     color = DetailMuted, fontSize = 12.sp,
@@ -361,7 +352,7 @@ private fun ChapterGroups(
             groups.forEach { (name, count) -> add(name to count) }
         }
     }
-    val labels = choices.map { (name, _) -> name?.ifBlank { "未分组" } ?: "全部" }
+    val labels = choices.map { (name, _) -> name?.let(::chapterGroupLabel) ?: "全部" }
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val textStyle = LocalTextStyle.current
@@ -399,6 +390,11 @@ private fun ChapterGroups(
 
 private fun isVolumeGroup(name: String): Boolean = name.contains("单行本") || name.contains("單行本")
 
+private fun isDefaultChapterGroup(name: String): Boolean =
+    name.isBlank() || name == "默认" || name == "默認" || name.equals("default", ignoreCase = true)
+
+private fun chapterGroupLabel(name: String): String = if (isDefaultChapterGroup(name)) "章节" else name
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChapterTile(
@@ -415,7 +411,7 @@ private fun ChapterTile(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val enabled = !downloadMode || canDownload(entry)
-    Column(
+    Row(
         Modifier.fillMaxWidth().height(height)
             .combinedClickable(
                 interactionSource = interaction, indication = null, enabled = enabled,
@@ -438,24 +434,22 @@ private fun ChapterTile(
                     .filter(String::isNotBlank).joinToString("，")
             }
             .padding(horizontal = 7.dp, vertical = 5.dp),
-        verticalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                chapter.title, color = if (current) DetailForeground else if (enabled) DetailSecondary else DetailMuted,
-                fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(3.dp))
-            // Reserve the icon's space even before download: no resizing when a job starts.
-            ChapterDownloadMark(entry, downloadMode)
+        Text(
+            chapter.title, color = if (current) DetailForeground else if (enabled) DetailSecondary else DetailMuted,
+            fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(3.dp))
+        // Reading and download have independent, stable micro-mark slots.
+        Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
+            ChapterReadMark(progress, progressKnown)
         }
-        // One compact state line belongs to the chapter itself, without another badge/container.
-        Box(Modifier.fillMaxWidth().height((14f * LocalDensity.current.fontScale).dp)) {
-            ChapterReadingStatus(progress, progressKnown)
-        }
+        Spacer(Modifier.width(3.dp))
+        ChapterDownloadMark(entry, downloadMode)
     }
 }
 

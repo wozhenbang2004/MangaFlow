@@ -1,5 +1,16 @@
 # Third-party notices
 
+## Author and tag search contracts
+
+Public search option names and actual category identifiers were checked against
+Venera's source configuration, fixed commit `a04e05591f7832f7166d6660546613c114d6738a`,
+`https://github.com/venera-app/venera-configs/blob/a04e05591f7832f7166d6660546613c114d6738a/copy_manga.js`
+(`category_param_dict`, `categoryComics`, `search.optionList`).
+`data/SearchTags.kt` retains known source names/identifiers; current comic metadata
+can supply additional paths. These are protocol metadata, not a bundled copy of
+the upstream client implementation. The source adapter and bounded multi-tag
+intersection are application code; source inspection is not a live-service result.
+
 ## Telephoto
 
 Telephoto 0.16.0, copyright Saket Narayan, Apache License 2.0:

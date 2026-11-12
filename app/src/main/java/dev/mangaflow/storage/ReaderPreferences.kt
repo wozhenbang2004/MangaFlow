@@ -15,4 +15,7 @@ data class ReaderPreferences(
     val coverAlone: Boolean = true,
     val dimAmount: Float = 0f,
     val glassSkin: GlassSkin = GlassSkin.LIQUID,
+    // App-wide browse presentation: 1 is a list; 2–4 are cover columns.
+    val discoverColumns: Int = 3,
+    val updateColumns: Int = 3,
 )

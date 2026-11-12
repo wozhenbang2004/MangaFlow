@@ -101,6 +101,7 @@ internal fun ExpandingSearchBar(
     onQuery: (String) -> Unit,
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
+    placeholder: String = "搜索作品、作者或标签",
     results: @Composable (maxHeight: Dp, active: Boolean) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -218,7 +219,7 @@ internal fun ExpandingSearchBar(
                     compositingStrategy = CompositingStrategy.ModulateAlpha
                 },
             cornerRadius = 22.dp + 2.dp * progress,
-            role = if (displayedQuery.isBlank()) GlassSurfaceRole.CONTROL else GlassSurfaceRole.PANEL,
+            role = if (present) GlassSurfaceRole.PANEL else GlassSurfaceRole.CONTROL,
             interactionSource = searchInteraction,
             softCard = true,
         ) {}
@@ -282,10 +283,10 @@ internal fun ExpandingSearchBar(
                     modifier = Modifier.weight(1f).fillMaxHeight().focusRequester(requester)
                         .onFocusChanged { inputFocused = it.isFocused }
                         .onPlaced { inputPlaced = true }
-                        .semantics { contentDescription = "搜索漫画、作者" },
+                        .semantics { contentDescription = placeholder },
                     decorationBox = { input ->
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
-                            if (displayedQuery.isEmpty()) Text("搜索漫画、作者",
+                            if (displayedQuery.isEmpty()) Text(placeholder,
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -2,7 +2,6 @@ package dev.mangaflow.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,7 +43,7 @@ internal fun RankingMetrics(manga: Manga, heatLabel: String, onExpand: () -> Uni
         fontFamily = FontFamily.SansSerif, fontSize = 12.sp, lineHeight = 16.sp,
         fontWeight = FontWeight.Medium, letterSpacing = 0.sp, fontFeatureSettings = "tnum")
     val density = LocalDensity.current
-    val markSlot = with(density) { 22.sp.toDp() }
+    val markSlot = reviewSourceMarkWidth(18.dp, density.fontScale)
     val measurer = rememberTextMeasurer()
     val values = scores.map { metric ->
         detailMetricScore(requireNotNull(metric.score)) +
@@ -69,8 +68,8 @@ internal fun RankingMetrics(manga: Manga, heatLabel: String, onExpand: () -> Uni
         }
         BoxWithConstraints(Modifier.fillMaxWidth().heightIn(min = 20.dp)) {
             val available = with(density) { (maxWidth - 18.dp).toPx().coerceAtLeast(0f) }
-            val gap = with(density) { 7.dp.toPx() }
-            val markAndGap = with(density) { markSlot.toPx() + 3.dp.toPx() }
+            val gap = with(density) { 7.dp.roundToPx().toFloat() }
+            val markAndGap = with(density) { (markSlot.roundToPx() + 3.dp.roundToPx()).toFloat() }
             var used = 0f
             var count = 0
             for (value in values.take(3)) {
@@ -88,9 +87,7 @@ internal fun RankingMetrics(manga: Manga, heatLabel: String, onExpand: () -> Uni
                     scores.take(count).forEachIndexed { index, metric ->
                         Row(verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Box(Modifier.width(markSlot), contentAlignment = Alignment.Center) {
-                                ReviewSourceMark(metric.sourceId, size = 18.dp, onDark = onDark)
-                            }
+                            ReviewSourceMark(metric.sourceId, size = 18.dp, onDark = onDark)
                             Text(values[index], style = valueStyle, color = foreground.copy(alpha = .78f), maxLines = 1)
                         }
                     }

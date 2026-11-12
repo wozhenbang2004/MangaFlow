@@ -7,11 +7,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
@@ -33,7 +37,10 @@ internal fun reviewSourceAccent(id: String, onDark: Boolean): Color = when (id) 
     else -> if (onDark) Color(0xFFCFCCD4) else Color(0xFF76717E)
 }
 
-/** Original CC0 vectors where available; other providers retain their honest short wordmarks. */
+/** The measured slot is identical for vectors and wordmarks, including enlarged text. */
+internal fun reviewSourceMarkWidth(size: Dp, fontScale: Float): Dp = size * (1.45f * fontScale.coerceAtLeast(1f))
+
+/** Original CC0 vectors and honest wordmarks share one optically balanced reference box. */
 @Composable
 internal fun ReviewSourceMark(
     id: String,
@@ -43,24 +50,37 @@ internal fun ReviewSourceMark(
     heat: Boolean = false,
 ) {
     val color = reviewSourceAccent(id, onDark)
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val resource = when (id) {
         "anilist" -> R.drawable.ic_source_anilist
         "myanimelist" -> R.drawable.ic_source_myanimelist
         "kitsu" -> R.drawable.ic_source_kitsu
         else -> null
     }
-    when {
-        heat -> Icon(Icons.Outlined.LocalFireDepartment, null, tint = color,
-            modifier = modifier.size(size).clearAndSetSemantics { })
-        id == "copy" -> Icon(Icons.Outlined.MenuBook, null, tint = color,
-            modifier = modifier.size(size).clearAndSetSemantics { })
-        resource != null -> Icon(painterResource(resource), null, tint = color,
-            modifier = modifier.size(size).clearAndSetSemantics { })
-        else -> Text(when (id) { "bangumi" -> "bgm"; "mangaupdates" -> "MU"; "mangadex" -> "MD"
-            else -> ReviewProviders.find(id)?.mark ?: id.take(2).uppercase() },
-            color = color, style = MaterialTheme.typography.labelSmall.copy(
-                fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
-                fontSize = (size.value * .66f).sp, lineHeight = size.value.sp, letterSpacing = 0.sp),
-            maxLines = 1, modifier = modifier.clearAndSetSemantics { })
+    Box(modifier.size(width = reviewSourceMarkWidth(size, fontScale), height = size * fontScale)
+        .clearAndSetSemantics { }, contentAlignment = Alignment.Center) {
+        when {
+            heat -> Icon(Icons.Outlined.LocalFireDepartment, null, tint = color,
+                modifier = Modifier.size(size * (.88f * fontScale)))
+            id == "copy" -> Icon(Icons.Outlined.MenuBook, null, tint = color,
+                modifier = Modifier.size(size * (.88f * fontScale)))
+            resource != null -> {
+                // The original AL path fills 75% of its viewport height; MAL fills 42%.
+                // Match their visible ink instead of making every 24px viewport equally tall.
+                val opticalScale = when (id) { "anilist" -> .76f; "myanimelist" -> 1.14f; else -> .66f }
+                Icon(painterResource(resource), null, tint = color,
+                    modifier = Modifier.requiredSize(size * (opticalScale * fontScale)))
+            }
+            else -> {
+                val mark = when (id) { "bangumi" -> "bgm"; "mangaupdates" -> "MU"; "mangadex" -> "MD"
+                    else -> ReviewProviders.find(id)?.mark ?: id.take(2).uppercase() }
+                val labelUnits = mark.sumOf { if (it.code >= 0x2E80) 2 else 1 }.coerceAtLeast(1)
+                val labelScale = minOf(.68f, 2.8f / labelUnits)
+                Text(mark, color = color, style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
+                    fontSize = (size.value * labelScale).sp, lineHeight = size.value.sp, letterSpacing = 0.sp),
+                    maxLines = 1, softWrap = false)
+            }
+        }
     }
 }

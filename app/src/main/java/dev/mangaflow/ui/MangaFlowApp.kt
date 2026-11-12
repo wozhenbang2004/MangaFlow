@@ -24,6 +24,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,6 +54,13 @@ import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import dev.mangaflow.data.SearchTarget
+import dev.mangaflow.ui.motion.MotionBottomSheet
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -162,6 +170,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val snackbar = remember { SnackbarHostState() }
     val savedState = rememberSaveableStateHolder()
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
+    var tagSearchVisible by rememberSaveable { mutableStateOf(false) }
     var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
     var selectedCover by remember { mutableStateOf<MangaCoverKey?>(null) }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -169,6 +178,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     LaunchedEffect(Unit) { model.events.collect { snackbar.showSnackbar(it) } }
     LaunchedEffect(openUpdatesRequest) {
         if (openUpdatesRequest > 0) {
+            tagSearchVisible = false
+            model.clearSearch()
             model.closeReader()
             model.closeDetail()
             changeSection(Section.SETTINGS)
@@ -177,6 +188,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     LaunchedEffect(openDownloadsRequest) {
         if (openDownloadsRequest > 0) {
+            tagSearchVisible = false
+            model.clearSearch()
             model.closeReader()
             model.closeDetail()
             changeSection(Section.DOWNLOADS)
@@ -201,6 +214,43 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             AuthorWorksSheet(author, model.repository, onDismiss = model::closeAuthor,
                 onMore = model::moreAuthor, onRetry = model::retryAuthor,
                 onOpen = { model.openManga(it) })
+        }
+    }
+    if (tagSearchVisible) {
+        CompositionLocalProvider(LocalMangaMetrics provides metricState, LocalGlassSkin provides preferences.glassSkin) {
+        val panelHeight = (LocalConfiguration.current.screenHeightDp.dp * .72f - 60.dp).coerceAtLeast(120.dp)
+        val closeTags: () -> Unit = { tagSearchVisible = false; model.clearSearch() }
+        MotionBottomSheet(onDismissRequest = closeTags) { dismiss ->
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).navigationBarsPadding()) {
+                Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
+                    BasicTextField(value = browse.query, onValueChange = model::setQuery,
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
+                        modifier = Modifier.weight(1f).padding(horizontal = 12.dp)
+                            .semantics { contentDescription = "搜索作品、作者或标签" },
+                        decorationBox = { input ->
+                            Box {
+                                if (browse.query.isEmpty()) Text(when (browse.searchTarget) {
+                                    SearchTarget.TITLE -> "搜索作品"
+                                    SearchTarget.AUTHOR -> "搜索作者"
+                                    SearchTarget.TAG -> "筛选标签"
+                                }, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                input()
+                            }
+                        })
+                    MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Outlined.Close, "关闭标签搜索", Modifier.size(20.dp))
+                    }
+                }
+                DiscoverySearchResults(browse, expanded = true, active = true,
+                    maxHeight = panelHeight, repository = model.repository,
+                    onRetry = model::retryBrowse, onMore = model::loadMore,
+                    onOpen = { manga -> selectedCover = null; dismiss(); model.openManga(manga) },
+                    onTarget = model::setSearchTarget, onTag = model::toggleSearchTag,
+                    onRetryTags = model::retrySearchTags)
+            }
+        }
         }
     }
     val activity = LocalContext.current.activityOrNull()
@@ -389,20 +439,21 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             onBack = model::closeDetail, onRetry = model::retryDetail,
                             onToggleFavorite = { model.toggleFavorite(current.state.manga) },
                             onRead = model::readChapter, onAuthor = model::openAuthor,
+                            onTag = { manga, tag -> model.openTagSearch(manga, tag); tagSearchVisible = true },
                             onRestart = model::restartChapter,
                             onContinue = model::continueReading,
                             onDownload = { onRequestNotifications(); model.downloadChapter(it) },
                             onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                             onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
                             loadReplies = model::reviewReplies,
-                            active = current.key == frame.key && authorWorks == null,
+                            active = current.key == frame.key && authorWorks == null && !tagSearchVisible,
                         )
                     }
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
                         val searchBackdrop = rememberHazeState()
                         val chromeDensity = LocalDensity.current
                         val discoveryBackground = model.browseBackground(browse)
-                        val displayedDiscovery = if (browse.query.isBlank()) browse else discoveryBackground
+                        val displayedDiscovery = if (!browse.isSearch) browse else discoveryBackground
                         val rankingPresence = remember {
                             MutableTransitionState(displayedDiscovery.mode == DiscoveryMode.RANKING)
                         }
@@ -425,13 +476,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val chromeReady by remember {
                             derivedStateOf { !searchExpanded && (searchForeground?.value ?: 0f) <= .02f }
                         }
-                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen && authorWorks == null &&
+                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen && authorWorks == null && !tagSearchVisible &&
                             !currentBack.gesturing && !currentBack.completed
                         val closeSearch: () -> Unit = {
                             keyboard?.hide()
                             focus.clearFocus(force = true)
                             searchExpanded = false
-                            model.setQuery("")
+                            model.clearSearch()
                         }
                         Box(Modifier.fillMaxSize().statusBarsPadding()) {
                         Box(Modifier.fillMaxSize()) {
@@ -492,6 +543,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
+                                        discoverColumns = preferences.discoverColumns,
+                                        updateColumns = preferences.updateColumns,
                                         backgroundState = discoveryBackground,
                                         searchExpanded = searchVisible,
                                         searchBackdrop = searchBackdrop,
@@ -571,6 +624,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         if (current.section == Section.DISCOVER) ExpandingSearchBar(
                             expanded = searchExpanded,
                             query = browse.query,
+                            placeholder = when (browse.searchTarget) {
+                                SearchTarget.TITLE -> "搜索作品"
+                                SearchTarget.AUTHOR -> "搜索作者"
+                                SearchTarget.TAG -> "筛选标签"
+                            },
                             active = rootActive,
                             backdrop = searchBackdrop,
                             onExpandedChange = { if (it) searchExpanded = true else closeSearch() },
@@ -584,6 +642,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 state = browse, expanded = searchExpanded, active = searchActive,
                                 maxHeight = maxHeight, repository = model.repository,
                                 onRetry = model::retryBrowse, onMore = model::loadMore,
+                                onTarget = model::setSearchTarget, onTag = model::toggleSearchTag,
+                                onRetryTags = model::retrySearchTags,
                                 onOpen = { manga -> selectedCover = null; closeSearch(); model.openManga(manga) },
                             )
                         }

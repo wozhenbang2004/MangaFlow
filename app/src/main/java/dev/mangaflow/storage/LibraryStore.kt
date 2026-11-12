@@ -772,11 +772,14 @@ class LibraryStore(context: Context) {
             coverAlone = optBoolean("coverAlone", true),
             dimAmount = optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
             glassSkin = GlassSkin.entries.firstOrNull { it.name == optString("glassSkin") } ?: GlassSkin.LIQUID,
+            discoverColumns = optInt("discoverColumns", 3).coerceIn(1, 4),
+            updateColumns = optInt("updateColumns", 3).coerceIn(1, 4),
         )
     }
 
     private fun ReaderPreferences.sanitized(): ReaderPreferences =
-        copy(dimAmount = dimAmount.coerceIn(0f, 0.65f))
+        copy(dimAmount = dimAmount.coerceIn(0f, 0.65f),
+            discoverColumns = discoverColumns.coerceIn(1, 4), updateColumns = updateColumns.coerceIn(1, 4))
 
     private fun ReaderPreferences.toJson(): JSONObject = JSONObject().apply {
         put("mode", mode.name)
@@ -787,6 +790,8 @@ class LibraryStore(context: Context) {
         put("coverAlone", coverAlone)
         put("dimAmount", dimAmount.toDouble())
         put("glassSkin", glassSkin.name)
+        put("discoverColumns", discoverColumns)
+        put("updateColumns", updateColumns)
     }
 
     private fun readLegacyLongImageMigration(): Boolean {
@@ -854,6 +859,7 @@ internal fun Manga.toJson(): JSONObject = JSONObject().apply {
     put("coverUrl", coverUrl)
     put("authors", JSONArray(authors))
     put("authorPaths", JSONObject(authorPaths))
+    put("tagPaths", JSONObject(tagPaths))
     put("description", description)
     put("status", status)
     put("tags", JSONArray(tags))
@@ -867,6 +873,9 @@ internal fun readManga(json: JSONObject): Manga = Manga(
     coverUrl = json.optString("coverUrl"),
     authors = json.optJSONArray("authors").strings(),
     authorPaths = json.optJSONObject("authorPaths")?.let { paths ->
+        paths.keys().asSequence().mapNotNull { key -> (paths.opt(key) as? String)?.let { key to it } }.toMap()
+    }.orEmpty(),
+    tagPaths = json.optJSONObject("tagPaths")?.let { paths ->
         paths.keys().asSequence().mapNotNull { key -> (paths.opt(key) as? String)?.let { key to it } }.toMap()
     }.orEmpty(),
     description = json.optString("description"),

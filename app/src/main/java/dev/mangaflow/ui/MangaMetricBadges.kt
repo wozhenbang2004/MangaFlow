@@ -1,12 +1,10 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -73,7 +71,6 @@ internal fun observedMangaMetrics(manga: Manga, requestDelay: Long = 180L): List
 }
 
 private data class MetricToken(
-    val mark: String,
     val value: String,
     val description: String,
     val sourceId: String,
@@ -94,15 +91,13 @@ internal fun MangaMetricBadges(
     val metrics = observedMangaMetrics(manga)
     val heat = if (manga.rank != null) manga.popularity
         else manga.totalPopularity ?: metrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: manga.popularity
-    val heatToken = heat?.let { MetricToken(if (compact) "热" else heatLabel,
-        metricCount(it), "$heatLabel $it", "copy") }
+    val heatToken = heat?.let { MetricToken(metricCount(it), "$heatLabel $it", "copy") }
     val scores = metrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
         .sortedBy { ReviewProviders.order(it.sourceId) }.map { metric ->
             val score = requireNotNull(metric.score)
-            val provider = ReviewProviders.find(metric.sourceId)
             val nativeScore = metricScore(score) +
                 (if (metric.scoreScale > 0 && (!compact || metric.scoreScale != 10)) "/${metric.scoreScale}" else "")
-            MetricToken(provider?.mark ?: metric.sourceId, nativeScore,
+            MetricToken(nativeScore,
                 "${metric.name}，${metric.scoreLabel}${metricScore(score)} 分" +
                     (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "，原站满分未知") +
                     (metric.ratingCount?.let { "，$it 人评分" } ?: ""), metric.sourceId)
@@ -111,23 +106,19 @@ internal fun MangaMetricBadges(
         fontFamily = FontFamily.SansSerif, fontSize = 11.sp, lineHeight = 16.sp,
         letterSpacing = 0.sp, fontFeatureSettings = "tnum",
         fontWeight = if (compact) FontWeight.Normal else FontWeight.Medium)
-    val markStyle = textStyle.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    val tokenPadding = with(density) { (if (plain) 0.dp else 2.dp).toPx() }
-    val innerGap = with(density) { 3.dp.toPx() }
-    val outerGap = with(density) { 7.dp.toPx() }
+    val tokenPadding = with(density) { (if (plain) 0.dp else 2.dp).roundToPx().toFloat() }
+    val innerGap = with(density) { 3.dp.roundToPx().toFloat() }
+    val outerGap = with(density) { 7.dp.roundToPx().toFloat() }
+    val markWidth = with(density) { reviewSourceMarkWidth(15.dp, fontScale).roundToPx().toFloat() }
     fun tokenWidth(token: MetricToken): Float {
-        val markWidth = if (token.sourceId in listOf("copy", "anilist", "myanimelist", "kitsu"))
-            with(density) { 15.dp.toPx() }
-        else measurer.measure(token.mark, markStyle.copy(fontWeight = FontWeight.Bold), maxLines = 1).size.width.toFloat()
         return markWidth + innerGap + measurer.measure(token.value, textStyle, maxLines = 1).size.width + tokenPadding * 2f
     }
-    fun moreWidth(count: Int): Float =
-        measurer.measure("+$count", textStyle, maxLines = 1).size.width.toFloat()
+    if (heatToken == null && scores.isEmpty()) return
 
     // A source response fills this one text line without moving history/list rows.
-    BoxWithConstraints(modifier.heightIn(min = with(density) { 16.sp.toDp() })) {
+    BoxWithConstraints(modifier) {
         val availableWidth = with(density) { maxWidth.toPx() }
         val scoreLimit = maxScores.coerceIn(0, if (compact) 1 else 2).coerceAtMost(scores.size)
         val scoreWidths = scores.take(scoreLimit).map(::tokenWidth)
@@ -135,7 +126,6 @@ internal fun MangaMetricBadges(
             val widths = buildList {
                 if (!compact && heatToken != null) add(tokenWidth(heatToken))
                 addAll(scoreWidths.take(count))
-                if (showMore && scores.size > count) add(moreWidth(scores.size - count))
             }
             return widths.sum() + outerGap * (widths.size - 1).coerceAtLeast(0)
         }
@@ -143,34 +133,31 @@ internal fun MangaMetricBadges(
         while (count > 0 && widthFor(count) > availableWidth) count--
         val visible = scores.take(count)
         val hidden = scores.drop(count)
-        val more = if (showMore && hidden.isNotEmpty()) hidden.size else 0
-        val moreDescription = if (more > 0) "另有 $more 个已返回来源评分：" +
+        // Preserve extra-source information for accessibility, without unexplained +N text.
+        val hiddenDescription = if (showMore && hidden.isNotEmpty())
             hidden.joinToString("；") { it.description } else ""
 
         if (compact) {
-            // Independent slots keep the score on the same baseline even when heat is absent.
-            val lineHeight = maxOf(16.dp, with(density) { 16.sp.toDp() })
             Column(Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Box(Modifier.fillMaxWidth().heightIn(min = lineHeight)) {
-                    heatToken?.let { MetricBadge(it, foreground.copy(alpha = .76f), textStyle, plain) }
-                }
-                Box(Modifier.fillMaxWidth().heightIn(min = lineHeight)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp),
+                heatToken?.let { MetricBadge(it, foreground.copy(alpha = .76f), textStyle, plain) }
+                if (visible.isNotEmpty()) {
+                    Row(Modifier.then(if (hiddenDescription.isNotEmpty()) Modifier.semantics {
+                        contentDescription = hiddenDescription
+                    } else Modifier), horizontalArrangement = Arrangement.spacedBy(7.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         visible.forEach { MetricBadge(it, foreground.copy(alpha = .76f), textStyle, plain) }
-                        if (more > 0) MoreMetricCount(more, moreDescription, foreground, textStyle)
                     }
                 }
             }
-        } else if (heatToken != null || visible.isNotEmpty() || more > 0) {
-            Row(horizontalArrangement = Arrangement.spacedBy(7.dp),
+        } else if (heatToken != null || visible.isNotEmpty()) {
+            Row(Modifier.then(if (hiddenDescription.isNotEmpty()) Modifier.semantics {
+                contentDescription = hiddenDescription
+            } else Modifier), horizontalArrangement = Arrangement.spacedBy(7.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                // A very narrow band gives the accurate more-count room before clipping heat text.
                 heatToken?.let { MetricBadge(it, foreground, textStyle, plain,
                     Modifier.weight(1f, fill = false)) }
                 visible.forEach { MetricBadge(it, foreground, textStyle, plain) }
-                if (more > 0) MoreMetricCount(more, moreDescription, foreground, textStyle)
             }
         }
     }
@@ -193,12 +180,6 @@ private fun MetricBadge(
         Text(token.value, color = foreground.copy(alpha = foreground.alpha * .86f), style = textStyle,
             modifier = Modifier.weight(1f, fill = false), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
-}
-
-@Composable
-private fun MoreMetricCount(count: Int, description: String, foreground: Color, textStyle: TextStyle) {
-    Text("+$count", color = foreground.copy(alpha = .55f), style = textStyle, maxLines = 1,
-        overflow = TextOverflow.Clip, modifier = Modifier.semantics { contentDescription = description })
 }
 
 private fun metricScore(value: Double): String =

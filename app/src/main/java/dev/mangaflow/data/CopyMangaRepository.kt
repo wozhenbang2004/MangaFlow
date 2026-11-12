@@ -7,9 +7,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -58,16 +61,85 @@ class CopyMangaRepository(
     }
 
     override suspend fun search(query: String, page: Int): MangaPage = withContext(Dispatchers.IO) {
+        keywordSearch(query, SearchTarget.TITLE, page)
+    }
+
+    private suspend fun keywordSearch(query: String, target: SearchTarget, page: Int): MangaPage {
         val keyword = query.trim()
         require(keyword.length in 1..120) { "请输入 1 至 120 个字符。" }
         require(page in 0..1000) { "漫画分页超出范围。" }
         val url = apiOrigin.newBuilder().addPathSegments("api/v3/search/comic")
             .addQueryParameter("q", keyword)
+            .addQueryParameter("q_type", if (target == SearchTarget.AUTHOR) "author" else "name")
             .addQueryParameter("free_type", "1")
             .addQueryParameter("limit", "20")
             .addQueryParameter("offset", (page * 20).toString())
             .addQueryParameter("platform", "3").build()
-        catalogPage(apiJson(url, "漫画搜索"), page * 20, 20)
+        return catalogPage(apiJson(url, "漫画搜索"), page * 20, 20)
+    }
+
+    /**
+     * The source exposes one theme filter, not an evidenced multi-theme intersection.
+     * Continue its real cursor and intersect full source metadata, never only UI rows.
+     * A sparse intersection scans at most two source pages per explicit load.
+     */
+    suspend fun search(query: String, target: SearchTarget, selectedTags: List<MangaTag>, page: Int): MangaPage =
+        withContext(Dispatchers.IO) {
+            val tags = selectedTags.distinctBy(MangaTag::path).sortedBy(MangaTag::path)
+            tags.forEach { segment(it.path) }
+            val keyword = query.trim().takeUnless { target == SearchTarget.TAG }.orEmpty()
+            if (keyword.isBlank() && tags.isEmpty()) return@withContext MangaPage(emptyList(), false)
+            val keywordSource = keyword.isNotBlank()
+            val needsIntersection = tags.isNotEmpty() && (keywordSource || tags.size > 1)
+            val permits = Semaphore(4)
+            val matched = mutableListOf<Manga>()
+            var cursor = page
+            var more = true
+            repeat(if (needsIntersection) 2 else 1) {
+                if (!more || matched.size >= 20) return@repeat
+                currentCoroutineContext().ensureActive()
+                val result = if (keywordSource) keywordSearch(keyword, target, cursor)
+                    else themePage(tags.first().path, cursor)
+                val candidates = if (!needsIntersection) result.items else coroutineScope {
+                    result.items.map { manga -> async {
+                        val tagged = if (manga.tagPaths.isNotEmpty()) manga else permits.withPermit {
+                            val comic = comicMetadata(segment(manga.id)).getJSONObject("comic")
+                            manga.copy(tags = themePaths(comic).keys.toList(), tagPaths = themePaths(comic))
+                        }
+                        tagged.takeIf { candidate -> tags.all { it.path in candidate.tagPaths.values } }
+                    } }.mapNotNull { it.await() }
+                }
+                matched += candidates
+                cursor++
+                more = result.hasMore
+            }
+            MangaPage(matched.distinctBy(Manga::id), more, nextPage = cursor)
+        }
+
+    private suspend fun themePage(path: String, page: Int): MangaPage {
+        require(page in 0..950) { "漫画分页超出范围。" }
+        val offset = page * 21
+        val url = apiOrigin.newBuilder().addPathSegments("api/v3/comics")
+            .addQueryParameter("theme", segment(path)).addQueryParameter("ordering", "-popular")
+            .addQueryParameter("free_type", "1").addQueryParameter("limit", "21")
+            .addQueryParameter("offset", "$offset").addQueryParameter("platform", "3").build()
+        return catalogPage(apiJson(url, "标签漫画"), offset, 21)
+    }
+
+    private fun themePaths(comic: JSONObject): Map<String, String> = comic.optJSONArray("theme")?.objects().orEmpty()
+        .mapNotNull { row ->
+            val name = row.text("name")
+            val path = runCatching { segment(row.text("path_word")) }.getOrNull()
+            if (name.isBlank() || path == null) null else name to path
+        }.groupBy({ it.first }, { it.second }).mapNotNull { (name, paths) ->
+            paths.distinct().singleOrNull()?.let { name to it }
+        }.toMap()
+
+    suspend fun searchTagsFor(manga: Manga): List<MangaTag> = withContext(Dispatchers.IO) {
+        val paths = manga.tagPaths.ifEmpty {
+            themePaths(comicMetadata(segment(manga.id)).getJSONObject("comic"))
+        }
+        paths.map { (name, path) -> MangaTag(name, path) }
     }
 
     /** Venera a04e055: /api/v3/comics?author=<author.path_word>, not a title search. */
@@ -288,6 +360,8 @@ class CopyMangaRepository(
                     coverUrl = cover,
                     authors = authors,
                     authorPaths = authorPaths(comic),
+                    tags = comic.optJSONArray("theme")?.objects()?.mapNotNull { it.text("name").takeIf(String::isNotBlank) }.orEmpty(),
+                    tagPaths = themePaths(comic),
                     latestChapter = comic.optJSONObject("last_chapter")?.text("name").orEmpty(),
                     sourceUrl = comicUrl(id),
                     totalPopularity = comic.opt("popular")?.toString()?.toLongOrNull()?.takeIf { it >= 0 },
@@ -324,6 +398,7 @@ class CopyMangaRepository(
             coverUrl = optionalCover(comic.text("cover")),
             authors = comic.optJSONArray("author")?.objects()?.mapNotNull { it.text("name").takeIf(String::isNotBlank) }.orEmpty(),
             authorPaths = authorPaths(comic),
+            tagPaths = themePaths(comic),
             description = comic.text("brief"),
             status = comic.optJSONObject("status")?.text("display").orEmpty(),
             tags = comic.optJSONArray("theme")?.objects()?.mapNotNull { it.text("name").takeIf(String::isNotBlank) }.orEmpty(),

@@ -190,7 +190,7 @@ private fun SourceChoice(id: String?, name: String, selected: Boolean, modifier:
             Icon(Icons.Outlined.Public, null, tint = accent, modifier = Modifier.size(14.dp))
             Text(" 全部", color = accent, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
         } else {
-            ReviewSourceMark(id, size = if (id in listOf("copy", "anilist", "myanimelist", "kitsu")) 16.dp else 21.dp)
+            ReviewSourceMark(id, size = 18.dp)
             val label = when (id) { "copy" -> "拷贝"; "anilist" -> "AniList"; "myanimelist" -> "MAL"; "kitsu" -> "Kitsu"; else -> null }
             label?.let { Text(it, color = if (selected) accent else DetailSecondary, fontSize = 11.sp, lineHeight = 16.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 5.dp)) }

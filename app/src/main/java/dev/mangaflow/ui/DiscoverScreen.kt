@@ -133,6 +133,8 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.data.MangaTag
+import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.BottomPullLoadIndicator
@@ -161,6 +163,8 @@ fun DiscoverScreen(
     contentTopPadding: Dp,
     canAutoAdvance: Boolean,
     repository: MangaRepository,
+    discoverColumns: Int = 3,
+    updateColumns: Int = 3,
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onMore: () -> Unit,
@@ -170,7 +174,7 @@ fun DiscoverScreen(
     active: Boolean = true,
 ) {
     val motion = LocalMotionEnabled.current
-    val browse = if (state.query.isBlank()) state else backgroundState
+    val browse = if (!state.isSearch) state else backgroundState
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
     var actionsManga by remember { mutableStateOf<Manga?>(null) }
     var ratingsManga by remember { mutableStateOf<Manga?>(null) }
@@ -201,6 +205,7 @@ fun DiscoverScreen(
                 soft = true,
             ) { pane ->
                 DiscoveryPane(pane, positions, repository,
+                    columns = (if (pane.mode == DiscoveryMode.LATEST) updateColumns else discoverColumns).coerceIn(1, 4),
                     active = unobscured && !holdingContent && pane.cacheKey == browse.cacheKey,
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
@@ -274,12 +279,15 @@ internal fun DiscoverySearchResults(
     onRetry: () -> Unit,
     onMore: () -> Unit,
     onOpen: (Manga) -> Unit,
+    onTarget: (SearchTarget) -> Unit,
+    onTag: (MangaTag) -> Unit,
+    onRetryTags: () -> Unit,
 ) {
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
     val search = if (expanded) state else retainedSearch
     val positions = rememberSaveable(saver = SearchPositionsSaver) { LinkedHashMap<String, LazyListState>() }
-    if (search.query.isBlank() || maxHeight <= 0.dp) return
+    if (maxHeight <= 0.dp) return
     val retainedResults = remember(search.cacheKey) {
         val saved = positions.remove(search.cacheKey) ?: LazyListState()
         positions[search.cacheKey] = saved
@@ -288,7 +296,11 @@ internal fun DiscoverySearchResults(
     }
     Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).padding(8.dp)
         .motionInputGate(active)) {
-        Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, bottom = 5.dp),
+        SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
+            search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags)
+        val selectingTags = search.searchTarget == SearchTarget.TAG && search.selectedTags.isEmpty()
+        val awaitingKeyword = search.query.isBlank() && search.selectedTags.isEmpty()
+        if (search.isSearch && !selectingTags && !awaitingKeyword) Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 5.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text("搜索结果", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.weight(1f))
@@ -300,6 +312,7 @@ internal fun DiscoverySearchResults(
             }
         }
         when {
+            selectingTags || awaitingKeyword || !search.isSearch -> Unit
             search.loading && search.items.isEmpty() -> Box(
                 Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
             ) { Text("正在查找…", style = MaterialTheme.typography.bodySmall) }
@@ -307,7 +320,8 @@ internal fun DiscoverySearchResults(
                 Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(if (search.error != null) "搜索暂时不可用" else "没有找到相关漫画",
+                Text(if (search.error != null) "搜索暂时不可用" else if (search.hasMore)
+                    "暂未找到匹配，仍有内容待筛选" else "没有找到相关漫画",
                     style = MaterialTheme.typography.bodyMedium)
                 if (search.error != null) {
                     Text(search.error, modifier = Modifier.padding(top = 6.dp),
@@ -315,6 +329,10 @@ internal fun DiscoverySearchResults(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 3, overflow = TextOverflow.Ellipsis)
                     TextButton(onClick = onRetry) { Text("重试") }
+                }
+                if (search.error == null && search.hasMore) {
+                    if (search.loadingMore) CircularProgressIndicator(Modifier.padding(8.dp).size(18.dp), strokeWidth = 2.dp)
+                    else TextButton(onClick = onMore) { Text("继续筛选") }
                 }
             }
             else -> LazyColumn(
@@ -470,6 +488,7 @@ private fun DiscoveryPane(
     state: BrowseState,
     positions: LinkedHashMap<String, LazyGridState>,
     repository: MangaRepository,
+    columns: Int,
     active: Boolean,
     canAutoAdvance: Boolean,
     onRefresh: () -> Unit,
@@ -504,10 +523,10 @@ private fun DiscoveryPane(
         onLoadMore = onMore,
     )
     LazyVerticalGrid(
-        columns = GridCells.Fixed(3), state = grid,
+        columns = GridCells.Fixed(if (ranking) 1 else columns), state = grid,
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = topPadding, bottom = 32.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(if (ranking) 12.dp else 0.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (columns == 4) 8.dp else 10.dp),
+        verticalArrangement = Arrangement.spacedBy(if (ranking || columns == 1) 12.dp else 10.dp),
         modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
     ) {
         if (state.loading && state.items.isEmpty()) {
@@ -545,7 +564,10 @@ private fun DiscoveryPane(
                 }
             } else {
                 items(state.items, key = Manga::id) { manga ->
-                    CoverTile(manga, repository, dense = true, modifier = Modifier.padding(bottom = 16.dp),
+                    if (columns == 1) BrowseListRow(manga, repository,
+                        showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
+                        onLongClick = { onManage(manga) }, onClick = { onOpen(manga) })
+                    else CoverTile(manga, repository, dense = true, narrow = columns == 4,
                         showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
                         onLongClick = { onManage(manga) }) { onOpen(manga) }
                 }
@@ -557,13 +579,11 @@ private fun DiscoveryPane(
                         TextButton(onClick = onRetry) { Text("重试") }
                     }
                 } else {
-                    Column(Modifier.fillMaxWidth().height(64.dp), horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterVertically)) {
-                        if (state.hasMore || state.loadingMore) BottomPullLoadIndicator(pull, Modifier.size(32.dp))
-                        Text(if (state.loadingMore) "正在加载" else if (!state.hasMore) "已经到底了"
-                            else if (pull.progress >= 1f) "松手加载" else "上拉加载",
-                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    if (state.hasMore || state.loadingMore) Box(Modifier.fillMaxWidth().height(48.dp)
+                        .semantics { contentDescription = if (state.loadingMore) "正在加载" else if (pull.progress >= 1f)
+                            "松手加载" else "上拉加载" }, contentAlignment = Alignment.Center) {
+                        BottomPullLoadIndicator(pull, Modifier.size(32.dp))
+                    } else Spacer(Modifier.height(12.dp))
                 }
             }
         }
@@ -588,6 +608,40 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, onOpen: (
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             MangaMetricBadges(manga, showMore = false)
+        }
+    }
+}
+
+/** The existing search-result composition, expanded for the saved single-column browse mode. */
+@Composable
+private fun BrowseListRow(
+    manga: Manga,
+    repository: MangaRepository,
+    showChapter: Boolean,
+    placement: String,
+    onLongClick: () -> Unit,
+    onClick: () -> Unit,
+) {
+    val interaction = remember(manga.id) { MutableInteractionSource() }
+    val transition = LocalMangaCoverTransition.current
+    Row(Modifier.fillMaxWidth().combinedClickable(interactionSource = interaction,
+        indication = null, role = Role.Button, onClickLabel = "查看${manga.title}",
+        onLongClickLabel = "漫画操作", onLongClick = onLongClick, onClick = {
+            transition?.select?.invoke(MangaCoverKey(manga.id, placement))
+            onClick()
+        }).motionPress(interaction, pressedScale = .985f), verticalAlignment = Alignment.CenterVertically) {
+        MangaCover(manga, repository, Modifier.width(64.dp).height(92.dp)
+            .mangaSharedCover(manga.id, placement).mangaCoverCard(9.dp))
+        Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(manga.title, style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            MangaMetricBadges(manga, Modifier.fillMaxWidth(), showMore = false, plain = true)
         }
     }
 }
@@ -904,6 +958,7 @@ internal fun CoverTile(
     manga: Manga,
     repository: MangaRepository,
     dense: Boolean = false,
+    narrow: Boolean = false,
     modifier: Modifier = Modifier,
     showChapter: Boolean = false,
     placement: String? = null,
@@ -923,11 +978,12 @@ internal fun CoverTile(
         MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(2f / 3f)
             .then(if (placement != null) Modifier.mangaSharedCover(manga.id, placement) else Modifier).mangaCoverCard(12.dp))
         Text(manga.title, modifier = Modifier.padding(top = 7.dp, start = 2.dp, end = 2.dp),
-            style = if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
+            style = if (narrow) MaterialTheme.typography.bodySmall.copy(lineHeight = 17.sp)
+                else if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
         MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp),
             compact = true, showMore = false, plain = true)
-        if (showChapter) Text(manga.latestChapter, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
+        if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             minLines = 1, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }

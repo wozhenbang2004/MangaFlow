@@ -27,7 +27,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,6 +45,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.CloudSync
+import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.LightMode
+import androidx.compose.material.icons.outlined.NotificationsNone
+import androidx.compose.material.icons.outlined.Restore
+import androidx.compose.material.icons.outlined.SystemUpdate
+import androidx.compose.material.icons.outlined.Update
+import androidx.compose.material.icons.outlined.UploadFile
+import androidx.compose.material.icons.outlined.ViewDay
+import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.Layers
@@ -95,7 +106,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.Dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -110,6 +120,7 @@ import dev.mangaflow.storage.WebDavBackupConfig
 import dev.mangaflow.storage.WebDavBackupStore
 import dev.mangaflow.storage.WallpaperStore
 import dev.mangaflow.ui.motion.MotionDialog
+import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
@@ -347,15 +358,27 @@ fun SettingsScreen(
                         }
                     }
                     Column {
-                        SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn) {
+                        SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn, Icons.Outlined.LightMode) {
                             libraryStore.updatePreferences(preferences.copy(keepScreenOn = it))
                         }
-                        SettingsToggle("图片之间留白", preferences.pageGap) {
+                        SettingsToggle("图片之间留白", preferences.pageGap, Icons.Outlined.ViewDay) {
                             libraryStore.updatePreferences(preferences.copy(pageGap = it))
                         }
                     }
                 }
                 SettingsSection("外观") {
+                    SettingsDisclosure("发现页布局", settingsLayoutLabel(preferences.discoverColumns),
+                        Icons.Outlined.ViewModule, expandedSetting == "discover-layout", { toggleSetting("discover-layout") }) {
+                        SettingsChoices(settingsLayoutChoices, preferences.discoverColumns) { columns ->
+                            libraryStore.updatePreferences(libraryStore.preferences.value.copy(discoverColumns = columns))
+                        }
+                    }
+                    SettingsDisclosure("更新页布局", settingsLayoutLabel(preferences.updateColumns),
+                        Icons.Outlined.Update, expandedSetting == "update-layout", { toggleSetting("update-layout") }) {
+                        SettingsChoices(settingsLayoutChoices, preferences.updateColumns) { columns ->
+                            libraryStore.updatePreferences(libraryStore.preferences.value.copy(updateColumns = columns))
+                        }
+                    }
                     SettingsDisclosure("玻璃材质", if (preferences.glassSkin == GlassSkin.FROSTED) "毛玻璃" else "液态玻璃",
                         Icons.Outlined.Layers, expandedSetting == "glass", { toggleSetting("glass") }) {
                         GlassSkinPicker(
@@ -378,14 +401,16 @@ fun SettingsScreen(
                         Icons.Outlined.CloudSync, expandedSetting == "backup", { toggleSetting("backup") }) {
                         Column {
                             SettingsLinkRow("导出阅读备份",
-                                if (backupBusy == "export") "正在导出…" else "书架、进度、画面收藏与阅读统计") {
+                                if (backupBusy == "export") "正在导出…" else "书架、进度、画面收藏与阅读统计",
+                                Icons.Outlined.UploadFile) {
                                 if (backupBusy == null) exportBackup.launch("MangaFlow-backup.json")
                             }
                             SettingsLinkRow("恢复阅读备份",
-                                if (backupBusy == "inspect" || backupBusy == "restore") "正在处理…" else "从备份文件恢复本机阅读数据") {
+                                if (backupBusy == "inspect" || backupBusy == "restore") "正在处理…" else "从备份文件恢复本机阅读数据",
+                                Icons.Outlined.Restore) {
                                 if (backupBusy == null) importBackup.launch(arrayOf("application/json", "text/plain"))
                             }
-                            SettingsLinkRow("WebDAV 阅读备份", webDavStatusDetail(webDavConfig, backupBusy)) {
+                            SettingsLinkRow("WebDAV 阅读备份", webDavStatusDetail(webDavConfig, backupBusy), Icons.Outlined.CloudSync) {
                                 if (backupBusy == null) { webDavNotice = null; showWebDav = true }
                             }
                         }
@@ -400,21 +425,27 @@ fun SettingsScreen(
                         Icons.Outlined.Storage, expandedSetting == "cache", { toggleSetting("cache") }) {
                         Column {
                             listOf("browse" to "推荐与热榜", "metadata" to "目录、评分与评论", "images" to "图片与头像").forEach { (key, label) ->
-                                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 7.dp),
-                                    verticalAlignment = Alignment.CenterVertically) {
+                                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    SettingsRowIcon(when (key) {
+                                        "browse" -> Icons.Outlined.Explore
+                                        "metadata" -> Icons.Outlined.Forum
+                                        else -> Icons.Outlined.Image
+                                    })
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                         Text(label, style = MaterialTheme.typography.bodyLarge, color = foreground)
                                         Text(cacheSizes[key]?.let(::settingsBytes) ?: "正在统计…",
                                             style = MaterialTheme.typography.bodySmall, color = secondary)
                                     }
                                     val showBusy = rememberDelayedBusy(clearingCache == key)
-                                    SettingsTextAction(enabled = clearingCache == null && cacheSizes[key] != null,
+                                    MotionIconButton(enabled = clearingCache == null && cacheSizes[key] != null,
+                                        modifier = Modifier.size(44.dp).semantics { contentDescription = "清理$label" },
                                         onClick = { clearCache(key, label) }) {
-                                        MotionSwap(showBusy, Modifier.size(16.dp)) { busy ->
+                                        MotionSwap(showBusy, Modifier.size(20.dp)) { busy ->
                                             if (busy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                                            else Icon(Icons.Outlined.DeleteOutline, null, Modifier.size(20.dp), tint = secondary)
                                         }
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("清理", color = secondary)
                                     }
                                 }
                             }
@@ -434,14 +465,37 @@ fun SettingsScreen(
                             .animateContentSize(if (LocalMotionEnabled.current) tween(MangaMotion.Content) else snap()),
                             verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             val activity = context.settingsActivity()
+                            val checked = update.lastChecked.takeIf { it > 0 }?.let(::settingsLastCheck)
+                            val timestamp = update.lastChecked.takeIf { it > 0 }?.let {
+                                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()).format(Date(it))
+                            }
+                            val updateAction = when (update.phase) {
+                                UpdatePhase.CHECKING -> "检查中"
+                                UpdatePhase.VERIFYING -> "核对中"
+                                UpdatePhase.AVAILABLE -> if (update.downloaded > 0) "继续下载更新" else "下载更新"
+                                UpdatePhase.DOWNLOADING -> "暂停下载"
+                                UpdatePhase.READY -> "安装更新"
+                                UpdatePhase.ERROR -> "重试检查更新"
+                                else -> "检查更新"
+                            }
                             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                                SettingsRowIcon(Icons.Outlined.SystemUpdate)
+                                Spacer(Modifier.width(12.dp))
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Text("软件更新", style = MaterialTheme.typography.bodyMedium, color = foreground)
-                                    Text(update.release?.let { "v${BuildConfig.VERSION_NAME} → ${it.versionName}" }
-                                        ?: "v${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall,
-                                        color = secondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    val version = update.release?.let { "v${BuildConfig.VERSION_NAME} → ${it.versionName}" }
+                                        ?: "v${BuildConfig.VERSION_NAME}"
+                                    Text(listOfNotNull(version, checked).joinToString(" · "),
+                                        style = MaterialTheme.typography.bodySmall, color = secondary,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.then(if (timestamp == null) Modifier else Modifier
+                                            .semantics { contentDescription = "$version，上次检查 $timestamp" }
+                                            .clickable(role = Role.Button, onClickLabel = "查看完整检查时间") {
+                                                Toast.makeText(context, "上次检查 $timestamp", Toast.LENGTH_SHORT).show()
+                                            }))
                                 }
-                                SettingsTextAction(
+                                MotionIconButton(
+                                    modifier = Modifier.size(44.dp).semantics { contentDescription = updateAction },
                                     enabled = update.phase !in setOf(UpdatePhase.CHECKING, UpdatePhase.VERIFYING) &&
                                         (update.phase != UpdatePhase.READY || activity != null),
                                     onClick = {
@@ -454,69 +508,44 @@ fun SettingsScreen(
                                         }
                                     },
                                 ) {
-                                    Row(Modifier.widthIn(min = 92.dp), verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.Center) {
-                                        MotionSwap(update.phase, Modifier.size(17.dp)) { phase ->
-                                            when (phase) {
-                                                UpdatePhase.CHECKING, UpdatePhase.VERIFYING ->
-                                                    CircularProgressIndicator(Modifier.size(15.dp), color = secondary, strokeWidth = 1.5.dp)
-                                                UpdatePhase.AVAILABLE -> Icon(Icons.Outlined.ArrowDownward, null, tint = foreground)
-                                                UpdatePhase.DOWNLOADING -> Icon(Icons.Outlined.Pause, null, tint = foreground)
-                                                UpdatePhase.READY -> Icon(Icons.Outlined.ArrowDownward, null, tint = foreground)
-                                                else -> Icon(Icons.Outlined.Refresh, null, tint = foreground)
-                                            }
+                                    MotionSwap(update.phase, Modifier.size(20.dp)) { phase ->
+                                        when (phase) {
+                                            UpdatePhase.CHECKING, UpdatePhase.VERIFYING ->
+                                                CircularProgressIndicator(Modifier.size(15.dp), color = secondary, strokeWidth = 1.5.dp)
+                                            UpdatePhase.AVAILABLE -> Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(20.dp), tint = colors.primary)
+                                            UpdatePhase.DOWNLOADING -> Icon(Icons.Outlined.Pause, null, Modifier.size(20.dp), tint = foreground)
+                                            UpdatePhase.READY -> Icon(Icons.Outlined.SystemUpdate, null, Modifier.size(20.dp), tint = colors.primary)
+                                            else -> Icon(Icons.Outlined.Refresh, null, Modifier.size(20.dp), tint = foreground)
                                         }
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(when (update.phase) {
-                                            UpdatePhase.CHECKING -> "检查中"
-                                            UpdatePhase.VERIFYING -> "核对中"
-                                            UpdatePhase.AVAILABLE -> if (update.downloaded > 0) "继续下载" else "下载更新"
-                                            UpdatePhase.DOWNLOADING -> "暂停"
-                                            UpdatePhase.READY -> "安装更新"
-                                            UpdatePhase.ERROR -> "重试"
-                                            else -> "检查更新"
-                                        }, style = MaterialTheme.typography.labelLarge,
-                                            color = when (update.phase) {
-                                                UpdatePhase.CHECKING, UpdatePhase.VERIFYING -> secondary
-                                                UpdatePhase.AVAILABLE, UpdatePhase.READY -> colors.primary
-                                                else -> foreground
-                                            })
                                     }
                                 }
                             }
-                            val checked = update.lastChecked.takeIf { it > 0 }?.let(::settingsLastCheck)
                             val status = when (update.phase) {
-                                UpdatePhase.IDLE -> checked
-                                UpdatePhase.CURRENT -> listOfNotNull(update.message, checked).joinToString(" · ")
+                                UpdatePhase.IDLE -> null
+                                UpdatePhase.CURRENT -> update.message
                                 UpdatePhase.CHECKING, UpdatePhase.VERIFYING, UpdatePhase.DOWNLOADING -> null
                                 else -> update.message
                             }
                             if (!status.isNullOrBlank()) {
-                                val timestamp = update.lastChecked.takeIf { it > 0 }?.let {
-                                    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()).format(Date(it))
-                                }
                                 Text(status, style = MaterialTheme.typography.bodySmall,
                                     color = if (update.phase == UpdatePhase.ERROR) colors.error else secondary,
-                                    modifier = Modifier.then(if (timestamp == null) Modifier else Modifier
-                                        .semantics { contentDescription = "$status，上次检查 $timestamp" }
-                                        .clickable(role = Role.Button, onClickLabel = "查看完整检查时间") {
-                                            Toast.makeText(context, "上次检查 $timestamp", Toast.LENGTH_SHORT).show()
-                                        }).padding(bottom = 2.dp))
+                                    modifier = Modifier.padding(start = 32.dp, bottom = 2.dp))
                             }
                             update.release?.let { release ->
                                 if (release.notes.isNotBlank()) {
                                     Text(release.notes,
-                                        modifier = Modifier.clickable(role = Role.Button,
+                                        modifier = Modifier.padding(start = 32.dp).clickable(role = Role.Button,
                                             onClickLabel = if (expandedNotes) "收起更新说明" else "展开更新说明") { expandedNotes = !expandedNotes },
                                         style = MaterialTheme.typography.bodySmall, color = secondary,
-                                        maxLines = if (expandedNotes) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis)
+                                        maxLines = if (expandedNotes) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
                                 }
                                 if (update.phase == UpdatePhase.AVAILABLE && release.bytes > 0 && update.downloaded == 0L) {
-                                    Text(settingsBytes(release.bytes), style = MaterialTheme.typography.bodySmall, color = secondary)
+                                    Text(settingsBytes(release.bytes), style = MaterialTheme.typography.bodySmall,
+                                        color = secondary, modifier = Modifier.padding(start = 32.dp))
                                 }
                             }
                             if (update.phase == UpdatePhase.DOWNLOADING) {
-                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                                Row(Modifier.fillMaxWidth().padding(start = 32.dp), verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                     LinearProgressIndicator(progress = { update.progress },
                                         modifier = Modifier.weight(1f).height(2.dp).clip(CircleShape),
@@ -527,12 +556,13 @@ fun SettingsScreen(
                             }
                         }
                         Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                            SettingsToggle("自动检查更新", automatic, leadingInset = 0.dp, compact = true) {
+                            SettingsToggle("自动检查更新", automatic, Icons.Outlined.Update) {
                                 automatic = it
                                 updateManager.setAutomatic(it)
                             }
                             SettingsLinkRow(
                                 title = "更新提醒", detail = if (notifications) "已开启" else "未开启",
+                                icon = Icons.Outlined.NotificationsNone,
                                 inlineDetail = true, compact = true,
                                 onClick = {
                                     if (notifications) {
@@ -547,7 +577,7 @@ fun SettingsScreen(
                         }
                     }
                     Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                        SettingsLinkRow("项目主页", "", external = true, compact = true) { context.openProjectPage() }
+                        SettingsLinkRow("项目主页", "", Icons.Outlined.Code, external = true, compact = true) { context.openProjectPage() }
                     }
                 }
             }
@@ -873,14 +903,16 @@ private fun SettingsDisclosure(
             .motionPress(interaction, pressedScale = .99f)
             .heightIn(min = 48.dp).padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(icon, null, Modifier.size(21.dp), tint = colors.onSurfaceVariant)
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            SettingsRowIcon(icon)
             Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
                 color = colors.onSurface)
             Text(value, Modifier.widthIn(max = 132.dp), style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp)
-                .graphicsLayer { rotationZ = 90f * reveal.value }, tint = colors.onSurfaceVariant.copy(alpha = .65f))
+            Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp)
+                    .graphicsLayer { rotationZ = 90f * reveal.value }, tint = colors.onSurfaceVariant.copy(alpha = .65f))
+            }
         }
         Column(Modifier.fillMaxWidth().clipToBounds().motionInputGate(expanded)
             .layout { measurable, constraints ->
@@ -900,6 +932,15 @@ private fun SettingsDisclosure(
 }
 
 @Composable
+private fun SettingsRowIcon(icon: ImageVector) {
+    Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+private val settingsLayoutChoices = listOf(1 to "列表", 2 to "2列", 3 to "3列", 4 to "4列")
+
+private fun settingsLayoutLabel(columns: Int): String = if (columns == 1) "列表" else "${columns.coerceIn(2, 4)}列"
+
+@Composable
 private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onSelected: (T) -> Unit) {
     val colors = MaterialTheme.colorScheme
     MotionTabs(
@@ -913,16 +954,18 @@ private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onS
 }
 
 @Composable
-private fun SettingsToggle(title: String, checked: Boolean, leadingInset: Dp = 31.dp, compact: Boolean = false, onCheckedChange: (Boolean) -> Unit) {
+private fun SettingsToggle(title: String, checked: Boolean, icon: ImageVector, onCheckedChange: (Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
             .toggleable(checked, interactionSource = interaction, indication = null,
-                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = if (compact) 48.dp else 50.dp).padding(vertical = 3.dp),
+                role = Role.Switch, onValueChange = onCheckedChange).heightIn(min = 48.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(title, Modifier.weight(1f).padding(start = leadingInset, end = 12.dp),
+        SettingsRowIcon(icon)
+        Text(title, Modifier.weight(1f),
             style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
         Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
             MotionSwitchThumb(checked, interaction)
@@ -931,14 +974,15 @@ private fun SettingsToggle(title: String, checked: Boolean, leadingInset: Dp = 3
 }
 
 @Composable
-private fun SettingsLinkRow(title: String, detail: String, external: Boolean = false, inlineDetail: Boolean = false, compact: Boolean = false, onClick: () -> Unit) {
+private fun SettingsLinkRow(title: String, detail: String, icon: ImageVector, external: Boolean = false, inlineDetail: Boolean = false, compact: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
         .clickable(interactionSource = interaction, indication = null, onClick = onClick)
         .motionPress(interaction, pressedScale = .99f).heightIn(min = if (compact) 48.dp else 56.dp)
-            .padding(vertical = if (compact) 6.dp else 10.dp),
+            .padding(vertical = if (compact) 6.dp else 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        SettingsRowIcon(icon)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(title, style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
             if (!inlineDetail && detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
@@ -946,17 +990,10 @@ private fun SettingsLinkRow(title: String, detail: String, external: Boolean = f
         }
         if (inlineDetail && detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
             color = colors.onSurfaceVariant)
-        Icon(if (external) Icons.Outlined.OpenInNew else Icons.Outlined.ChevronRight,
-            contentDescription = null, tint = colors.onSurfaceVariant.copy(alpha = .7f), modifier = Modifier.size(18.dp))
-    }
-}
-
-@Composable
-private fun SettingsTextAction(enabled: Boolean = true, onClick: () -> Unit, content: @Composable RowScope.() -> Unit) {
-    val interaction = remember { MutableInteractionSource() }
-    TextButton(enabled = enabled, onClick = onClick, interactionSource = interaction) {
-        Row(Modifier.motionPress(interaction, enabled), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center, content = content)
+        Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
+            Icon(if (external) Icons.Outlined.OpenInNew else Icons.Outlined.ChevronRight,
+                contentDescription = null, tint = colors.onSurfaceVariant.copy(alpha = .7f), modifier = Modifier.size(18.dp))
+        }
     }
 }
 

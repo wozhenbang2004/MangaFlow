@@ -14,6 +14,9 @@ import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.MangaTag
+import dev.mangaflow.data.SearchTarget
+import dev.mangaflow.data.CopySearchTags
 import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.data.MangaMetric
 import dev.mangaflow.data.MangaMetricsRepository
@@ -56,6 +59,11 @@ import java.util.concurrent.ConcurrentHashMap
 
 data class BrowseState(
     val query: String = "",
+    val searchTarget: SearchTarget = SearchTarget.TITLE,
+    val selectedTags: List<MangaTag> = emptyList(),
+    val availableTags: List<MangaTag> = CopySearchTags,
+    val tagsLoading: Boolean = false,
+    val tagsError: String? = null,
     val mode: DiscoveryMode = DiscoveryMode.RECOMMENDED,
     val period: RankPeriod = RankPeriod.WEEK,
     val audience: RankAudience = RankAudience.MALE,
@@ -69,8 +77,12 @@ data class BrowseState(
     val refreshing: Boolean = false,
     val updatedAt: Long = 0,
 ) {
+    val isSearch: Boolean get() = searchTarget != SearchTarget.TITLE || query.isNotBlank() || selectedTags.isNotEmpty()
     val cacheKey: String get() = when {
-        query.isNotBlank() -> "search:${query.trim()}"
+        isSearch -> {
+            val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
+            "search-v2:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+        }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
     }
@@ -149,6 +161,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val _browse = MutableStateFlow(BrowseState())
     val browse = _browse.asStateFlow()
     private var retainedBrowse: BrowseState? = null
+    private var knownSearchTags = CopySearchTags
+    private var tagLookupJob: Job? = null
+    private var tagLookupRequest = 0L
+    private var pendingTagLookup: Pair<Manga, String>? = null
     private val _detail = MutableStateFlow<DetailState?>(null)
     val detail = _detail.asStateFlow()
     private val _authorWorks = MutableStateFlow<AuthorWorksState?>(null)
@@ -205,22 +221,101 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setQuery(query: String) {
         if (query == _browse.value.query) return
+        cancelTagLookup()
         val previous = _browse.value
+        if (previous.searchTarget == SearchTarget.TAG) {
+            _browse.update { it.copy(query = query) }
+            return
+        }
         showBrowse(BrowseState(query = query, mode = previous.mode, period = previous.period,
-            audience = previous.audience), debounce = query.isNotBlank())
+            audience = previous.audience, searchTarget = previous.searchTarget, selectedTags = previous.selectedTags),
+            debounce = query.isNotBlank() && previous.searchTarget != SearchTarget.TAG)
+    }
+
+    fun setSearchTarget(target: SearchTarget) {
+        val previous = _browse.value
+        if (previous.searchTarget == target) return
+        cancelTagLookup()
+        showBrowse(BrowseState(query = previous.query, searchTarget = target, selectedTags = previous.selectedTags,
+            mode = previous.mode, period = previous.period, audience = previous.audience))
+    }
+
+    fun toggleSearchTag(tag: MangaTag) {
+        if (tag.name.isBlank() || tag.path.isBlank()) return
+        cancelTagLookup()
+        val previous = _browse.value
+        val selected = if (previous.selectedTags.any { it.path == tag.path })
+            previous.selectedTags.filterNot { it.path == tag.path } else previous.selectedTags + tag
+        knownSearchTags = (knownSearchTags + tag).distinctBy(MangaTag::path)
+        showBrowse(BrowseState(query = previous.query, searchTarget = previous.searchTarget, selectedTags = selected,
+            mode = previous.mode, period = previous.period, audience = previous.audience))
+    }
+
+    fun clearSearch() {
+        cancelTagLookup()
+        val previous = _browse.value
+        showBrowse(BrowseState(mode = previous.mode, period = previous.period, audience = previous.audience))
+    }
+
+    fun openTagSearch(manga: Manga, name: String) {
+        cancelTagLookup()
+        val previous = _browse.value
+        knownSearchTags = (knownSearchTags + manga.tagPaths.map { MangaTag(it.key, it.value) }).distinctBy(MangaTag::path)
+        val tag = manga.tagPaths[name]?.let { MangaTag(name, it) }
+            ?: knownSearchTags.firstOrNull { it.name == name }
+        val selection = BrowseState(query = if (tag == null) name else "",
+            searchTarget = SearchTarget.TAG, selectedTags = listOfNotNull(tag),
+            tagsLoading = tag == null,
+            mode = previous.mode, period = previous.period, audience = previous.audience)
+        showBrowse(selection)
+        if (tag != null) return
+        pendingTagLookup = manga to name
+        _browse.update { it.copy(tagsLoading = true) }
+        val request = ++tagLookupRequest
+        tagLookupJob = viewModelScope.launch {
+            try {
+                val tags = repository.searchTagsFor(manga)
+                if (request != tagLookupRequest) return@launch
+                knownSearchTags = (knownSearchTags + tags).distinctBy(MangaTag::path)
+                val resolved = tags.firstOrNull { it.name == name }
+                    ?: throw SourceException("来源没有返回这个标签的检索索引。")
+                pendingTagLookup = null
+                showBrowse(selection.copy(query = "", selectedTags = listOf(resolved)))
+            } catch (cancelled: CancellationException) { throw cancelled }
+              catch (failure: Exception) {
+                if (request == tagLookupRequest) _browse.update { it.copy(tagsLoading = false,
+                    tagsError = failure.message ?: "标签暂时无法读取，请重试。") }
+            }
+        }
+    }
+
+    fun retrySearchTags() {
+        pendingTagLookup?.let { (manga, tag) -> openTagSearch(manga, tag); return }
+        _browse.update { it.copy(availableTags = knownSearchTags, tagsLoading = false, tagsError = null) }
+    }
+
+    private fun cancelTagLookup() {
+        tagLookupRequest++
+        tagLookupJob?.cancel()
+        pendingTagLookup = null
+        _browse.update { it.copy(tagsLoading = false, tagsError = null) }
     }
 
     fun selectDiscovery(mode: DiscoveryMode, period: RankPeriod = _browse.value.period,
         audience: RankAudience = _browse.value.audience, clearQuery: Boolean = false) {
         val previous = _browse.value
         val query = if (clearQuery) "" else previous.query
-        if (previous.mode == mode && previous.period == period && previous.audience == audience && previous.query == query) return
-        showBrowse(BrowseState(query = query, mode = mode, period = period, audience = audience))
+        val tags = if (clearQuery) emptyList() else previous.selectedTags
+        if (previous.mode == mode && previous.period == period && previous.audience == audience &&
+            previous.query == query && previous.selectedTags == tags) return
+        if (clearQuery) cancelTagLookup()
+        showBrowse(BrowseState(query = query, mode = mode, period = period, audience = audience,
+            searchTarget = previous.searchTarget, selectedTags = tags))
     }
 
     /** The search backdrop survives screen disposal and Activity recreation with this ViewModel. */
     fun browseBackground(selection: BrowseState): BrowseState {
-        if (selection.query.isBlank()) return selection
+        if (!selection.isSearch) return selection
         val background = BrowseState(mode = selection.mode, period = selection.period, audience = selection.audience)
         return retainedBrowse?.takeIf { it.cacheKey == background.cacheKey }
             ?: browseCache.cached(background.cacheKey)?.restore(background)
@@ -229,21 +324,31 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun showBrowse(selection: BrowseState, debounce: Boolean = false) {
         val previous = _browse.value
-        if (previous.query.isBlank()) retainedBrowse = previous
+        if (!previous.isSearch) retainedBrowse = previous
         browseJob?.cancel()
         val requestId = ++browseRequestId
         val generation = browseCache.generation
         val memory = browseCache.cached(selection.cacheKey)
-        _browse.value = memory?.restore(selection) ?: selection
+        val configured = selection.copy(availableTags = knownSearchTags)
+        _browse.value = memory?.restore(configured) ?: configured
         browseJob = viewModelScope.launch {
             val snapshot = memory ?: browseCache.read(selection.cacheKey, generation)
             if (requestId != browseRequestId) return@launch
             if (snapshot != null) {
-                _browse.value = snapshot.restore(selection)
+                _browse.update { current ->
+                    if (requestId != browseRequestId) current else {
+                        // TAG text filters the already available directory, not this
+                        // result set. Disk hydration must not overwrite newer typing.
+                        val selectionWithCurrentFilter = if (configured.searchTarget == SearchTarget.TAG &&
+                            current.cacheKey == selection.cacheKey) configured.copy(query = current.query)
+                        else configured
+                        snapshot.restore(selectionWithCurrentFilter)
+                    }
+                }
                 // Fresh selections need no request. Stale rankings refresh their complete
                 // loaded range atomically, so a saved deep position never sees page zero alone.
                 if (isFresh(snapshot.updatedAt, selection) ||
-                    snapshot.page > 0 && (selection.query.isNotBlank() ||
+                    snapshot.page > 0 && (selection.isSearch ||
                         selection.mode != DiscoveryMode.RANKING)) return@launch
             }
             if (debounce) delay(450)
@@ -288,11 +393,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long) {
         try {
             val query = state.query.trim()
-            var result = if (query.isBlank()) community.browse(state.mode, state.period, state.audience, page)
-                else repository.search(query, page)
+            var result = if (!state.isSearch) community.browse(state.mode, state.period, state.audience, page)
+                else repository.search(query, state.searchTarget, state.selectedTags, page)
             val replacement = result.items.toMutableList()
-            var loadedPage = page
-            if (query.isBlank() && state.mode == DiscoveryMode.RANKING && page == 0 && state.items.isNotEmpty()) {
+            var loadedPage = result.nextPage?.minus(1) ?: page
+            if (!state.isSearch && state.mode == DiscoveryMode.RANKING && page == 0 && state.items.isNotEmpty()) {
                 // Never combine a new first page with old ranking pages. Keep the old list
                 // visible until the previously loaded range (or the new source end) is ready.
                 while (loadedPage < state.page && result.hasMore) {
@@ -331,7 +436,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun isFresh(updatedAt: Long, state: BrowseState): Boolean {
         val ttl = when {
-            state.query.isNotBlank() || state.mode != DiscoveryMode.RANKING -> 15 * 60_000L
+            state.isSearch || state.mode != DiscoveryMode.RANKING -> 15 * 60_000L
             state.period == RankPeriod.DAY || state.period == RankPeriod.WEEK -> 30 * 60_000L
             else -> 60 * 60_000L
         }
