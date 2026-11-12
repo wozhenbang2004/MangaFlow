@@ -173,7 +173,7 @@ fun SettingsScreen(
             Text("翻页方式", style = MaterialTheme.typography.bodyLarge, color = foreground)
             Spacer(Modifier.height(12.dp))
             SettingsChoices(
-                choices = listOf(ReadingMode.VERTICAL to "纵向", ReadingMode.WEBTOON to "条漫",
+                choices = listOf(ReadingMode.VERTICAL to "纵向",
                     ReadingMode.LEFT_TO_RIGHT to "左至右", ReadingMode.RIGHT_TO_LEFT to "右至左"),
                 selected = preferences.mode,
                 onSelected = { libraryStore.updatePreferences(preferences.copy(mode = it)) },
@@ -187,9 +187,6 @@ fun SettingsScreen(
             Spacer(Modifier.height(12.dp))
             SettingsToggle("阅读时保持亮屏", preferences.keepScreenOn) { libraryStore.updatePreferences(preferences.copy(keepScreenOn = it)) }
             SettingsToggle("图片之间留白", preferences.pageGap) { libraryStore.updatePreferences(preferences.copy(pageGap = it)) }
-            SettingsToggle("边看边下", preferences.downloadWhileReading) { libraryStore.updatePreferences(preferences.copy(downloadWhileReading = it)) }
-            Text("自动保存当前打开的一章，可在下载页暂停或删除。",
-                style = MaterialTheme.typography.bodySmall, color = secondary)
             Spacer(Modifier.height(20.dp))
             HorizontalDivider(color = colors.outlineVariant)
             Spacer(Modifier.height(28.dp))

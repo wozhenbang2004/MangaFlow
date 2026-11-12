@@ -34,6 +34,7 @@ data class ChapterProgress(
 class LibraryStore(context: Context) {
     private val disk = context.applicationContext.getSharedPreferences("mangaflow_library", Context.MODE_PRIVATE)
     private val lock = Any()
+    private val restoreLegacyLongImages = readLegacyLongImageMigration()
     private val _favorites = MutableStateFlow(readArray("favorites") { readManga(it) }.distinctBy(Manga::id))
     private val _history = MutableStateFlow(readArray("history", ::readProgress).distinctBy { it.manga.id })
     private val _preferences = MutableStateFlow(readPreferences())
@@ -77,6 +78,7 @@ class LibraryStore(context: Context) {
     }
 
     fun longImagePositionFor(mangaId: String, chapterId: String, pageIndex: Int): Float? = synchronized(lock) {
+        if (!restoreLegacyLongImages) return@synchronized null
         val key = longImagePositionKey(mangaId, chapterId, pageIndex)
         pendingLongImagePositions[key]?.let { return@synchronized it }
         if (ignoreStoredProgress) return@synchronized null
@@ -84,18 +86,10 @@ class LibraryStore(context: Context) {
         runCatching { disk.getFloat(key, 0f) }.getOrNull()?.takeIf(Float::isFinite)?.coerceIn(0f, 1f)
     }
 
-    fun saveLongImagePosition(mangaId: String, chapterId: String, pageIndex: Int, position: Float) {
-        if (pageIndex < 0 || !position.isFinite()) return
-        synchronized(lock) {
-            val key = longImagePositionKey(mangaId, chapterId, pageIndex)
-            val next = position.coerceIn(0f, 1f)
-            pendingLongImagePositions[key] = next
-            pendingWrite().longImages[key] = next
-            startProgressWriter()
-        }
-    }
-
-    fun saveProgress(manga: Manga, chapter: Chapter, pageIndex: Int, pageCount: Int, scrollOffset: Int = 0) {
+    fun saveProgress(
+        manga: Manga, chapter: Chapter, pageIndex: Int, pageCount: Int, scrollOffset: Int = 0,
+        clearLegacyLongImagePosition: Boolean = false,
+    ) {
         if (pageCount <= 0) return
         synchronized(lock) {
             val progress = ReadingProgress(
@@ -121,6 +115,12 @@ class LibraryStore(context: Context) {
             val position = progress.chapterProgress()
             pendingChapterPositions[key] = position
             write.chapters[key] = position
+            if (clearLegacyLongImagePosition && (longImagePositionFor(manga.id, chapter.id, progress.pageIndex) ?: 0f) > 0f) {
+                // Persist the converted outer offset and consume the old inner pan in one batch.
+                val legacyKey = longImagePositionKey(manga.id, chapter.id, progress.pageIndex)
+                pendingLongImagePositions[legacyKey] = 0f
+                write.longImages[legacyKey] = 0f
+            }
             _history.value = next
             write.history = next
             startProgressWriter()
@@ -238,23 +238,38 @@ class LibraryStore(context: Context) {
             put("doublePage", next.doublePage)
             put("coverAlone", next.coverAlone)
             put("dimAmount", next.dimAmount.toDouble())
-            put("downloadWhileReading", next.downloadWhileReading)
         }.toString()).apply()
     }
 
     private fun readPreferences(): ReaderPreferences = runCatching {
         val json = JSONObject(disk.getString("reader_preferences", "{}") ?: "{}")
+        val storedMode = json.optString("mode")
         ReaderPreferences(
-            mode = ReadingMode.entries.firstOrNull { it.name == json.optString("mode") } ?: ReadingMode.VERTICAL,
+            mode = when (storedMode) {
+                "WEBTOON" -> ReadingMode.VERTICAL
+                else -> ReadingMode.entries.firstOrNull { it.name == storedMode } ?: ReadingMode.VERTICAL
+            },
             theme = ReaderTheme.entries.firstOrNull { it.name == json.optString("theme") } ?: ReaderTheme.PAPER,
             keepScreenOn = json.optBoolean("keepScreenOn", true),
-            pageGap = json.optBoolean("pageGap", false),
+            // The former webtoon choice always rendered without page gaps.
+            pageGap = storedMode != "WEBTOON" && json.optBoolean("pageGap", false),
             doublePage = json.optBoolean("doublePage", false),
             coverAlone = json.optBoolean("coverAlone", true),
             dimAmount = json.optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
-            downloadWhileReading = json.optBoolean("downloadWhileReading", true),
         )
     }.getOrDefault(ReaderPreferences())
+
+    private fun readLegacyLongImageMigration(): Boolean {
+        val key = "restore_legacy_vertical_positions"
+        if (disk.contains(key)) return disk.getBoolean(key, true)
+        val storedMode = runCatching {
+            JSONObject(disk.getString("reader_preferences", "{}") ?: "{}").optString("mode")
+        }.getOrDefault("")
+        // Webtoon already saved an outer offset; older inner-pan values must not be added to it.
+        val restore = storedMode != "WEBTOON"
+        disk.edit().putBoolean(key, restore).apply()
+        return restore
+    }
 
     private fun <T> readArray(key: String, read: (JSONObject) -> T): List<T> = runCatching {
         val array = JSONArray(disk.getString(key, "[]") ?: "[]")

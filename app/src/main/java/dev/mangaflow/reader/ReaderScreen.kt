@@ -12,7 +12,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.core.SnapSpec
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.stopScroll
@@ -99,10 +98,10 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -114,7 +113,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -138,7 +136,6 @@ import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.Page
-import dev.mangaflow.data.ReviewRepository
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
@@ -165,14 +162,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
-import me.saket.telephoto.zoomable.ZoomableState
-import me.saket.telephoto.ExperimentalTelephotoApi
-import me.saket.telephoto.zoomable.ZoomableContentLocation
 import me.saket.telephoto.zoomable.rememberZoomableImageState
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -185,7 +176,6 @@ fun ReaderScreen(
     libraryStore: LibraryStore,
     downloadStore: DownloadStore,
     communityRepository: CopyCommunityRepository,
-    reviewRepository: ReviewRepository,
     onBack: () -> Unit,
     onRequestNotificationPermission: () -> Unit = {},
     onChapterVisible: (Manga, Chapter) -> Unit = { _, _ -> },
@@ -200,7 +190,7 @@ fun ReaderScreen(
     var chapterId by rememberSaveable(manga.id) { mutableStateOf(initialChapterId) }
     val chapter = chapters.firstOrNull { it.id == chapterId }
         ?: Chapter(chapterId, libraryStore.progressFor(manga.id)?.takeIf { it.chapterId == chapterId }?.chapterTitle ?: "正在阅读", 0)
-    val discussionState = rememberChapterDiscussionState(manga, chapter, communityRepository, reviewRepository)
+    val discussionState = rememberChapterDiscussionState(manga, chapter, communityRepository)
     val siblings = remember(chapters, chapter.group) { chapters.filter { it.group == chapter.group }.sortedBy(Chapter::index) }
     val hasMultipleGroups = remember(chapters) { chapters.map(Chapter::group).distinct().size > 1 }
     val chapterIndex = siblings.indexOfFirst { it.id == chapterId }
@@ -280,13 +270,9 @@ fun ReaderScreen(
             val saved = libraryStore.progressFor(manga.id, chapterId)
             pageIndex = saved?.pageIndex?.coerceIn(0, loaded.lastIndex) ?: 0
             cursor.scrollOffset = saved?.scrollOffset ?: 0
-            if (libraryStore.preferences.value.downloadWhileReading) {
-                try { downloadStore.ensureReadingDownload(manga, chapter, loaded, headers) {
-                    libraryStore.preferences.value.downloadWhileReading
-                } }
-                catch (cancelled: CancellationException) { throw cancelled }
-                catch (failure: Exception) { downloadMessage = failure.message ?: "本章暂时未能保存，可继续阅读" }
-            }
+            try { downloadStore.ensureReadingDownload(manga, chapter, loaded, headers) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { downloadMessage = failure.message ?: "本章暂时未能保存，可继续阅读" }
             downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
             pages = loaded
         } catch (cancelled: CancellationException) {
@@ -298,15 +284,6 @@ fun ReaderScreen(
 
     LaunchedEffect(chapterId, pageIndex) {
         downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
-    }
-    LaunchedEffect(chapterId, preferences.downloadWhileReading, loading) {
-        if (!loading && preferences.downloadWhileReading && pages.isNotEmpty()) {
-            try { downloadStore.ensureReadingDownload(manga, chapter, pages, headers) {
-                libraryStore.preferences.value.downloadWhileReading
-            } }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) { downloadMessage = failure.message ?: "本章暂时未能保存，可继续阅读" }
-        }
     }
 
     LaunchedEffect(controlsVisible, showSettings, showChapters, showSpreadAdjustment, showComments, loading, error, progressInteracting, touchExploration) {
@@ -355,9 +332,9 @@ fun ReaderScreen(
                         targetPage = targetPage,
                         onTargetConsumed = { targetPage = null },
                         onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
-                        onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, pages.size, offset) },
+                        onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, pages.size, offset,
+                            clearLegacyLongImagePosition = preferences.mode == ReadingMode.VERTICAL) },
                         longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
-                        onSaveLongImagePosition = { index, position -> libraryStore.saveLongImagePosition(manga.id, chapter.id, index, position) },
                         onVisibleImageLoaded = {
                             if (active && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
                                 chapterVisibilityReported = true
@@ -373,10 +350,10 @@ fun ReaderScreen(
                         },
                         onTap = { controlsVisible = !controlsVisible },
                         endContent = {
-                            ChapterDiscussion(manga, chapter, communityRepository, colors.background, colors.onSurface,
+                            ChapterDiscussion(manga, chapter, colors.background, colors.onSurface,
                                 onNext = siblings.getOrNull(chapterIndex + 1)?.let { next ->
                                     { chapterId = next.id; controlsVisible = true }
-                                }, reviewRepository = reviewRepository, state = discussionState)
+                                }, state = discussionState)
                         },
                     )
                 }
@@ -535,39 +512,10 @@ fun ReaderScreen(
         }
     }
     ReaderSettingsDialog(visible = showSettings, preferences = preferences, onDimPreview = { dimPreview.value = it }, update = { next ->
-        val downloadChoiceChanged = next.downloadWhileReading != preferences.downloadWhileReading
         if (next.mode != preferences.mode || next.doublePage != preferences.doublePage || next.coverAlone != preferences.coverAlone) {
             cursor.scrollOffset = 0
         }
         libraryStore.updatePreferences(next)
-        if (downloadChoiceChanged) {
-            if (!next.downloadWhileReading) {
-                downloadStore.entryFor(manga.id, chapter.id)
-                    ?.takeIf { it.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
-                    ?.let { downloadStore.pause(it.id) }
-            } else if (pages.isNotEmpty()) {
-                // An explicit switch-on can resume a paused/deleted task; automatic effects cannot.
-                val chapterToSave = chapter
-                val pagesToSave = pages
-                val expectedEntry = activeDownload
-                onRequestNotificationPermission()
-                scope.launch {
-                    try {
-                        val sourcePages = if (expectedEntry?.needsSourceRefresh == true)
-                            repository.pages(manga.id, chapterToSave.id, forceRefresh = true) else pagesToSave
-                        if (!libraryStore.preferences.value.downloadWhileReading) return@launch
-                        if (expectedEntry != null)
-                            downloadStore.refreshReadingDownload(manga, chapterToSave, sourcePages, headers, expectedEntry) {
-                                libraryStore.preferences.value.downloadWhileReading
-                            }
-                        else downloadStore.enqueue(manga, chapterToSave, sourcePages, headers) {
-                            libraryStore.preferences.value.downloadWhileReading
-                        }
-                    } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (failure: Exception) { downloadMessage = failure.message ?: "本章暂时未能保存，可继续阅读" }
-                }
-            }
-        }
     }) {
         dimPreview.value?.takeIf { it != preferences.dimAmount }?.let { amount ->
             libraryStore.updatePreferences(preferences.copy(dimAmount = amount))
@@ -599,8 +547,8 @@ fun ReaderScreen(
         onDismiss = { showChapters = false },
     )
     if (showComments) ChapterDiscussion(
-        manga, chapter, communityRepository, colors.background, colors.onSurface,
-        onNext = null, reviewRepository = reviewRepository,
+        manga, chapter, colors.background, colors.onSurface,
+        onNext = null,
         previewVisible = false, onClose = { showComments = false }, state = discussionState,
     )
 }
@@ -621,7 +569,6 @@ private fun ChapterPages(
     onLocation: (Int, Int) -> Unit,
     onSave: (Int, Int) -> Unit,
     longImagePosition: (Int) -> Float?,
-    onSaveLongImagePosition: (Int, Float) -> Unit,
     onVisibleImageLoaded: () -> Unit,
     onNearEnd: () -> Unit,
     onTap: () -> Unit,
@@ -636,20 +583,22 @@ private fun ChapterPages(
     val prefetchRequests = remember { mutableStateMapOf<Int, Disposable>() }
     val startPage = remember { initialPage.coerceIn(0, pages.lastIndex) }
     val startOffset = remember { initialOffset.coerceAtLeast(0) }
-    if (preferences.mode == ReadingMode.VERTICAL || preferences.mode == ReadingMode.WEBTOON) {
+    if (preferences.mode == ReadingMode.VERTICAL) {
         val list = rememberLazyListState(initialFirstVisibleItemIndex = startPage)
-        var restoring by remember { mutableStateOf(startOffset > 0) }
-        var targetMeasured by remember { mutableStateOf(pages[startPage].width > 0 && pages[startPage].height > 0) }
-        LaunchedEffect(restoring, targetMeasured) {
-            if (restoring && targetMeasured) {
+        val legacyLongPosition = remember { longImagePosition(startPage)?.takeIf { it > 0f } }
+        var restoring by remember { mutableStateOf(startOffset > 0 || legacyLongPosition != null) }
+        var targetHeight by remember { mutableIntStateOf(0) }
+        val dragging by list.interactionSource.collectIsDraggedAsState()
+        LaunchedEffect(restoring, targetHeight) {
+            if (restoring && targetHeight > 0) {
                 withFrameNanos { }
-                list.scrollToItem(startPage, startOffset)
+                // Old vertical reading kept long-image pan separately from the list offset.
+                val offset = (startOffset + (legacyLongPosition ?: 0f) * targetHeight).roundToInt()
+                list.scrollToItem(startPage, offset.coerceIn(0, targetHeight - 1))
                 restoring = false
             }
         }
-        LaunchedEffect(list) {
-            snapshotFlow { list.isScrollInProgress }.collect { moving -> if (moving && !targetMeasured) restoring = false }
-        }
+        LaunchedEffect(dragging) { if (dragging) restoring = false }
         LaunchedEffect(list) {
             snapshotFlow {
                 val layout = list.layoutInfo
@@ -666,9 +615,9 @@ private fun ChapterPages(
             }
         }
         LaunchedEffect(list) {
-            snapshotFlow { list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex) to
-                if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0 }
-                .distinctUntilChanged().collect { (index, offset) -> if (!restoring) location(index, offset) }
+            snapshotFlow { Triple(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
+                if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0, restoring) }
+                .distinctUntilChanged().collect { (index, offset, restoringNow) -> if (!restoringNow) location(index, offset) }
         }
         LaunchedEffect(list) {
             snapshotFlow { Triple(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
@@ -687,16 +636,12 @@ private fun ChapterPages(
             val anchor = list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex)
             (visible.firstOrNull()?.index ?: anchor) to (visible.lastOrNull()?.index ?: anchor)
         }
-        LazyColumn(state = list, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(if (preferences.mode == ReadingMode.VERTICAL && preferences.pageGap) 6.dp else 0.dp)) {
+        LazyColumn(state = list, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
             itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                 ReaderPage(
-                    page, headers, resolvePage = resolvePage, retryPage = retryPage, paged = false, continuous = preferences.mode == ReadingMode.WEBTOON, onTap = onTap,
-                    onMeasured = {
-                        loadedPages[index] = true
-                        if (index == startPage) targetMeasured = true
-                    },
-                    longImagePosition = { longImagePosition(index) },
-                    onSaveLongImagePosition = { onSaveLongImagePosition(index, it) },
+                    page, headers, resolvePage = resolvePage, retryPage = retryPage, paged = false, onTap = onTap,
+                    onMeasured = { loadedPages[index] = true },
+                    onHeightMeasured = { if (index == startPage) targetHeight = it },
                     onComposed = { present -> if (present) composedPages[index] = true else composedPages.remove(index) },
                     prefetch = prefetchRequests[index],
                 )
@@ -802,7 +747,6 @@ private fun ChapterPages(
 }
 
 private class ReaderCursor(var scrollOffset: Int = 0)
-private class LongImageCursor(var position: Float? = null)
 
 private data class PrefetchWindow(val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>)
 
@@ -896,7 +840,6 @@ private fun readerImageRequest(context: Context, page: Page, headers: Map<String
         .data(if (page.url.startsWith("file:")) File(URI(page.url)) else page.url)
         .httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
 
-@OptIn(FlowPreview::class)
 @Composable
 private fun ReaderPage(
     page: Page,
@@ -904,12 +847,10 @@ private fun ReaderPage(
     resolvePage: suspend (Page) -> Page,
     retryPage: suspend (Page) -> Page,
     paged: Boolean,
-    continuous: Boolean = false,
     pagedAlignment: Alignment = Alignment.Center,
     onTap: () -> Unit,
     onMeasured: () -> Unit,
-    longImagePosition: () -> Float? = { null },
-    onSaveLongImagePosition: (Float) -> Unit = {},
+    onHeightMeasured: (Int) -> Unit = {},
     onComposed: (Boolean) -> Unit = {},
     prefetch: Disposable? = null,
 ) {
@@ -920,10 +861,11 @@ private fun ReaderPage(
     val resolve by rememberUpdatedState(resolvePage)
     val retrySource by rememberUpdatedState(retryPage)
     val composed by rememberUpdatedState(onComposed)
-    val readLongImagePosition by rememberUpdatedState(longImagePosition)
-    val saveLongImagePosition by rememberUpdatedState(onSaveLongImagePosition)
+    val heightMeasured by rememberUpdatedState(onHeightMeasured)
     // Lazy layout recycling must not collapse a measured page back to its placeholder height.
     var aspect by rememberSaveable(page.index) { mutableFloatStateOf(if (page.width > 0 && page.height > 0) page.width.toFloat() / page.height else 0.7f) }
+    var dimensionsKnown by rememberSaveable(page.index) { mutableStateOf(page.width > 0 && page.height > 0) }
+    var measuredHeight by remember { mutableIntStateOf(0) }
     var error by remember(page.url) { mutableStateOf<String?>(null) }
     var loading by remember(page.url) { mutableStateOf(true) }
     var reload by remember(page.url) { mutableIntStateOf(0) }
@@ -984,6 +926,7 @@ private fun ReaderPage(
                         // may have been rounded while fitting the viewport and is only a fallback.
                         if ((page.width <= 0 || page.height <= 0) && width > 0 && height > 0) {
                             aspect = (width.toFloat() / height).coerceAtLeast(.005f)
+                            dimensionsKnown = true
                         }
                         loading = false
                         measured()
@@ -1003,41 +946,20 @@ private fun ReaderPage(
         }
         val imageError = error ?: prefetchError.takeUnless { resource?.url?.startsWith("file:") == true }
         val naturalHeight = maxWidth / aspect
-        val longImage = !paged && !continuous && naturalHeight > screenHeight * 3f
-        // Sub-sampling operates within its own layout bounds. Keep exceptionally tall
-        // images in a screen-sized viewport so off-screen tiles are actually unloaded.
-        val pageModifier = if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(if (longImage) screenHeight else naturalHeight)
+        val naturalHeightPx = with(density) { naturalHeight.roundToPx() }
+        LaunchedEffect(paged, dimensionsKnown, naturalHeightPx, measuredHeight) {
+            // A successful image request can precede its new layout. Never restore from the placeholder height.
+            if (!paged && dimensionsKnown && measuredHeight == naturalHeightPx && measuredHeight > 0) {
+                heightMeasured(measuredHeight)
+            }
+        }
+        val longImage = !paged && naturalHeight > screenHeight * 3f
+        // Vertical reading uses one continuous scroll surface for pages and long strips.
+        val pageModifier = if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(naturalHeight)
+            .onSizeChanged { measuredHeight = it.height }
         Box(pageModifier.clipToBounds(), contentAlignment = Alignment.Center) {
             if (request != null && !waitingForPrefetch && imageError == null) key(reload) {
                 val imageState = rememberZoomableImageState()
-                var longImageRestored by rememberSaveable(page.index) { mutableStateOf(false) }
-                val latestLongImagePosition = remember { LongImageCursor() }
-                if (longImage) {
-                    LaunchedEffect(imageState) {
-                        snapshotFlow {
-                            imageState.isImageDisplayed && !imageState.isPlaceholderDisplayed &&
-                                imageState.zoomableState.contentTransformation.isSpecified
-                        }.first { it }
-                        if (!longImageRestored) {
-                            readLongImagePosition()?.let { imageState.zoomableState.restoreLongImagePosition(it) }
-                            longImageRestored = true
-                        }
-                    }
-                    LaunchedEffect(imageState) {
-                        snapshotFlow {
-                            if (longImageRestored && imageState.isImageDisplayed && !imageState.isPlaceholderDisplayed) {
-                                imageState.zoomableState.longImagePosition()
-                            } else null
-                        }.filterNotNull().distinctUntilChanged()
-                            .onEach { latestLongImagePosition.position = it }
-                            .debounce(450).collect { saveLongImagePosition(it) }
-                    }
-                    DisposableEffect(imageState) {
-                        onDispose {
-                            if (longImageRestored) latestLongImagePosition.position?.let(saveLongImagePosition)
-                        }
-                    }
-                }
                 ZoomableAsyncImage(
                     model = request,
                     state = imageState,
@@ -1045,63 +967,17 @@ private fun ReaderPage(
                     modifier = Modifier.fillMaxSize(),
                     contentScale = if (paged) ContentScale.Fit else ContentScale.FillWidth,
                     alignment = if (paged) pagedAlignment else Alignment.TopCenter,
-                    gesturesEnabled = !continuous && (!longImage || longImageRestored),
+                    gesturesEnabled = !longImage,
                     onClick = { onTap() },
                 )
             }
             if (delayedLoading && imageError == null) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
-            if (longImage && !loading && imageError == null) Text(
-                "长图可在页内上下拖动",
-                color = Color.White.copy(alpha = .9f), fontSize = 11.sp,
-                modifier = Modifier.align(Alignment.TopCenter).padding(top = 10.dp)
-                    .clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = .58f))
-                    .padding(horizontal = 12.dp, vertical = 7.dp),
-            )
             if (imageError != null) Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("第 ${page.index + 1} 页未加载", color = Color.Gray, fontSize = 13.sp)
                 Text(imageError, color = Color.Gray, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
                 TextButton(onClick = { reload++ }) { Text("重载这页", color = Color.Gray) }
             }
         }
-    }
-}
-
-// In Telephoto 0.16.0, contentSize exposes the full height; coordinate-system bounds are viewport-clipped.
-@Suppress("DEPRECATION")
-private fun ZoomableState.longImagePosition(): Float? {
-    val transformation = contentTransformation
-    if (!transformation.isSpecified) return null
-    val height = transformation.contentSize.height * transformation.scale.scaleY
-    if (!height.isFinite() || height <= 0f || !transformation.offset.y.isFinite()) return null
-    return ((longImageTopOffset() - transformation.offset.y) / height).coerceIn(0f, 1f)
-}
-
-@OptIn(ExperimentalTelephotoApi::class)
-@Suppress("DEPRECATION")
-private fun ZoomableState.longImageTopOffset(): Float {
-    // The pinned library top-aligns sub-sampled tiles, but centers ordinary painters before scaling.
-    if (!autoApplyTransformations) return 0f
-    val viewport = coordinateSystem.viewportSize
-    if (viewport.width <= 0f || viewport.height <= 0f) return 0f
-    val transformation = contentTransformation
-    val origin = ZoomableContentLocation.scaledInsideAndCenterAligned(transformation.contentSize)
-        .location(viewport, LayoutDirection.Ltr).top
-    return -origin * transformation.scale.scaleY
-}
-
-@Suppress("DEPRECATION")
-private suspend fun ZoomableState.restoreLongImagePosition(position: Float) {
-    val initialScale = contentTransformation.scaleMetadata.initialScale
-    val fittedZoom = maxOf(initialScale.scaleX, initialScale.scaleY)
-    if (!fittedZoom.isFinite() || fittedZoom <= 0f) return
-    // Fresh reader sessions resume the same part of a long strip at its readable, full-width scale.
-    // Telephoto's own saveable state retains pinch zoom during configuration changes.
-    zoomTo(zoomFactor = fittedZoom, animationSpec = SnapSpec())
-    val transformation = contentTransformation
-    val height = transformation.contentSize.height * transformation.scale.scaleY
-    val distance = longImageTopOffset() - position.coerceIn(0f, 1f) * height - transformation.offset.y
-    if (height.isFinite() && height > 0f && distance.isFinite()) {
-        panBy(offset = Offset(0f, distance), animationSpec = SnapSpec())
     }
 }
 
@@ -1219,7 +1095,7 @@ private fun ReaderSettingsDialog(
     var dimAmount by remember { mutableFloatStateOf(preferences.dimAmount) }
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
-    val modes = listOf(ReadingMode.VERTICAL to "纵向", ReadingMode.WEBTOON to "条漫",
+    val modes = listOf(ReadingMode.VERTICAL to "纵向",
         ReadingMode.RIGHT_TO_LEFT to "右翻", ReadingMode.LEFT_TO_RIGHT to "左翻")
     val themes = listOf(ReaderTheme.PAPER, ReaderTheme.SEPIA, ReaderTheme.INK)
     val availableHeight = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(160).dp
@@ -1250,17 +1126,12 @@ private fun ReaderSettingsDialog(
                         )
                     }
                     ReaderToggle("保持屏幕常亮", preferences.keepScreenOn) { update(preferences.copy(keepScreenOn = it)) }
-                    ReaderToggle("边看边下", preferences.downloadWhileReading, "只保存正在阅读的章节") {
-                        update(preferences.copy(downloadWhileReading = it))
-                    }
                     Column(Modifier.fillMaxWidth().animateContentSize(
                         animationSpec = tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
                     )) {
                         if (preferences.mode == ReadingMode.VERTICAL) ReaderToggle("页间留白", preferences.pageGap) {
                             update(preferences.copy(pageGap = it))
                         }
-                        if (preferences.mode == ReadingMode.WEBTOON) Text("长图连续显示，无页间空隙",
-                            color = colors.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
                         if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
                             ReaderToggle("双页跨页", preferences.doublePage) { update(preferences.copy(doublePage = it)) }
                             if (preferences.doublePage) ReaderToggle("封面独页", preferences.coverAlone) {
