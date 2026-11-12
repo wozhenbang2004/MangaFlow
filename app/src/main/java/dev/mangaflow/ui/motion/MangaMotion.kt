@@ -6,6 +6,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.MutableTransitionState
@@ -94,6 +95,7 @@ internal object MangaMotion {
 }
 
 internal val LocalMotionEnabled = staticCompositionLocalOf { true }
+internal val LocalTabVisibilityScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
 
 @Composable
 internal fun MangaMotionProvider(content: @Composable () -> Unit) {
@@ -222,7 +224,9 @@ internal fun <T> MotionTabContent(
         }, label = "tab-content",
     ) { target ->
         val bounds = if (fillContent) Modifier.fillMaxSize() else Modifier
-        Box(bounds.motionInputGate(contentKey(target) == contentKey(selected))) { content(target) }
+        CompositionLocalProvider(LocalTabVisibilityScope provides this) {
+            Box(bounds.motionInputGate(contentKey(target) == contentKey(selected))) { content(target) }
+        }
     }
 }
 

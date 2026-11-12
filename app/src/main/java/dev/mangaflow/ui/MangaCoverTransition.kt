@@ -36,7 +36,7 @@ internal fun Modifier.mangaSharedCover(mangaId: String, placement: String? = nul
     return with(host.shared) {
         val content = rememberSharedContentState(key)
         // The carousel fits the whole artwork; the portrait detail uses a different crop.
-        if (key.placement == "discovery-featured") this@mangaSharedCover.sharedBounds(
+        if (key.placement == "discovery-featured" || key.placement.startsWith("ranking-")) this@mangaSharedCover.sharedBounds(
             content, animatedVisibilityScope = host.visibility,
             enter = fadeIn(tween(260, easing = MangaMotion.EnterEasing)),
             exit = fadeOut(tween(180, easing = MangaMotion.ExitEasing)),

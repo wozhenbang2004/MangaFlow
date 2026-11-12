@@ -240,9 +240,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             if (requestId != browseRequestId) return@launch
             if (snapshot != null) {
                 _browse.value = snapshot.restore(selection)
-                // Revalidating page zero must not truncate a restored multi-page list or
-                // mix a newly ordered ranking with older pages. Refresh stays explicit there.
-                if (snapshot.page > 0 || isFresh(snapshot.updatedAt, selection)) return@launch
+                // Fresh selections need no request. Stale rankings refresh their complete
+                // loaded range atomically, so a saved deep position never sees page zero alone.
+                if (isFresh(snapshot.updatedAt, selection) ||
+                    snapshot.page > 0 && (selection.query.isNotBlank() ||
+                        selection.mode != DiscoveryMode.RANKING)) return@launch
             }
             if (debounce) delay(450)
             if (requestId != browseRequestId) return@launch
@@ -286,14 +288,25 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long) {
         try {
             val query = state.query.trim()
-            val result = if (query.isBlank()) community.browse(state.mode, state.period, state.audience, page)
+            var result = if (query.isBlank()) community.browse(state.mode, state.period, state.audience, page)
                 else repository.search(query, page)
+            val replacement = result.items.toMutableList()
+            var loadedPage = page
+            if (query.isBlank() && state.mode == DiscoveryMode.RANKING && page == 0 && state.items.isNotEmpty()) {
+                // Never combine a new first page with old ranking pages. Keep the old list
+                // visible until the previously loaded range (or the new source end) is ready.
+                while (loadedPage < state.page && result.hasMore) {
+                    if (requestId != browseRequestId || generation != browseCache.generation) return
+                    result = community.browse(state.mode, state.period, state.audience, ++loadedPage)
+                    replacement += result.items
+                }
+            }
             if (requestId != browseRequestId || generation != browseCache.generation) return
             _browse.update { current ->
                 if (requestId != browseRequestId) current else current.copy(
-                    items = (if (page == 0) result.items else current.items + result.items).distinctBy(Manga::id),
+                    items = (if (page == 0) replacement else current.items + replacement).distinctBy(Manga::id),
                     loading = false, refreshing = false, loadingMore = false, error = null, failedPage = null,
-                    hasMore = result.hasMore, page = page,
+                    hasMore = result.hasMore, page = loadedPage,
                     updatedAt = if (page == 0 || current.updatedAt <= 0) System.currentTimeMillis() else current.updatedAt,
                 )
             }

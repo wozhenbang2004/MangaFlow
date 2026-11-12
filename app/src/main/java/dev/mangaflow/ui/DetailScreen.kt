@@ -197,6 +197,7 @@ fun DetailScreen(
             .httpHeaders(NetworkHeaders.Builder().set("User-Agent", "Mozilla/5.0")
                 .set("Referer", current.sourceUrl.ifBlank { "https://www.copy3000.com/comic/" + current.id }).build())
             .crossfade(if (motion) MangaMotion.Quick else 0)
+            .placeholderMemoryCacheKey("manga-cover:" + current.coverUrl)
             .memoryCacheKey("detail-cover:" + current.coverUrl + ":" + coverRetry).build()
     }
     val scope = rememberCoroutineScope()

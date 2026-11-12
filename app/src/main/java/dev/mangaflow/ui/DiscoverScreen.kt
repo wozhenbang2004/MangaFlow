@@ -46,6 +46,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -107,6 +108,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
@@ -202,7 +204,7 @@ fun DiscoverScreen(
                     active = unobscured && !holdingContent && pane.cacheKey == browse.cacheKey,
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
-                    onManage = { actionsManga = it },
+                    onManage = { actionsManga = it }, onRatings = { ratingsManga = it },
                     topPadding = contentTopPadding)
             }
             if (holdingContent) {
@@ -366,30 +368,46 @@ internal fun RankingControls(
     val choiceWidth = maxOf(44.dp, labelWidth + 16.dp)
     val periodWidth = choiceWidth * RankPeriod.entries.size
     BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-        val shortPeriods = maxWidth < periodWidth + 92.dp
-        // A fixed icon slot leaves all four periods room, including larger text sizes.
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            RankingPeriods(state.period, onPeriod, Modifier.weight(1f), shortPeriods)
-            Spacer(Modifier.width(4.dp))
-            RankingAudienceToggle(state.audience, onAudience, Modifier.width(44.dp))
-            Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh) }
+        if (maxWidth >= periodWidth + 92.dp) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                RankingPeriods(state.period, onPeriod, Modifier.weight(1f))
+                Spacer(Modifier.width(4.dp))
+                RankingAudienceToggle(state.audience, onAudience, Modifier.width(44.dp))
+                Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh) }
+            }
+        } else {
+            // Keep the actual period names and every choice at large font scales.
+            // Only the tools wrap; no clipped Total tab or single-letter period names.
+            val wrapLabels = maxWidth < periodWidth
+            Column(Modifier.fillMaxWidth()) {
+                RankingPeriods(state.period, onPeriod, Modifier.fillMaxWidth(), wrapLabels)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically) {
+                    RankingAudienceToggle(state.audience, onAudience, Modifier.width(44.dp))
+                    Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh) }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun RankingPeriods(period: RankPeriod, onPeriod: (RankPeriod) -> Unit, modifier: Modifier, concise: Boolean = false) {
+private fun RankingPeriods(period: RankPeriod, onPeriod: (RankPeriod) -> Unit, modifier: Modifier, wrapLabels: Boolean = false) {
+    val density = LocalDensity.current
+    val height = if (wrapLabels) maxOf(44.dp, with(density) { 28.sp.toDp() + 16.dp }) else 44.dp
     MotionTabs(selected = period.ordinal, labels = RankPeriod.entries.map { it.label },
         onSelect = { onPeriod(RankPeriod.entries[it]) }, role = Role.RadioButton,
-        modifier = modifier, fontSize = 12.sp, controlHeight = 44.dp,
+        modifier = modifier, fontSize = 12.sp, controlHeight = height,
         treatment = MotionTabTreatment.Underline,
-        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .78f),
+        indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .5f),
+        muted = MaterialTheme.colorScheme.onSurface.copy(alpha = .44f),
         selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
         itemContent = { index, selected, color ->
             val label = RankPeriod.entries[index].label
-            Text(if (concise) label.take(1) else label, color = color, fontSize = 12.sp,
+            Text(label, color = color, fontSize = 12.sp, lineHeight = 14.sp, textAlign = TextAlign.Center,
                 fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-                maxLines = 1, modifier = Modifier.semantics { contentDescription = label })
+                maxLines = if (wrapLabels) 2 else 1,
+                modifier = Modifier.semantics { contentDescription = label })
         })
 }
 
@@ -459,9 +477,9 @@ private fun DiscoveryPane(
     onMore: () -> Unit,
     onOpen: (Manga) -> Unit,
     onManage: (Manga) -> Unit,
+    onRatings: (Manga) -> Unit,
     topPadding: Dp,
 ) {
-    val coverTransition = LocalMangaCoverTransition.current
     val retainedGrid = remember(state.cacheKey) {
         val saved = positions.remove(state.cacheKey) ?: LazyGridState()
         positions[state.cacheKey] = saved
@@ -475,6 +493,8 @@ private fun DiscoveryPane(
         derivedStateOf { grid.layoutInfo.visibleItemsInfo.any { it.key == "hero" } }
     }
     val ranking = state.mode == DiscoveryMode.RANKING
+    val motion = LocalMotionEnabled.current
+    val firstEntranceIndex = remember(state.cacheKey) { retainedGrid.firstVisibleItemIndex }
     val pull = rememberBottomPullLoadState(
         key = state.cacheKey,
         enabled = active && state.items.isNotEmpty() && state.hasMore && !state.loading &&
@@ -487,7 +507,7 @@ private fun DiscoveryPane(
         columns = GridCells.Fixed(3), state = grid,
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = topPadding, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(0.dp),
+        verticalArrangement = Arrangement.spacedBy(if (ranking) 12.dp else 0.dp),
         modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
     ) {
         if (state.loading && state.items.isEmpty()) {
@@ -516,13 +536,12 @@ private fun DiscoveryPane(
                 }
             }
             if (ranking) {
-                items(state.items, key = Manga::id, span = { GridItemSpan(maxLineSpan) }) { manga ->
-                    Box(Modifier.padding(bottom = 8.dp)) {
-                        RankRow(manga, repository, state.period) {
-                            coverTransition?.select?.invoke(null)
-                            onOpen(manga)
-                        }
-                    }
+                itemsIndexed(state.items, key = { _, manga -> manga.id }, span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
+                    RankRow(manga, repository, state.period, state.cacheKey,
+                        modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
+                            placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())
+                            .rankingRowEntrance(index - firstEntranceIndex),
+                        onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
                 }
             } else {
                 items(state.items, key = Manga::id) { manga ->
@@ -746,27 +765,39 @@ private fun FeaturedManga(
 }
 
 @Composable
-private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPeriod, onClick: () -> Unit) {
+private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPeriod, listKey: String,
+    modifier: Modifier = Modifier, onRatings: () -> Unit, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
-    Row(Modifier.fillMaxWidth()
-        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+    val transition = LocalMangaCoverTransition.current
+    Row(modifier.fillMaxWidth()
+        .clickable(interactionSource = interaction, indication = null, onClick = {
+            transition?.select?.invoke(MangaCoverKey(manga.id, "ranking-$listKey"))
+            onClick()
+        })
         .motionPress(interaction, pressedScale = .985f)
         .padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(manga.rank?.toString()?.padStart(2, '0') ?: "—", fontSize = 17.sp,
+        Text(manga.rank?.toString()?.padStart(2, '0') ?: "—", fontSize = 18.sp,
+            style = MaterialTheme.typography.titleSmall.copy(fontFeatureSettings = "tnum"),
             fontWeight = if ((manga.rank ?: 99) <= 3) FontWeight.SemiBold else FontWeight.Normal,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if ((manga.rank ?: 99) <= 3) .92f else .4f),
-            maxLines = 1, modifier = Modifier.widthIn(min = 30.dp))
-        MangaCover(manga, repository, Modifier.width(54.dp).height(76.dp).mangaCoverCard(8.dp))
-        Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            MangaMetricBadges(manga, showMore = false, heatLabel = when (period) {
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if ((manga.rank ?: 99) <= 3) .82f else .38f),
+            maxLines = 1, modifier = Modifier.widthIn(min = 30.dp).padding(end = 4.dp))
+        MangaCover(manga, repository, Modifier.width(68.dp).height(98.dp)
+            .mangaSharedCover(manga.id, "ranking-$listKey").mangaCoverCard(8.dp))
+        Column(Modifier.weight(1f).padding(start = 10.dp).heightIn(min = 98.dp),
+            verticalArrangement = Arrangement.SpaceBetween) {
+            Column {
+                Text(manga.title, fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
+                    minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(manga.authors.take(2).joinToString(" / "), fontSize = 12.sp, lineHeight = 16.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .46f), minLines = 1, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+            }
+            RankingMetrics(manga, heatLabel = when (period) {
                 RankPeriod.DAY -> "日热"
                 RankPeriod.WEEK -> "周热"
                 RankPeriod.MONTH -> "月热"
                 RankPeriod.TOTAL -> "总热"
-            })
+            }, onExpand = onRatings)
         }
     }
 }
@@ -894,6 +925,7 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
     val motion = LocalMotionEnabled.current
     val request = remember(manga.id, manga.coverUrl, motion) {
         ImageRequest.Builder(context).data(manga.coverUrl)
+            .memoryCacheKey("manga-cover:" + manga.coverUrl)
             .httpHeaders(NetworkHeaders.Builder().apply {
                 repository.imageHeaders(manga.id, "").forEach { (name, value) -> set(name, value) }
             }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()

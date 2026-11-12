@@ -95,8 +95,10 @@ class CopyCommunityRepository(
             } catch (_: IllegalArgumentException) { malformed++ }
               catch (_: SourceException) { malformed++ }
         }
-        if (list.length() > 0 && malformed == list.length()) {
-            throw SourceException("$operation 返回了无法识别的漫画列表。", publicUrl)
+        if (malformed > 0 && (mode == DiscoveryMode.RANKING || malformed == list.length())) {
+            // A parse failure is not an unavailable rank. Keep the last complete snapshot
+            // and offer retry rather than silently dropping (for example) seventh place.
+            throw SourceException("$operation 这一页有 $malformed 部漫画信息不完整，请重试。", publicUrl)
         }
         // Keep the upstream ordering and rank numbers, including when unavailable rows are omitted.
         MangaPage(items.distinctBy(Manga::id), pagination.nextPage != null)
