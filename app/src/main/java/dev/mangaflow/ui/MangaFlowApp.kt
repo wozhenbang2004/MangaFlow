@@ -117,6 +117,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val metrics by model.metrics.collectAsStateWithLifecycle()
     val detail by model.detail.collectAsStateWithLifecycle()
     val reading by model.reading.collectAsStateWithLifecycle()
+    val libraryOpening by model.libraryOpening.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
     val history by model.library.history.collectAsStateWithLifecycle()
     val preferences by model.library.preferences.collectAsStateWithLifecycle()
@@ -126,6 +127,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val update by model.updates.state.collectAsStateWithLifecycle()
     var sectionName by rememberSaveable { mutableStateOf(Section.DISCOVER.name) }
     val section = Section.valueOf(sectionName)
+    val changeSection: (Section) -> Unit = { destination ->
+        model.cancelLibraryReading()
+        sectionName = destination.name
+    }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -139,7 +144,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         if (openUpdatesRequest > 0) {
             model.closeReader()
             model.closeDetail()
-            sectionName = Section.SETTINGS.name
+            changeSection(Section.SETTINGS)
             drawer.close()
         }
     }
@@ -147,16 +152,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         if (openDownloadsRequest > 0) {
             model.closeReader()
             model.closeDetail()
-            sectionName = Section.DOWNLOADS.name
+            changeSection(Section.DOWNLOADS)
             drawer.close()
         }
     }
-    BackHandler(reading != null || detail != null || drawer.isOpen || section != Section.DISCOVER) {
+    BackHandler(reading != null || detail != null || drawer.isOpen || libraryOpening != null || section != Section.DISCOVER) {
         when {
             reading != null -> model.closeReader()
             detail != null -> model.closeDetail()
             drawer.isOpen -> scope.launch { drawer.close() }
-            else -> sectionName = Section.DISCOVER.name
+            libraryOpening != null -> model.cancelLibraryReading()
+            else -> changeSection(Section.DISCOVER)
         }
     }
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)
@@ -211,7 +217,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         NavigationDrawerItem(
                             label = { Text(destination.title) },
                             selected = section == destination,
-                            onClick = { sectionName = destination.name; scope.launch { drawer.close() } },
+                            onClick = { changeSection(destination); scope.launch { drawer.close() } },
                             icon = { Icon(destination.icon, null, modifier = Modifier.size(21.dp)) },
                             shape = RoundedCornerShape(14.dp),
                             colors = NavigationDrawerItemDefaults.colors(
@@ -322,6 +328,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 Box {
                                     MotionIconButton(onClick = {
                                         closeSearch()
+                                        model.cancelLibraryReading()
                                         scope.launch { drawer.open() }
                                     }) {
                                         Icon(Icons.Outlined.Menu, if (hasUpdate) "打开导航，有新版本" else "打开导航", Modifier.size(22.dp))
@@ -352,10 +359,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Spacer(Modifier.weight(1f))
                                 }
                                 if (hasUpdate && current.section != Section.DISCOVER) {
-                                    TextButton(onClick = { sectionName = Section.SETTINGS.name }) { Text("有新版本", style = MaterialTheme.typography.labelMedium) }
+                                    TextButton(onClick = { changeSection(Section.SETTINGS) }) { Text("有新版本", style = MaterialTheme.typography.labelMedium) }
                                 }
                                 if (current.section == Section.LIBRARY) {
-                                    TextButton(onClick = { sectionName = Section.ACCOUNT.name }) { Text("云端书架") }
+                                    TextButton(onClick = { changeSection(Section.ACCOUNT) }) { Text("云端书架") }
                                 }
                             }
                             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -375,8 +382,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     )
                                     Section.LIBRARY -> LibraryScreen(
                                         favorites = favorites, history = history, repository = model.repository,
-                                        onOpen = { model.openManga(it) }, onContinue = model::continueReading,
-                                        onDiscover = { sectionName = Section.DISCOVER.name },
+                                        opening = libraryOpening, active = rootActive,
+                                        onOpen = model::readFromLibrary, onDetails = { model.openManga(it) },
+                                        onContinue = model::continueReading,
+                                        onDiscover = { changeSection(Section.DISCOVER) },
+                                        onRetryOpen = model::retryLibraryReading, onCancelOpen = model::cancelLibraryReading,
                                     )
                                     Section.DOWNLOADS -> DownloadsScreen(model.downloads, model::openDownload,
                                         model::retryDownload, refreshingDownloads)

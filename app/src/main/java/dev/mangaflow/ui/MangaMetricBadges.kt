@@ -47,6 +47,7 @@ internal fun MangaMetricBadges(
     foreground: Color = MaterialTheme.colorScheme.onSurface,
     heatLabel: String = "热",
     compact: Boolean = false,
+    maxScores: Int = if (compact) 2 else Int.MAX_VALUE,
 ) {
     val state = LocalMangaMetrics.current
     // Lazy containers may briefly compose a passing item; don't start work for every fling.
@@ -70,7 +71,7 @@ internal fun MangaMetricBadges(
         }
         val scores = metrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
             .sortedBy { ReviewProviders.order(it.sourceId) }
-        val visible = if (compact) scores.take(2) else scores
+        val visible = scores.take(maxScores.coerceAtLeast(0))
         visible.forEach { metric ->
             metric.score?.let { score ->
                 val provider = ReviewProviders.find(metric.sourceId)

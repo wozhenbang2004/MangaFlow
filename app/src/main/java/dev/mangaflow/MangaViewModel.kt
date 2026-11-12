@@ -88,6 +88,12 @@ data class ReadingSession(
     val chaptersError: String? = null,
 )
 
+data class LibraryOpenState(
+    val manga: Manga,
+    val loading: Boolean = true,
+    val error: String? = null,
+)
+
 data class AccountUiState(
     val profile: AccountProfile? = null,
     val busy: Boolean = true,
@@ -128,6 +134,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val detail = _detail.asStateFlow()
     private val _reading = MutableStateFlow<ReadingSession?>(null)
     val reading = _reading.asStateFlow()
+    private val _libraryOpening = MutableStateFlow<LibraryOpenState?>(null)
+    val libraryOpening = _libraryOpening.asStateFlow()
     private val _refreshingDownloads = MutableStateFlow<Set<String>>(emptySet())
     val refreshingDownloads = _refreshingDownloads.asStateFlow()
     private val messages = Channel<String>(Channel.BUFFERED)
@@ -143,6 +151,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private var detailJob: Job? = null
     private var reviewJob: Job? = null
     private var readingCatalogJob: Job? = null
+    private var libraryOpenJob: Job? = null
+    private var libraryOpenRequestId = 0L
     private var chapterPrefetchJob: Job? = null
     private var chapterPrefetchKey: String? = null
     private var readingRequestId = 0L
@@ -439,6 +449,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openManga(manga: Manga, continueChapterId: String? = null) {
+        cancelLibraryReading()
         detailJob?.cancel()
         reviewJob?.cancel()
         reviewPageJobs.values.forEach { it.cancel() }
@@ -661,7 +672,60 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         openSavedChapter(progress.manga, progress.chapterId, progress.chapterTitle)
     }
 
+    fun readFromLibrary(manga: Manga) {
+        if (_libraryOpening.value?.let { it.manga.id == manga.id && it.loading } == true) return
+        cancelLibraryReading()
+        library.progressFor(manga.id)?.takeIf { it.chapterId.isNotBlank() }?.let {
+            continueReading(it)
+            return
+        }
+        val requestId = libraryOpenRequestId
+        _libraryOpening.value = LibraryOpenState(manga)
+        val request = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val memory = repository.cachedDetail(manga.id)?.takeIf { it.chapters.isNotEmpty() }
+                val saved = if (memory == null) readerCatalogs.read(manga.id) else null
+                if (requestId != libraryOpenRequestId) return@launch
+                // Only a full directory establishes the first chapter; a download may start midway.
+                val catalog = memory ?: saved ?: repository.detail(manga.id)
+                if (requestId != libraryOpenRequestId) return@launch
+                val first = catalog.chapters.minByOrNull(Chapter::index)?.takeIf { it.id.isNotBlank() }
+                    ?: throw IllegalStateException("暂时没有可读章节，请稍后重试。")
+                if (memory == null && saved == null) readerCatalogs.save(catalog)
+                if (requestId != libraryOpenRequestId) return@launch
+                // Detach before beginReading invalidates other navigation intents; do not cancel this job.
+                libraryOpenJob = null
+                _libraryOpening.value = null
+                closeDetail()
+                beginReading(ReadingSession(catalog.manga, catalog.chapters, first.id,
+                    chaptersLoading = saved != null))
+                if (saved != null) loadReadingCatalog()
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                if (requestId == libraryOpenRequestId) {
+                    _libraryOpening.value = LibraryOpenState(manga, loading = false,
+                        error = failure.message ?: "暂时无法打开这本漫画，请重试。")
+                }
+            }
+        }
+        libraryOpenJob = request
+        request.start()
+    }
+
+    fun retryLibraryReading() {
+        _libraryOpening.value?.takeUnless { it.loading }?.manga?.let(::readFromLibrary)
+    }
+
+    fun cancelLibraryReading() {
+        libraryOpenRequestId++
+        libraryOpenJob?.cancel()
+        libraryOpenJob = null
+        _libraryOpening.value = null
+    }
+
     private fun beginReading(session: ReadingSession) {
+        cancelLibraryReading()
         readingCatalogJob?.cancel()
         chapterPrefetchJob?.cancel()
         chapterPrefetchKey = null
@@ -800,6 +864,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeReader() {
+        cancelLibraryReading()
         readingRequestId++
         readingCatalogJob?.cancel()
         chapterPrefetchJob?.cancel()

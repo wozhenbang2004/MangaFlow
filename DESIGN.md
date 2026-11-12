@@ -10,6 +10,24 @@ Run `43190352044` (0.1.37) compiled and signed, then failed in `reserve_tag`. Th
 
 This follow-up uses existing CI logs, official API contracts and source/diff review. No tests or local build. Submit to current main and confirm the next CI trigger; the new compilation and publication result remains unverified at delivery.
 
+## Physical collection shelf · 2026-11-12
+
+User: “收藏书架这块我希望做成真的那种书架你去看看怎么做先去社区研究下”, followed by “有源码吗去给我们项目做这部分功能设计好”. Recorded from this conversation at 09:33 UTC; exact message IDs are unavailable. The supplied empty-library screenshot is the before-state. The second instruction authorizes adapting the researched source into MangaFlow; it is not approval of an Android visual result.
+
+This replaces DENSITY-05's flat collection grid. DENSITY-04's compact header, history rows and independent saved positions remain. The adopted source is Petar Gyurov's `virtual-bookshelf`, commit `3c1073227df161d87eb48e7286bb7748cd22cd4d`, under the Unlicense. Its actual `book/spine/cover/top` construction and bottom-anchored extraction are adapted in `BookshelfBook.kt`; the original source slice and license are retained under `third_party/virtual-bookshelf/`. No WebView or new runtime dependency is added. The light Shelf Expression reference informs the quiet shelf surface only; its non-commercial project/assets are not copied. KOReader's mixed shelf informed orientation, not its preview-first opening flow.
+
+| ID | Design and implementation | Observable requirement / current evidence |
+| --- | --- | --- |
+| SHELF-01 | Favorites become a lazy stack of light, shallow planks, with a front edge, contact shadow and upright books. Each row starts with a full real cover, followed by narrower spines. Use theme surfaces, paper edges and restrained shadows; no wood texture, random heights/colors or decorative room. | Book bottoms meet the plank; titles and real source badges remain readable. Full covers use Fit. Current status: source adaptation; device appearance pending. |
+| SHELF-02 | Use approximately 114dp front-cover slots, at least 76dp spine slots, 10dp gaps and 16dp side margins; reflow with width and font scale. Book bodies are approximately 164dp high. Spine drawings stay narrow inside their larger hit slots. Put compact labels/badges below each plank. | Long titles truncate visibly but remain complete in accessibility/details. Enlarged text reduces books per row. Row composition follows the stored favorite order and does not change after reading progress updates. |
+| SHELF-03 | Short press starts/resumes reading immediately; long press opens the existing detail/catalog route. The actual press/first-open state drives a restrained bottom-anchored lift/turn using the existing motion constants. Drawing transforms are inside a fixed combined-clickable target. | No animation delay before data/navigation, hover-only controls, drag-to-open interception or second preview tap. Normal vertical scrolling cancels a press; reduced motion keeps static feedback. |
+| SHELF-04 | Reuse the original ReadingProgress continuation path. First-time reading resolves a complete in-memory, persisted or online directory and chooses its lowest chapter index. A single cancellable opening request owns the per-book busy/error state. | Restore the exact chapter/page/offset; never choose the first downloaded subset as the first chapter. Empty/failing directories stay on the shelf with retry/cancel. A later book, history tab, detail route or navigation away invalidates stale navigation. |
+| SHELF-05 | Keep an actual empty shelf when favorites are empty: two shallow planks and a compact “去发现” action. Keep independent saveable collection/history positions inside the existing root-LIBRARY state provider. | No invented books, progress or scores. Returning from reading keeps the shelf location. Existing favorites, cloud state, downloads and reader storage formats are unchanged. |
+
+Implementation review: the integrated source has been read independently for opening/cancellation, saved-position reuse, fixed hit targets and badge defaults. No source-level blocker was found. The final merge preserves main's concurrent rating-loading and CI repairs.
+
+Scope: local collection presentation, direct opening, the existing shared badge's optional score limit, retained upstream source and these records. Source/diff review and direct main CI trigger follow AGENTS.md. No tests, lint, local build, emulator, API probe or visual fixtures. Compilation, dark/light appearance, large-font layout and phone gesture feel remain unverified until the CI artifact and user feedback; source review does not close those items.
+
 ## Search morph correction · 2026-11-12
 
 User: “搜索框的那个还不是不行去看看我们审美库吧肯定有类似我描述的那种效果的”. This rejects the search appearance delivered at `9527c84`; it does not accept SEARCH-02's visual result. The earlier “点击后图标会有一些动画然后搜索框从图标左侧展出” and floating liquid-glass request remain active.

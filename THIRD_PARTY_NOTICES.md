@@ -1,5 +1,23 @@
 # Third-party notices
 
+## Virtual bookshelf
+
+The local collection's `ui/BookshelfBook.kt` adapts Petar Gyurov's
+`virtual-bookshelf`, fixed commit `3c1073227df161d87eb48e7286bb7748cd22cd4d`:
+`https://github.com/petargyurov/virtual-bookshelf/tree/3c1073227df161d87eb48e7286bb7748cd22cd4d`.
+
+The upstream `.spine`, `.cover`, `.top`, vertical title and bottom-anchored
+rotation/translation are adapted to Compose drawing and the app's existing motion.
+The app uses real manga covers, stable book slots, direct reading and accessible
+press/long-press actions; upstream random appearance and desktop-only hover are
+removed. No upstream book data or cover artwork is bundled. This is a source
+adaptation, not the original website running inside the app.
+
+The original key source files, byte manifest, full **Unlicense** text and precise
+adaptation map are retained in `third_party/virtual-bookshelf/`. No additional
+runtime library is required. Source retention and review do not establish Android
+compilation, appearance or user acceptance.
+
 ## Public rating and comment contracts · 2026-11-12
 
 MangaFlow's additional adapters are independently implemented against public documentation

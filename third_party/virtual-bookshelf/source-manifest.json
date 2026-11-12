@@ -1,0 +1,49 @@
+{
+  "repo": "petargyurov/virtual-bookshelf",
+  "commit": "3c1073227df161d87eb48e7286bb7748cd22cd4d",
+  "scope": "Key source files only; not a complete repository or a tested Android component",
+  "files": [
+    {
+      "path": "bookshelf.css",
+      "url": "https://raw.githubusercontent.com/petargyurov/virtual-bookshelf/3c1073227df161d87eb48e7286bb7748cd22cd4d/bookshelf.css",
+      "bytes": 4989,
+      "sha256": "24424ffc6f584427413019a5168cae6ce340d28ceabb5355e35161489e439e88",
+      "stored_as": "bookshelf.css"
+    },
+    {
+      "path": "bookshelf.js",
+      "url": "https://raw.githubusercontent.com/petargyurov/virtual-bookshelf/3c1073227df161d87eb48e7286bb7748cd22cd4d/bookshelf.js",
+      "bytes": 2431,
+      "sha256": "d04ec9b4c062b131808a3e90021d78f4acea4f036c8067af31bfa59f011f9128",
+      "stored_as": "bookshelf.js"
+    },
+    {
+      "path": "utils.js",
+      "url": "https://raw.githubusercontent.com/petargyurov/virtual-bookshelf/3c1073227df161d87eb48e7286bb7748cd22cd4d/utils.js",
+      "bytes": 1018,
+      "sha256": "db64ee45419fb3b7c59d75da749a164984018f96e971c06c91e14e095c3a6b02",
+      "stored_as": "utils.js"
+    },
+    {
+      "path": "index.html",
+      "url": "https://raw.githubusercontent.com/petargyurov/virtual-bookshelf/3c1073227df161d87eb48e7286bb7748cd22cd4d/index.html",
+      "bytes": 490,
+      "sha256": "d092149cc800a1f5847f67a5fcf44a3c985f5b7fbb891243bbbce2645b905f53",
+      "stored_as": "index.html"
+    },
+    {
+      "path": "LICENSE",
+      "url": "https://raw.githubusercontent.com/petargyurov/virtual-bookshelf/3c1073227df161d87eb48e7286bb7748cd22cd4d/LICENSE",
+      "bytes": 1211,
+      "sha256": "6b0382b16279f26ff69014300541967a356a666eb0b91b422f6862f6b7dad17e",
+      "stored_as": "LICENSE"
+    },
+    {
+      "path": "README.md",
+      "url": "https://raw.githubusercontent.com/petargyurov/virtual-bookshelf/3c1073227df161d87eb48e7286bb7748cd22cd4d/README.md",
+      "bytes": 1855,
+      "sha256": "dcd01aa2c70b337da213ee0f8b22b318127846ae805a5ba0cf7d0dba11abaa10",
+      "stored_as": "UPSTREAM_README.txt"
+    }
+  ]
+}
