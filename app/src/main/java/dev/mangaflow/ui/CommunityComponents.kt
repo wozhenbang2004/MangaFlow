@@ -438,6 +438,7 @@ private fun CommentContent(
                 if (review.date.isNotBlank()) Text(compactCommentDate(review.date), color = muted, fontSize = if (comfortable) 11.sp else 10.sp,
                     modifier = Modifier.widthIn(max = 76.dp).semantics { contentDescription = review.date },
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (canTranslate) CommentTranslationAction(translationText, muted)
                 if (expandable) Icon(
                     if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
                     null, tint = muted, modifier = Modifier.size(14.dp))
@@ -473,14 +474,13 @@ private fun CommentContent(
                     onTextLayout = { if (!expanded) overflows = it.hasVisualOverflow })
             }
             if ((review.upVotes ?: 0) > 0 || (review.downVotes ?: 0) > 0 ||
-                (revealed && conceal) || canTranslate ||
+                (revealed && conceal) ||
                 (showReplyCount && (review.replyCount ?: 0) > 0)) {
                 FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (conceal && revealed) TextButton(onClick = toggleContent,
                         contentPadding = PaddingValues(end = 12.dp)) {
                         Text(if (review.kind == ReviewKind.REVIEW) "收起长评" else "隐藏剧透", color = muted, fontSize = 11.sp)
                     }
-                    if (canTranslate) CommentTranslationAction(translationText, muted)
                     review.upVotes?.takeIf { it > 0 }?.let {
                         Text("${review.positiveVoteLabel} $it", color = muted, fontSize = 10.sp,
                             modifier = Modifier.align(Alignment.CenterVertically).padding(end = 4.dp))

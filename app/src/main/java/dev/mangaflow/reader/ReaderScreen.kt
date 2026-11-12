@@ -612,7 +612,10 @@ fun ReaderScreen(
                     }
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
                         val actionsScroll = rememberScrollState()
-                        val narrow = maxWidth < 300.dp
+                        val canCorrectSpread = preferences.doublePage &&
+                            preferences.mode in setOf(ReadingMode.RIGHT_TO_LEFT, ReadingMode.LEFT_TO_RIGHT)
+                        val hasMoreActions = canCorrectSpread || returnLocation != null
+                        val narrow = maxWidth < (if (hasMoreActions) 348.dp else 300.dp)
                         Row(Modifier.fillMaxWidth().then(if (narrow) Modifier.horizontalScroll(actionsScroll) else Modifier),
                             verticalAlignment = Alignment.CenterVertically) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -629,6 +632,13 @@ fun ReaderScreen(
                             Spacer(Modifier.width(12.dp))
                             if (!narrow) Spacer(Modifier.weight(1f))
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                ReaderIcon(
+                                    if (currentPictureCollected) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                    if (currentPictureCollected) "取消画面收藏" else if (currentPicture?.spread == true) "收藏当前跨页" else "收藏当前画面",
+                                    enabled = currentPicture != null, interactive = controlsVisible,
+                                ) {
+                                    currentPicture?.let { togglePicture(it.firstPage, it.lastPage) }
+                                }
                                 ReaderIcon(
                                     Icons.Outlined.Forum,
                                     if (localImport) "本地章节没有在线评论" else "本章评论",
@@ -688,24 +698,16 @@ fun ReaderScreen(
                                 }
                                 key(chapterId) {
                                     Box {
-                                        ReaderIcon(Icons.Outlined.MoreHoriz, "更多阅读操作", interactive = controlsVisible) {
+                                        if (hasMoreActions) ReaderIcon(Icons.Outlined.MoreHoriz, "更多阅读操作", interactive = controlsVisible) {
                                             showReaderActions = !showReaderActions
                                         }
                                         CompactGlassPopover(
-                                            visible = showReaderActions && controlsVisible && active && !leavingReader,
+                                            visible = hasMoreActions && showReaderActions && controlsVisible && active && !leavingReader,
                                             backdrop = readerBackdrop, aboveAnchor = true,
                                             onDismiss = { showReaderActions = false },
                                             onPresenceChange = { readerActionsPresent = it },
                                         ) {
-                                            CompactMenuAction(
-                                                if (currentPictureCollected) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                                if (currentPictureCollected) "取消画面收藏" else if (currentPicture?.spread == true) "收藏当前跨页" else "收藏当前画面",
-                                                enabled = showReaderActions && currentPicture != null,
-                                            ) {
-                                                showReaderActions = false
-                                                currentPicture?.let { togglePicture(it.firstPage, it.lastPage) }
-                                            }
-                                            if (preferences.doublePage && (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT)) {
+                                            if (canCorrectSpread) {
                                                 CompactMenuAction(Icons.Rounded.Tune, "校正双页", enabled = showReaderActions) {
                                                     showReaderActions = false
                                                     showSpreadAdjustment = true

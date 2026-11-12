@@ -1,5 +1,18 @@
 # MangaFlow detail · 2026-11-12
 
+## Device-feedback reversals and exposed page collection · 2026-11-13 (current)
+
+User: “详情页除了每一话的那个改动其他的全弄回原来的。” (`1000121464.jpg`, `1000121467.jpg`); “翻译占的空间太大了” (`1000121468.jpg`); “轮播图下面那个栏也弄回原来的吧” (`1000121469.jpg`); “而是收藏当前页没必要放到那吧直接摆出来就行吧” (`1000121470.jpg`). These supersede DETAIL-READABLE-01/02, DETAIL-DOCK-02, CAROUSEL-06's continuous indicator, and the picture-collection part of READER-CONSOLE-04.
+
+| ID | Current implementation decision | Acceptance boundary |
+| --- | --- | --- |
+| DETAIL-RESTORE-03 | Restore `3aa84ee`'s large fixed artwork, overlaid title/author/synopsis/tags/ratings, cover gradient/collapse, toolbar, chapter/comment selector and progress-ring continuation dock. Restore the old single catalog toolbar; retain the current individual chapter/volume status, actual saved progress, download marks. Restore the old download-mode interaction, where tapping a chapter requests that chapter directly. | The artwork/information/tab/dock layout matches the old source, with current chapter data and the cached cover placeholder integrated. Keep independent chapter positions and distinguish completed reading from completed downloading. No snapshot, storage or source rollback. |
+| COMMENTS-TRANSLATE-02 | Put the existing translation handoff beside the author/source/date metadata as a 20dp-minimum text action. Remove translation from the footer condition so a translation-only comment does not reserve another button row. | Preserve native translation/copy fallback and spoiler/reveal gating. Long names ellipsize, dates remain single-line, and the action grows with text instead of clipping. The source text is untouched. |
+| HOME-INDICATOR-02 | Restore the pre-`3aa84ee` animated dot/short-pill carousel position indicator and its 12dp spacing, retaining the current actual carousel, artwork and placement keys. Mirror visual order for RTL. | No continuous gray track below the carousel. Position follows the current focused recommendation; autoplay, native drag and reduced motion keep the same owners. |
+| READER-COLLECT-05 | Show the current-page/spread heart directly beside comment/download actions. Only spread correction and return-location remain in More; hide the More trigger when neither applies. Base horizontal scrolling on the actual six/seven 48dp action slots and 12dp group gap. | The visible heart uses the current original-page range, filled/unfilled saved state and existing persistence callback. No extra popup is required to save or unsave a picture, and seek width/release behavior remains unchanged. |
+
+Source/diff review only; no tests, local build, API probes, simulator or UI automation. Direct main and observed CI trigger remain the delivery boundary; all screenshots are user-provided before-state evidence and the revised device result remains pending feedback.
+
 ## Ranking hierarchy, native scores and retained browsing · 2026-11-12 (current)
 
 User: “顶部导航太臃肿、评分信息缺乏层级、榜单列表的视觉节奏不够统一”; “移除 `+3` 这种无说明数字，其余评分通过点击评分区域查看”; “不能为了排版美观擅自重编号”; “榜单切换时保留各自的滚动位置”; “切换榜单时不要重复请求已经缓存的数据，保持列表稳定，后台更新再平滑替换”; “去修”. This supersedes DENSITY-03 and METRICS-04's one-band/+N treatment for ranking rows only.

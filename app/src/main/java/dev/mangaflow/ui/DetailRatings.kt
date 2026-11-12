@@ -60,7 +60,7 @@ internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean
     val valueStyle = MaterialTheme.typography.labelMedium.copy(
         fontFamily = FontFamily.SansSerif, fontSize = 14.sp, lineHeight = 20.sp,
         fontWeight = FontWeight.Medium, letterSpacing = 0.sp, fontFeatureSettings = "tnum")
-    Row(Modifier.fillMaxWidth().heightIn(min = 34.dp)
+    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp)
         .clickable(enabled = enabled, role = Role.Button, onClickLabel = "查看各站评分、样本与口径", onClick = onExpand),
         verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.weight(1f).horizontalScroll(rememberScrollState(), enabled = enabled),

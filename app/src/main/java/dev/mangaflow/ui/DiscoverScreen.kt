@@ -662,7 +662,9 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
         }
     }
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val indicator by animateFloatAsState(focused.toFloat(),
+        if (motion) tween(240, easing = MangaMotion.EnterEasing) else snap(), label = "featured-position")
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val itemHeight = (224f * LocalDensity.current.fontScale.coerceAtLeast(1f)).dp
             val peekWidth = (maxWidth * .15f).coerceIn(44.dp, 80.dp)
@@ -698,14 +700,15 @@ private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, vi
         }
         if (manga.size > 1) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             val color = MaterialTheme.colorScheme.onSurface
-            Canvas(Modifier.size(width = 64.dp, height = 3.dp).clearAndSetSemantics { }) {
-                val fraction = (position / manga.lastIndex).coerceIn(0f, 1f)
-                val thumbWidth = 16.dp.toPx().coerceAtMost(size.width)
-                val x = (size.width - thumbWidth) * (if (rtl) 1f - fraction else fraction)
-                val radius = CornerRadius(size.height / 2f)
-                drawRoundRect(color.copy(alpha = .10f), cornerRadius = radius)
-                drawRoundRect(color.copy(alpha = .42f), topLeft = Offset(x, 0f),
-                    size = Size(thumbWidth, size.height), cornerRadius = radius)
+            Canvas(Modifier.size(width = (manga.size * 16).dp, height = 4.dp).clearAndSetSemantics { }) {
+                repeat(manga.size) { index ->
+                    val visualIndex = if (rtl) manga.lastIndex - index else index
+                    val weight = (1f - kotlin.math.abs(indicator - index)).coerceIn(0f, 1f)
+                    val width = (4f + 10f * weight).dp.toPx()
+                    drawRoundRect(color.copy(alpha = .13f + .45f * weight),
+                        topLeft = Offset((visualIndex * 16 + 8).dp.toPx() - width / 2f, 0f),
+                        size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
+                }
             }
         }
     }

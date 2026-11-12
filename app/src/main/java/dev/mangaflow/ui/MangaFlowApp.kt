@@ -373,10 +373,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             onRestart = model::restartChapter,
                             onContinue = model::continueReading,
                             onDownload = { onRequestNotifications(); model.downloadChapter(it) },
-                            onDownloadBatch = { selected ->
-                                onRequestNotifications()
-                                selected.forEach(model::downloadChapter)
-                            },
                             onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                             onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
                             loadReplies = model::reviewReplies,

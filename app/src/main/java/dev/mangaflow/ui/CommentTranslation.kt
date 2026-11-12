@@ -8,11 +8,14 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -25,9 +28,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -53,7 +58,7 @@ internal fun hasForeignCommentText(text: String): Boolean {
 /** Uses the phone's native text tools only after a tap; their result never replaces the original. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun CommentTranslationAction(text: String, color: Color) {
+internal fun CommentTranslationAction(text: String, color: Color, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     var fallbackVisible by remember(text) { mutableStateOf(false) }
     var message by remember(text) { mutableStateOf("") }
@@ -66,21 +71,23 @@ internal fun CommentTranslationAction(text: String, color: Color) {
         fallbackVisible = true
     }
 
-    TextButton(onClick = {
-        // Stay well below Binder's transaction limit; never silently translate a truncated review.
-        if (text.length > 32_000) {
-            showFallback("这条评论较长。", allowTools = false)
-        } else {
-            val target = translationIntent(context, text)
-            when {
-                target == null -> showFallback("手机未提供直接翻译。", allowTools = true)
-                !openTextTool(context, target, "选择翻译应用") ->
-                    showFallback("暂时无法打开翻译应用。", allowTools = true)
+    val interaction = remember { MutableInteractionSource() }
+    Box(modifier.heightIn(min = 20.dp)
+        .semantics { contentDescription = "用手机上的翻译应用翻译评论" }
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = {
+            // Stay well below Binder's transaction limit; never silently translate a truncated review.
+            if (text.length > 32_000) {
+                showFallback("这条评论较长。", allowTools = false)
+            } else {
+                val target = translationIntent(context, text)
+                when {
+                    target == null -> showFallback("手机未提供直接翻译。", allowTools = true)
+                    !openTextTool(context, target, "选择翻译应用") ->
+                        showFallback("暂时无法打开翻译应用。", allowTools = true)
+                }
             }
-        }
-    }, modifier = Modifier.semantics { contentDescription = "用手机上的翻译应用翻译评论" },
-        contentPadding = PaddingValues(horizontal = 4.dp)) {
-        Text("翻译", color = color, fontSize = 11.sp)
+        }).padding(horizontal = 4.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {
+        Text("翻译", color = color, fontSize = 11.sp, lineHeight = 16.sp)
     }
 
     MotionDialog(visible = fallbackVisible, onDismissRequest = { fallbackVisible = false }) {
