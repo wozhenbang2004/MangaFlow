@@ -85,10 +85,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Brush
@@ -313,15 +314,15 @@ fun DetailScreen(
         val compactHero = availableHeight < 600.dp
         val collapsedHero = availableHeight < 420.dp
         val seamHeight = if (collapsedHero) 0.dp else 8.dp
-        // Real artwork headroom keeps a small initial scroll above the sharp poster/title.
-        // Keep this space above the book, never between its metadata and section tabs.
-        val artworkHeadroom = if (compactHero) 28.dp
-            else (availableHeight * .10f).coerceIn(56.dp, 88.dp)
+        // Safety belongs to the artwork's content, not a clipped viewport below the toolbar.
+        val toolbarClearance = statusInset + 56.dp
+        val toolbarPixels = with(density) { toolbarClearance.roundToPx() }
+        val artworkHeadroom = toolbarClearance + if (compactHero) 8.dp else 16.dp
         var naturalHeroHeight by remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
         // The book information owns its height; never reserve a percentage of
         // the screen below short metadata.
         val heroHeight = if (collapsedHero) 0.dp else with(density) { naturalHeroHeight.toDp() }
-        val atmosphereHeight = heroHeight + statusInset + 56.dp + seamHeight
+        val atmosphereHeight = heroHeight + seamHeight
         // Finish fading before the clipping edge, leaving identical body color on both sides.
         val atmosphereFadeEnd = (1f - 24.dp / atmosphereHeight.coerceAtLeast(1.dp)).coerceIn(.65f, .96f)
         val atmosphereFadeStart = (atmosphereFadeEnd - 104.dp / atmosphereHeight.coerceAtLeast(1.dp))
@@ -329,12 +330,15 @@ fun DetailScreen(
         val heroPixels = with(density) { heroHeight.toPx() }
         val collapseTravelScale = if (compactHero) .84f else .76f
         val collapseRange = heroPixels / collapseTravelScale
-        val header = rememberTopAppBarState(initialHeightOffsetLimit = -collapseRange)
+        val header = key(current.id) { rememberTopAppBarState(initialHeightOffsetLimit = -collapseRange) }
         val dockScrollTravel = with(density) { 96.dp.toPx() }
-        val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel) {
+        val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel, heroPixels, collapseTravelScale) {
             derivedStateOf {
                 if (activeSection != 0) 0f else {
-                    val coverProgress = ((header.collapsedFraction - .12f) / .68f).coerceIn(0f, 1f)
+                    // Start with the first actual pixel; an unmeasured header is not a scroll.
+                    val coverTravel = if (heroPixels > 0f)
+                        (-header.heightOffset * collapseTravelScale).coerceIn(0f, heroPixels) else 0f
+                    val coverProgress = (coverTravel / dockScrollTravel).coerceIn(0f, 1f)
                     val catalogProgress = catalogGrid?.let { grid ->
                         if (grid.firstVisibleItemIndex > 0) 1f
                         else (grid.firstVisibleItemScrollOffset / dockScrollTravel).coerceIn(0f, 1f)
@@ -348,7 +352,7 @@ fun DetailScreen(
         )
         SideEffect {
             if (header.heightOffsetLimit != -collapseRange) {
-                val collapsed = header.collapsedFraction
+                val collapsed = if (header.heightOffsetLimit < 0f) header.collapsedFraction else 0f
                 contentsJump?.cancel()
                 header.heightOffsetLimit = -collapseRange
                 header.heightOffset = -collapseRange * collapsed
@@ -421,20 +425,19 @@ fun DetailScreen(
             }
             Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
                 .align(Alignment.TopCenter).nestedScroll(scrolling)) {
-                ArtworkToolbar(
-                    header = header, compact = collapsedHero, title = current.title, backdrop = artworkBackdrop,
-                    favorite = isFavorite, coverFailed = coverFailed, active = active,
-                    coverLight = lightDetail,
-                    comments = activeSection == 1, commentCount = commentCount,
-                    sceneColor = informationTone.copy(alpha = .32f),
-                    onBack = onBack, onIntroduction = { fullIntroduction = true },
-                    onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() }, onRetryCover = {
-                        coverFailed = false
-                        coverRetry++
-                    },
-                )
                 Box(
-                    Modifier.fillMaxWidth().clipToBounds()
+                    Modifier.fillMaxWidth()
+                        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                        .drawWithContent {
+                            drawContent()
+                            if (size.height > 0f) {
+                                // The sharp poster passes behind the controls and fades only at the window edge.
+                                drawRect(Brush.verticalGradient(
+                                    colors = listOf(Color.Transparent, Color.Black),
+                                    endY = minOf(size.height, 28.dp.toPx()).coerceAtLeast(1f),
+                                ), blendMode = BlendMode.DstIn)
+                            }
+                        }
                         .scrollable(artworkScroll, Orientation.Vertical,
                             reverseDirection = true, enabled = active)
                         .layout { measurable, constraints ->
@@ -446,7 +449,9 @@ fun DetailScreen(
                             )
                             val expanded = if (collapsedHero) 0 else foreground.height
                             val offset = (header.heightOffset * collapseTravelScale).roundToInt().coerceIn(-expanded, 0)
-                            layout(foreground.width, (expanded + offset).coerceIn(constraints.minHeight, constraints.maxHeight)) {
+                            val visibleHeight = maxOf(toolbarPixels, expanded + offset)
+                                .coerceIn(constraints.minHeight, constraints.maxHeight)
+                            layout(foreground.width, visibleHeight) {
                                 foreground.placeRelative(0, offset)
                             }
                         },
@@ -529,6 +534,33 @@ fun DetailScreen(
                         }
                     }
                 }
+            }
+            // Keep toolbar hit targets safe while the real clear artwork scrolls under them.
+            Box(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxWidth()
+                .height(toolbarClearance + 24.dp).align(Alignment.TopCenter)
+                .drawBehind {
+                    val reveal = if (collapsedHero) 1f
+                        else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
+                    val end = size.height.coerceAtLeast(1f)
+                    val solidEnd = (toolbarClearance.toPx() / end).coerceIn(0f, .99f)
+                    drawRect(Brush.verticalGradient(
+                        0f to informationTone.copy(alpha = reveal),
+                        solidEnd to informationTone.copy(alpha = reveal),
+                        1f to informationTone.copy(alpha = 0f),
+                    ))
+                }) {
+                ArtworkToolbar(
+                    header = header, compact = collapsedHero, title = current.title, backdrop = artworkBackdrop,
+                    favorite = isFavorite, coverFailed = coverFailed, active = active,
+                    coverLight = lightDetail,
+                    comments = activeSection == 1, commentCount = commentCount,
+                    sceneColor = Color.Transparent,
+                    onBack = onBack, onIntroduction = { fullIntroduction = true },
+                    onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() }, onRetryCover = {
+                        coverFailed = false
+                        coverRetry++
+                    },
+                )
             }
         }
         DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
@@ -857,27 +889,27 @@ private fun DetailSections(
     downloadMode: Boolean, onToggleDownload: () -> Unit,
 ) {
     val labels = listOf("章节", "评论")
-    BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 4.dp)) {
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 2.dp)) {
         val availableWidth = maxWidth
         val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-        val tabWidth = (208f * scale).dp.coerceAtMost((availableWidth - 52.dp).coerceAtLeast(0.dp))
+        val tabWidth = (164f * scale).dp.coerceAtMost((availableWidth - 52.dp).coerceAtLeast(0.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             MotionTabs(selected, labels, onSelect, modifier = Modifier.width(tabWidth),
                 foreground = DetailForeground, muted = DetailSecondary,
                 track = Color.Transparent, indicator = DetailForeground.copy(alpha = .85f),
-                compact = false, controlHeight = 48.dp, fontSize = 15.sp,
+                compact = true, controlHeight = 40.dp, fontSize = 13.sp,
                 treatment = MotionTabTreatment.Underline,
                 itemContent = { index, chosen, color ->
                     val count = if (index == 0) chapterCount.takeIf { it > 0 }?.toString() else commentCount
                     Row(Modifier.semantics(mergeDescendants = true) {
                         contentDescription = listOfNotNull(labels[index], count).joinToString("，")
-                    }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(labels[index], color = color, fontSize = 15.sp,
+                    }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(labels[index], color = color, fontSize = 13.sp,
                             fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         count?.let { Text(it, Modifier.weight(1f, fill = false),
-                            color = color.copy(alpha = .65f), fontSize = 11.sp,
+                            color = color.copy(alpha = .65f), fontSize = 10.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
                 })

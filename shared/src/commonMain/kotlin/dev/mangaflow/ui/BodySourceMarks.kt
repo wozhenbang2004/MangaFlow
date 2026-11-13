@@ -56,7 +56,7 @@ internal fun BodySourceMark(sourceId: String, sourceName: String, modifier: Modi
 /** A reader source entry is one disclosure target. Only a row in its chooser changes source. */
 @Composable
 internal fun ReaderSourceStack(chapter: Chapter, modifier: Modifier = Modifier, enabled: Boolean = true,
-    onOpen: () -> Unit) {
+    compact: Boolean = false, onOpen: () -> Unit) {
     val sources = remember(chapter.id, chapter.sourceId, chapter.variants) {
         val current = chapter.variants.firstOrNull { it.storageId == chapter.id }
             ?: chapter.variants.firstOrNull { it.sourceId == chapter.sourceId }
@@ -68,14 +68,14 @@ internal fun ReaderSourceStack(chapter: Chapter, modifier: Modifier = Modifier, 
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     val description = "当前来源：${sources.first().sourceName}，${sources.size}个来源，展开选择"
-    Box(modifier.width(48.dp).heightIn(min = 44.dp)
+    Box(modifier.width(if (compact) 36.dp else 48.dp).heightIn(min = if (compact) 20.dp else 44.dp)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "选择本章来源", onClick = onOpen)
         .motionPress(interaction, enabled = enabled, pressedScale = .97f)
         .semantics(mergeDescendants = true) { contentDescription = description },
         contentAlignment = Alignment.Center) {
-        val badge = 22.dp
-        val step = 10.dp
+        val badge = if (compact) 16.dp else 22.dp
+        val step = if (compact) 7.dp else 10.dp
         Box(Modifier.width(badge + step * (displayed.size - 1)).height(badge)) {
             // Opaque neutral badges physically occlude the rear artwork. The selected
             // source is drawn last, with every centre kept on the same X-axis baseline.
@@ -84,7 +84,7 @@ internal fun ReaderSourceStack(chapter: Chapter, modifier: Modifier = Modifier, 
                 val surface = lerp(colors.surface, colors.onSurface, .055f + .025f * index).copy(alpha = 1f)
                 Box(Modifier.absoluteOffset(x = step * index).size(badge).background(surface, CircleShape),
                     contentAlignment = Alignment.Center) {
-                    ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(15.dp), muted = index != 0)
+                    ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(if (compact) 11.dp else 15.dp), muted = index != 0)
                 }
             }
         }

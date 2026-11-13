@@ -187,7 +187,9 @@ internal fun ExpandingSearchBar(
     BoxWithConstraints(modifier.imePadding()) {
         val panelWidth = (maxWidth - 64.dp).coerceIn(44.dp, 448.dp)
         val resultsRoom = (maxHeight - 64.dp).coerceIn(0.dp, 360.dp)
-        val panelHeight = foregroundHeight.coerceIn(44.dp, 44.dp + resultsRoom)
+        // An empty title/author query is exactly the toolbar height, without an empty result gutter.
+        val inputOnly = expanded && query.isBlank() && searchTarget != SearchTarget.TAG && !scopeCopyOnly
+        val panelHeight = if (inputOnly) 44.dp else foregroundHeight.coerceIn(44.dp, 44.dp + resultsRoom)
         val width = shell.animateDp(
             transitionSpec = {
                 if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()

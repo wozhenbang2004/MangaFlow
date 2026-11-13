@@ -65,6 +65,7 @@ internal fun SwipeToRemove(
     modifier: Modifier = Modifier,
     label: String = "删除",
     enabled: Boolean = true,
+    transparentBackground: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     var width by remember { mutableIntStateOf(0) }
@@ -207,7 +208,7 @@ internal fun SwipeToRemove(
         }
         Box(Modifier.fillMaxWidth().graphicsLayer {
             translationX = if (!enabled) 0f else drawnOffset()
-        }.background(if (wallpaper) Color.Transparent else colors.background)) { content() }
+        }.background(if (wallpaper || transparentBackground) Color.Transparent else colors.background)) { content() }
     }
 }
 

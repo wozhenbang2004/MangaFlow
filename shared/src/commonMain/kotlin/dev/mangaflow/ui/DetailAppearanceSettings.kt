@@ -64,13 +64,13 @@ internal fun DetailAppearanceSettings() {
             order = { if (it) 1 else 0 }, fillContent = false, soft = true) { open ->
             if (open) Column(Modifier.fillMaxWidth()) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("仅调节详情顶部", Modifier.weight(1f), fontSize = 11.sp, color = colors.onSurfaceVariant)
+                    Text("仅影响详情页的封面背景", Modifier.weight(1f), fontSize = 11.sp, color = colors.onSurfaceVariant)
                     MotionIconButton(onClick = store::reset, modifier = Modifier.size(36.dp)) {
                         Icon(Icons.Outlined.RestartAlt, "还原封面氛围", Modifier.size(17.dp))
                     }
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("模糊", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("模糊程度", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text(if (modernPlatformBlur) state.blur.roundToInt().toString() else "不可用",
                         color = colors.onSurfaceVariant, fontSize = 11.sp)
                 }
@@ -78,12 +78,13 @@ internal fun DetailAppearanceSettings() {
                     onValueChangeFinished = store::save, formatValue = { it.roundToInt().toString() },
                     modifier = Modifier.semantics { contentDescription = "详情背景模糊强度" })
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("背景强度", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text("封面背景", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                     Text("${(state.strength * 100).roundToInt()}%", color = colors.onSurfaceVariant, fontSize = 11.sp)
                 }
+                Text("越低越淡，越高越明显", color = colors.onSurfaceVariant, fontSize = 11.sp)
                 MotionSlider(state.strength, store::setStrength, onValueChangeFinished = store::save,
                     formatValue = { "${(it * 100).roundToInt()}%" },
-                    modifier = Modifier.semantics { contentDescription = "详情封面背景强度" })
+                    modifier = Modifier.semantics { contentDescription = "封面背景显眼程度；越低越淡，越高越明显" })
             }
         }
     }

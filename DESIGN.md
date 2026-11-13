@@ -1,5 +1,23 @@
 # MangaFlow detail · 2026-11-12
 
+
+## Current density / artwork / desktop correction · 2026-11-14 (71–77)
+
+The latest user screenshots in this turn are the before-state evidence; no exact image filename or installed version is available. The user says “这个界面的格式塔做的太差了而且过渡很差”, “全部下面那一大行章节”, “刚点开某个漫画进去往下滑那个阅读键不会像正常那样动起来”, and “顶栏太低…你放背景过去了没放精确图过去”. These are corrections to61/62/53, not acceptance of those implementations. Earlier follow-ups remain active: “微调删了吧”, “背景强度又啥意思”, “那四个tab…太复杂”, “历史列表…左右这么空”, “搜索框太高了不对称”, and “exe可以拉取更新但没法安装…增量更新…多个版本的连续增量更新”. The user explicitly authorizes implementation agents and cloud-only work.
+
+| ID | Adopted implementation and observable boundary |
+| --- | --- |
+| SETTINGS-SIMPLE-71 | Remove the exposed four-mode screen chooser and manual margin/corner controls. Use one understandable cutout-avoidance switch, retain automatic safe controls, and migrate obsolete manual frame values so hidden settings cannot leave an unremovable border. Call detail atmosphere strength “封面背景” with light/dense endpoints, separately from blur. Reuse the actual MotionSlider. |
+| HISTORY-DENSITY-72 | Recent reading is a compact cover/title/progress list. Reduce compound lateral padding and opt its rows out of SwipeToRemove's white idle backing. Keep real swipe deletion, source identity, resume position, history animation and bottom safety. Do not remove all swipe backgrounds globally. |
+| SEARCH-HEIGHT-73 | An empty works/author query must not compose an empty result Column with16dp padding that stretches the optical shell from44dp to60dp. Input and menu retain the same44dp height; real loading/results/tag selection keep their own content. |
+| DETAIL-GROUPING-74 | Main chapters/comments are the primary short navigation. Secondary chapter groups use content-sized36dp Ovio tabs; sources remain one compact icon/count disclosure, with explicit pending count. Suppress the first repeated default-group “章节” heading; keep real later group/volume boundaries. Preserve four-column48dp cells. Each chapter's existing source-circle stack replaces repeated “4源” wording without changing variants or selected-source semantics. |
+| DETAIL-SHARP-75 | Move ArtworkToolbar out of the foreground Column into a true overlay. The clear poster/title must scroll through the real toolbar region and approach the physical top rather than hit a clip at statusInset+56dp. Apply the transition in the toolbar region, retain safe interactive controls, natural hero height and gradual local atmosphere fade completing before the chapter navigation. Adding background pixels/headroom alone does not satisfy this requirement. |
+| DOCK-FIRST-76 | Drive compact reading-dock progress from real first-drag pixel travel; remove the .12 collapsed-fraction dead zone. Preserve a stable largest dock-clearance lane, one shared scroll state and cancelable contents jump. No false initial condensation from unmeasured hero geometry. |
+| DESKTOP-UPDATE-77 | Repair explicit Windows installer handoff, process/file-lock handling and visible failure. Reuse a maintained file-incremental mechanism compatible with jpackage: compare actual installed/current file identities and fetch only changed application files, independent of how many releases were skipped. Keep runtime compatibility/hash/path guards and full-installer fallback. The old181 client needs a one-time full upgrade; it cannot gain the protocol retroactively. File-level increments must be described honestly, with exact actual packaged artifacts and pipeline evidence. |
+
+Writer ownership: detail_header owns DetailScreen/DetailReadingDock; settings_history owns display/detail appearance, Discover recent/empty search and optional SwipeToRemove behavior; desktop_update owns desktop installer/update packaging; root owns DetailCatalog/compact source-stack adaptation, integration and shared docs. Root alone updates refs with the expected main head. No local computer operations, tests, local builds, service/UI probes or added review gate. All new visual/gesture effects await user artifact feedback; source readiness and CI trigger do not establish phone/installer acceptance.
+
+
 ## Latest screenshot corrections · 2026-11-14 (61–70)
 
 This batch continues the cloud-only FAST-ITERATE-29 workflow. User screenshots1000121592/1593/1595/1597/1598/1599/1601/1602/1603 do not identify an installed build. Android0.1.179 at5e6ccdce/run43453311840 is observed successful packaging; that is not visual or gesture acceptance.

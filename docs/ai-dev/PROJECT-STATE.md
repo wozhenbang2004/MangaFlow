@@ -2,6 +2,17 @@
 
 Updated: 2026-11-14. Route: DELIVERY with focused research branches. Execution: cloud-only GitHub connector and in-memory edits, per the latest explicit user instruction.
 
+
+## Active density / artwork / updater batch · 2026-11-14
+
+Current user evidence/acceptance is DESIGN.md71–77 plus all active61–70. Cloud baseline is c7bbecf5b9558efc2b7ccf959700b379636c5933 (Android181 completed/success; appearance remains explicitly rejected in the latest screenshots). User requests implementation agents, no local computer access, no tests/build/probe/review gate, direct main with expected-head lease and normal CI trigger.
+
+Root implements compact catalog grouping and existing source-stack reuse. detail_header owns the true overlay toolbar/sharp-cover first-scroll transition and immediate pixel-driven reading dock. settings_history owns simplified cutout setup, clearer atmosphere naming, recent-row density and empty-query search shell. desktop_update owns actual installer launch and file-incremental jpackage-compatible updates; runtime compatibility requires a full-package fallback and old181 needs one initial full update. All agents return isolated cloud blobs; root is the only ref/docs controller.
+
+Next exact action: integrate UI implementations on latest remote main, confirm its existing CI, then integrate the separate desktop update artifacts/workflow when ready. Preserve unrelated source/auth/platform changes. Phone feel, physical edges and Windows install/delta behavior are pending real user feedback; do not claim device validation.
+
+Raw-user batch is covered through the latest three screenshots and their message in this turn; exact chat/image IDs unavailable. Prior checkpoint text below is retained as historical evidence, not a pending instruction to resubmit181.
+
 ## Current screenshot / source-disc integration · 2026-11-14
 
 Current scope and raw user evidence: DESIGN.md DETAIL-COVERAGE-61 through EXECUTION-70 (screenshots1592/1593/1595/1597/1598/1599/1601/1602/1603). The user explicitly renewed independent implementation delegation. Root remains the only commit/ref/docs controller; all work is cloud GitHub connector plus in-memory edits and cloud attachment viewing. Do not operate the user's local computer or introduce tests/local builds/probes or an extra review gate.

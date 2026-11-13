@@ -91,7 +91,7 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
         catch (_: Exception) { failed = true }
     }
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 24.dp else 12.dp, end = 24.dp, bottom = 8.dp),
+        Row(Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 8.dp, end = 16.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             if (onBack != null) MotionIconButton(onClick = onBack, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回最近阅读", Modifier.size(20.dp))
@@ -103,7 +103,7 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
             records?.let { Text(it.size.toString(), color = secondary, fontSize = 12.sp) }
         }
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(),
-            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 16.dp)) {
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
             if (failed) item(key = "retry") {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("章节记录暂未读取", fontSize = 13.sp, color = secondary, modifier = Modifier.weight(1f))

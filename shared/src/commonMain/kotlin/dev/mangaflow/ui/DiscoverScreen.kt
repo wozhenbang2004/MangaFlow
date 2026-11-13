@@ -335,6 +335,8 @@ internal fun DiscoverySearchResults(
     }
     val selectingTags = search.searchTarget == SearchTarget.TAG && search.selectedTags.isEmpty()
     val awaitingKeyword = search.query.isBlank() && search.selectedTags.isEmpty()
+    // Empty title/author search is only the 44dp input row; no padded, invisible result panel.
+    if (awaitingKeyword && !selectingTags) return
     val showResults = search.isSearch && !selectingTags && !awaitingKeyword
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
@@ -974,25 +976,26 @@ internal fun RecentReadingSheet(
             if (selected != null) ChapterHistoryContent(selected, library,
                 onContinue = { onContinue(it); dismiss() }, onBack = { chapterManga = null })
             else Column(Modifier.fillMaxWidth()) {
-                Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
+                Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("最近阅读", fontSize = 16.sp, fontWeight = FontWeight.Medium, lineHeight = 22.sp)
                     Text(history.size.toString(), style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).navigationBarsPadding(), state = recentPosition,
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 12.dp),
+                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     items(history, key = { it.manga.id }) { progress ->
                         val rowInteraction = remember(progress.manga.id) { MutableInteractionSource() }
-                        SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
+                        SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录",
+                            transparentBackground = true) {
                             Row(Modifier.fillMaxWidth()
                                 .clickable(interactionSource = rowInteraction, indication = null, role = Role.Button,
                                     onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() })
                                 .motionPress(rowInteraction, pressedScale = .985f)
                                 .padding(horizontal = 4.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                MangaCover(progress.manga, repository, Modifier.width(32.dp).height(44.dp).mangaCoverCard(5.dp))
+                                MangaCover(progress.manga, repository, Modifier.width(36.dp).height(50.dp).mangaCoverCard(5.dp))
                                 Column(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                                     Text(progress.manga.title, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
