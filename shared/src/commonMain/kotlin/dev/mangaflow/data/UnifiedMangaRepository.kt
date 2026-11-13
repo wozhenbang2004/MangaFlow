@@ -27,6 +27,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -62,7 +63,8 @@ class UnifiedMangaRepository(
     private val nativeCatalogIds = mutableSetOf<String>()
     private data class CatalogStamp(val generation: Long, val at: Long)
     private val catalogFetchedAt = LinkedHashMap<String, CatalogStamp>()
-    private val catalogLocks = Array(16) { Mutex() }
+    private class CatalogGate(val mutex: Mutex = Mutex(), var users: Int = 0)
+    private val catalogGates = mutableMapOf<String, CatalogGate>()
     private data class SearchKey(val source: String, val query: String, val page: Int)
     private data class CachedSearch(val storedAt: Long, val generation: Long, val page: MangaPage)
     private val sourceSearchCache = LinkedHashMap<SearchKey, CachedSearch>()
@@ -440,6 +442,7 @@ class UnifiedMangaRepository(
 
     /** Origin/settings changes must not reuse a chapter URL from the previous source session. */
     fun invalidatePageCache(sourceId: String) {
+        if (sourceId == "copy") copy.invalidateCaches()
         synchronized(unifiedMangaRepositoryStateLock) {
             pageCacheGenerations[sourceId] = (pageCacheGenerations[sourceId] ?: 0L) + 1L
             pageCache.keys.removeAll { it.startsWith("@source/$sourceId/") }
@@ -639,22 +642,41 @@ class UnifiedMangaRepository(
         val ref = SourceKeys.decodeManga(mangaId)
         require(!SourceKeys.isEncoded(mangaId) || ref.sourceId == sourceId) { "作品和所选来源不一致。" }
         val id = SourceKeys.manga(sourceId, ref.mangaId)
-        return catalogLocks[(id.hashCode() and Int.MAX_VALUE) % catalogLocks.size].withLock {
-            val generation = synchronized(unifiedMangaRepositoryStateLock) { pageCacheGenerations[sourceId] ?: 0L }
-            if (!forceRefresh) synchronized(unifiedMangaRepositoryStateLock) {
-                rawCatalogs[id]?.takeIf { catalogFetchedAt[id]?.let { stamp ->
-                    stamp.generation == generation && repositoryNanoTime() - stamp.at in 0L until CATALOG_CACHE_NANOS
-                } == true }
-            }?.let { return@withLock it }
-            val loaded = if (sourceId == "copy") copy.detail(id) else adapter(sourceId).detail(id)
-            synchronized(unifiedMangaRepositoryStateLock) {
-                if ((pageCacheGenerations[sourceId] ?: 0L) != generation)
-                    throw CancellationException("来源已更新或移除，请重新打开作品。")
-                rememberRaw(loaded, native = true)
-                synchronized(unifiedMangaRepositoryStateLock) { catalogFetchedAt[id] = CatalogStamp(generation, repositoryNanoTime()) }
+        val requestedAt = repositoryNanoTime()
+        val gate = synchronized(unifiedMangaRepositoryStateLock) {
+            catalogGates.getOrPut(id) { CatalogGate() }.also { it.users++ }
+        }
+        try {
+            return gate.mutex.withLock {
+                val generation = synchronized(unifiedMangaRepositoryStateLock) { pageCacheGenerations[sourceId] ?: 0L }
+                synchronized(unifiedMangaRepositoryStateLock) {
+                    rawCatalogs[id]?.takeIf { catalogFetchedAt[id]?.let { stamp ->
+                        stamp.generation == generation && repositoryNanoTime() - stamp.at in 0L until CATALOG_CACHE_NANOS &&
+                            (!forceRefresh || stamp.at >= requestedAt)
+                    } == true }
+                }?.let { return@withLock it }
+                val loaded = if (sourceId == "copy") copy.detail(id) else adapter(sourceId).detail(id)
+                synchronized(unifiedMangaRepositoryStateLock) {
+                    if ((pageCacheGenerations[sourceId] ?: 0L) != generation)
+                        throw CancellationException("来源已更新或移除，请重新打开作品。")
+                    rememberRaw(loaded, native = true)
+                    catalogFetchedAt[id] = CatalogStamp(generation, repositoryNanoTime())
+                }
+                // Usable source data is published independently of disposable cache persistence.
+                scope.launch {
+                    catalogStore?.save(loaded) {
+                        synchronized(unifiedMangaRepositoryStateLock) {
+                            (pageCacheGenerations[sourceId] ?: 0L) == generation && rawCatalogs[id] === loaded
+                        }
+                    }
+                }
+                loaded
             }
-            catalogStore?.save(loaded) { synchronized(unifiedMangaRepositoryStateLock) { (pageCacheGenerations[sourceId] ?: 0L) == generation } }
-            loaded
+        } finally {
+            synchronized(unifiedMangaRepositoryStateLock) {
+                gate.users--
+                if (gate.users == 0 && catalogGates[id] === gate) catalogGates.remove(id)
+            }
         }
     }
 
@@ -666,11 +688,17 @@ class UnifiedMangaRepository(
         val ref = SourceKeys.decodeManga(mangaId)
         val generation = synchronized(unifiedMangaRepositoryStateLock) { pageCacheGenerations[ref.sourceId] ?: 0L }
         val loaded = if (ref.sourceId == "copy") copy.detail(ref.mangaId, onMetadata)
-        else adapter(ref.sourceId).detail(mangaId).also { onMetadata(it.manga) }
+        else detailSource(ref.sourceId, mangaId, forceRefresh = true).also { onMetadata(it.manga) }
         synchronized(unifiedMangaRepositoryStateLock) {
             if ((pageCacheGenerations[ref.sourceId] ?: 0L) != generation)
                 throw CancellationException("来源已更新或移除，请重新打开作品。")
-            rememberRaw(loaded, native = true)
+            if (ref.sourceId == "copy") {
+                // A later shared refresh may already have completed before this caller resumes.
+                val latest = copy.cachedDetail(ref.mangaId) ?: loaded
+                if (rawCatalogs[mangaId] !== latest) rememberRaw(latest, native = true)
+                catalogFetchedAt[mangaId] = CatalogStamp(generation, repositoryNanoTime())
+            }
+            // Foreign success was stamped by detailSource; do not replace a newer queued result.
         }
         val result = withContext(Dispatchers.Default) { project(loaded) }
         // A slow/refused additional source cannot block the available base catalog.
@@ -683,6 +711,20 @@ class UnifiedMangaRepository(
         val ref = SourceKeys.decodeManga(mangaId)
         val raw = retained ?: if (ref.sourceId == "copy") copy.cachedDetail(ref.mangaId) else null
         return raw?.let(::project)
+    }
+
+    /** Stale catalogues remain readable; only proven fresh data may skip revalidation. */
+    fun isCatalogFresh(mangaId: String): Boolean {
+        val ref = SourceKeys.decodeManga(mangaId)
+        // Copy owns its existing ten-minute cache; explicit invalidation clears it too.
+        if (ref.sourceId == "copy") return copy.cachedDetail(ref.mangaId)?.chapters?.isNotEmpty() == true
+        return synchronized(unifiedMangaRepositoryStateLock) {
+            val generation = pageCacheGenerations[ref.sourceId] ?: 0L
+            mangaId in nativeCatalogIds && rawCatalogs[mangaId]?.chapters?.isNotEmpty() == true &&
+                catalogFetchedAt[mangaId]?.let { stamp ->
+                    stamp.generation == generation && repositoryNanoTime() - stamp.at in 0L until CATALOG_CACHE_NANOS
+                } == true
+        }
     }
 
     fun cachedSourceDetail(mangaId: String): MangaDetail? = synchronized(unifiedMangaRepositoryStateLock) { rawCatalogs[mangaId] }

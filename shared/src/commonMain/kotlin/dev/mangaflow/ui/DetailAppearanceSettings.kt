@@ -3,11 +3,14 @@ package dev.mangaflow.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BlurOn
 import androidx.compose.material.icons.outlined.ExpandLess
@@ -54,11 +57,13 @@ internal fun DetailAppearanceSettings() {
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = if (expanded) "收起封面氛围调节" else "调节详情封面氛围",
                 onClick = { expanded = !expanded }).motionPress(interaction),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Icon(Icons.Outlined.BlurOn, null, Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             Text("封面氛围", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-            Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
-                Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
+                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
+                    Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            }
         }
         MotionTabContent(expanded, Modifier.fillMaxWidth(), contentKey = { it },
             order = { if (it) 1 else 0 }, fillContent = false, soft = true) { open ->

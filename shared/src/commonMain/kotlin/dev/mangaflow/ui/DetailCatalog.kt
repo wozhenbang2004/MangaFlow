@@ -73,7 +73,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -119,7 +119,6 @@ import dev.mangaflow.ui.motion.LocalTabVisibilityScope
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
@@ -182,7 +181,8 @@ internal fun DetailCatalog(
             sourceCloseRequested = true
         }
     }
-    val volumeCovers = remember(mangaId) { mutableStateMapOf<String, VolumeCoverState>() }
+    // Each book observes only its own cover state; completing one image does not invalidate its siblings.
+    val volumeCovers = remember(mangaId) { linkedMapOf<String, MutableState<VolumeCoverState>>() }
     val coverPermits = remember(mangaId) { Semaphore(2) }
 
     val presence = LocalTabVisibilityScope.current
@@ -301,35 +301,32 @@ internal fun DetailCatalog(
                                         coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
                                 }
                                 if (isVolumeChapter(chapter)) {
-                                    val cover = volumeCovers[chapter.id] ?: VolumeCoverState()
-                                    LaunchedEffect(chapter.id, paneActive, cover.error, cover.attempt) {
-                                        if (paneActive && cover.error != null && cover.automaticRetries < 2) {
-                                            delay(900L * (cover.automaticRetries + 1))
-                                            if (volumeCovers[chapter.id] === cover)
-                                                volumeCovers[chapter.id] = VolumeCoverState(
-                                                    attempt = cover.attempt + 1,
-                                                    automaticRetries = cover.automaticRetries + 1)
-                                        }
+                                    val coverState = remember(mangaId, chapter.id) {
+                                        val retained = volumeCovers.remove(chapter.id) ?: mutableStateOf(VolumeCoverState())
+                                        volumeCovers[chapter.id] = retained
+                                        while (volumeCovers.size > 128) volumeCovers.remove(volumeCovers.keys.first())
+                                        retained
                                     }
+                                    val cover = coverState.value
                                     LaunchedEffect(chapter.id, paneActive, cover.attempt) {
                                         if (!paneActive || cover.page != null || cover.error != null) return@LaunchedEffect
                                         val pending = cover.copy(loading = true)
-                                        volumeCovers[chapter.id] = pending
+                                        coverState.value = pending
                                         try {
                                             val page = coverPermits.withPermit {
                                                 loadVolumeCover(chapter, cover.attempt > 0)
                                             }
                                             currentCoroutineContext().ensureActive()
-                                            if (volumeCovers[chapter.id] === pending)
-                                                volumeCovers[chapter.id] = pending.copy(page = page, loading = false)
+                                            if (coverState.value === pending)
+                                                coverState.value = pending.copy(page = page, loading = false)
                                         } catch (cancelled: CancellationException) { throw cancelled }
                                         catch (failure: Exception) {
-                                            if (volumeCovers[chapter.id] === pending)
-                                                volumeCovers[chapter.id] = pending.copy(loading = false,
+                                            if (coverState.value === pending)
+                                                coverState.value = pending.copy(loading = false,
                                                     error = failure.message ?: "这一卷封面暂不可用")
                                         } finally {
-                                            if (volumeCovers[chapter.id] === pending)
-                                                volumeCovers[chapter.id] = VolumeCoverState(attempt = pending.attempt, automaticRetries = pending.automaticRetries)
+                                            if (coverState.value === pending)
+                                                coverState.value = VolumeCoverState(attempt = pending.attempt)
                                         }
                                     }
                                     Column(downloadAnchorModifier.padding(bottom = 6.dp)) {
@@ -346,11 +343,11 @@ internal fun DetailCatalog(
                                             onRead = { onRead(chapter) }, onDownload = { onDownload(chapter, downloadAnchor) },
                                             onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor },
                                             onCoverError = {
-                                                if (paneActive && volumeCovers[chapter.id] === cover)
-                                                    volumeCovers[chapter.id] = cover.copy(error = "封面图片暂不可用")
+                                                if (paneActive && coverState.value === cover)
+                                                    coverState.value = cover.copy(error = "封面图片暂不可用")
                                             },
                                             onRetryCover = {
-                                                volumeCovers[chapter.id] = VolumeCoverState(attempt = cover.attempt + 1)
+                                                coverState.value = VolumeCoverState(attempt = cover.attempt + 1)
                                             },
                                             sourceMarks = {
                                                 CatalogSourceEntry(
@@ -603,7 +600,7 @@ private fun isVolumeGroup(name: String): Boolean = name.contains("单行本") ||
 private fun isDefaultChapterGroup(name: String): Boolean =
     name.isBlank() || name == "默认" || name == "默認" || name.equals("default", ignoreCase = true)
 
-private fun chapterGroupLabel(name: String): String = if (isDefaultChapterGroup(name)) "章节" else name
+internal fun chapterGroupLabel(name: String): String = if (isDefaultChapterGroup(name)) "章节" else name
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

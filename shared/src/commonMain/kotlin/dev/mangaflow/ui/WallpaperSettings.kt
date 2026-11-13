@@ -196,13 +196,9 @@ internal fun WallpaperSettings(
                 modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Computer, "连接电脑", Modifier.size(21.dp), tint = colors.onSurfaceVariant)
             }
-            MotionIconButton(onClick = { finishAdjustment(); picker.launch(arrayOf("image/*")) }, enabled = !importing,
+            MotionIconButton(onClick = { finishAdjustment(); picker.launch(arrayOf("image/*", "video/*")) }, enabled = !importing,
                 modifier = Modifier.size(44.dp)) {
-                Icon(Icons.Outlined.AddPhotoAlternate, "添加图片", Modifier.size(21.dp), tint = colors.onSurfaceVariant)
-            }
-            MotionIconButton(onClick = { finishAdjustment(); picker.launch(arrayOf("video/*")) }, enabled = !importing,
-                modifier = Modifier.size(44.dp)) {
-                Icon(Icons.Outlined.VideoFile, "添加视频", Modifier.size(21.dp), tint = colors.onSurfaceVariant)
+                Icon(Icons.Outlined.AddPhotoAlternate, "添加图片或视频", Modifier.size(21.dp), tint = colors.onSurfaceVariant)
             }
             if (importing) Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
                 MotionBusyIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp)

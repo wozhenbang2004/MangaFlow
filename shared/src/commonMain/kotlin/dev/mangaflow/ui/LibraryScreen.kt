@@ -159,7 +159,6 @@ fun LibraryScreen(
     val preferredShelfWidth = morphGlassTabWidth(shelfTabs)
     val collections by libraryStore.pageCollections.collectAsStateWithLifecycle()
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
-    val readingActivity by libraryStore.readingActivity.collectAsStateWithLifecycle()
     var managedId by remember { mutableStateOf<String?>(null) }
     var chapterHistoryManga by remember { mutableStateOf<Manga?>(null) }
     var draggedFavorite by remember { mutableStateOf<Manga?>(null) }
@@ -190,6 +189,8 @@ fun LibraryScreen(
     val removalScope = rememberCoroutineScope()
     var pendingFavorites by remember { mutableStateOf<Set<String>>(emptySet()) }
     var pendingHistory by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val visibleFavorites = remember(favorites, pendingFavorites) { favorites.filterNot { it.id in pendingFavorites } }
+    val visibleHistory = remember(history, pendingHistory) { history.filterNot { it.manga.id in pendingHistory } }
     fun removeFavoriteWithUndo(manga: Manga) {
         if (manga.id in pendingFavorites) return
         pendingFavorites = pendingFavorites + manga.id
@@ -234,8 +235,11 @@ fun LibraryScreen(
         onOpen = { showCollections = false; onOpenPageCollection(it) },
         onRemove = { libraryStore.removePageCollection(it.key) },
         onDismiss = { showCollections = false })
-    if (showStats) ReadingStatsSheet(readingActivity, repository,
-        onDismiss = { showStats = false }, onOpenManga = { showStats = false; onOpen(it) })
+    if (showStats) {
+        val readingActivity by libraryStore.readingActivity.collectAsStateWithLifecycle()
+        ReadingStatsSheet(readingActivity, repository,
+            onDismiss = { showStats = false }, onOpenManga = { showStats = false; onOpen(it) })
+    }
     chapterHistoryManga?.let { manga ->
         ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
     }
@@ -256,10 +260,10 @@ fun LibraryScreen(
                         contentPadding = PaddingValues(start = historyInset, end = historyInset, top = headerPadding + 4.dp, bottom = 24.dp + bottomInset),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        if (history.isEmpty()) item(key = "empty-history") {
+                        if (visibleHistory.isEmpty()) item(key = "empty-history") {
                             EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
                         }
-                        items(history.filterNot { it.manga.id in pendingHistory }, key = { "history-${it.manga.id}" }) { progress ->
+                        items(visibleHistory, key = { "history-${it.manga.id}" }, contentType = { "reading-history" }) { progress ->
                             SwipeToRemove(onRemove = { removeHistoryWithUndo(progress.manga.id) }, label = "删除阅读记录",
                                 modifier = Modifier.animateItem(
                                     fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
@@ -293,10 +297,10 @@ fun LibraryScreen(
                             horizontalArrangement = Arrangement.spacedBy(gap),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            if (favorites.isEmpty()) item(key = "empty-collection", span = {
+                            if (visibleFavorites.isEmpty()) item(key = "empty-collection", span = {
                                 androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                             }) { EmptyBookshelf(onDiscover) }
-                            gridItems(favorites.filterNot { it.id in pendingFavorites }, key = Manga::id) { manga ->
+                            gridItems(visibleFavorites, key = Manga::id, contentType = { "shelf-book" }) { manga ->
                                 val saved = progressById[manga.id]
                                 val dragged = draggedFavorite?.id == manga.id
                                 val interaction = remember(manga.id) { MutableInteractionSource() }

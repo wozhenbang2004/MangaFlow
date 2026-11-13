@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -126,6 +127,7 @@ internal fun MangaMetricBadges(
     showMore: Boolean = !compact,
     plain: Boolean = false,
     valueSize: TextUnit? = null,
+    periodHeat: Boolean = false,
     onExpand: (() -> Unit)? = null,
 ) {
     val fan = LocalMetricSourceFan.current
@@ -134,11 +136,16 @@ internal fun MangaMetricBadges(
         onDispose { if (fan != null && fan.request?.key === anchorKey) fan.clear() }
     }
     val liveMetrics = observedMangaMetrics(manga)
-    val metrics = fan?.request?.takeIf { it.key === anchorKey }?.metrics ?: liveMetrics
-    val heat = if (manga.rank != null) manga.popularity
+    val ownFan by remember(fan, anchorKey) { derivedStateOf {
+        fan?.request?.takeIf { it.key === anchorKey }
+    } }
+    val metrics = ownFan?.metrics ?: liveMetrics
+    val heat = if (periodHeat || manga.rank != null) manga.popularity
         else manga.totalPopularity ?: metrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: manga.popularity
-    val heatToken = heat?.let { MetricToken(metricCount(it), metricCount(it), "$heatLabel $it", "copy", popularity = it) }
-    val scores = metrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
+    val heatToken = remember(heat, heatLabel) {
+        heat?.let { MetricToken(metricCount(it), metricCount(it), "$heatLabel $it", "copy", popularity = it) }
+    }
+    val scores = remember(metrics, compact) { metrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
         .sortedBy { ReviewProviders.order(it.sourceId) }.map { metric ->
             val score = requireNotNull(metric.score)
             val nativeScore = metricScore(score) +
@@ -147,7 +154,7 @@ internal fun MangaMetricBadges(
                 "${metric.name}，${metric.scoreLabel}${metricScore(score)} 分" +
                     (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "，原站满分未知") +
                     (metric.ratingCount?.let { "，$it 人评分" } ?: ""), metric.sourceId)
-        }
+        } }
     val textStyle = mangaMetricValueStyle(valueSize ?: 12.sp)
     val unitFamily = mangaFontFamily(MangaFontScene.INTERFACE)
     val measurer = rememberTextMeasurer()
@@ -157,7 +164,8 @@ internal fun MangaMetricBadges(
     val groupGap = if (compact) 8.dp else 11.dp
     val outerGap = with(density) { groupGap.roundToPx().toFloat() }
     val fontScale = density.fontScale.coerceAtLeast(1f)
-    val sourceWidths = scores.associate { it.sourceId to metricSourceWidth() }
+    val sourceWidth = metricSourceWidth()
+    val sourceWidths = remember(scores, sourceWidth) { scores.associate { it.sourceId to sourceWidth } }
     val heatSeparation = with(density) { 5.dp.toPx() }
     val heatMarkSize = 14.dp * fontScale
     val heatMarkWidth = with(density) { heatMarkSize.roundToPx().toFloat() }
@@ -168,7 +176,6 @@ internal fun MangaMetricBadges(
     }
     if (heatToken == null && scores.isEmpty()) return
 
-    val tokens = listOfNotNull(heatToken) + scores
     val showOverflow = compact || showMore
     val interaction = remember(manga.id) { MutableInteractionSource() }
     var stackBounds by remember(manga.id) { mutableStateOf(Rect.Zero) }
@@ -183,14 +190,16 @@ internal fun MangaMetricBadges(
         val heatTextRoom = (availableWidth - fittedHeatMark - innerGap - tokenPadding * 2f - 1f).coerceAtLeast(1f)
         // Compact only the displayed decimal unit; retain the full native value in semantics/details.
         val fittedHeat = heatToken?.let { token ->
-            if (measurer.measure(token.value, textStyle, maxLines = 1).size.width > heatTextRoom)
+            if (measurer.measure(metricValueText(token.value, textStyle.fontSize, unitFamily = unitFamily), textStyle, maxLines = 1).size.width > heatTextRoom)
                 token.copy(value = token.value.replace(Regex("\\.[0-9]+(?=[万亿]$)"), ""))
             else token
         }
         val heatStyle = textStyle
         val heatWidth = fittedHeat?.let { fittedHeatMark + innerGap + tokenPadding * 2f +
-            measurer.measure(it.value, heatStyle, maxLines = 1).size.width } ?: 0f
-        val widths = scores.map(::tokenWidth)
+            measurer.measure(metricValueText(it.value, heatStyle.fontSize, unitFamily = unitFamily), heatStyle, maxLines = 1).size.width } ?: 0f
+        val widths = remember(scores, textStyle, unitFamily, density, tokenPadding, innerGap, sourceWidths, heatMarkWidth, measurer) {
+            scores.map(::tokenWidth)
+        }
         val baseStackSize = if (narrow) 12.dp else 15.dp
         val baseStackWidth = with(density) { (baseStackSize * 1.25f * fontScale).roundToPx() }
         fun stackFor(start: Int, room: Float): List<StackedMetric> {
@@ -226,7 +235,8 @@ internal fun MangaMetricBadges(
             if (count == 0) break
             count--
         }
-        val disclose = onExpand?.takeIf { count < scores.size }?.let { details ->
+        val disclose = onExpand
+        val expandStack = onExpand?.let { details ->
             {
                 if (fan != null && stack.isNotEmpty() && stackBounds.width > 0f && stackBounds.height > 0f) {
                     fan.open(MetricSourceFanRequest(anchorKey, metrics, stackBounds,
@@ -241,13 +251,7 @@ internal fun MangaMetricBadges(
         Row(Modifier.fillMaxWidth().heightIn(min = lineHeight)
             .then(if (disclose != null) Modifier.clickable(interactionSource = interaction, indication = null,
                 role = Role.Button, onClickLabel = "查看完整来源评分", onClick = disclose) else Modifier)
-            .clearAndSetSemantics {
-                contentDescription = tokens.joinToString("；") { it.description }
-                if (disclose != null) {
-                    role = Role.Button
-                    onClick("查看完整来源评分") { disclose(); true }
-                }
-            },
+            .semantics(mergeDescendants = true) { },
             horizontalArrangement = Arrangement.spacedBy(groupGap), verticalAlignment = Alignment.CenterVertically) {
             fittedHeat?.let {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -262,7 +266,14 @@ internal fun MangaMetricBadges(
                     textStyle, plain, compact)
             }
             if (stack.isNotEmpty()) MetricSourceStack(stack, foreground, lineHeight,
-                Modifier.onGloballyPositioned {
+                Modifier.then(if (expandStack != null) Modifier.clickable(
+                    interactionSource = remember(manga.id) { MutableInteractionSource() }, indication = null,
+                    role = Role.Button, onClickLabel = "展开其余来源评分", onClick = expandStack)
+                    .clearAndSetSemantics {
+                        contentDescription = stack.joinToString("；") { it.token.description }
+                        role = Role.Button
+                        onClick("展开其余来源评分") { expandStack(); true }
+                    } else Modifier).onGloballyPositioned {
                     val position = it.localToScreen(Offset.Zero)
                     stackBounds = if (position.isSpecified) Rect(position,
                         Size(it.size.width.toFloat(), it.size.height.toFloat())) else Rect.Zero

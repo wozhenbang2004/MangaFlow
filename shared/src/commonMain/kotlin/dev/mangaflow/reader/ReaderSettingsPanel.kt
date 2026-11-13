@@ -2,7 +2,15 @@ package dev.mangaflow.reader
 
 import dev.mangaflow.ui.LocalMangaWindow
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,20 +19,29 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -41,6 +58,7 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.motionPress
 import kotlin.math.roundToInt
 
 /** Keep related choices together; each filled segment represents its complete hit region. */
@@ -57,6 +75,7 @@ internal fun ReaderSettingsDialog(
     onDismiss: () -> Unit,
 ) {
     var dimAmount by remember { mutableFloatStateOf(preferences.dimAmount) }
+    var sourceResumeExpanded by rememberSaveable { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
     val modes = listOf(ReadingMode.VERTICAL to "纵向",
@@ -98,22 +117,54 @@ internal fun ReaderSettingsDialog(
                         }
                     }
 
-                    ReaderSettingsSection("切源续读") {
+                    Column(Modifier.fillMaxWidth()) {
                         val resumePolicies = listOf("ask", "source_record", "same_page")
-                        MotionTabs(
-                            selected = resumePolicies.indexOf(sourceResumePolicy).coerceAtLeast(0),
-                            labels = listOf("每次询问", "本源记录", "尝试同页"),
-                            onSelect = { onSourceResumePolicy(resumePolicies[it]) },
-                            foreground = colors.onSurface, muted = colors.onSurfaceVariant,
-                            track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
-                            fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
-                            controlHeight = 44.dp, fontSize = 12.sp, role = Role.RadioButton,
-                            selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
-                        )
-                        if (sourceResumePolicy == "same_page") Text(
-                            "不同版本分图可能不同，页码不保证对应。",
-                            color = colors.onSurfaceVariant, fontSize = 12.sp,
-                        )
+                        val resumeLabels = listOf("每次询问", "本源记录", "尝试同页")
+                        val selectedPolicy = resumePolicies.indexOf(sourceResumePolicy).coerceAtLeast(0)
+                        val interaction = remember { MutableInteractionSource() }
+                        val turn = animateFloatAsState(if (sourceResumeExpanded) 180f else 0f,
+                            tween(if (motion) MangaMotion.Quick else 0), label = "reader-source-settings")
+                        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                            .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+                                onClickLabel = if (sourceResumeExpanded) "收起切源续读选项" else "展开切源续读选项",
+                                onClick = { sourceResumeExpanded = !sourceResumeExpanded })
+                            .motionPress(interaction, pressedScale = .99f)
+                            .semantics {
+                                stateDescription = resumeLabels[selectedPolicy] +
+                                    if (sourceResumeExpanded) "，已展开" else "，已收起"
+                            }, verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("切源续读", Modifier.weight(1f), color = colors.onSurfaceVariant,
+                                fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            Text(resumeLabels[selectedPolicy], color = colors.onSurfaceVariant, fontSize = 12.sp)
+                            Icon(Icons.Outlined.ExpandMore, null, tint = colors.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp).graphicsLayer { rotationZ = turn.value })
+                        }
+                        AnimatedVisibility(sourceResumeExpanded,
+                            enter = expandVertically(tween(if (motion) MangaMotion.Content else 0,
+                                easing = MangaMotion.EnterEasing)) + fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
+                            exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0,
+                                easing = MangaMotion.ExitEasing)) + fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                MotionTabs(
+                                    selected = selectedPolicy, labels = resumeLabels,
+                                    onSelect = { onSourceResumePolicy(resumePolicies[it]) },
+                                    foreground = colors.onSurface, muted = colors.onSurfaceVariant,
+                                    track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
+                                    fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+                                    controlHeight = 44.dp, fontSize = 12.sp, role = Role.RadioButton,
+                                    selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
+                                )
+                                AnimatedVisibility(sourceResumePolicy == "same_page",
+                                    enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
+                                        expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+                                    exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                                        shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
+                                    Text("不同版本分图可能不同，页码不保证对应。",
+                                        color = colors.onSurfaceVariant, fontSize = 12.sp)
+                                }
+                            }
+                        }
                     }
 
                     if (PanelReadingAvailable) ReaderSettingsSection("分镜") {
@@ -141,6 +192,7 @@ internal fun ReaderSettingsDialog(
                                 value = dimAmount, onValueChange = { dimAmount = it; onDimPreview(it) },
                                 onValueChangeFinished = { update(preferences.copy(dimAmount = dimAmount)) },
                                 valueRange = 0f..0.65f, modifier = Modifier.fillMaxWidth(), label = "降低阅读亮度",
+                                valueLabel = { (it * 100).roundToInt().toString() + "%" },
                             )
                         }
                     }

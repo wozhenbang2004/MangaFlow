@@ -127,6 +127,8 @@ fun AccountScreen(
     var submitting by remember { mutableStateOf(false) }
     var showHistory by remember(profile?.username) { mutableStateOf(false) }
     var removeFavorite by remember(profile?.username) { mutableStateOf<Manga?>(null) }
+    var managedFavorite by remember(profile?.username) { mutableStateOf<Manga?>(null) }
+    val cloudFavorites = remember(state.favorites) { state.favorites.distinctBy(Manga::id) }
     val clearSecrets = {
         password = ""
         cookie = ""
@@ -138,7 +140,7 @@ fun AccountScreen(
         focus.clearFocus()
     }
     LaunchedEffect(state.busy) { if (!state.busy) submitting = false }
-    LaunchedEffect(active) { if (!active) clearInputs() }
+    LaunchedEffect(active) { if (!active) { clearInputs(); managedFavorite = null; removeFavorite = null } }
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) clearSecrets()
@@ -320,19 +322,22 @@ fun AccountScreen(
                                         }
                                     }
                                 } else {
-                                    items(state.favorites.distinctBy(Manga::id), key = { "cloud-favorite-${it.id}" }) { manga ->
+                                    items(cloudFavorites, key = { "cloud-favorite-${it.id}" }, contentType = { "cloud-book" }) { manga ->
                                         val syncing = manga.id in state.syncingFavorites
-                                        Column {
-                                            CoverTile(manga, repository) { onOpen(manga) }
-                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                                TextButton(onClick = { removeFavorite = manga }, enabled = !syncing,
-                                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp)) {
-                                                    if (syncing) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp, color = colors.onSurfaceVariant)
-                                                    else Icon(Icons.Outlined.Close, null, Modifier.size(14.dp))
-                                                    Spacer(Modifier.width(4.dp))
-                                                    Text(if (syncing) "同步中" else "移除", style = MaterialTheme.typography.bodySmall)
-                                                }
+                                        Box {
+                                            CoverTile(manga, repository,
+                                                onLongClick = { managedFavorite = manga }) { onOpen(manga) }
+                                            if (syncing) Box(Modifier.align(Alignment.TopEnd).padding(6.dp).size(22.dp)
+                                                .background(colors.surface.copy(alpha = .94f), CircleShape),
+                                                contentAlignment = Alignment.Center) {
+                                                CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp,
+                                                    color = colors.onSurfaceVariant)
                                             }
+                                            CloudFavoriteActionsMenu(managedFavorite?.id == manga.id,
+                                                onDismiss = { managedFavorite = null },
+                                                onDetails = { onOpen(manga) },
+                                                onRemove = { removeFavorite = manga },
+                                                removeEnabled = !syncing, removeLabel = "移除云端收藏")
                                         }
                                     }
                                     if (state.favoritesLoading || state.favoritesError != null || state.favoritesHasMore) {
@@ -433,14 +438,11 @@ private fun CloudContinueRow(entry: CloudHistoryEntry, repository: MangaReposito
         verticalAlignment = Alignment.CenterVertically) {
         MangaCover(entry.manga, repository, Modifier.width(45.dp).height(62.dp).mangaCoverCard(8.dp))
         Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(if (entry.chapterId.isBlank()) "查看漫画" else "继续阅读", style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(entry.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            MangaMetricBadges(entry.manga)
             if (entry.chapterTitle.isNotBlank()) Text(entry.chapterTitle, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Icon(Icons.Outlined.PlayArrow, "打开阅读记录", Modifier.size(23.dp))
+        Icon(Icons.Outlined.PlayArrow, if (entry.chapterId.isBlank()) "查看漫画详情" else "继续阅读 ${entry.chapterTitle}", Modifier.size(23.dp))
     }
 }
 

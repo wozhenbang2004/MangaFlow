@@ -143,7 +143,10 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
             derivedStateOf { (state.currentPage + state.currentPageOffsetFraction)
                 .coerceIn(0f, manga.lastIndex.toFloat()) }
         }
-        val extracted = remember(manga.map { it.coverUrl }) { mutableStateMapOf<String, Color>() }
+        val coverUrls = remember(manga) { manga.map { it.coverUrl } }
+        val extracted = remember(coverUrls) { mutableStateMapOf<String, Color>() }
+        val readyCovers = remember(coverUrls) { mutableStateMapOf<String, Boolean>() }
+        val currentCoverReady = manga.getOrNull(state.currentPage)?.coverUrl?.let { readyCovers[it] } == true
         val fallback = MaterialTheme.colorScheme.surfaceVariant
         val colors = manga.map { entry ->
             key(entry.id, entry.coverUrl) {
@@ -169,7 +172,9 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                 // falloff room without changing the pager's equal horizontal insets.
                 contentPadding = PaddingValues(start = edgePadding, end = edgePadding, top = 6.dp, bottom = 8.dp),
                 pageSpacing = 10.dp,
-                beyondViewportPageCount = 1, flingBehavior = fling, userScrollEnabled = visible,
+                // Visible peeks are always composed; extra offscreen bytes wait for the current cover.
+                beyondViewportPageCount = if (visible && currentCoverReady) 1 else 0,
+                flingBehavior = fling, userScrollEnabled = visible,
                 key = { manga[it].id },
                 modifier = Modifier.fillMaxWidth().height(itemHeight + 14.dp)
                     .semantics { stateDescription = "推荐 ${state.currentPage + 1} / ${manga.size}" }) { index ->
@@ -177,6 +182,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                 FeaturedManga(manga[index], repository, captionHeight, titleLines, inlineInformation, imageWidthPx, imageHeightPx,
                     color = colors[index], atmosphere = atmosphere,
                     onColor = { extracted[manga[index].coverUrl] = it },
+                    onReady = { readyCovers[manga[index].coverUrl] = true },
                     modifier = Modifier.fillMaxWidth().height(itemHeight).graphicsLayer {
                         val scale = if (motion) .92f + .08f * emphasis() else 1f
                         scaleX = scale; scaleY = scale
@@ -220,6 +226,7 @@ private fun FeaturedManga(
     color: State<Color>,
     atmosphere: State<Color>,
     onColor: (Color) -> Unit,
+    onReady: () -> Unit,
     modifier: Modifier,
     emphasis: () -> Float,
     offset: () -> Float,
@@ -244,6 +251,7 @@ private fun FeaturedManga(
     }
     var decoded by remember(manga.coverUrl) { mutableStateOf<Image?>(null) }
     val latestOnColor by rememberUpdatedState(onColor)
+    val latestOnReady by rememberUpdatedState(onReady)
     LaunchedEffect(manga.coverUrl, decoded) {
         decoded?.let { bitmap ->
             FeaturedCoverColors.get(manga.coverUrl)?.let { latestOnColor(it); return@LaunchedEffect }
@@ -251,7 +259,7 @@ private fun FeaturedManga(
                 ?.let { latestOnColor(it) }
         }
     }
-    val request = remember(context, manga.id, manga.coverUrl, repository, imageWidthPx, imageHeightPx, motion) {
+    val request = remember(context, manga.id, manga.coverUrl, manga.sourceUrl, repository, imageWidthPx, imageHeightPx, motion) {
         ImageRequest.Builder(imagePlatformContext(context)).data(manga.coverUrl).softwareBitmap()
             .size(imageWidthPx, imageHeightPx)
             .memoryCacheKey("featured-cover:" + manga.coverUrl)
@@ -262,7 +270,7 @@ private fun FeaturedManga(
     }
     // Both artwork layers share one bounded Coil decode and the original request headers.
     val painter = rememberAsyncImagePainter(request, contentScale = ContentScale.Fit,
-        onSuccess = { decoded = it.result.image })
+        onSuccess = { decoded = it.result.image; latestOnReady() })
     val surface = if (color.value.luminance() > .28f) lerp(color.value, Color.White, .56f)
         else lerp(color.value, Color.Black, .22f)
     val onDark = surface.luminance() <= .5f

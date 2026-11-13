@@ -126,7 +126,9 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(progress.chapterTitle.ifBlank { "已保存的章节" }, fontSize = 14.sp, lineHeight = 20.sp,
                             fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(mangaNumberText("${progress.pageIndex + 1}/${progress.pageCount} 页 · ${historyTime(progress.updatedAt)}"),
+                        val pageLabel = if (progress.pageCount > 0) "${progress.pageIndex + 1}/${progress.pageCount} 页"
+                            else "第 ${progress.pageIndex + 1} 页"
+                        Text(mangaNumberText("$pageLabel · ${historyTime(progress.updatedAt)}"),
                             fontSize = 12.sp, lineHeight = 16.sp, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Spacer(Modifier.width(12.dp))

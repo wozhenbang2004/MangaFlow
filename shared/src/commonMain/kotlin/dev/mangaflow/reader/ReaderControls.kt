@@ -44,6 +44,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -95,6 +96,7 @@ internal fun ReaderSeekBar(
     enabled: Boolean = true,
     label: String,
     interactions: MutableInteractionSource = remember { MutableInteractionSource() },
+    valueLabel: ((Float) -> String)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val pressed by interactions.collectIsPressedAsState()
@@ -111,7 +113,7 @@ internal fun ReaderSeekBar(
     val pageCount = remember(label) {
         Regex("""共\s*(\d+)\s*页""").find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
     }
-    val previewText = pageCount?.let { count ->
+    val previewText = valueLabel?.invoke(value.coerceIn(valueRange)) ?: pageCount?.let { count ->
         "${value.roundToInt().coerceIn(0, (count - 1).coerceAtLeast(0)) + 1} / $count"
     } ?: "${(fraction * 100f).roundToInt()}%"
     // Continuous reading/scrubbing is silent; the preview and release commit are the feedback.
@@ -152,7 +154,10 @@ internal fun ReaderSeekBar(
             valueRange = valueRange,
             interactionSource = interactions,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).align(Alignment.BottomCenter)
-                .semantics { contentDescription = label },
+                .semantics {
+                    contentDescription = label
+                    valueLabel?.let { stateDescription = it(value.coerceIn(valueRange)) }
+                },
             thumb = {
                 // A stable hit slot surrounds a small solid thumb; the track has no glass optics.
                 Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {

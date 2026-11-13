@@ -328,16 +328,16 @@ internal fun ChapterSourceDisc(
                     Row(Modifier.fillMaxWidth().height(14.dp)
                         .clickable(interactionSource = resolutionInteraction, indication = null,
                             role = Role.Button,
-                            onClickLabel = if (sample.known) "重新读取尺寸样本" else "读取尺寸样本",
+                            onClickLabel = if (sample.known) "重新读取原图尺寸" else "读取原图尺寸",
                             onClick = { if (sample.canMeasure && !sample.busy) sample.measure() })
                         .motionPress(resolutionInteraction, enabled = sample.canMeasure && !sample.busy, pressedScale = .98f)
                         .semantics(mergeDescendants = true) {
                             contentDescription = variant.sourceName + "，" + sample.detail
                             stateDescription = when {
-                                sample.busy -> "正在读取尺寸样本"
+                                sample.busy -> "正在读取原图尺寸"
                                 sample.error != null -> "读取失败，可重试"
-                                sample.known -> "已知样本尺寸，可重新读取"
-                                sample.canMeasure -> "尚未读取尺寸样本"
+                                sample.known -> "已知原图尺寸，可重新读取"
+                                sample.canMeasure -> "尚未读取原图尺寸"
                                 else -> "尺寸未知"
                             }
                             if (!sample.canMeasure || sample.busy) disabled()
@@ -346,8 +346,6 @@ internal fun ChapterSourceDisc(
                         if (sample.busy) MotionBusyIndicator(Modifier.size(9.dp),
                             color = colors.onSurfaceVariant, strokeWidth = 1.dp)
                         if (sample.known) {
-                            Text("样本", color = colors.onSurfaceVariant, fontSize = 12.sp,
-                                lineHeight = 14.sp, maxLines = 1)
                             Text(sample.compactLabel, color = colors.onSurfaceVariant,
                                 style = mangaMetricValueStyle(12.sp, 14.sp),
                                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))

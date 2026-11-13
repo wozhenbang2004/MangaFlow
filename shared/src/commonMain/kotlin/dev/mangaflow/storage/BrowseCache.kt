@@ -41,7 +41,7 @@ class BrowseCache(context: Context) {
     val generation: Long get() = epoch.get()
 
     fun cached(key: String): BrowseSnapshot? = synchronized(memoryLock) {
-        memory.remove(key)?.also { memory[key] = it }?.takeIf { usableTime(it.updatedAt) }
+        memory.remove(key)?.takeIf { usableTime(it.updatedAt) }?.also { memory[key] = it }
     }
 
     suspend fun read(key: String, generation: Long): BrowseSnapshot? {
@@ -140,6 +140,8 @@ class BrowseCache(context: Context) {
     suspend fun write(snapshot: BrowseSnapshot, generation: Long): Unit = withContext(Dispatchers.IO) {
         // Keep the last complete cached page range rather than truncating and skipping manga.
         if (!withinBounds(snapshot) || generation != epoch.get()) return@withContext
+        // Superseded requests should not encode a large range merely to be rejected after IO.
+        if (synchronized(memoryLock) { memory[snapshot.key]?.let { it !== snapshot } == true }) return@withContext
         val encoded = JSONObject().apply {
             put("version", VERSION)
             put("key", snapshot.key)

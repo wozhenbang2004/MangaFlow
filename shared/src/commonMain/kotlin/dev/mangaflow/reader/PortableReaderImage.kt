@@ -166,11 +166,23 @@ private fun originalTiles(size: IntSize, left: Float, top: Float, right: Float, 
     val firstY = (floor(top / step).toInt() - 1).coerceAtLeast(0)
     val lastX = (floor((right - 1).coerceAtLeast(left) / step).toInt() + 1).coerceAtMost((size.width - 1) / step)
     val lastY = (floor((bottom - 1).coerceAtLeast(top) / step).toInt() + 1).coerceAtMost((size.height - 1) / step)
+    val visibleFirstX = floor(left / step).toInt().coerceIn(firstX, lastX)
+    val visibleFirstY = floor(top / step).toInt().coerceIn(firstY, lastY)
+    val visibleLastX = floor((right - 1).coerceAtLeast(left) / step).toInt().coerceIn(visibleFirstX, lastX)
+    val visibleLastY = floor((bottom - 1).coerceAtLeast(top) / step).toInt().coerceIn(visibleFirstY, lastY)
     return buildList {
+        fun append(x: Int, y: Int) {
+            if (this.size < 32) add(ReaderTile(IntRect(x * step, y * step,
+                minOf((x + 1) * step, size.width), minOf((y + 1) * step, size.height)), sample))
+        }
+        // Keep order stable inside each tile window, so subpixel panning does not restart decodes.
+        for (y in visibleFirstY..visibleLastY) for (x in visibleFirstX..visibleLastX) {
+            if (this.size >= 32) return@buildList
+            append(x, y)
+        }
         for (y in firstY..lastY) for (x in firstX..lastX) {
             if (this.size >= 32) return@buildList
-            add(ReaderTile(IntRect(x * step, y * step, minOf((x + 1) * step, size.width),
-                minOf((y + 1) * step, size.height)), sample))
+            if (x !in visibleFirstX..visibleLastX || y !in visibleFirstY..visibleLastY) append(x, y)
         }
     }
 }

@@ -1,5 +1,18 @@
 # MangaFlow · current work
 
+## Whole-system cache / performance / UIUX upgrade · 2026-11-14
+
+Active raw request and seven-domain contract are DESIGN.md SYSTEM-UPGRADE-123; SIZE-LABEL-124 records the follow-up“样本二字没必要吧。然后继续” with1000121658. The full task is retained. Six isolated implementation agents supplied31 source files; root adds shared state/metrics/navigation work and integrates two small grafts. Expected finished scope is35 source files plus these existing records, with no new UI/report framework.
+
+Current implementation: stale-first/fresh-native directory reuse; shared live directory requests and root/epoch/write-safe bounded hot cache; less repeated validated-file/JSON/stat/manifest work; exact source reader entry and continue preparation off Main; visible-first paging/tiles, correct ready state and local detail retries; real brightness and dimensions; independent lazy browse sections and period-aware adaptive scores; isolated volume-cover state and Default comment preparation; task-based downloads/cloud/history/settings/import/backup disclosure. Inactive root snapshots stop receiving unrelated live updates, scores have stable click ownership and actual Haze focus, and the source size has no“样本”prefix. No original byte, history, storage/variant ID or group/edition migration.
+
+Root integrated against350e884a62463512116eca21b1e3f6fb9df521a6, grafting its actual Copy aliases onto the cache implementation and keeping all foreground wallpaper discovery changes. Cache isCatalogFresh and shared periodHeat are the only new in-batch root call contracts; reader imports the detail label helper only for visible default labels. Retrying a saved/collected entry retains its exact chapter and collection. No direct storage-bounds shortcut bypasses EXIF.
+
+Prior observed packages: Android196/run43487843192 and its applications43487843080 completed/success; latest parent Android197/run43493733207 completed/success, native43493733105 still in progress at this checkpoint. Those observations are not proof of the new batch. Execution is cloud GitHub connector plus in-memory source/objects, no local/test/build/benchmark/browser/device/service probe or extra review gate. Read normal workflow steps retain compile/package, manual-only Lint, signing and exact main guards.
+
+Next exact action: verify latest head and overlap once, publish the entire ready batch with an expected-head lease, confirm its matching normal Android/native CI identities, then keep main stable. If current main already contains this section and source batch, do not resubmit or create a status-only commit; use current CI or actual user feedback. Actual speed, memory, visuals, touch and CDN behavior remain unmeasured until real evidence.
+
+
 ## Current follow-up: real aliases / LAN discovery / quality comparison / Steam route
 
 Raw requirements and scope are DESIGN.md SOURCE-ALIAS-119 through STEAM-WORKSHOP-122. The user explicitly requested multi-channel higher-resolution image comparison and then reported1000121659's still-pending association plus missing PC discovery; the additional question requests Steam authentication/direct Workshop acquisition research.

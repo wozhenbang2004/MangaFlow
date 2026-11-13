@@ -1,5 +1,8 @@
 package dev.mangaflow.ui
 
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.foundation.layout.asPaddingValues
 
 import dev.mangaflow.data.chapterSourceMangaId
@@ -222,6 +225,14 @@ private val Frame.depth: Int get() = when (this) {
     is Frame.Reader -> 2
 }
 
+/** Keep the last drawn snapshot while its page is covered; resubscription receives current data. */
+@Composable
+private fun <T> StateFlow<T>.collectVisibleAsState(visible: Boolean): State<T> {
+    val source = this
+    val visibleFlow = remember(source, visible) { flow { if (visible) emitAll(source) } }
+    return visibleFlow.collectAsStateWithLifecycle(initialValue = source.value)
+}
+
 @OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = rememberMangaViewModel()) {
@@ -229,7 +240,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val wallpaperContext = LocalContext.current.applicationContext
     val wallpaperStore = remember(wallpaperContext) { WallpaperStore.get(wallpaperContext) }
     val wallpaper by wallpaperStore.state.collectAsStateWithLifecycle()
-    val browse by model.browse.collectAsStateWithLifecycle()
     val metricState = remember(model) { MangaMetricState(model.metrics, model::retainMetrics, model::releaseMetrics) }
     val detail by model.detail.collectAsStateWithLifecycle()
     val authorWorks by model.authorWorks.collectAsStateWithLifecycle()
@@ -241,9 +251,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val sourceCatalogErrors by model.repository.sourceErrors.collectAsStateWithLifecycle()
     val sourceDiscovery by model.repository.sourceDiscovery.collectAsStateWithLifecycle()
     val libraryOpening by model.libraryOpening.collectAsStateWithLifecycle()
-    val favorites by model.library.favorites.collectAsStateWithLifecycle()
-    val history by model.library.history.collectAsStateWithLifecycle()
-    val preferences by model.library.preferences.collectAsStateWithLifecycle()
     val refreshingDownloads by model.refreshingDownloads.collectAsStateWithLifecycle()
     val account by model.account.collectAsStateWithLifecycle()
     val update by model.updates.state.collectAsStateWithLifecycle()
@@ -269,6 +276,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
     var tagSearchVisible by rememberSaveable { mutableStateOf(false) }
     var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
+    val browse by model.browse.collectVisibleAsState(
+        reading == null && detail == null || tagSearchVisible || searchExpanded)
+    val favorites by model.library.favorites.collectVisibleAsState(reading == null)
+    val history by model.library.history.collectVisibleAsState(reading == null || recentReadingOpen)
+    val preferences by model.library.preferences.collectVisibleAsState(reading == null)
     var selectedCover by remember { mutableStateOf<MangaCoverKey?>(null) }
     val keyboard = LocalSoftwareKeyboardController.current
     val motion = LocalMotionEnabled.current

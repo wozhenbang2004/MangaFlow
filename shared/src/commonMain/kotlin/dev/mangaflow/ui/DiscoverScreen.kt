@@ -241,7 +241,7 @@ fun DiscoverScreen(
         }
     }
     }
-    MetricSourceFan(sourceFan)
+    MetricSourceFan(sourceFan, backdrop = searchBackdrop)
     actionsManga?.let { manga ->
         MotionBottomSheet(onDismissRequest = { actionsManga = null }) { dismiss ->
             Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 16.dp)) {
@@ -419,7 +419,7 @@ internal fun DiscoverySearchResults(
                     contentPadding = PaddingValues(bottom = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    items(search.items, key = Manga::id) { manga ->
+                    items(search.items, key = Manga::id, contentType = { "search-result" }) { manga ->
                         SearchResultRow(manga, repository, "search-${search.cacheKey}",
                             horizontalInset = if (tagsOnly) 0.dp else 6.dp,
                             bodySources = if (federated) search.sourceMatches[manga.id].orEmpty() else emptyList(),
@@ -607,6 +607,7 @@ private fun DiscoveryPane(
     val ranking = state.mode == DiscoveryMode.RANKING
     val motion = LocalMotionEnabled.current
     val firstEntranceIndex = remember(state.cacheKey) { retainedGrid.firstVisibleItemIndex }
+    val featured = remember(state.items) { state.items.take(6) }
     val pull = rememberBottomPullLoadState(
         key = state.cacheKey,
         enabled = active && state.items.isNotEmpty() && state.hasMore && !state.loading &&
@@ -652,13 +653,12 @@ private fun DiscoveryPane(
         modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
     ) {
         if (state.mode == DiscoveryMode.RECOMMENDED && (state.loading || state.items.isNotEmpty())) {
-            item(span = { GridItemSpan(maxLineSpan) }, key = "hero") {
-                Column(Modifier.fillMaxWidth()) {
-                    FeaturedCarousel(state.items.take(6), repository,
-                        active && heroVisible && canAutoAdvance && !grid.isScrollInProgress && !layoutPresent,
-                        onOpen = onOpen, onRatings = onRatings, loading = state.loading)
-                    if (state.items.isNotEmpty()) sectionControls()
-                }
+            item(span = { GridItemSpan(maxLineSpan) }, key = "hero", contentType = "featured") {
+                // The gallery owns only its artwork. The following section can remain
+                // visible without keeping an offscreen gallery active.
+                FeaturedCarousel(featured, repository,
+                    active && heroVisible && canAutoAdvance && !layoutPresent,
+                    onOpen = onOpen, onRatings = onRatings, loading = state.loading)
             }
         }
         if (state.loading && state.items.isEmpty()) {
@@ -673,12 +673,13 @@ private fun DiscoveryPane(
                 EmptyMessage("暂时没有漫画", "来源暂时没有返回内容，可以稍后刷新。", "刷新", onRefresh)
             }
         } else {
-            if (!ranking && state.mode != DiscoveryMode.RECOMMENDED)
-                item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
-                sectionControls()
-            }
+            if (!ranking)
+                item(span = { GridItemSpan(maxLineSpan) }, key = "section", contentType = "section-control") {
+                    sectionControls()
+                }
             if (ranking) {
-                itemsIndexed(state.items, key = { _, manga -> manga.id }, span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
+                itemsIndexed(state.items, key = { _, manga -> manga.id }, contentType = { _, _ -> "ranking-book" },
+                    span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
                     RankRow(manga, repository, state.period, state.cacheKey,
                         modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
                             placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())
@@ -686,7 +687,7 @@ private fun DiscoveryPane(
                         onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
                 }
             } else {
-                items(state.items, key = Manga::id) { manga ->
+                items(state.items, key = Manga::id, contentType = { "browse-book" }) { manga ->
                     Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
                         placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())) {
                         MotionTabContent(selected = columns == 1, modifier = Modifier.fillMaxWidth(),
@@ -702,7 +703,7 @@ private fun DiscoveryPane(
                     }
                 }
             }
-            item(span = { GridItemSpan(maxLineSpan) }, key = "more") {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "more", contentType = "load-more") {
                 if (state.error != null) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(state.error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -1030,7 +1031,7 @@ internal fun ContinueRow(
         MangaCover(progress.manga, repository, Modifier.width(46.dp).height(64.dp).mangaCoverCard(7.dp))
         Column(Modifier.weight(1f).padding(start = 12.dp, end = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(progress.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(mangaNumberText("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页"), style = MaterialTheme.typography.bodySmall,
+            Text(mangaNumberText(recentReadingLocation(progress)), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (progress.pageCount > 0) {
                 val fraction = ((progress.pageIndex + 1).toFloat() / progress.pageCount).coerceIn(0f, 1f)
@@ -1093,7 +1094,7 @@ internal fun RecentReadingSheet(
                                 Column(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                                     Text(progress.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text(mangaNumberText("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页"),
+                                    Text(mangaNumberText(recentReadingLocation(progress)),
                                         fontSize = 12.sp, lineHeight = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
@@ -1158,16 +1159,19 @@ internal fun CoverTile(
 internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Modifier, scale: ContentScale = ContentScale.Crop) {
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
-    val request = remember(manga.id, manga.coverUrl, motion) {
-        ImageRequest.Builder(imagePlatformContext(context)).data(manga.coverUrl)
-            .memoryCacheKey("manga-cover:" + manga.coverUrl)
-            .httpHeaders(NetworkHeaders.Builder().apply {
-                repository.imageHeaders(manga.id, "").forEach { (name, value) -> set(name, value) }
-            }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
+    val request = remember(context, repository, manga.id, manga.coverUrl, manga.sourceUrl, motion) {
+        manga.coverUrl.takeIf(String::isNotBlank)?.let { url ->
+            ImageRequest.Builder(imagePlatformContext(context)).data(url)
+                .memoryCacheKey("manga-cover:" + url)
+                .httpHeaders(NetworkHeaders.Builder().apply {
+                    repository.imageHeaders(manga.id, "").forEach { (name, value) -> set(name, value) }
+                }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
+        }
     }
     Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
         Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(25.dp))
-        AsyncImage(model = request, contentDescription = null, contentScale = scale, modifier = Modifier.fillMaxSize())
+        if (request != null) AsyncImage(model = request, contentDescription = null, contentScale = scale,
+            modifier = Modifier.fillMaxSize())
     }
 }
 
@@ -1193,6 +1197,10 @@ internal fun EmptyMessage(title: String, description: String, action: String? = 
         if (action != null) TextButton(onClick = onAction) { Text(action) }
     }
 }
+
+private fun recentReadingLocation(progress: ReadingProgress): String =
+    progress.chapterTitle + " · " + if (progress.pageCount > 0)
+        "${progress.pageIndex + 1}/${progress.pageCount} 页" else "第${progress.pageIndex + 1}页"
 
 private fun browseUpdatedAt(timestamp: Long): String =
     formatInstantMillis(timestamp, "HH:mm") + " 更新"

@@ -131,6 +131,11 @@ import kotlinx.coroutines.launch
 
 private enum class DownloadFilter(val label: String) { ALL("全部"), ACTIVE("进行中"), SAVED("已下载") }
 
+// Layout depends on membership/order/completion, never on page or byte progress.
+private data class DownloadDirectoryEntry(
+    val id: String, val mangaId: String, val group: String, val chapterIndex: Int, val saved: Boolean,
+)
+
 private sealed interface LocalImportSource {
     data class Archive(val uri: String) : LocalImportSource
     data class Images(val uris: List<String>) : LocalImportSource
@@ -197,8 +202,27 @@ fun DownloadsScreen(
     val contentTopPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
-    val manageableEntries = entries.filterNot { it.id in removingIds }
-    val selectedEntries = manageableEntries.filter { it.id in selectedIds }
+    val manageableEntries = remember(entries, removingIds) { entries.filterNot { it.id in removingIds } }
+    val selectedEntries = remember(manageableEntries, selectedIds) { manageableEntries.filter { it.id in selectedIds } }
+    val entriesById = remember(entries) { entries.associateBy(DownloadEntry::id) }
+    val historyById = remember(history) { history.associateBy { it.manga.id } }
+    val directory = remember(manageableEntries) {
+        manageableEntries.map { DownloadDirectoryEntry(it.id, it.manga.id, it.chapter.group,
+            it.chapter.index, it.status == DownloadStatus.COMPLETED) }
+    }
+    val orderedBooks = remember(directory) {
+        DownloadFilter.entries.associateWith { page ->
+            directory.filter { entry -> when (page) {
+                DownloadFilter.ALL -> true
+                DownloadFilter.ACTIVE -> !entry.saved
+                DownloadFilter.SAVED -> entry.saved
+            } }.groupBy(DownloadDirectoryEntry::mangaId).mapValues { (_, chapters) ->
+                chapters.groupBy(DownloadDirectoryEntry::group).values.flatMap { group ->
+                    group.sortedBy(DownloadDirectoryEntry::chapterIndex).map(DownloadDirectoryEntry::id)
+                }
+            }
+        }
+    }
     val motion = LocalMotionEnabled.current
     val activeEntries = manageableEntries.filter { it.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING) }
     val resumableEntries = manageableEntries.filter {
@@ -344,12 +368,23 @@ fun DownloadsScreen(
                                     style = MaterialTheme.typography.titleMedium, color = foreground,
                                 )
                                 Spacer(Modifier.height(8.dp))
-                                Text("在目录下载，或导入 CBZ、ZIP、图片与文件夹", style = MaterialTheme.typography.bodySmall, color = secondary)
+                                Text(when (pageFilter) {
+                                    DownloadFilter.ALL -> "从漫画目录下载章节，或添加本地漫画。"
+                                    DownloadFilter.ACTIVE -> if (completedEntries.isNotEmpty()) "已完成的章节保存在“已下载”中。" else "从漫画目录选择章节，即可开始下载。"
+                                    DownloadFilter.SAVED -> if (manageableEntries.isNotEmpty()) "任务尚未完成，可在“进行中”查看。" else "下载完成后，就能在这里离线阅读。"
+                                }, style = MaterialTheme.typography.bodySmall, color = secondary)
+                                if (pageFilter == DownloadFilter.ACTIVE && completedEntries.isNotEmpty()) {
+                                    TextButton(onClick = { filter = DownloadFilter.SAVED }) { Text("查看已下载") }
+                                } else if (pageFilter == DownloadFilter.SAVED && manageableEntries.isNotEmpty()) {
+                                    TextButton(onClick = { filter = DownloadFilter.ACTIVE }) { Text("查看进行中") }
+                                } else if (pageFilter == DownloadFilter.ALL) {
+                                    TextButton(onClick = { showImportSources = true }) { Text("添加本地漫画") }
+                                }
                             }
                         }
                     } else {
-                        visible.groupBy { it.manga.id }.forEach { (mangaId, workEntries) ->
-                            val chapters = workEntries.groupBy { it.chapter.group }.values.flatMap { group -> group.sortedBy { it.chapter.index } }
+                        orderedBooks.getValue(pageFilter).forEach { (mangaId, chapterIds) ->
+                            val chapters = chapterIds.mapNotNull(entriesById::get)
                             val expanded = mangaId in expandedBooks && chapters.size > 1
                             item(key = "work:$mangaId", contentType = "download-work") {
                                 val placement = Modifier.animateItem(
@@ -362,7 +397,7 @@ fun DownloadsScreen(
                                         DownloadBookRow(chapters, repository, expanded, managing,
                                             selected = chapters.all { it.id in selectedIds }, refreshingIds = refreshingIds,
                                             onRead = {
-                                                val resume = history.firstOrNull { it.manga.id == mangaId }
+                                                val resume = historyById[mangaId]
                                                 val target = chapters.firstOrNull { it.chapter.id == resume?.chapterId }
                                                     ?: chapters.firstOrNull { it.status == DownloadStatus.COMPLETED }
                                                     ?: chapters.firstOrNull { it.completedPages > 0 } ?: chapters.first()

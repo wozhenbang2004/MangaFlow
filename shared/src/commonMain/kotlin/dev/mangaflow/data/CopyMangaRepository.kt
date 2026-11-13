@@ -44,6 +44,7 @@ class CopyMangaRepository(
     private val anonymousIdentity by lazy(identityProvider)
     private val imageDomains = config.trustedImageDomains.map { it.lowercase().trim('.') }.toSet()
     private val catalogCache = LinkedHashMap<String, CachedCatalog>()
+    private val catalogRequests = mutableMapOf<String, SharedCatalog>()
     private val pageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pageRequests = mutableMapOf<PageKey, SharedPages>()
     private val pageCache = LinkedHashMap<PageKey, CachedPages>()
@@ -173,14 +174,53 @@ class CopyMangaRepository(
             paths.distinct().singleOrNull()?.let { name to it }
         }.toMap()
 
-    override suspend fun detail(mangaId: String): MangaDetail = withContext(Dispatchers.IO) {
-        // An explicit refresh always obtains a new public directory.
-        foregroundRequest("章节目录", 35_000L) { readCatalog(segment(mangaId)).detail }
-    }
+    override suspend fun detail(mangaId: String): MangaDetail = detailCatalog(mangaId, null)
 
-    suspend fun detail(mangaId: String, onMetadata: (Manga) -> Unit): MangaDetail = withContext(Dispatchers.IO) {
-        foregroundRequest("章节目录", 35_000L) { readCatalog(segment(mangaId), onMetadata).detail }
-    }
+    suspend fun detail(mangaId: String, onMetadata: (Manga) -> Unit): MangaDetail =
+        detailCatalog(mangaId, onMetadata)
+
+    private suspend fun detailCatalog(mangaId: String, onMetadata: ((Manga) -> Unit)?): MangaDetail =
+        withContext(Dispatchers.IO) {
+            val id = segment(mangaId)
+            val observer = onMetadata?.let(::CatalogObserver)
+            foregroundRequest("章节目录", 35_000L) {
+                currentCoroutineContext().ensureActive()
+                val (request, metadata) = synchronized(copyMangaRepositoryStateLock) {
+                    // A refresh shares only live work, never a completed pre-click directory.
+                    val shared = catalogRequests[id]?.takeUnless { it.result.isCompleted }
+                        ?: SharedCatalog(pageScope.async(start = CoroutineStart.LAZY) {
+                            val job = currentCoroutineContext()[Job]
+                            readCatalog(id) { manga ->
+                                val observers = synchronized(copyMangaRepositoryStateLock) {
+                                    catalogRequests[id]?.takeIf { it.result === job }?.let { running ->
+                                        running.metadata = manga
+                                        running.observers.toList()
+                                    }.orEmpty()
+                                }
+                                observers.forEach { it.callback(manga) }
+                            }
+                        }).also { catalogRequests[id] = it }
+                    shared.readers++
+                    observer?.let { shared.observers.add(it) }
+                    shared to shared.metadata
+                }
+                try {
+                    // Registration and this snapshot share a lock, so late joiners see metadata once.
+                    if (metadata != null) onMetadata?.invoke(metadata)
+                    request.result.start()
+                    request.result.await().detail
+                } finally {
+                    synchronized(copyMangaRepositoryStateLock) {
+                        observer?.let { request.observers.remove(it) }
+                        request.readers--
+                        if (request.readers == 0) {
+                            if (catalogRequests[id] === request) catalogRequests.remove(id)
+                            if (!request.result.isCompleted) request.result.cancel()
+                        }
+                    }
+                }
+            }
+        }
 
     /** A reading session may reuse a recent directory without refreshing it. */
     fun cachedDetail(mangaId: String): MangaDetail? {
@@ -188,6 +228,18 @@ class CopyMangaRepository(
         return synchronized(copyMangaRepositoryStateLock) {
             catalogCache[mangaId]?.takeIf { wallTimeMillis() - it.fetchedAt in 0L until 10 * 60_000L }
                 ?.detail
+        }
+    }
+
+    internal fun invalidateCaches() {
+        synchronized(copyMangaRepositoryStateLock) {
+            catalogCache.clear()
+            pageCache.clear()
+            coverCache.clear()
+            val active = catalogRequests.values.map { it.result } + pageRequests.values.map { it.result }
+            catalogRequests.clear()
+            pageRequests.clear()
+            active.forEach { it.cancel() }
         }
     }
 
@@ -563,6 +615,11 @@ class CopyMangaRepository(
     private data class PageKey(val mangaId: String, val chapterId: String)
     private data class CachedPages(val pages: List<Page>, val fetchedAt: Long)
     private data class CachedCover(val page: Page, val fetchedAt: Long)
+    private class CatalogObserver(val callback: (Manga) -> Unit)
+    private class SharedCatalog(val result: Deferred<CachedCatalog>, var readers: Int = 0) {
+        var metadata: Manga? = null
+        val observers = mutableSetOf<CatalogObserver>()
+    }
     private class SharedPages(val result: Deferred<List<Page>>, var readers: Int = 0)
 
     private companion object {

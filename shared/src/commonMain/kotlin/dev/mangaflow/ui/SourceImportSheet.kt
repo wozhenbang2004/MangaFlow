@@ -10,6 +10,13 @@ import dev.mangaflow.ui.platform.releasePickedDocuments
 import dev.mangaflow.ui.platform.rememberOpenDocumentPicker
 import kotlinx.coroutines.IO
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -34,6 +41,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -60,11 +70,14 @@ import dev.mangaflow.reader.panels.PanelRuntimeState
 import dev.mangaflow.reader.panels.PanelRuntimeStore
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -116,6 +129,13 @@ internal fun SourceImportSheet(
     var failure by remember { mutableStateOf<String?>(null) }
     var activeJob by remember { mutableStateOf<Job?>(null) }
     var completedName by remember { mutableStateOf<String?>(null) }
+    var showFormats by remember { mutableStateOf(false) }
+    var showEngineDetails by remember { mutableStateOf(false) }
+    var showPackageDetails by remember(prepared?.digest) { mutableStateOf(false) }
+    val motion = LocalMotionEnabled.current
+    val engineReady = engine.installed && !engine.downloading && !engine.pendingRemoval
+    val engineReveal = animateFloatAsState(if (showEngineDetails) 1f else 0f,
+        tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "source-engine-disclosure")
 
     fun operate(label: String, block: suspend () -> Unit) {
         if (busy != null || completedName != null) return
@@ -201,10 +221,6 @@ internal fun SourceImportSheet(
             LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false),
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 6.dp, bottom = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                item(key = "engine") {
-                    ScriptEngineControl(runtimes, engine, busy == null,
-                        onFailure = { failure = it })
-                }
                 failure?.let { message -> item(key = "failure") {
                     Text(message, fontSize = 12.sp, lineHeight = 17.sp, color = colors.error,
                         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
@@ -221,8 +237,21 @@ internal fun SourceImportSheet(
                 val bundle = prepared
                 if (bundle == null) {
                     item(key = "formats") {
-                        Text("添加公开源仓库，挑选需要的漫画源；读取目录不会运行或安装脚本。目前支持 Mangayomi 格式的 JS 漫画源，APK、Dart 和阅读规则书源暂不支持。",
-                            fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant)
+                        Column {
+                            Text("JS 漫画源 · 支持源仓库或文件", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                            MotionTextButton(onClick = { showFormats = !showFormats },
+                                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                                Text(if (showFormats) "收起导入说明" else "支持格式与导入说明", fontSize = 11.sp)
+                            }
+                            AnimatedVisibility(showFormats,
+                                enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
+                                    expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+                                exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                                    shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
+                                Text("可添加公开仓库，挑选需要的漫画源；读取目录不会运行或安装脚本。目前支持 Mangayomi 格式的 JS 漫画源，APK、Dart 和阅读规则书源暂不支持。",
+                                    fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant)
+                            }
+                        }
                     }
                     item(key = "import-mode") {
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -363,19 +392,40 @@ internal fun SourceImportSheet(
                         Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                             Text(bundle.metadata.optString("name"), fontSize = 15.sp, fontWeight = FontWeight.Medium)
                             ImportDetail("网站", bundle.metadata.optString("baseUrl"))
-                            ImportDetail("版本", bundle.metadata.optString("version").ifBlank { "未提供" })
-                            ImportDetail("语言", bundle.metadata.optString("lang"))
-                            ImportDetail("来自", bundle.origin)
-                            ImportDetail("指纹", bundle.digest.take(16))
+                            ImportDetail("版本", listOf(bundle.metadata.optString("version"), bundle.metadata.optString("lang"))
+                                .filter(String::isNotBlank).joinToString(" · ").ifBlank { "未提供" })
+                            ImportDetail("来自", displayImportOrigin(bundle.origin))
                             if (installed.any { it.sourceId == bundle.sourceId && it.digest == bundle.digest }) {
                                 Text("同一版本已安装，可重新启用；不会重复添加。", fontSize = 11.sp, color = colors.onSurfaceVariant)
                             }
-                            Text("脚本可以请求网络，请确认来源可信。仅支持当前 JS 宿主；网页验证、APK、Dart 和阅读规则暂不兼容。目录识别不代表网站已验证可读，不支持的功能会明确报错。",
-                                color = colors.onSurfaceVariant, fontSize = 11.sp, lineHeight = 17.sp)
+                            Text("脚本可以请求网络，请确认来源可信。", color = colors.onSurfaceVariant,
+                                fontSize = 11.sp, lineHeight = 17.sp)
+                            MotionTextButton(onClick = { showPackageDetails = !showPackageDetails },
+                                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                                Text(if (showPackageDetails) "收起来源信息" else "兼容性与来源信息", fontSize = 11.sp)
+                            }
+                            AnimatedVisibility(showPackageDetails,
+                                enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
+                                    expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+                                exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                                    shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    ImportDetail("来源", bundle.origin)
+                                    ImportDetail("指纹", bundle.digest.take(16))
+                                    Text("仅支持当前 JS 宿主；网页验证、APK、Dart 和阅读规则暂不兼容。目录识别不代表网站已验证可读，不支持的功能会明确报错。",
+                                        color = colors.onSurfaceVariant, fontSize = 11.sp, lineHeight = 17.sp)
+                                }
+                            }
+                        }
+                    }
+                    if (!engineReady || engine.error != null) item(key = "required-engine") {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("导入此源需要脚本运行组件", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                            ScriptEngineControl(runtimes, engine, busy == null, onFailure = { failure = it })
                         }
                     }
                     item(key = "install") {
-                        MotionButton(enabled = busy == null && engine.installed && !engine.downloading && !engine.pendingRemoval,
+                        MotionButton(enabled = busy == null && engineReady,
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = colors.onSurface, contentColor = colors.surface),
                             onClick = {
@@ -399,6 +449,29 @@ internal fun SourceImportSheet(
                             }) { Text("导入并启用", fontSize = 13.sp) }
                         MotionTextButton(enabled = busy == null, modifier = Modifier.fillMaxWidth(),
                             onClick = { prepared = null; failure = null }) { Text("重新选择", fontSize = 12.sp) }
+                    }
+                }
+                if (bundle == null || engineReady && engine.error == null) item(key = "engine-maintenance") {
+                    Column {
+                        MotionTextButton(onClick = { showEngineDetails = !showEngineDetails },
+                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                            Text(if (showEngineDetails) "收起运行组件" else "运行组件 · " +
+                                (if (engineReady) "已就绪" else "导入时下载"), fontSize = 11.sp,
+                                color = colors.onSurfaceVariant)
+                        }
+                        // Match SettingsDisclosure: hiding maintenance must not cancel its running operation.
+                        Column(Modifier.fillMaxWidth().clipToBounds().motionInputGate(showEngineDetails)
+                            .layout { measurable, constraints ->
+                                if (engineReveal.value <= 0f) layout(constraints.minWidth, 0) {}
+                                else {
+                                    val body = measurable.measure(constraints.copy(minHeight = 0))
+                                    layout(body.width, (body.height * engineReveal.value).toInt().coerceAtLeast(0)) {
+                                        body.placeRelative(0, 0)
+                                    }
+                                }
+                            }.graphicsLayer { alpha = engineReveal.value }) {
+                            ScriptEngineControl(runtimes, engine, busy == null, onFailure = { failure = it })
+                        }
                     }
                 }
             }

@@ -2,6 +2,8 @@ package dev.mangaflow.ui
 
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -37,6 +39,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.FederatedSearchSource
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.data.federatedMangaIdentity
 import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.ui.motion.MotionBottomSheet
@@ -145,6 +148,7 @@ internal fun SearchSourceSummary(
 }
 
 /** Choose an actual native result without implying that same-title records are versions. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun FederatedSearchChoices(
     matches: List<Manga>,
@@ -158,8 +162,8 @@ internal fun FederatedSearchChoices(
     val keyboard = LocalSoftwareKeyboardController.current
     val maximumHeight = LocalMangaWindow.current.height * .72f
     LaunchedEffect(Unit) { focus.clearFocus(); keyboard?.hide() }
-    val frozen = remember { matches.distinctBy(::federatedMangaIdentity) }
-    val bySource = remember(frozen) { frozen.groupBy { it.sourceId } }
+    val frozen = remember(matches) { matches.distinctBy(::federatedMangaIdentity) }
+    val entries = remember(frozen) { searchEntryPresentations(frozen) }
     val heading = frozen.firstOrNull()?.title.orEmpty()
     var pendingOpen by remember { mutableStateOf<Manga?>(null) }
     MotionBottomSheet(onDismissRequest = {
@@ -179,47 +183,86 @@ internal fun FederatedSearchChoices(
             LazyColumn(Modifier.weight(1f, fill = false).fillMaxWidth(),
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                items(frozen, key = { federatedMangaIdentity(it) }) { manga ->
-                    val sourceMatches = bySource.getValue(manga.sourceId)
-                    val sourceName = manga.sourceName.ifBlank { sourceDisplayName(manga.sourceId) }
-                    val entryNumber = sourceMatches.indexOf(manga) + 1
-                    val authors = manga.authors.filter { it.isNotBlank() }.joinToString(" · ")
-                    val details = listOfNotNull(
-                        authors.takeIf { it.isNotBlank() },
-                        manga.latestChapter.takeIf { it.isNotBlank() },
-                        manga.status.takeIf { it.isNotBlank() },
-                    ).joinToString(" · ")
-                    val entryPath = if (sourceMatches.size > 1) searchEntryPath(manga) else null
+                items(entries, key = { federatedMangaIdentity(it.manga) }, contentType = { "native-search-choice" }) { entry ->
+                    val manga = entry.manga
+                    var identityVisible by remember(federatedMangaIdentity(manga)) { mutableStateOf(false) }
                     val interaction = remember(manga.id) { MutableInteractionSource() }
                     Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(12.dp))
-                        .clickable(interactionSource = interaction, indication = null, role = Role.Button,
-                            onClickLabel = "阅读${sourceName}的${manga.title}" +
-                                if (sourceMatches.size > 1) "，条目$entryNumber" else "", onClick = {
-                                pendingOpen = manga; dismiss()
-                            }).motionPress(interaction, pressedScale = .99f)
+                        .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
+                            onClickLabel = "打开${entry.sourceName}的${manga.title}",
+                            onLongClickLabel = if (identityVisible) "收起来源标识" else "查看来源标识",
+                            onLongClick = { identityVisible = !identityVisible },
+                            onClick = { pendingOpen = manga; dismiss() })
+                        .motionPress(interaction, pressedScale = .99f)
                         .padding(horizontal = 8.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        if (sourceMatches.size > 1) MangaCover(manga, repository,
+                        if (entry.sameSourceCount > 1) MangaCover(manga, repository,
                             Modifier.size(28.dp, 40.dp).mangaCoverCard(4.dp))
-                        else ChapterSourceLogo(manga.sourceId, sourceName, Modifier.size(16.dp))
+                        else ChapterSourceLogo(manga.sourceId, entry.sourceName, Modifier.size(16.dp))
                         Column(Modifier.weight(1f).padding(start = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                if (sourceMatches.size > 1) ChapterSourceLogo(manga.sourceId, sourceName, Modifier.size(14.dp))
-                                Text(if (sourceMatches.size > 1) "$sourceName · $entryNumber" else sourceName,
-                                    fontSize = 13.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (entry.sameSourceCount > 1)
+                                    ChapterSourceLogo(manga.sourceId, entry.sourceName, Modifier.size(14.dp))
+                                Text(entry.primary,
+                                    fontFamily = if (entry.primaryIsTitle) mangaFontFamily(MangaFontScene.WORK_TITLE) else null,
+                                    fontSize = 13.sp, lineHeight = 17.sp, fontWeight = FontWeight.Medium,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
-                            if (details.isNotBlank()) Text(details,
-                                fontSize = 11.sp, lineHeight = 14.sp, color = colors.onSurfaceVariant,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (entryPath != null) Text(entryPath, fontSize = 10.sp, lineHeight = 12.sp,
-                                color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
+                            if (entry.secondary.isNotBlank()) Text(entry.secondary,
+                                fontSize = 11.sp, lineHeight = 15.sp, color = colors.onSurfaceVariant,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            // Only genuinely indistinguishable metadata needs a native identifier up front.
+                            if (entry.ambiguous || identityVisible) Text(entry.identity,
+                                fontSize = 10.sp, lineHeight = 13.sp, color = colors.onSurfaceVariant,
+                                maxLines = if (identityVisible) 3 else 1,
+                                overflow = if (identityVisible) TextOverflow.Ellipsis else TextOverflow.MiddleEllipsis)
                         }
                     }
                 }
             }
         }
+    }
+}
+
+private data class SearchEntryPresentation(
+    val manga: Manga,
+    val sourceName: String,
+    val sameSourceCount: Int,
+    val primary: String,
+    val primaryIsTitle: Boolean,
+    val secondary: String,
+    val ambiguous: Boolean,
+    val identity: String,
+)
+
+/** Disclose the fields that actually distinguish the supplied native entries, without another lookup. */
+private fun searchEntryPresentations(matches: List<Manga>): List<SearchEntryPresentation> {
+    val grouped = matches.groupBy { it.sourceId }
+    fun authors(manga: Manga) = manga.authors.map(String::trim).filter(String::isNotBlank).joinToString(" · ")
+    fun signature(manga: Manga) = listOf(manga.title.trim(), authors(manga),
+        manga.latestChapter.trim(), manga.status.trim())
+    val signatures = matches.associate { federatedMangaIdentity(it) to signature(it) }
+    val fieldValues = grouped.mapValues { (_, peers) ->
+        List(4) { index -> peers.map { signatures.getValue(federatedMangaIdentity(it))[index] }.toSet() }
+    }
+    val signatureCounts = grouped.mapValues { (_, peers) ->
+        peers.groupingBy { signatures.getValue(federatedMangaIdentity(it)) }.eachCount()
+    }
+    return matches.map { manga ->
+        val peers = grouped.getValue(manga.sourceId)
+        val name = manga.sourceName.ifBlank { sourceDisplayName(manga.sourceId) }
+        val fields = signatures.getValue(federatedMangaIdentity(manga))
+        val differing = if (peers.size < 2) -1 else fields.indices.firstOrNull { index ->
+            fields[index].isNotBlank() && fieldValues.getValue(manga.sourceId)[index].size > 1
+        } ?: -1
+        val primaryIsTitle = differing == 0 || peers.size > 1 && differing < 0 && manga.title.isNotBlank()
+        val primary = if (peers.size == 1) name else
+            fields.getOrNull(differing)?.takeIf(String::isNotBlank) ?: manga.title.ifBlank { name }
+        val secondary = fields.drop(1).filter { it.isNotBlank() && it != primary }.distinct().joinToString(" · ")
+        SearchEntryPresentation(manga, name, peers.size, primary, primaryIsTitle, secondary,
+            ambiguous = (signatureCounts.getValue(manga.sourceId)[fields] ?: 0) > 1,
+            identity = searchEntryPath(manga))
     }
 }
 

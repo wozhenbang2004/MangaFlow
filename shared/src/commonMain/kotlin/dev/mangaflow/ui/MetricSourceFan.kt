@@ -35,7 +35,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
@@ -59,6 +58,12 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import dev.mangaflow.data.MangaMetric
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.HazeSourceRetention
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.HazeColorEffect
+import dev.chrisbanes.haze.blur.hazeBlur
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlin.math.PI
@@ -133,7 +138,7 @@ private object FanWindowOrigin : PopupPositionProvider {
 /** Reuse source marks, the app's motion roles and reference-keyed modal ownership.
  *  No card measures change, and reversing one progress retraces every icon's flight. */
 @Composable
-internal fun MetricSourceFan(state: MetricSourceFanState) {
+internal fun MetricSourceFan(state: MetricSourceFanState, backdrop: HazeState? = null) {
     val request = state.request ?: return
     val motion = LocalMotionEnabled.current
     val progress = remember(request) { Animatable(0f) }
@@ -153,8 +158,32 @@ internal fun MetricSourceFan(state: MetricSourceFanState) {
     val layoutDirection = LocalLayoutDirection.current
     val onDark = request.foreground.luminance() > .5f
     val backing = if (onDark) Color(0xFF19181C) else MaterialTheme.colorScheme.surface
+    val scrim = MaterialTheme.colorScheme.scrim
+    val blurInput = remember(backdrop) {
+        backdrop?.let { HazeInput.Sources(it, retention = HazeSourceRetention.KeepLastFrame) }
+    }
+    val blurStyle = remember(progress, scrim) {
+        HazeBlurStyle {
+            val p = progress.value.coerceIn(0f, 1f)
+            blurRadius(18.dp * p)
+            alpha(p)
+            noiseFactor(0f)
+            backgroundColor(Color.Transparent)
+            colorEffects(listOf(HazeColorEffect.tint(scrim.copy(alpha = .045f))))
+            fallbackColorEffect(HazeColorEffect.tint(scrim.copy(alpha = .16f)))
+        }
+    }
+    val interaction = remember(request) { MutableInteractionSource() }
     Popup(popupPositionProvider = FanWindowOrigin, onDismissRequest = { state.close() },
         properties = PopupProperties(focusable = true, clippingEnabled = false)) {
+        Box(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize()
+                .then(if (blurInput != null) Modifier.hazeBlur(input = blurInput, style = blurStyle,
+                    expandLayerBounds = false) else Modifier
+                    .graphicsLayer { alpha = progress.value }
+                    .drawBehind { drawRect(backing.copy(alpha = .16f)) })
+                .clickable(interactionSource = interaction, indication = null,
+                    role = Role.Button, onClickLabel = "收起评分来源", onClick = { state.close() }))
         BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding()
             .onGloballyPositioned {
                 val position = it.localToScreen(Offset.Zero)
@@ -187,17 +216,6 @@ internal fun MetricSourceFan(state: MetricSourceFanState) {
             val preferredTop = if (anchor.top >= fanHeight + gap + inset)
                 anchor.top - gap - fanHeight else anchor.bottom + gap
             val top = preferredTop.coerceIn(inset, heightPx - inset - fanHeight)
-            val interaction = remember(request) { MutableInteractionSource() }
-            val veil = remember(backing, centerX, top, fanWidth, fanHeight) {
-                Brush.radialGradient(listOf(backing.copy(alpha = .93f), backing.copy(alpha = .86f), Color.Transparent),
-                    center = Offset(centerX, top + fanHeight / 2f), radius = maxOf(fanWidth, fanHeight) * .85f)
-            }
-            Box(Modifier.fillMaxSize()
-                .graphicsLayer { alpha = progress.value }
-                .drawBehind { drawRect(backing.copy(alpha = .16f)); drawRect(veil) }
-                .clickable(interactionSource = interaction, indication = null,
-                    role = Role.Button, onClickLabel = "收起评分来源", onClick = { state.close() }))
-
             request.items.indices.reversed().forEach { index ->
                 val item = request.items[index]
                 val row = index / columns
@@ -251,6 +269,7 @@ internal fun MetricSourceFan(state: MetricSourceFanState) {
                         state.close(request.onDetails)
                     }.semantics { contentDescription = item.description } else Modifier.clearAndSetSemantics { }))
             }
+        }
         }
     }
 }

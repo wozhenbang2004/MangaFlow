@@ -2,6 +2,7 @@ package dev.mangaflow.reader
 
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.mangaFontFamily
+import dev.mangaflow.ui.chapterGroupLabel
 import dev.mangaflow.ui.mangaNumberText
 
 import dev.mangaflow.data.chapterSourceMangaId
@@ -1183,9 +1184,10 @@ private fun ChapterPages(
     val visibleImageChanged by rememberUpdatedState(onVisibleImageChanged)
     val nearEnd by rememberUpdatedState(onNearEnd)
     val atEndChanged by rememberUpdatedState(onAtEndChanged)
-    val loadedPages = remember { mutableStateMapOf<Int, Boolean>() }
+    val currentPages by rememberUpdatedState(pages)
+    val loadedPages = remember { mutableStateMapOf<Int, String>() }
     val composedPages = remember { mutableStateMapOf<Int, Boolean>() }
-    val prefetchRequests = remember { mutableStateMapOf<Int, Disposable>() }
+    val prefetchRequests = remember(pages) { mutableStateMapOf<Int, Disposable>() }
     val pageDimensions = remember { mutableStateMapOf<String, IntSize>() }
     val startPage = remember { initialPage.coerceIn(0, pages.lastIndex) }
     val startOffset = remember { initialOffset.coerceAtLeast(0) }
@@ -1215,7 +1217,7 @@ private fun ChapterPages(
             key = list,
             enabled = active && !restoring && onPrevious != null,
             loading = false,
-            canScrollForward = { list.canScrollBackward || pageLayoutReady[0] != true || loadedPages[0] != true },
+            canScrollForward = { list.canScrollBackward || pageLayoutReady[0] != true || loadedPages[0] != pages[0].url },
             onLoadMore = { onPrevious?.invoke() },
             actionLabel = "返回上一话",
             towardStart = true,
@@ -1245,7 +1247,7 @@ private fun ChapterPages(
             snapshotFlow {
                 val layout = list.layoutInfo
                 if (restoring) -1 else layout.visibleItemsInfo.lastOrNull { item ->
-                    loadedPages[item.index] == true && item.size > 0 &&
+                    item.index in pages.indices && loadedPages[item.index] == pages[item.index].url && item.size > 0 &&
                         item.offset < layout.viewportEndOffset &&
                         item.offset + item.size > layout.viewportStartOffset
                 }?.index ?: -1
@@ -1350,7 +1352,12 @@ private fun ChapterPages(
                 itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                     ReaderPage(
                         page, headers, resolvePage = resolvePage, retryPage = retryPage, paged = false, onTap = onTap,
-                        onMeasured = { loadedPages[index] = true },
+                        onLoadChanged = { ready ->
+                            if (currentPages.getOrNull(index)?.url == page.url) {
+                                if (ready) loadedPages[index] = page.url
+                                else if (loadedPages[index] == page.url) loadedPages.remove(index)
+                            }
+                        },
                         onHeightMeasured = { if (index == startPage) targetHeight = it },
                         onComposed = { present -> if (present) composedPages[index] = true else composedPages.remove(index) },
                         prefetch = prefetchRequests[index],
@@ -1411,7 +1418,7 @@ private fun ChapterPages(
         val atEnd by remember(pager, groups) {
             derivedStateOf {
                 pager.settledPage == groups.lastIndex && pager.currentPage == groups.lastIndex &&
-                    kotlin.math.abs(pager.currentPageOffsetFraction) < .01f && loadedPages[pages.lastIndex] == true
+                    kotlin.math.abs(pager.currentPageOffsetFraction) < .01f && loadedPages[pages.lastIndex] == pages.last().url
             }
         }
         val endReady = groups.last().let { group ->
@@ -1438,7 +1445,8 @@ private fun ChapterPages(
         LaunchedEffect(pager, groups, active) {
             snapshotFlow {
                 groups.getOrNull(pager.currentPage)?.let { group ->
-                    if (loadedPages[group.first] == true || (group.second != null && loadedPages[group.second] == true)) group.last
+                    if (loadedPages[group.first] == pages[group.first].url ||
+                        (group.second != null && loadedPages[group.second] == pages[group.second].url)) group.last
                     else -1
                 } ?: -1
             }.distinctUntilChanged().collect { lastVisible ->
@@ -1473,7 +1481,8 @@ private fun ChapterPages(
                 state = pager,
                 modifier = Modifier.fillMaxSize(),
                 reverseLayout = preferences.mode == ReadingMode.RIGHT_TO_LEFT,
-                beyondViewportPageCount = 1,
+                // Original-byte prefetch warms neighbors; do not decode whole offscreen spreads at entry.
+                beyondViewportPageCount = 0,
                 key = { index -> "image:${groups[index].first}" },
             ) { index ->
                 val group = groups.getOrNull(index)
@@ -1482,7 +1491,13 @@ private fun ChapterPages(
                         Box(modifier) {
                             ReaderPage(
                                 pages[imageIndex], headers, resolvePage = resolvePage, retryPage = retryPage, paged = true, pagedAlignment = alignment, onTap = onTap,
-                                onMeasured = { loadedPages[imageIndex] = true },
+                                onLoadChanged = { ready ->
+                                    val url = pages[imageIndex].url
+                                    if (currentPages.getOrNull(imageIndex)?.url == url) {
+                                        if (ready) loadedPages[imageIndex] = url
+                                        else if (loadedPages[imageIndex] == url) loadedPages.remove(imageIndex)
+                                    }
+                                },
                                 onComposed = { present -> if (present) composedPages[imageIndex] = true else composedPages.remove(imageIndex) },
                                 prefetch = prefetchRequests[imageIndex],
                                 onChapterSwipeReadyChanged = { ready ->
@@ -1547,7 +1562,7 @@ private fun AdjacentPagePrefetch(
     headers: Map<String, String>,
     mode: ReadingMode,
     composedPages: Map<Int, Boolean>,
-    loadedPages: Map<Int, Boolean>,
+    loadedPages: Map<Int, String>,
     requests: MutableMap<Int, Disposable>,
     resolvePage: suspend (Page) -> Page,
     enabled: Boolean,
@@ -1567,7 +1582,7 @@ private fun AdjacentPagePrefetch(
             snapshotFlow {
                 val (first, last) = visible()
                 PrefetchWindow(first, last, composedPages.keys.toSet(), requests.keys.toSet(), prefetchEnabled,
-                    (first..last).all { it !in pages.indices || loadedPages[it] == true })
+                    (first..last).all { it !in pages.indices || loadedPages[it] == pages[it].url })
             }.distinctUntilChanged().collectLatest { window ->
                 val active = window.composed + (window.first..window.last)
                 val nextDirection = when {
@@ -1656,7 +1671,7 @@ private fun ReaderPage(
     paged: Boolean,
     pagedAlignment: Alignment = Alignment.Center,
     onTap: () -> Unit,
-    onMeasured: () -> Unit,
+    onLoadChanged: (Boolean) -> Unit,
     onHeightMeasured: (Int) -> Unit = {},
     onComposed: (Boolean) -> Unit = {},
     prefetch: Disposable? = null,
@@ -1670,7 +1685,8 @@ private fun ReaderPage(
     val context = LocalContext.current
     val density = LocalDensity.current
     val screenHeight = LocalMangaWindow.current.height.coerceAtLeast(1.dp)
-    val measured by rememberUpdatedState(onMeasured)
+    // Request callbacks retain their own page/URL owner even if a later manifest replaces this slot.
+    val loadChanged = onLoadChanged
     val resolve by rememberUpdatedState(resolvePage)
     val retrySource by rememberUpdatedState(retryPage)
     val composed by rememberUpdatedState(onComposed)
@@ -1693,9 +1709,11 @@ private fun ReaderPage(
     var loading by remember(page.url) { mutableStateOf(true) }
     var reload by remember(page.url) { mutableIntStateOf(0) }
     var detailStatus by remember(page.url, reload) { mutableStateOf<ReaderDetailStatus?>(null) }
+    var detailRetry by remember(page.url, reload) { mutableIntStateOf(0) }
     var loadedImage by remember(page.url, reload) { mutableStateOf<LoadedReaderImage?>(null) }
     var resolvedPage by remember(page.url) { mutableStateOf<Page?>(null) }
     LaunchedEffect(page.url, reload) {
+        loadChanged(false)
         loading = true
         error = null
         resolvedPage = null
@@ -1748,8 +1766,9 @@ private fun ReaderPage(
         waitingForPrefetch = false
     }
     DisposableEffect(page.url) {
+        val releaseLoad = onLoadChanged
         composed(true)
-        onDispose { composed(false) }
+        onDispose { composed(false); releaseLoad(false) }
     }
     BoxWithConstraints(if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
         val viewportWidthPx = with(density) { maxWidth.roundToPx() }
@@ -1764,7 +1783,7 @@ private fun ReaderPage(
                 .scale(Scale.FIT)
                 .crossfade(false)
                 .listener(
-                    onStart = { loading = true; error = null },
+                    onStart = { loading = true; error = null; loadChanged(false) },
                     onSuccess = { _, result ->
                         val width = result.image.width
                         val height = result.image.height
@@ -1772,9 +1791,10 @@ private fun ReaderPage(
                             loadedImage = LoadedReaderImage(result.diskCacheKey, IntSize(width, height))
                         }
                         loading = false
-                        measured()
+                        loadChanged(true)
                     },
                     onError = { _, result ->
+                        loadChanged(false)
                         if (requested.url.startsWith("file:") && page.url.startsWith("https:")) {
                             // Files can be removed by the download screen while this image is visible.
                             // Recover just this image from its retained source address.
@@ -1827,16 +1847,18 @@ private fun ReaderPage(
                         }.distinctUntilChanged().collect { chapterSwipeReadyChanged(it) }
                     }
                     DisposableEffect(imageState) { onDispose { chapterSwipeReadyChanged(false) } }
-                    ZoomableAsyncImage(
-                        model = request,
-                        state = imageState,
-                        contentDescription = "第 ${page.index + 1} 页",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit,
-                        alignment = pagedAlignment,
-                        gesturesEnabled = true,
-                        onClick = { onTap() },
-                    )
+                    key(detailRetry) {
+                        ZoomableAsyncImage(
+                            model = request,
+                            state = imageState,
+                            contentDescription = "第 ${page.index + 1} 页",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit,
+                            alignment = pagedAlignment,
+                            gesturesEnabled = true,
+                            onClick = { onTap() },
+                        )
+                    }
                     imageState.detailNotice?.takeIf { imageState.detailError == null }?.let { message ->
                         Text(message, Modifier.align(Alignment.BottomCenter).padding(16.dp),
                             color = Color.Gray, fontSize = 11.sp)
@@ -1845,7 +1867,11 @@ private fun ReaderPage(
                         Column(Modifier.align(Alignment.BottomCenter).padding(16.dp),
                             horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(message, color = Color.Gray, fontSize = 11.sp)
-                            TextButton(onClick = { reload++ }) { Text("重试原图细节", color = Color.Gray) }
+                            TextButton(onClick = {
+                                imageState.detailError = null
+                                imageState.detailNotice = null
+                                detailRetry++
+                            }) { Text("重试原图细节", color = Color.Gray) }
                         }
                     }
                 } else {
@@ -1867,9 +1893,11 @@ private fun ReaderPage(
                         ?: page.takeIf { it.width > 0 && it.height > 0 }?.let { IntSize(it.width, it.height) }
                     if (hasDimensions && originalSize != null && naturalHeightPx > previewHeight * 2 &&
                         originalSize.readerAspectRatio() == aspect && loadedImage != null) {
-                        VerticalReaderTiles(requireNotNull(resource), loadedImage?.diskCacheKey,
-                            originalSize, viewportWidthPx, naturalHeightPx, visibleWindow,
-                            onDetailStatus = { detailStatus = it })
+                        key(resource?.url, detailRetry) {
+                            VerticalReaderTiles(requireNotNull(resource), loadedImage?.diskCacheKey,
+                                originalSize, viewportWidthPx, naturalHeightPx, visibleWindow,
+                                onDetailStatus = { detailStatus = it })
+                        }
                     }
                 }
             }
@@ -1878,7 +1906,7 @@ private fun ReaderPage(
                     IntOffset(0, (visibleWindow()?.top ?: 0) + 64.dp.roundToPx())
                 }.padding(horizontal = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(status.message, color = Color.Gray, fontSize = 11.sp)
-                    if (status.retryable) TextButton(onClick = { reload++ }) { Text("重试原图细节", color = Color.Gray) }
+                    if (status.retryable) TextButton(onClick = { detailStatus = null; detailRetry++ }) { Text("重试原图细节", color = Color.Gray) }
                 }
             }
             if (delayedLoading && imageError == null) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
@@ -1996,7 +2024,8 @@ private fun ReaderProgressSlider(
     val originalSize = remember(shownPage?.url, dimensionRevision) {
         shownPage?.let { ReaderDimensionCache.get(it.url) }
     }
-    val resolutionLabel = originalSize?.let { "${it.width} × ${it.height} px" } ?: "尺寸待获取"
+    val resolutionLabel = originalSize?.let { "${it.width} × ${it.height} px" } ?: "—"
+    val resolutionDescription = originalSize?.let { "原图 ${it.width} × ${it.height} 像素" } ?: "原图尺寸尚未获取"
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
 
     LaunchedEffect(pressed, dragged, enabled) {
@@ -2029,7 +2058,7 @@ private fun ReaderProgressSlider(
         Column(Modifier.width(112.dp * fontScale).heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
             .clickable(enabled = enabled && pageCount > 0, role = Role.Button,
                 onClickLabel = "打开页面导航", onClick = onOpenNavigator)
-            .semantics { contentDescription = "第 ${shown.roundToInt() + 1} 页，共 $pageCount 页，原图$resolutionLabel" }
+            .semantics { contentDescription = "第 ${shown.roundToInt() + 1} 页，共 $pageCount 页，$resolutionDescription" }
             .padding(horizontal = 4.dp, vertical = 5.dp),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
             Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
@@ -2143,7 +2172,7 @@ private fun ReaderChaptersDialog(
                     ReaderIcon(Icons.Rounded.Close, "关闭目录", onClick = onDismiss)
                 }
                 if (groups.size > 1) MotionTabs(
-                    selected = groups.indexOf(group), labels = groups, onSelect = { selectedGroup = groups[it] },
+                    selected = groups.indexOf(group), labels = groups.map(::chapterGroupLabel), onSelect = { selectedGroup = groups[it] },
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     compact = true, underline = true, indicator = colors.onSurface.copy(alpha = .75f), fontSize = 12.sp,
                 )

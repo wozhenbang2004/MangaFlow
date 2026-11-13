@@ -99,6 +99,7 @@ class LibraryStore(context: Context) {
     private val deferredMutations = mutableListOf<() -> Unit>()
     private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pendingChapterPositions = mutableMapOf<String, ChapterProgress>()
+    private val decodedChapterPositions = linkedMapOf<String, ChapterProgress>()
     private val pendingLongImagePositions = mutableMapOf<String, Float>()
     private val pendingProgressRemovals = mutableMapOf<String, Long>()
     private var removalSequence = 0L
@@ -458,23 +459,38 @@ class LibraryStore(context: Context) {
 
     fun progressFor(mangaId: String): ReadingProgress? = _history.value.firstOrNull { it.manga.id == mangaId }
 
+    /** Exact encoded values make the bounded parse cache valid across pending writes and backup restores. */
+    private fun readChapterPosition(encoded: String): ChapterProgress? {
+        synchronized(lock) {
+            decodedChapterPositions.remove(encoded)?.also { decodedChapterPositions[encoded] = it }
+        }?.let { return it }
+        val parsed = runCatching {
+            val json = JSONObject(encoded)
+            ChapterProgress(
+                pageIndex = json.getInt("pageIndex").coerceAtLeast(0),
+                pageCount = json.getInt("pageCount").coerceAtLeast(0),
+                scrollOffset = json.optInt("scrollOffset").coerceAtLeast(0),
+                chapterTitle = json.optString("chapterTitle").take(160),
+                updatedAt = json.optLong("updatedAt").coerceAtLeast(0L),
+                panelIndex = json.optInt("panelIndex", -1).coerceIn(-1, 127),
+                panelLayout = json.optString("panelLayout").take(160),
+            )
+        }.getOrNull() ?: return null
+        synchronized(lock) {
+            decodedChapterPositions.remove(encoded)
+            decodedChapterPositions[encoded] = parsed
+            while (decodedChapterPositions.size > MAX_DECODED_CHAPTER_POSITIONS)
+                decodedChapterPositions.remove(decodedChapterPositions.keys.first())
+        }
+        return parsed
+    }
+
     fun progressFor(mangaId: String, chapterId: String): ChapterProgress? = synchronized(lock) {
         if (!stateRestored) return@synchronized null
         val key = chapterProgressKey(mangaId, chapterId)
         pendingChapterPositions[key]?.let { return@synchronized it }
         val stored = if (ignoreStoredProgress || mangaId in pendingProgressRemovals) null else disk.getString(key, null)?.let { encoded ->
-            runCatching {
-                val json = JSONObject(encoded)
-                ChapterProgress(
-                    pageIndex = json.getInt("pageIndex").coerceAtLeast(0),
-                    pageCount = json.getInt("pageCount").coerceAtLeast(0),
-                    scrollOffset = json.optInt("scrollOffset").coerceAtLeast(0),
-                    chapterTitle = json.optString("chapterTitle").take(160),
-                    updatedAt = json.optLong("updatedAt").coerceAtLeast(0L),
-                    panelIndex = json.optInt("panelIndex", -1).coerceIn(-1, 127),
-                    panelLayout = json.optString("panelLayout").take(160),
-                )
-            }.getOrNull()
+            readChapterPosition(encoded)
         }
         stored ?: progressFor(mangaId)?.takeIf { it.chapterId == chapterId }?.chapterProgress()
     }
@@ -495,13 +511,7 @@ class LibraryStore(context: Context) {
         // Parse away from the reader's lock. The UI owns cancellation via the revision above.
         val positions = linkedMapOf<String, ChapterProgress>()
         encoded.forEach { (chapterId, value) ->
-            runCatching {
-                val json = JSONObject(value)
-                ChapterProgress(json.getInt("pageIndex").coerceAtLeast(0),
-                    json.getInt("pageCount").coerceAtLeast(0), json.optInt("scrollOffset").coerceAtLeast(0),
-                    json.optString("chapterTitle").take(160), json.optLong("updatedAt").coerceAtLeast(0L),
-                    json.optInt("panelIndex", -1).coerceIn(-1, 127), json.optString("panelLayout").take(160))
-            }.getOrNull()?.let { positions[chapterId] = it }
+            readChapterPosition(value)?.let { positions[chapterId] = it }
         }
         positions.putAll(pending)
         recent?.let {
@@ -981,6 +991,7 @@ class LibraryStore(context: Context) {
         const val BACKUP_FORMAT = "MangaFlowLibraryBackup"
         const val BACKUP_VERSION = 1
         const val MAX_BACKUP_BYTES = 8 * 1024 * 1024
+        const val MAX_DECODED_CHAPTER_POSITIONS = 512
         const val MAX_BACKUP_SOURCE_PACKAGES = 64
         const val SHELF_STATES_KEY = "shelf_states"
         const val PAGE_COLLECTIONS_KEY = "page_collections"

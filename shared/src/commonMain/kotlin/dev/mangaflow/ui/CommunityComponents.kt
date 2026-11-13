@@ -105,6 +105,8 @@ import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -115,7 +117,11 @@ private val CommunityLine: Color @Composable get() = MaterialTheme.colorScheme.o
 private val CommunityProviders = dev.mangaflow.data.ReviewProviders.displayOrder
 
 /** Mix only confirmed reviews, keeping each source's native ID and pagination. */
-private data class MixedReview(val source: ReviewSource, val review: MangaReview, val order: Int)
+private data class ReviewRows(val sourceId: String, val subjectId: String, val reviews: List<MangaReview>)
+private data class MixedReview(val sourceId: String, val subjectId: String, val review: MangaReview, val order: Int) {
+    val dateKey = reviewDateKey(review.date)
+    val sourceOrder = CommunityProviders.indexOf(sourceId).let { if (it < 0) 99 else it }
+}
 
 private fun reviewDateKey(date: String): String {
     val value = date.trim().replace('T', ' ')
@@ -124,9 +130,41 @@ private fun reviewDateKey(date: String): String {
 }
 
 private fun MixedReview.stableKey(): String =
-    source.id + ":" + source.subjectId + ":" + review.kind + ":" + review.id
+    sourceId + ":" + subjectId + ":" + review.kind + ":" + review.id
 
 private data class ReviewCluster(val key: String, val rows: List<MixedReview>, val promotion: Boolean)
+
+/** Normalize and group actual review text away from input/scroll composition. */
+private suspend fun prepareReviewClusters(
+    inputs: List<ReviewRows>,
+    selectedSource: String?,
+    longOnly: Boolean,
+): List<ReviewCluster> {
+    val context = currentCoroutineContext()
+    val ordered = inputs.asSequence().filter { selectedSource == null || it.sourceId == selectedSource }
+        .flatMap { source ->
+            source.reviews.asSequence().withIndex()
+                .filter { !longOnly || it.value.kind == ReviewKind.REVIEW }
+                .map { item ->
+                    context.ensureActive()
+                    MixedReview(source.sourceId, source.subjectId, item.value, item.index)
+                }
+        }.distinctBy { it.stableKey() }
+        .sortedWith(compareByDescending<MixedReview> { it.dateKey }
+            .thenBy { it.sourceOrder }.thenBy(MixedReview::order))
+    val grouped = linkedMapOf<String, MutableList<MixedReview>>()
+    ordered.forEach { row ->
+        context.ensureActive()
+        val content = reviewDuplicateText(row.review)
+        val key = if (content.length >= 12) "text:${row.review.kind}:${row.review.spoiler}:$content"
+            else "id:" + row.stableKey()
+        grouped.getOrPut(key) { mutableListOf() }.add(row)
+    }
+    return grouped.map { (key, rows) ->
+        context.ensureActive()
+        ReviewCluster(key, rows, rows.any { isLikelyReviewPromotion(it.review) })
+    }
+}
 
 @Composable
 internal fun CommunityPanel(
@@ -161,25 +199,23 @@ internal fun CommunityPanel(
             listState.stopScroll()
         }
     }
-    val mixed = remember(sources, selectedSource, longOnly) {
-        val rows = sources.asSequence().filter { it.status == ReviewStatus.READY && it.hasWorkReviews }
-            .filter { selectedSource == null || it.id == selectedSource }
-            .flatMap { source -> source.reviews.mapIndexed { index, review -> MixedReview(source, review, index) }.asSequence() }
-            .filter { !longOnly || it.review.kind == ReviewKind.REVIEW }
-            .distinctBy { it.stableKey() }
-        val newest = compareByDescending<MixedReview> { reviewDateKey(it.review.date) }
-            .thenBy { CommunityProviders.indexOf(it.source.id).let { n -> if (n < 0) 99 else n } }
-            .thenBy(MixedReview::order)
-        rows.sortedWith(newest).toList()
+    // Paging/busy/metric-only publications must not normalize and sort every comment again.
+    val reviewRows = remember(sources) {
+        sources.filter { it.status == ReviewStatus.READY && it.hasWorkReviews }
+            .map { ReviewRows(it.id, it.subjectId, it.reviews) }
     }
-    val clusters = remember(mixed) {
-        val grouped = linkedMapOf<String, MutableList<MixedReview>>()
-        mixed.forEach { row ->
-            val content = reviewDuplicateText(row.review)
-            val key = if (content.length >= 12) "text:${row.review.kind}:${row.review.spoiler}:$content" else "id:" + row.stableKey()
-            grouped.getOrPut(key) { mutableListOf() }.add(row)
+    val sourcesById = remember(sources) { sources.associateBy { it.id } }
+    var clusters by remember(mangaId, selectedSource, longOnly) { mutableStateOf(emptyList<ReviewCluster>()) }
+    var preparing by remember(mangaId, selectedSource, longOnly) { mutableStateOf(true) }
+    LaunchedEffect(mangaId, reviewRows, selectedSource, longOnly, active) {
+        if (!active) return@LaunchedEffect
+        preparing = true
+        val prepared = withContext(Dispatchers.Default) {
+            prepareReviewClusters(reviewRows, selectedSource, longOnly)
         }
-        grouped.map { (key, rows) -> ReviewCluster(key, rows, rows.any { isLikelyReviewPromotion(it.review) }) }
+        // Cancelled inputs cannot replace the current filter. Existing rows remain during an append.
+        clusters = prepared
+        preparing = false
     }
     val nearEnd by remember(listState) {
         derivedStateOf {
@@ -188,20 +224,25 @@ internal fun CommunityPanel(
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 4
         }
     }
-    val loadable = sources.filter {
-        it.hasWorkReviews && (selectedSource == null || it.id == selectedSource) &&
-            it.status == ReviewStatus.READY && it.nextPage != null && !it.loadingMore && it.reviewsError == null
+    val relevantSources = remember(sources, selectedSource) {
+        sources.filter { it.hasWorkReviews && (selectedSource == null || it.id == selectedSource) }
     }
-    val nextSource = loadable.minWithOrNull(compareBy<ReviewSource> { it.reviews.size }
-        .thenBy { CommunityProviders.indexOf(it.id).let { n -> if (n < 0) 99 else n } })
-    LaunchedEffect(mangaId, sources, nearEnd, loading, selectedSource, longOnly, active) {
-        if (active && !loading && nearEnd && sources.none { it.loadingMore } &&
+    val nextSource = remember(relevantSources) {
+        relevantSources.filter { it.status == ReviewStatus.READY && it.nextPage != null &&
+            !it.loadingMore && it.reviewsError == null }
+            .minWithOrNull(compareBy<ReviewSource> { it.reviews.size }
+                .thenBy { CommunityProviders.indexOf(it.id).let { n -> if (n < 0) 99 else n } })
+    }
+    // A selected ready provider need not wait for unrelated score/comment providers.
+    val relevantBusy = preparing || relevantSources.any { it.loadingMore } ||
+        (loading && (selectedSource == null || relevantSources.isEmpty()))
+    LaunchedEffect(mangaId, sources, nearEnd, relevantBusy, selectedSource, longOnly, active, clusters.isEmpty()) {
+        if (active && !relevantBusy && nearEnd &&
             (clusters.isNotEmpty() || (!longOnly && selectedSource == null))) nextSource?.let { onMore(it.id) }
     }
-    val relevantSources = sources.filter { it.hasWorkReviews && (selectedSource == null || it.id == selectedSource) }
-    val unavailableSources = relevantSources.filter {
+    val unavailableSources = remember(relevantSources) { relevantSources.filter {
         it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null
-    }
+    } }
     val allUnavailable = relevantSources.isNotEmpty() && unavailableSources.size == relevantSources.size
     val resetPosition = { scope.launch { listState.scrollToItem(0) }; Unit }
     Box(modifier.fillMaxSize()) {
@@ -217,21 +258,20 @@ internal fun CommunityPanel(
                 modifier = Modifier.weight(1f).fillMaxWidth().motionInputGate(active),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomPadding)) {
                 items(clusters, key = { it.key }) { cluster ->
-                    CuratedReviewCluster(mangaId, cluster, hidePromotions, loadReplies)
+                    CuratedReviewCluster(mangaId, cluster, sourcesById, hidePromotions, loadReplies)
                     HorizontalDivider(Modifier.padding(start = 38.dp), color = CommunityLine.copy(alpha = .035f), thickness = .5.dp)
                 }
                 item("mixed-footer") {
                     Column(Modifier.fillMaxWidth()) {
                         when {
-                            loading || sources.any { it.loadingMore } -> SmallLoading()
+                            relevantBusy -> SmallLoading()
                             clusters.isEmpty() && unavailableSources.isNotEmpty() ->
                                 CommentUnavailableNotice(unavailableSources, allUnavailable, onRetry)
                             clusters.isEmpty() -> Text(if (selectedSource != null || longOnly) "暂没有符合筛选的评论" else "还没有可显示的评论",
                                 color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 18.dp))
-                            nextSource == null -> Text("当前可获取的评论已加载完毕",
-                                color = CommunityMuted, fontSize = 11.sp, modifier = Modifier.padding(vertical = 16.dp))
+                            unavailableSources.isNotEmpty() -> CommentUnavailableNotice(unavailableSources, allUnavailable, onRetry)
                         }
-                        if (clusters.isEmpty() && nextSource != null && !loading && sources.none { it.loadingMore }) {
+                        if (clusters.isEmpty() && nextSource != null && !relevantBusy) {
                             TextButton(onClick = { onMore(nextSource.id) }) { Text("继续查找评论", color = CommunityMuted) }
                         }
                     }
@@ -245,6 +285,7 @@ internal fun CommunityPanel(
 private fun CuratedReviewCluster(
     mangaId: String,
     cluster: ReviewCluster,
+    sources: Map<String, ReviewSource>,
     hidePromotions: Boolean,
     loadReplies: suspend (ReviewSource, MangaReview, Int) -> ReviewPage,
 ) {
@@ -260,13 +301,15 @@ private fun CuratedReviewCluster(
                 Icon(Icons.Outlined.VisibilityOff, null, tint = CommunityMuted.copy(alpha = .6f), modifier = Modifier.size(15.dp))
                 Text("疑似推广" + if (cluster.rows.size > 1) " · 相似内容 ${cluster.rows.size} 条" else " · 点击查看原文",
                     color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                CommentSourceBadge(cluster.rows.first().source.id)
+                CommentSourceBadge(cluster.rows.first().sourceId)
                 Icon(Icons.Outlined.ChevronRight, null, tint = CommunityMuted, modifier = Modifier.size(15.dp))
             }
         } else {
             val shown = if (showSimilar) cluster.rows else cluster.rows.take(1)
             shown.forEach { row -> key(row.stableKey()) {
-                CommunityDiscussionComment(row.source, row.review, loadReplies, comfortable = true)
+                sources[row.sourceId]?.takeIf { it.subjectId == row.subjectId }?.let { source ->
+                    CommunityDiscussionComment(source, row.review, loadReplies, comfortable = true)
+                }
             } }
             Row(Modifier.padding(start = 38.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 if (cluster.rows.size > 1) Text(

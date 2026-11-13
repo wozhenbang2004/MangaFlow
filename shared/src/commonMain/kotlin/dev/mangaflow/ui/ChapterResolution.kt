@@ -123,7 +123,7 @@ internal fun rememberChapterResolution(
             "第" + (it.index + 1) + "页 " + resolutionPair(it.size) + " px" +
                 if (it.measured) "（原图实测）" else "（来源标注）"
         }
-        examples + " · " + coverage + " · 样本像素尺寸，不是画质评分"
+        examples + " · " + coverage + " · 仅代表已读取页面的像素尺寸"
     }
     val measure: () -> Unit = {
         if (!busy && repository != null) {
@@ -185,4 +185,4 @@ internal fun rememberChapterResolution(
 }
 
 private data class ResolutionSample(val index: Int, val size: IntSize, val measured: Boolean)
-private fun resolutionPair(size: IntSize): String = size.width.toString() + "×" + size.height
+private fun resolutionPair(size: IntSize): String = size.width.toString() + " × " + size.height

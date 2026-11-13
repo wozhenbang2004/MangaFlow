@@ -7,11 +7,18 @@ import dev.mangaflow.ui.platform.*
 
 import dev.mangaflow.platform.*
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,6 +47,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -52,6 +61,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import dev.mangaflow.data.MangaRepository
@@ -113,9 +123,9 @@ internal fun DownloadBookRow(
                     color = colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 val bytes = downloadBytes(entries.sumOf { it.downloadedBytes })
                 Text(mangaNumberText(when {
-                    entries.size == 1 -> "${entries.first().chapter.title} · ${if (allSaved) pages else "$completedPages/$pages"} 页 · $bytes"
+                    entries.size == 1 -> "${entries.first().chapter.title} · ${downloadPageProgress(completedPages, pages, allSaved)} · $bytes"
                     allSaved -> "${entries.size} 话 · $pages 页 · $bytes"
-                    else -> "$saved/${entries.size} 话已保存 · $completedPages/$pages 页"
+                    else -> "$saved/${entries.size} 话已保存 · ${downloadPageProgress(completedPages, pages)}"
                 }), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val status = when {
@@ -126,7 +136,7 @@ internal fun DownloadBookRow(
                     entries.any { it.status == DownloadStatus.PAUSED } -> "已暂停"
                     else -> null
                 }
-                if (status != null) Text(mangaNumberText("$status · $bytes"),
+                if (status != null) Text(mangaNumberText(if (entries.size == 1) status else "$status · $bytes"),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (failed > 0) colors.error else colors.onSurfaceVariant.copy(alpha = .8f),
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -139,11 +149,11 @@ internal fun DownloadBookRow(
                     Modifier.size(20.dp).graphicsLayer { rotationZ = rotation }, tint = colors.onSurfaceVariant)
             }
         }
-        if (!expanded) entries.firstOrNull { it.error.isNotBlank() }?.let {
-            Text(it.error, Modifier.padding(start = 60.dp, bottom = 8.dp),
-                style = MaterialTheme.typography.bodySmall, color = colors.error,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
+        val failure = remember(entries) {
+            entries.filter { it.error.isNotBlank() }.joinToString("\n\n") { it.chapter.title + "\n" + it.error }
         }
+        if (!expanded && failure.isNotBlank()) DownloadFailureDetails(failure, Modifier.padding(start = 60.dp))
+
     }
 }
 
@@ -177,7 +187,7 @@ internal fun DownloadChapterRow(
                 val source = dev.mangaflow.data.sourceDisplayName(
                     dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id).sourceId)
                 Text(mangaNumberText(source + " · " + if (entry.status == DownloadStatus.COMPLETED) "${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
-                    else "${downloadStateLabel(entry)} · ${entry.completedPages}/${entry.totalPages} 页"),
+                    else "${downloadStateLabel(entry)} · ${downloadPageProgress(entry.completedPages, entry.totalPages)}"),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -187,9 +197,46 @@ internal fun DownloadChapterRow(
                 if (selected) "已选择" else "未选择", Modifier.size(14.dp), tint = colors.primary)
             else DownloadTransferAction(listOf(entry), refreshingIds, onPause, onRetry)
         }
-        if (entry.error.isNotBlank()) Text(entry.error, color = colors.error,
-            style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (entry.error.isNotBlank()) DownloadFailureDetails(entry.error)
     }
+}
+
+@Composable
+private fun DownloadFailureDetails(message: String, modifier: Modifier = Modifier) {
+    var expanded by remember(message) { mutableStateOf(false) }
+    val colors = MaterialTheme.colorScheme
+    val motion = LocalMotionEnabled.current
+    val interaction = remember { MutableInteractionSource() }
+    Column(modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
+            .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+                onClickLabel = if (expanded) "收起失败原因" else "查看完整失败原因",
+                onClick = { expanded = !expanded })
+            .motionPress(interaction, pressedScale = .99f),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Icon(Icons.Outlined.Info, null, Modifier.size(14.dp), tint = colors.error)
+            Text("原因", style = MaterialTheme.typography.labelSmall, color = colors.error)
+            Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(13.dp).graphicsLayer {
+                rotationZ = if (expanded) 180f else 0f
+            }, tint = colors.onSurfaceVariant)
+        }
+        AnimatedVisibility(expanded,
+            enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
+                expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
+            SelectionContainer {
+                Text(message, Modifier.padding(bottom = 8.dp), color = colors.error,
+                    style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+private fun downloadPageProgress(completed: Int, total: Int, saved: Boolean = false): String = when {
+    total <= 0 -> "已保存 $completed 页"
+    saved -> "$total 页"
+    else -> "$completed/$total 页"
 }
 
 @Composable

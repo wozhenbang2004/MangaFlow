@@ -97,6 +97,9 @@ internal fun SearchScopeBar(
     val labels = listOf("作品", "作者", "标签")
     val icons = listOf(Icons.AutoMirrored.Outlined.MenuBook, Icons.Outlined.PersonOutline, Icons.AutoMirrored.Outlined.Label)
     val selectedPaths = remember(selectedTags) { selectedTags.mapTo(mutableSetOf()) { it.path } }
+    val tagChoices = remember(availableTags) {
+        availableTags.distinctBy { it.path }.map { tag -> tag to simplifiedTagQuery(tag.name) }
+    }
     var tagsExpanded by rememberSaveable(target, tagsOnly) { mutableStateOf(false) }
     val showChoices = target == SearchTarget.TAG && (tagsExpanded || selectedTags.isEmpty())
     val releaseInput = { keyboard?.hide(); focus.clearFocus(force = true) }
@@ -176,13 +179,13 @@ internal fun SearchScopeBar(
                             } })
                     }
                 }
-                val matches = remember(availableTags, query) {
+                val matches = remember(tagChoices, query) {
                     val term = simplifiedTagQuery(query.trim())
                     val resolvedPath = dev.mangaflow.data.copyTagForName(query, availableTags)?.path
-                    availableTags.distinctBy { it.path }.filter {
-                        term.isEmpty() || simplifiedTagQuery(it.name).contains(term, ignoreCase = true) ||
-                            it.path.contains(term, ignoreCase = true) || it.path == resolvedPath
-                    }
+                    tagChoices.filter { (tag, normalizedName) ->
+                        term.isEmpty() || normalizedName.contains(term, ignoreCase = true) ||
+                            tag.path.contains(term, ignoreCase = true) || tag.path == resolvedPath
+                    }.map { it.first }
                 }
                 if (tagsError != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(tagsError, color = colors.onSurfaceVariant, fontSize = 11.sp, maxLines = 2,

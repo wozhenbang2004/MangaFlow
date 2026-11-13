@@ -90,6 +90,8 @@ class DownloadStore private constructor(context: Context) {
     private val restoredMetadata = mutableSetOf<String>()
     private val validationLocks = ConcurrentMap<String, Mutex>()
     private val validatedGenerations = mutableMapOf<String, String>()
+    private val verifiedPageFiles = linkedMapOf<PageTransferKey, VerifiedPageFile>()
+    private val reconcileLock = Mutex()
     private val pageWriteVersions = mutableMapOf<String, MutableMap<Int, Long>>()
     private var entryOrder = emptyList<String>()
     private val transferSlots = Semaphore(3)
@@ -150,11 +152,12 @@ class DownloadStore private constructor(context: Context) {
             }.getOrNull()
             // File metadata is enough for the initial index. Decode only a requested page now;
             // all remaining image headers are checked by background validation.
-            val present = restored?.pages?.indices?.filter {
-                val file = pageFile(id, it)
-                file.isFile && file.length() > 0L
-            }.orEmpty().toMutableSet()
-            val bytes = present.sumOf { pageFile(id, it).length() }
+            val presentBytes = restored?.pages?.indices?.mapNotNull { index ->
+                val metadata = FileSystem.SYSTEM.metadataOrNull(pageFile(id, index).nativePath)
+                metadata?.takeIf { it.isRegularFile }?.size?.takeIf { it > 0L }?.let { index to it }
+            }.orEmpty().toMap()
+            val present = presentBytes.keys.toMutableSet()
+            val bytes = presentBytes.values.sum()
             synchronized(lock) {
                 restoredMetadata += id
                 if (restored != null && id !in records) {
@@ -175,7 +178,12 @@ class DownloadStore private constructor(context: Context) {
                 records[id]?.takeUnless { validatedGenerations[id] == it.generation }
             } ?: return@withLock
             val versions = synchronized(lock) { pageWriteVersions[id]?.toMap().orEmpty() }
-            val present = snapshot.pages.indices.filter { isReadableImage(pageFile(id, it)) }.toSet()
+            val presentBytes = mutableMapOf<Int, Long>()
+            for (index in snapshot.pages.indices) {
+                currentCoroutineContext().ensureActive()
+                readablePageFile(snapshot, index, pageFile(id, index))?.let { presentBytes[index] = it.bytes }
+            }
+            val present = presentBytes.keys
             synchronized(lock) {
                 val current = records[id]?.takeIf { it.generation == snapshot.generation } ?: return@synchronized
                 val available = availablePages.getOrPut(id) { mutableSetOf() }
@@ -186,7 +194,11 @@ class DownloadStore private constructor(context: Context) {
                     }
                 }
                 validatedGenerations[id] = current.generation
-                val bytes = available.sumOf { pageFile(id, it).length() }
+                val bytes = available.sumOf { index ->
+                    // Reuse this scan's stat; only concurrently replaced pages need a fresh one.
+                    if (pageWriteVersions[id]?.get(index) == versions[index]) presentBytes[index] ?: 0L
+                    else pageFile(id, index).length()
+                }
                 if (current.entry.completedPages != available.size || current.entry.downloadedBytes != bytes) {
                     // Startup verification is a cache/index correction, not a durable user intent.
                     // Avoid rewriting every manifest and requiring free disk just to read a chapter.
@@ -497,6 +509,7 @@ class DownloadStore private constructor(context: Context) {
                 readerPositions.remove(id)
                 validatedGenerations.remove(id)
                 pageWriteVersions.remove(id)
+                verifiedPageFiles.keys.removeAll { it.id == id }
                 publish()
             }
         }
@@ -638,7 +651,8 @@ class DownloadStore private constructor(context: Context) {
     private fun localPage(snapshot: DownloadRecord, index: Int): Page? {
         val page = snapshot.pages.getOrNull(index) ?: return null
         val file = pageFile(snapshot.entry.id, index)
-        if (!isReadableImage(file)) {
+        val verifiedFile = readablePageFile(snapshot, index, file)
+        if (verifiedFile == null) {
             synchronized(lock) {
                 val current = records[snapshot.entry.id]
                 val present = availablePages[snapshot.entry.id]
@@ -672,6 +686,7 @@ class DownloadStore private constructor(context: Context) {
             if (!canWrite) return null
             destination.parentFile?.mkdirs()
             val bounds = downloadPageFile(page.url, snapshot.headers, partial)
+            val savedBytes = partial.length()
             currentCoroutineContext().ensureActive()
             return synchronized(lock) {
                 val current = records[key.id] ?: return@synchronized null
@@ -679,7 +694,13 @@ class DownloadStore private constructor(context: Context) {
                 // Only validated, closed files are published; readers can never see a partial write.
                 if (destination.exists() && !destination.delete()) throw DownloadStorageException("无法替换本地图片")
                 if (!partial.renameTo(destination)) throw DownloadStorageException("无法保存本地图片")
-                val available = availablePages.getOrPut(key.id) { mutableSetOf() }.apply { add(key.index) }
+                val available = availablePages.getOrPut(key.id) { mutableSetOf() }
+                val newlyAvailable = available.add(key.index)
+                // The file was validated and synced before publication. Count a new page once,
+                // rather than stat every prior image after each transfer in a long volume.
+                val downloadedBytes = if (newlyAvailable) current.entry.downloadedBytes + savedBytes
+                    else available.sumOf { pageFile(key.id, it).length() }
+                rememberVerifiedPage(key, destination, savedBytes)
                 val versions = pageWriteVersions.getOrPut(key.id) { mutableMapOf() }
                 versions[key.index] = (versions[key.index] ?: 0L) + 1L
                 val updatedPages = current.pages.mapIndexed { position, value ->
@@ -688,7 +709,7 @@ class DownloadStore private constructor(context: Context) {
                 val complete = available.size == current.pages.size && validatedGenerations[key.id] == current.generation
                 save(current.copy(pages = updatedPages, entry = current.entry.copy(
                     completedPages = available.size,
-                    downloadedBytes = available.sumOf { pageFile(key.id, it).length() },
+                    downloadedBytes = downloadedBytes,
                     status = if (complete) DownloadStatus.COMPLETED else current.entry.status,
                     error = "",
                 )))
@@ -729,6 +750,7 @@ class DownloadStore private constructor(context: Context) {
         val detached = record.copy(workId = "", generation = randomUuid(), entry = record.entry.copy(status = DownloadStatus.PAUSED, error = ""))
         save(detached)
         transferFailures.remove(record.entry.id)
+        verifiedPageFiles.keys.removeAll { it.id == record.entry.id }
         val transfers = pageTransfers.filterKeys { it.id == record.entry.id }.values.toList()
         return FileChange(record, detached, listOfNotNull(record.workId.takeIf(String::isNotBlank), writer?.workId).distinct(), writer, transfers)
     }
@@ -752,6 +774,7 @@ class DownloadStore private constructor(context: Context) {
 
     private class ChapterWriter(val workId: String, val finished: CompletableDeferred<Unit> = CompletableDeferred())
     private data class PageTransferKey(val id: String, val generation: String, val index: Int)
+    private data class VerifiedPageFile(val bytes: Long, val modifiedAt: Long?)
     private data class TransferFailure(val generation: String, val error: Exception)
     private data class FileChange(
         val previous: DownloadRecord, val detached: DownloadRecord, val workIds: List<String>,
@@ -762,6 +785,7 @@ class DownloadStore private constructor(context: Context) {
         val record = records[id] ?: return@synchronized
         if (record.workId != workId || record.entry.status == DownloadStatus.PAUSED) return@synchronized
         val next = transform(record.entry)
+        if (next == record.entry) return@synchronized
         // A page requested by the reader can finish the chapter while the worker is updating its
         // notification. Late cancellation/bookkeeping must not turn those saved images into failure.
         if (record.entry.status == DownloadStatus.COMPLETED && next.status != DownloadStatus.COMPLETED) return@synchronized
@@ -778,64 +802,109 @@ class DownloadStore private constructor(context: Context) {
 
     /** Reconcile persisted intent against the scheduler without holding the state lock during reads. */
     private suspend fun reconcileRestoredRecords() {
-        val ids = synchronized(lock) { records.keys.sortedBy { if (it in readerPositions) 0 else 1 } }
-        for (id in ids) {
-            prepareChapter(id)
-            val snapshot = synchronized(lock) { records[id] } ?: continue
-            if (snapshot.entry.status == DownloadStatus.PAUSED) continue
-            val active = snapshot.entry.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
-            if (!active && snapshot.entry.status != DownloadStatus.COMPLETED) continue
-            val files = synchronized(lock) { availablePages[snapshot.entry.id].orEmpty().map { pageFile(snapshot.entry.id, it) } }
-            val complete = snapshot.pages.isNotEmpty() && files.size == snapshot.pages.size
-            // A failed scheduler read is unknown, never evidence that a worker disappeared.
-            val workInfo = if (active && snapshot.workId.isNotBlank()) {
-                try {
-                    scheduler.state(snapshot.workId)
-                } catch (_: IllegalArgumentException) { null }
-                  catch (_: Exception) { continue }
-            } else null
-            val hasLiveWork = workInfo != null && workInfo in listOf(DownloadTaskState.ENQUEUED, DownloadTaskState.RUNNING, DownloadTaskState.BLOCKED)
-            synchronized(lock) {
-                // A pause, retry, refresh, deletion, or worker progress supersedes this snapshot.
-                if (records[snapshot.entry.id] !== snapshot) return@synchronized
-                try {
-                    when {
-                        snapshot.entry.status == DownloadStatus.COMPLETED && !complete -> save(snapshot.copy(entry = snapshot.entry.copy(
-                            status = DownloadStatus.FAILED,
-                            completedPages = files.size,
-                            downloadedBytes = files.sumOf(File::length),
-                            needsSourceRefresh = snapshot.pages.isEmpty() && snapshot.entry.manga.sourceUrl != LOCAL_SOURCE_URL,
-                            error = if (snapshot.entry.manga.sourceUrl == LOCAL_SOURCE_URL)
-                                "本地文件已损坏，请删除后重新导入" else "本地章节不完整，继续下载可修复",
-                        )))
-                        active && !hasLiveWork && complete -> save(snapshot.copy(entry = snapshot.entry.copy(
-                            status = DownloadStatus.COMPLETED,
-                            completedPages = files.size,
-                            downloadedBytes = files.sumOf(File::length),
-                            needsSourceRefresh = false,
-                            error = "",
-                        )))
-                        active && !hasLiveWork && (snapshot.entry.needsSourceRefresh || snapshot.pages.isEmpty()) -> save(snapshot.copy(entry = snapshot.entry.copy(
-                            status = DownloadStatus.FAILED,
-                            needsSourceRefresh = true,
-                            error = "图片地址需要刷新，请刷新并重试",
-                        )))
-                        active && !hasLiveWork -> {
-                            save(snapshot.copy(entry = snapshot.entry.copy(
-                                status = DownloadStatus.QUEUED,
+        // Startup and repeated foreground notifications share one reconciliation pass.
+        if (!reconcileLock.tryLock()) return
+        try {
+            val ids = synchronized(lock) { records.keys.sortedBy { if (it in readerPositions) 0 else 1 } }
+            for (id in ids) {
+                prepareChapter(id)
+                val snapshot = synchronized(lock) { records[id] } ?: continue
+                if (snapshot.entry.status == DownloadStatus.PAUSED) continue
+                val active = snapshot.entry.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
+                if (!active && snapshot.entry.status != DownloadStatus.COMPLETED) continue
+                val files = synchronized(lock) { availablePages[snapshot.entry.id].orEmpty().map { pageFile(snapshot.entry.id, it) } }
+                val complete = snapshot.pages.isNotEmpty() && files.size == snapshot.pages.size
+                // A failed scheduler read is unknown, never evidence that a worker disappeared.
+                val workInfo = if (active && snapshot.workId.isNotBlank()) {
+                    try {
+                        scheduler.state(snapshot.workId)
+                    } catch (_: IllegalArgumentException) { null }
+                      catch (_: Exception) { continue }
+                } else null
+                val hasLiveWork = workInfo != null && workInfo in listOf(DownloadTaskState.ENQUEUED, DownloadTaskState.RUNNING, DownloadTaskState.BLOCKED)
+                synchronized(lock) {
+                    // A pause, retry, refresh, deletion, or worker progress supersedes this snapshot.
+                    if (records[snapshot.entry.id] !== snapshot) return@synchronized
+                    try {
+                        when {
+                            snapshot.entry.status == DownloadStatus.COMPLETED && !complete -> save(snapshot.copy(entry = snapshot.entry.copy(
+                                status = DownloadStatus.FAILED,
                                 completedPages = files.size,
                                 downloadedBytes = files.sumOf(File::length),
+                                needsSourceRefresh = snapshot.pages.isEmpty() && snapshot.entry.manga.sourceUrl != LOCAL_SOURCE_URL,
+                                error = if (snapshot.entry.manga.sourceUrl == LOCAL_SOURCE_URL)
+                                    "本地文件已损坏，请删除后重新导入" else "本地章节不完整，继续下载可修复",
+                            )))
+                            active && !hasLiveWork && complete -> save(snapshot.copy(entry = snapshot.entry.copy(
+                                status = DownloadStatus.COMPLETED,
+                                completedPages = files.size,
+                                downloadedBytes = files.sumOf(File::length),
+                                needsSourceRefresh = false,
                                 error = "",
                             )))
-                            schedule(snapshot.entry.id)
+                            active && !hasLiveWork && (snapshot.entry.needsSourceRefresh || snapshot.pages.isEmpty()) -> save(snapshot.copy(entry = snapshot.entry.copy(
+                                status = DownloadStatus.FAILED,
+                                needsSourceRefresh = true,
+                                error = "图片地址需要刷新，请刷新并重试",
+                            )))
+                            active && !hasLiveWork -> {
+                                save(snapshot.copy(entry = snapshot.entry.copy(
+                                    status = DownloadStatus.QUEUED,
+                                    completedPages = files.size,
+                                    downloadedBytes = files.sumOf(File::length),
+                                    error = "",
+                                )))
+                                schedule(snapshot.entry.id)
+                            }
+                            snapshot.entry.status == DownloadStatus.RUNNING && workInfo == DownloadTaskState.ENQUEUED -> save(snapshot.copy(entry = snapshot.entry.copy(
+                                status = DownloadStatus.WAITING, error = "等待系统恢复下载",
+                            )))
+                            else -> Unit
                         }
-                        snapshot.entry.status == DownloadStatus.RUNNING && workInfo == DownloadTaskState.ENQUEUED -> save(snapshot.copy(entry = snapshot.entry.copy(
-                            status = DownloadStatus.WAITING, error = "等待系统恢复下载",
-                        )))
-                        else -> Unit
-                    }
-                } catch (error: Exception) { memoryFailure(snapshot.entry.id, error) }
+                    } catch (error: Exception) { memoryFailure(snapshot.entry.id, error) }
+                }
             }
+        } finally { reconcileLock.unlock() }
+    }
+
+    /** Cache only a checked file version; replacement, truncation or deletion forces validation again. */
+    private fun readablePageFile(snapshot: DownloadRecord, index: Int, file: File): VerifiedPageFile? {
+        val key = PageTransferKey(snapshot.entry.id, snapshot.generation, index)
+        val metadata = FileSystem.SYSTEM.metadataOrNull(file.nativePath)
+        val bytes = metadata?.takeIf { it.isRegularFile }?.size?.takeIf { it > 0L }
+        val modifiedAt = metadata?.lastModifiedAtMillis
+        if (bytes == null) {
+            synchronized(lock) { verifiedPageFiles.remove(key) }
+            return null
+        }
+        if (modifiedAt != null) {
+            val cached = synchronized(lock) {
+                verifiedPageFiles[key]?.takeIf { it.bytes == bytes && it.modifiedAt == modifiedAt }?.also {
+                    verifiedPageFiles.remove(key)
+                    verifiedPageFiles[key] = it
+                }
+            }
+            if (cached != null) return cached
+        }
+        val bounds = storageImageBounds(file)
+        if (bounds == null) {
+            synchronized(lock) { verifiedPageFiles.remove(key) }
+            return null
+        }
+        if (modifiedAt != null) rememberVerifiedPage(key, file, bytes, modifiedAt)
+        return VerifiedPageFile(bytes, modifiedAt)
+    }
+
+    private fun rememberVerifiedPage(key: PageTransferKey, file: File, bytes: Long, modifiedAt: Long? = null) {
+        val metadata = FileSystem.SYSTEM.metadataOrNull(file.nativePath) ?: return
+        val actualModified = metadata.lastModifiedAtMillis ?: return
+        if (!metadata.isRegularFile || bytes <= 0L || metadata.size != bytes ||
+            modifiedAt != null && actualModified != modifiedAt) return
+        synchronized(lock) {
+            if (records[key.id]?.generation != key.generation) return@synchronized
+            verifiedPageFiles.remove(key)
+            verifiedPageFiles[key] = VerifiedPageFile(bytes, actualModified)
+            while (verifiedPageFiles.size > MAX_VERIFIED_PAGES) verifiedPageFiles.remove(verifiedPageFiles.keys.first())
         }
     }
 
@@ -894,6 +963,7 @@ class DownloadStore private constructor(context: Context) {
         private const val LOCAL_PAGE_SCHEME = "local-import://"
         private const val IMPORT_DIRECTORY_PREFIX = ".import-"
         private const val MAX_IMPORT_PAGES = 5_000
+        private const val MAX_VERIFIED_PAGES = 1_024
         private const val MAX_IMPORT_DEPTH = 16
         private const val MAX_IMPORT_PAGE_BYTES = 128L * 1024L * 1024L
         private const val MAX_IMPORT_BYTES = 1_500L * 1024L * 1024L

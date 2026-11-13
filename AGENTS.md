@@ -1,5 +1,7 @@
 # MangaFlow
 
+- SYSTEM-UPGRADE-123 / SIZE-LABEL-124 in DESIGN.md owns the full cache/performance/UIUX batch and1000121658's removal of visible“样本”. Six implementation domains return isolated blobs; root integrates native freshness/stale-first display, exact-source off-Main entry, shared/bounded cache IO, validated download reuse, visible-first reading, stable browse/rating behavior, comment preparation and progressive management. Preserve pixel/source/history/edition identity, current aliases/wallpaper/font/resolution work. One complete cloud main lease and normal CI trigger; no local/test/build/probe or added review gate. See the current UIUX report for source-level implementation versus actual experience.
+
 - SOURCE-ALIAS-119 / PC-DISCOVERY-120 / QUALITY-COMPARE-121 / STEAM-WORKSHOP-122 in DESIGN.md own the current follow-up. Preserve actual Copy aliases through existing strict identity checks; foreground-only continuous LAN discovery/resume, bounded legacy IDs and per-socket physical LAN routing keep existing PIN/security/import/cancel. User explicitly authorized bounded anonymous cloud multi-source image comparison for this slice; no tests/local builds/user-device/account probes. Same-artwork sample1500×2076 vs1200×1660 is not a whole-source quality or index/edition equivalence. Steam QR/Workshop route is researched/pinned in the existing wallpaper research, not integrated Android functionality. One complete latest-main batch with expected-head lease, normal CI, no added gate.
 
 

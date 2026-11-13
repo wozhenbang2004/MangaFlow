@@ -239,10 +239,13 @@ fun SettingsScreen(
         )
     }
 
-    LaunchedEffect(imageLoader) {
-        try { readCacheSizes() }
-        catch (cancel: CancellationException) { throw cancel }
-        catch (_: Exception) { cacheNotice = "暂时无法读取缓存大小" }
+    LaunchedEffect(expandedSetting, imageLoader) {
+        if (expandedSetting == "cache") {
+            cacheNotice = null
+            try { readCacheSizes() }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { cacheNotice = "暂时无法读取缓存大小" }
+        }
     }
 
     fun clearCache(key: String, label: String) {
@@ -415,7 +418,7 @@ fun SettingsScreen(
                     SettingsDisclosure("缓存管理", when {
                         cacheSizes.size == 3 -> settingsBytes(cacheSizes.values.sum())
                         cacheNotice != null -> "暂时无法读取"
-                        else -> "正在统计…"
+                        else -> if (expandedSetting == "cache") "正在统计…" else "点按查看用量"
                     },
                         Icons.Outlined.Storage, expandedSetting == "cache", { toggleSetting("cache") }) {
                         Column {
@@ -642,6 +645,11 @@ private fun WebDavBackupDialog(
     var username by remember(visible, config.username) { mutableStateOf(config.username) }
     var password by remember(visible, config.hasPassword) { mutableStateOf("") }
     var remotePath by remember(visible, config.remotePath) { mutableStateOf(config.remotePath) }
+    var editing by remember { mutableStateOf(!config.configured) }
+    var advanced by remember { mutableStateOf(false) }
+    LaunchedEffect(visible) {
+        if (visible) { editing = !config.configured; advanced = false }
+    }
     val enabled = busy == null && endpoint.isNotBlank() && remotePath.isNotBlank()
     val draft = {
         WebDavBackupDraft(
@@ -662,65 +670,82 @@ private fun WebDavBackupDialog(
             Column(
                 Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 16.dp)
                     .heightIn(max = 680.dp)
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(rememberScrollState())
+                    .animateContentSize(tween(if (LocalMotionEnabled.current) MangaMotion.Content else 0,
+                        easing = MangaMotion.EnterEasing)),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text("WebDAV 阅读备份", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "同步书架、阅读位置、画面收藏、时长和阅读偏好。服务器必须提供可信 HTTPS，密码仅加密保存在本机。",
+                    if (editing) "使用可信 HTTPS 服务器。密码仅加密保存在本机。" else "备份书架、阅读位置、画面收藏与阅读偏好。",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant,
                 )
-                OutlinedTextField(
-                    value = endpoint,
-                    onValueChange = { endpoint = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = busy == null,
-                    singleLine = true,
-                    label = { Text("WebDAV HTTPS 地址") },
-                    placeholder = { Text("https://cloud.example.com/dav/") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
-                    shape = RoundedCornerShape(17.dp),
-                    colors = settingsInputColors(),
-                )
-                OutlinedTextField(
-                    value = username,
-                    onValueChange = { username = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = busy == null,
-                    singleLine = true,
-                    label = { Text("用户名") },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                    shape = RoundedCornerShape(17.dp),
-                    colors = settingsInputColors(),
-                )
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = busy == null,
-                    singleLine = true,
-                    label = { Text("密码") },
-                    placeholder = {
-                        Text(if (config.hasPassword) "留空保留已保存密码" else "可留空")
-                    },
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Next),
-                    shape = RoundedCornerShape(17.dp),
-                    colors = settingsInputColors(),
-                )
-                OutlinedTextField(
-                    value = remotePath,
-                    onValueChange = { remotePath = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = busy == null,
-                    singleLine = true,
-                    label = { Text("远端备份文件") },
-                    placeholder = { Text(WebDavBackupConfig.DEFAULT_REMOTE_PATH) },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    shape = RoundedCornerShape(17.dp),
-                    colors = settingsInputColors(),
-                )
+                if (!editing) {
+                    SettingsLinkRow("连接设置", config.endpoint, Icons.Outlined.CloudSync,
+                        inlineDetail = false) { if (busy == null) editing = true }
+                    Text(config.remotePath, style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                } else {
+                    OutlinedTextField(
+                        value = endpoint,
+                        onValueChange = { endpoint = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = busy == null,
+                        singleLine = true,
+                        label = { Text("WebDAV HTTPS 地址") },
+                        placeholder = { Text("https://cloud.example.com/dav/") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+                        shape = RoundedCornerShape(17.dp),
+                        colors = settingsInputColors(),
+                    )
+                    OutlinedTextField(
+                        value = username,
+                        onValueChange = { username = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = busy == null,
+                        singleLine = true,
+                        label = { Text("用户名") },
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                        shape = RoundedCornerShape(17.dp),
+                        colors = settingsInputColors(),
+                    )
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = busy == null,
+                        singleLine = true,
+                        label = { Text("密码") },
+                        placeholder = {
+                            Text(if (config.hasPassword) "留空保留已保存密码" else "可留空")
+                        },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Next),
+                        shape = RoundedCornerShape(17.dp),
+                        colors = settingsInputColors(),
+                    )
+
+                    TextButton(onClick = { advanced = !advanced }, enabled = busy == null,
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                        Text(if (advanced) "收起高级设置" else "高级设置", style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (advanced) {
+                        OutlinedTextField(
+                            value = remotePath,
+                            onValueChange = { remotePath = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = busy == null,
+                            singleLine = true,
+                            label = { Text("远端备份文件") },
+                            placeholder = { Text(WebDavBackupConfig.DEFAULT_REMOTE_PATH) },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            shape = RoundedCornerShape(17.dp),
+                            colors = settingsInputColors(),
+                        )
+
+                    }
+                }
                 Text(
                     "上传会覆盖这个远端文件；下载只读取并展示恢复确认。暂不后台自动同步，也不会上传漫画图片。",
                     style = MaterialTheme.typography.bodySmall,
@@ -746,12 +771,17 @@ private fun WebDavBackupDialog(
                     }
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    if (config.configured) {
+                    if (editing && config.configured) {
                         TextButton(onClick = onClear, enabled = busy == null) { Text("清除本机配置") }
                     }
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = onDismiss, enabled = busy == null) { Text("取消") }
-                    TextButton(onClick = { onSave(draft()) }, enabled = enabled) { Text("保存") }
+                    if (editing && config.configured) {
+                        TextButton(onClick = {
+                            endpoint = config.endpoint; username = config.username; password = ""
+                            remotePath = config.remotePath; editing = false; advanced = false
+                        }, enabled = busy == null) { Text("取消编辑") }
+                    } else TextButton(onClick = onDismiss, enabled = busy == null) { Text(if (editing) "取消" else "关闭") }
+                    if (editing) TextButton(onClick = { onSave(draft()) }, enabled = enabled) { Text("保存") }
                 }
                 FilledTonalButton(
                     onClick = { onDownload(draft()) },
