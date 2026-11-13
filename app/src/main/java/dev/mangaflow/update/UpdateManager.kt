@@ -27,6 +27,10 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URL
 import java.security.MessageDigest
 import java.security.Signature
@@ -34,6 +38,7 @@ import java.security.cert.CertificateFactory
 import java.security.interfaces.RSAPublicKey
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.net.ssl.SSLException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -110,7 +115,8 @@ class UpdateManager private constructor(private val context: Context) {
             complete(onComplete)
             return
         }
-        _state.value = _state.value.copy(phase = UpdatePhase.CHECKING, message = "正在检查新版本…")
+        val beforeCheck = _state.value
+        _state.value = beforeCheck.copy(phase = UpdatePhase.CHECKING, message = "正在检查新版本…")
         scope.launch {
             try {
                 val bytes = readBytes(MANIFEST_URL, MAX_MANIFEST_BYTES)
@@ -143,10 +149,13 @@ class UpdateManager private constructor(private val context: Context) {
                 }
                 preferences.edit().putLong("last_check", now).apply()
             } catch (failure: Exception) {
-                val previous = _state.value.release
-                _state.value = _state.value.copy(
-                    phase = if (previous != null) UpdatePhase.AVAILABLE else UpdatePhase.ERROR,
-                    message = failure.message ?: "检查失败，请稍后重试",
+                _state.value = beforeCheck.copy(
+                    phase = when {
+                        beforeCheck.phase == UpdatePhase.READY -> UpdatePhase.READY
+                        beforeCheck.release != null -> UpdatePhase.AVAILABLE
+                        else -> UpdatePhase.ERROR
+                    },
+                    message = updateFailureMessage(failure, "检查失败，请稍后重试"),
                 )
             } finally {
                 connection = null
@@ -237,7 +246,8 @@ class UpdateManager private constructor(private val context: Context) {
                 _state.value = _state.value.copy(
                     phase = UpdatePhase.AVAILABLE,
                     downloaded = partial?.length() ?: 0,
-                    message = if (cancelled.get() || failure is CancellationException) "下载已暂停，可继续下载" else failure.message ?: "下载失败，请重试",
+                    message = if (cancelled.get() || failure is CancellationException) "下载已暂停，可继续下载"
+                        else updateFailureMessage(failure, "下载失败，请重试"),
                 )
             } finally {
                 connection = null
@@ -436,6 +446,17 @@ class UpdateManager private constructor(private val context: Context) {
 
     private fun requireNotCancelled() {
         if (cancelled.get()) throw CancellationException("下载已取消")
+    }
+
+    private fun updateFailureMessage(failure: Exception, fallback: String): String {
+        val causes = generateSequence<Throwable>(failure) { it.cause }.take(8).toList()
+        return when {
+            causes.any { it is UnknownHostException } -> "无法连接更新服务，请切换网络或检查代理后重试"
+            causes.any { it is SocketTimeoutException } -> "连接更新服务超时，请稍后重试"
+            causes.any { it is ConnectException || it is NoRouteToHostException } -> "更新服务暂时连接不上，请切换网络后重试"
+            causes.any { it is SSLException } -> "更新服务安全连接失败，请稍后重试"
+            else -> failure.message ?: fallback
+        }
     }
 
     private fun schedule() {

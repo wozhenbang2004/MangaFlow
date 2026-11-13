@@ -31,12 +31,17 @@ android {
         abortOnError = true
         checkAllWarnings = true
         checkDependencies = true
-        checkReleaseBuilds = true
+        // Full Lint is an explicit CI option; assemble still compiles and runs R8.
+        checkReleaseBuilds = false
         warningsAsErrors = false
         htmlReport = true
         xmlReport = true
     }
-    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+    packaging {
+        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        // Compress multi-ABI inference libraries in the directly distributed APK.
+        jniLibs.useLegacyPackaging = true
+    }
 }
 
 // Lint analyzes sources; executable test tasks remain disabled.

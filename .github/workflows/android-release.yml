@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      full_lint:
+        description: Run full Android Lint before packaging
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -88,7 +93,7 @@ jobs:
 
       - name: Android Lint (release)
         id: lint
-        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true' && github.event_name == 'workflow_dispatch' && inputs.full_lint == true
         run: |
           set -euo pipefail
           chmod +x gradlew

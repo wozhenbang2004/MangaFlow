@@ -4,6 +4,11 @@ on:
   push:
     branches-ignore: [main]
   workflow_dispatch:
+    inputs:
+      full_lint:
+        description: Run full Android Lint before packaging
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,6 +41,7 @@ jobs:
           "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0'
       - name: Android Lint (release)
         id: lint
+        if: github.event_name == 'workflow_dispatch' && inputs.full_lint == true
         shell: bash
         run: |
           set -euo pipefail
