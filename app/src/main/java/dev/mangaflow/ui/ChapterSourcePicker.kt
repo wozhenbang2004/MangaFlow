@@ -51,6 +51,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -92,7 +94,8 @@ private val failedSourceMarks = mutableStateMapOf<String, Boolean>()
 
 /** The site's own mark; a failed favicon remains an honest source name, never a fabricated logo. */
 @Composable
-internal fun ChapterSourceLogo(sourceId: String, sourceName: String, modifier: Modifier = Modifier) {
+internal fun ChapterSourceLogo(sourceId: String, sourceName: String, modifier: Modifier = Modifier,
+    muted: Boolean = false) {
     val favicon = when (sourceId) {
         "copy" -> "https://www.copy4000.com/favicon.ico"
         "komiic" -> "https://komiic.com/favicon.ico"
@@ -100,9 +103,11 @@ internal fun ChapterSourceLogo(sourceId: String, sourceName: String, modifier: M
         else -> null
     }
     val failed = failedSourceMarks[sourceId] == true
+    val monochrome = remember { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) }) }
     Box(modifier, contentAlignment = Alignment.Center) {
         if (favicon != null && !failed) AsyncImage(
             model = favicon, contentDescription = null, contentScale = ContentScale.Fit,
+            colorFilter = if (muted) monochrome else null,
             modifier = Modifier.fillMaxSize(), onError = { failedSourceMarks[sourceId] = true },
         ) else Text(sourceName, color = DetailSecondary, fontSize = 9.sp, maxLines = 1,
             overflow = TextOverflow.Ellipsis)
@@ -139,7 +144,7 @@ internal fun ChapterSourceBadge(
             marks.indices.reversed().forEach { index ->
                 val variant = marks[index]
                 ChapterSourceLogo(variant.sourceId, variant.sourceName,
-                    Modifier.absoluteOffset(x = spacing * index).size(mark))
+                    Modifier.absoluteOffset(x = spacing * index).size(mark), muted = true)
             }
         }
     }
