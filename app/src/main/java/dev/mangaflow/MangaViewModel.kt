@@ -41,7 +41,8 @@ import dev.mangaflow.data.normalizedBodySourceTitle
 import dev.mangaflow.data.SourceDiscoveryResult
 import dev.mangaflow.data.SourceDiscoveryStatus
 import dev.mangaflow.data.FederatedSearchSource
-import dev.mangaflow.data.groupFederatedSearch
+import dev.mangaflow.data.FederatedSearchGroup
+import dev.mangaflow.data.FederatedSearchGrouper
 import dev.mangaflow.data.sources.BaoziBodySource
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
@@ -58,6 +59,7 @@ import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.ReaderCatalogStore
 import dev.mangaflow.storage.BrowseCache
 import dev.mangaflow.storage.BrowseSnapshot
+import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.update.UpdateManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -73,9 +75,13 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
@@ -103,13 +109,14 @@ data class BrowseState(
     val sourceChoiceIds: Set<String> = emptySet(),
     val searchSources: Map<String, FederatedSearchSource> = emptyMap(),
     val sourceNextPages: Map<String, Int> = emptyMap(),
+    val sourceScope: String = "",
 ) {
     val isSearch: Boolean get() = searchTarget != SearchTarget.TITLE || query.isNotBlank() || selectedTags.isNotEmpty()
     val isFederatedSearch: Boolean get() = searchTarget == SearchTarget.TITLE && query.isNotBlank() && selectedTags.isEmpty()
     val cacheKey: String get() = when {
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
-            "${if (isFederatedSearch) "search-v6-relevance" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+            "${if (isFederatedSearch) "search-v7-scoped:$sourceScope" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
         }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
@@ -205,6 +212,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val repository = UnifiedMangaRepository(copyRepository, unifiedChapters,
         bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(), komiicSource, MangaDexBodySource()),
         catalogStore = ReaderCatalogStore(application))
+    val bodySources = BodySourceRegistry(application, repository.sources)
     val library = LibraryStore(application)
     val downloads = DownloadStore.get(application)
     val updates = UpdateManager.get(application)
@@ -292,12 +300,32 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private var cloudHistoryFailedPage: Int? = null
     private var lastChapterSync: String? = null
     private var visibleReading: Pair<Manga, Chapter>? = null
+    private var projectionRequestId = 0L
+    private val projectionSaveLock = Mutex()
 
     init {
+        repository.setEnabledSources(bodySources.enabledSourceIds)
         showBrowse(_browse.value)
         restoreAccount()
-        viewModelScope.launch { unifiedChapters.revision.drop(1).collect { refreshUnifiedProjection() } }
-        viewModelScope.launch { repository.catalogRevision.drop(1).collect { refreshUnifiedProjection() } }
+        viewModelScope.launch {
+            bodySources.entries.collect {
+                val enabled = bodySources.enabledSourceIds
+                if (enabled != repository.enabledSources()) {
+                    withContext(Dispatchers.Default) { repository.setEnabledSources(enabled) }
+                    val current = _browse.value
+                    if (current.isFederatedSearch) showBrowse(current.copy(
+                        items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
+                        searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
+                        loading = true, loadingMore = false, refreshing = false, error = null,
+                        failedPage = null, page = 0, updatedAt = 0,
+                    ))
+                }
+            }
+        }
+        viewModelScope.launch {
+            combine(unifiedChapters.revision, repository.catalogRevision) { settings, catalogs -> settings to catalogs }
+                .drop(1).collectLatest { refreshUnifiedProjection() }
+        }
         viewModelScope.launch { repository.sourceDiscovery.collect { refreshSourceOverview() } }
         viewModelScope.launch { unifiedChapters.persistenceError.collect { error ->
             if (error != null) messages.send(error)
@@ -430,11 +458,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         browseJob?.cancel()
         val requestId = ++browseRequestId
         val generation = browseCache.generation
-        val memory = browseCache.cached(selection.cacheKey)
-        val configured = selection.copy(availableTags = knownSearchTags)
+        val configured = selection.copy(availableTags = knownSearchTags,
+            sourceScope = repository.enabledSources().sorted().joinToString(","))
+        val memory = browseCache.cached(configured.cacheKey)
         _browse.value = memory?.restore(configured) ?: configured
         browseJob = viewModelScope.launch {
-            val snapshot = memory ?: browseCache.read(selection.cacheKey, generation)
+            val snapshot = memory ?: browseCache.read(configured.cacheKey, generation)
             if (requestId != browseRequestId) return@launch
             if (snapshot != null) {
                 _browse.update { current ->
@@ -442,16 +471,16 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         // TAG text filters the already available directory, not this
                         // result set. Disk hydration must not overwrite newer typing.
                         val selectionWithCurrentFilter = if (configured.searchTarget == SearchTarget.TAG &&
-                            current.cacheKey == selection.cacheKey) configured.copy(query = current.query)
+                            current.cacheKey == configured.cacheKey) configured.copy(query = current.query)
                         else configured
                         snapshot.restore(selectionWithCurrentFilter)
                     }
                 }
                 // Fresh selections need no request. Stale rankings refresh their complete
                 // loaded range atomically, so a saved deep position never sees page zero alone.
-                if (isFresh(snapshot.updatedAt, selection) ||
-                    snapshot.page > 0 && (selection.isSearch ||
-                        selection.mode != DiscoveryMode.RANKING)) return@launch
+                if (isFresh(snapshot.updatedAt, configured) ||
+                    snapshot.page > 0 && (configured.isSearch ||
+                        configured.mode != DiscoveryMode.RANKING)) return@launch
             }
             if (debounce) delay(450)
             if (requestId != browseRequestId) return@launch
@@ -469,7 +498,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val generation = browseCache.generation
         _browse.value = state.copy(loading = state.items.isEmpty(), refreshing = state.items.isNotEmpty(),
             error = null, failedPage = null, loadingMore = false)
-        browseJob = viewModelScope.launch { loadBrowse(state, 0, requestId, generation) }
+        browseJob = viewModelScope.launch { loadBrowse(state, 0, requestId, generation, forceRefresh = true) }
     }
 
     fun loadMore() {
@@ -491,7 +520,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             browseJob?.cancel()
             _browse.update { it.copy(loadingMore = true) }
             browseJob = viewModelScope.launch { loadFederatedBrowse(state, state.page, requestId,
-                browseCache.generation, pages, retain = true) }
+                browseCache.generation, pages, retain = true, forceRefresh = true) }
             return
         }
         val page = state.failedPage ?: return
@@ -499,12 +528,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             refreshing = page == 0 && it.items.isNotEmpty(), loadingMore = page > 0, error = null, failedPage = null) }
         val requestId = ++browseRequestId
         val generation = browseCache.generation
-        browseJob = viewModelScope.launch { loadBrowse(state, page, requestId, generation) }
+        browseJob = viewModelScope.launch { loadBrowse(state, page, requestId, generation, forceRefresh = true) }
     }
 
-    private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long) {
+    private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long,
+        forceRefresh: Boolean = false) {
         if (state.isFederatedSearch) {
-            loadFederatedBrowse(state, page, requestId, generation)
+            loadFederatedBrowse(state, page, requestId, generation, forceRefresh = forceRefresh)
             return
         }
         try {
@@ -565,33 +595,46 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun loadFederatedBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long,
         requestedPages: Map<String, Int>? = if (page == 0) null else state.sourceNextPages,
-        retain: Boolean = page > 0) {
+        retain: Boolean = page > 0, forceRefresh: Boolean = false) {
         val previousHits = if (retain) state.sourceMatches.values.flatten().ifEmpty { state.items } else emptyList()
+        val grouper = withContext(Dispatchers.Default) { FederatedSearchGrouper(state.query) }
+        var groupedHits: List<Manga>? = null
+        var groups: List<FederatedSearchGroup> = emptyList()
         try {
-            repository.searchAll(state.query.trim(), requestedPages) { partial ->
+            repository.searchAll(state.query.trim(), requestedPages, forceRefresh = forceRefresh) { partial ->
                 if (requestId != browseRequestId || generation != browseCache.generation) return@searchAll
+                val hits = (previousHits + partial.hits).distinctBy(Manga::id)
+                // Source callbacks are serialized by the repository. Keep the mutable derivation
+                // cache outside StateFlow.update, whose CAS lambda may be evaluated again.
+                if (hits != groupedHits) {
+                    groups = grouper.group(hits, _browse.value.sourceMatches)
+                    groupedHits = hits
+                }
+                val groupedItems = groups.map { it.manga }
+                val groupedMatches = groups.associate { it.manga.id to it.matches }
+                val choiceIds = groups.filter { it.needsChoice }.map { it.manga.id }.toSet()
+                val noHits = groupedItems.isEmpty()
+                val statuses = (if (retain) state.searchSources else emptyMap()) + partial.sources
+                val pending = statuses.values.any { it.loading }
+                val next = statuses.values.filter { it.error == null && it.hasMore && it.nextPage != null }
+                    .associate { it.sourceId to it.nextPage!! }
+                val failedEmpty = !pending && noHits && statuses.values.any { it.error != null }
+                val keepExisting = pending && noHits
+                val updatedAt = if (!pending) System.currentTimeMillis() else null
                 _browse.update { current ->
-                    if (current.cacheKey != state.cacheKey || requestId != browseRequestId) current else {
-                        val hits = (previousHits + partial.hits).distinctBy(Manga::id)
-                        val groups = groupFederatedSearch(hits, current.sourceMatches, state.query)
-                        val statuses = (if (retain) state.searchSources else emptyMap()) + partial.sources
-                        val pending = statuses.values.any { it.loading }
-                        val next = statuses.values.filter { it.error == null && it.hasMore && it.nextPage != null }
-                            .associate { it.sourceId to it.nextPage!! }
-                        val failures = statuses.values.filter { it.error != null }
-                        current.copy(items = if (pending && groups.isEmpty()) current.items else groups.map { it.manga },
-                            sourceMatches = if (pending && groups.isEmpty()) current.sourceMatches
-                                else groups.associate { it.manga.id to it.matches },
-                            sourceChoiceIds = if (pending && groups.isEmpty()) current.sourceChoiceIds
-                                else groups.filter { it.needsChoice }.map { it.manga.id }.toSet(),
+                    if (current.cacheKey != state.cacheKey || requestId != browseRequestId ||
+                        generation != browseCache.generation) current else {
+                        current.copy(items = if (keepExisting) current.items else groupedItems,
+                            sourceMatches = if (keepExisting) current.sourceMatches else groupedMatches,
+                            sourceChoiceIds = if (keepExisting) current.sourceChoiceIds else choiceIds,
                             searchSources = statuses, sourceNextPages = next, hasMore = next.isNotEmpty(),
-                            loading = pending && groups.isEmpty() && current.items.isEmpty(),
+                            loading = pending && noHits && current.items.isEmpty(),
                             refreshing = pending && page == 0 && current.items.isNotEmpty(),
                             loadingMore = pending && retain, page = page,
-                            error = if (!pending && groups.isEmpty() && failures.isNotEmpty())
+                            error = if (failedEmpty)
                                 "部分来源暂时不可用，可重试；其他来源没有返回匹配作品。" else null,
-                            failedPage = if (!pending && groups.isEmpty() && failures.isNotEmpty()) page else null,
-                            updatedAt = if (!pending) System.currentTimeMillis() else current.updatedAt)
+                            failedPage = if (failedEmpty) page else null,
+                            updatedAt = updatedAt ?: current.updatedAt)
                     }
                 }
             }
@@ -1115,18 +1158,51 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Reproject the view; choosing a source never writes a reading event or copies a page cursor. */
     private suspend fun refreshUnifiedProjection() {
+        val request = ++projectionRequestId
+        val detailEpoch = detailRequestId
+        val readingEpoch = readingRequestId
+        val detailWorkId = _detail.value?.manga?.id
+        val readingWorkId = _reading.value?.manga?.id
+        val settingsRevision = unifiedChapters.revision.value
+        val catalogRevision = repository.catalogRevision.value
+        val workIds = listOfNotNull(detailWorkId, readingWorkId).distinct()
+        val catalogs = withContext(Dispatchers.Default) {
+            workIds.associateWith { repository.cachedDetail(it) }
+        }
+        fun currentProjection(): Boolean = request == projectionRequestId &&
+            settingsRevision == unifiedChapters.revision.value && catalogRevision == repository.catalogRevision.value
+        if (!currentProjection()) return
+        var changedCatalog: MangaDetail? = null
         val currentDetail = _detail.value
-        if (currentDetail != null) repository.cachedDetail(currentDetail.manga.id)?.let { catalog ->
-            _detail.update { if (it?.manga?.id == catalog.manga.id) it.copy(detail = catalog) else it }
-            readerCatalogs.save(catalog)
+        if (detailWorkId != null && detailRequestId == detailEpoch &&
+            currentDetail != null && currentDetail.manga.id == detailWorkId) {
+            catalogs[detailWorkId]?.let { catalog ->
+                if (currentDetail.detail != catalog) {
+                    _detail.value = currentDetail.copy(detail = catalog)
+                    changedCatalog = catalog
+                }
+            }
         }
         refreshSourceOverview()
-        val session = _reading.value ?: return
-        val catalog = repository.cachedDetail(session.manga.id) ?: return
-        val visible = visibleReading?.takeIf { it.first.id == session.manga.id }?.second
-            ?: findSourceChapter(session.chapters, session.chapterId)
-        val projected = if (visible != null) selectedChapters(catalog.chapters, visible) else catalog.chapters
-        _reading.update { if (it?.manga?.id == session.manga.id) it.copy(chapters = projected) else it }
+        val session = _reading.value
+        if (readingWorkId != null && readingRequestId == readingEpoch &&
+            session != null && session.manga.id == readingWorkId) {
+            catalogs[readingWorkId]?.let { catalog ->
+                // Read the visible source now: the reader can turn pages/chapters while
+                // a background projection is being built, without a new reading epoch.
+                val visible = visibleReading?.takeIf { it.first.id == session.manga.id }?.second
+                    ?: findSourceChapter(session.chapters, session.chapterId)
+                val projected = if (visible != null) selectedChapters(catalog.chapters, visible) else catalog.chapters
+                if (session.chapters != projected) _reading.value = session.copy(chapters = projected)
+            }
+        }
+        changedCatalog?.let { catalog ->
+            projectionSaveLock.withLock {
+                if (currentProjection() && detailRequestId == detailEpoch &&
+                    _detail.value?.manga?.id == catalog.manga.id && _detail.value?.detail == catalog)
+                    readerCatalogs.save(catalog)
+            }
+        }
     }
 
     fun manageSources() {

@@ -39,7 +39,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -50,11 +49,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -75,7 +71,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
-import coil3.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterVariant
@@ -90,31 +85,11 @@ import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import kotlin.math.roundToInt
 
-private val failedSourceMarks = mutableStateMapOf<String, Boolean>()
-
-/** Copy uses our muted-blue wordmark; other providers retain their own marks/name fallback. */
+/** Crisp app-owned glyphs; real provider names remain separate from the artwork. */
 @Composable
 internal fun ChapterSourceLogo(sourceId: String, sourceName: String, modifier: Modifier = Modifier,
     muted: Boolean = false) {
-    val favicon = when (sourceId) {
-        "komiic" -> "https://komiic.com/favicon.ico"
-        "mangadex" -> "https://mangadex.org/favicon.ico"
-        "baozi" -> "https://www.baozimh.com/favicon.ico"
-        "manhuagui" -> "https://www.manhuagui.com/favicon.ico"
-        "mangabz" -> "https://mangabz.com/favicon.ico"
-        else -> null
-    }
-    val failed = failedSourceMarks[sourceId] == true
-    val monochrome = remember { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) }) }
-    Box(modifier, contentAlignment = Alignment.Center) {
-        if (sourceId == "copy") CopySourceWordmark(Modifier.fillMaxSize())
-        else if (favicon != null && !failed) AsyncImage(
-            model = favicon, contentDescription = null, contentScale = ContentScale.Fit,
-            colorFilter = if (muted) monochrome else null,
-            modifier = Modifier.fillMaxSize(), onError = { failedSourceMarks[sourceId] = true },
-        ) else Text(sourceName, color = DetailSecondary, fontSize = 9.sp, maxLines = 1,
-            overflow = TextOverflow.Ellipsis)
-    }
+    BodySourceMark(sourceId, sourceName, modifier, muted)
 }
 
 /** Each visible source owns a separate hit slot; only actual overflow shares a list. */

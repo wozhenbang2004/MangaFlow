@@ -50,6 +50,7 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.NotificationsNone
 import androidx.compose.material.icons.outlined.Restore
@@ -113,6 +114,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.BuildConfig
+import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingMode
@@ -153,6 +156,8 @@ fun SettingsScreen(
     readMetadataCacheBytes: suspend () -> Long,
     clearMetadataCache: suspend () -> Unit,
     contentTopPadding: Dp = 0.dp,
+    sourceBackdrop: HazeState? = null,
+    sourceRegistry: BodySourceRegistry? = null,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -185,6 +190,7 @@ fun SettingsScreen(
     var showWebDav by remember { mutableStateOf(false) }
     var webDavNotice by remember { mutableStateOf<String?>(null) }
     var expandedSetting by rememberSaveable { mutableStateOf<String?>(null) }
+    var showBodySources by remember { mutableStateOf(false) }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
 
     val exportBackup = rememberLauncherForActivityResult(
@@ -388,6 +394,15 @@ fun SettingsScreen(
                     }
                 }
                 SettingsSection("数据") {
+                    sourceRegistry?.let { registry ->
+                        val sources by registry.entries.collectAsStateWithLifecycle()
+                        val added = sources.count { !it.removed }
+                        val enabled = sources.count { !it.removed && it.enabled }
+                        SettingsLinkRow("漫画源", "已启用 $enabled · 已添加 $added",
+                            Icons.AutoMirrored.Outlined.MenuBook, inlineDetail = true, compact = true) {
+                            showBodySources = true
+                        }
+                    }
                     SettingsDisclosure("备份与同步", if (backupBusy != null) "正在处理…" else "本地文件 · WebDAV",
                         Icons.Outlined.CloudSync, expandedSetting == "backup", { toggleSetting("backup") }) {
                         Column {
@@ -574,6 +589,10 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+
+    if (showBodySources && sourceRegistry != null) {
+        BodySourceSettingsSheet(sourceRegistry, sourceBackdrop, onDismiss = { showBodySources = false })
     }
 
     BackupRestoreDialog(

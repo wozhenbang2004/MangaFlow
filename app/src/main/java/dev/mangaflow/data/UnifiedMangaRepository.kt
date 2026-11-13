@@ -41,6 +41,8 @@ class UnifiedMangaRepository(
     val sources: List<BodySourceInfo> = listOf(
         BodySourceInfo("copy", "拷贝", "简中", "https://www.copy3000.com", ""),
     ) + bodySources.map { it.info }
+    private data class SourceEligibility(val ids: Set<String>, val generation: Long)
+    @Volatile private var sourceEligibility = SourceEligibility(sources.map { it.id }.toSet(), 0L)
     private val rawCatalogs = LinkedHashMap<String, MangaDetail>()
     private data class CatalogStamp(val generation: Long, val at: Long)
     private val catalogFetchedAt = LinkedHashMap<String, CatalogStamp>()
@@ -54,7 +56,8 @@ class UnifiedMangaRepository(
     // Fixed stripes keep the lock set bounded while coalescing prepare/reader requests.
     private val pageLocks = Array(16) { Mutex() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val refreshes = mutableMapOf<String, Deferred<Unit>>()
+    private data class RefreshRun(val eligibilityGeneration: Long, val job: Deferred<Unit>)
+    private val refreshes = mutableMapOf<String, RefreshRun>()
     private val refreshedAt = mutableMapOf<String, Long>()
     private val slots = Semaphore(2)
     private val _catalogRevision = MutableStateFlow(0L)
@@ -63,12 +66,49 @@ class UnifiedMangaRepository(
     val sourceErrors = _sourceErrors.asStateFlow()
     private val _sourceDiscovery = MutableStateFlow<Map<String, Map<String, SourceDiscoveryResult>>>(emptyMap())
     val sourceDiscovery = _sourceDiscovery.asStateFlow()
-    private data class DiscoveryRun(val signature: String, val generation: Long, val job: Deferred<Unit>)
+    private data class DiscoveryRun(val signature: String, val generation: Long,
+        val eligibilityGeneration: Long, val job: Deferred<Unit>)
     private val discoveries = mutableMapOf<String, DiscoveryRun>()
     private val discoveryGenerations = mutableMapOf<String, Long>()
     private val discoveryCompleted = mutableMapOf<String, Pair<String, Long>>()
+    private var discoveryCacheEpoch = 0L
     private val pageCacheGenerations = mutableMapOf<String, Long>()
     private val searchTerms = LinkedHashMap<String, MutableMap<String, String>>()
+
+    /** Installed sources remain readable; this eligibility controls search and automatic matching. */
+    fun enabledSources(): Set<String> = sourceEligibility.ids.toSet()
+
+    fun setEnabledSources(ids: Set<String>) {
+        val registered = sources.map { it.id }.toSet()
+        val next = ids.intersect(registered)
+        synchronized(discoveries) {
+            if (sourceEligibility.ids == next) return
+            sourceEligibility = SourceEligibility(next, sourceEligibility.generation + 1L)
+            val obsolete = discoveries.values.toList()
+            discoveries.keys.forEach { workId ->
+                discoveryGenerations[workId] = (discoveryGenerations[workId] ?: 0L) + 1L
+            }
+            discoveries.clear()
+            discoveryCacheEpoch += 1L
+            discoveryCompleted.clear()
+            _sourceDiscovery.value = emptyMap()
+            obsolete.forEach { it.job.cancel() }
+        }
+        synchronized(refreshes) {
+            val obsolete = refreshes.filterValues { it.eligibilityGeneration != sourceEligibility.generation }.toList()
+            obsolete.forEach { (workId, run) ->
+                refreshes.remove(workId)
+                run.job.cancel()
+            }
+            refreshedAt.clear()
+            _sourceErrors.value = emptyMap()
+        }
+    }
+
+    private fun ensureEligibility(expected: SourceEligibility, sourceId: String? = null) {
+        if (sourceEligibility.generation != expected.generation || sourceId != null && sourceId !in expected.ids)
+            throw CancellationException("来源搜索配置已更改。")
+    }
 
     override suspend fun discover(page: Int): MangaPage = copy.discover(page)
     override suspend fun search(query: String, page: Int): MangaPage = copy.search(query, page)
@@ -77,28 +117,36 @@ class UnifiedMangaRepository(
 
     suspend fun searchSource(sourceId: String, query: String, page: Int = 0, forceRefresh: Boolean = false): MangaPage {
         val key = SearchKey(sourceId, query.trim(), page)
+        val requestedAt = System.nanoTime()
         return searchLocks[(key.hashCode() and Int.MAX_VALUE) % searchLocks.size].withLock {
             val generation = synchronized(pageCache) { pageCacheGenerations[sourceId] ?: 0L }
-            if (!forceRefresh) synchronized(sourceSearchCache) {
+            synchronized(sourceSearchCache) {
                 sourceSearchCache[key]?.takeIf { it.generation == generation &&
-                    System.nanoTime() - it.storedAt in 0L until DISCOVERY_TTL_NANOS }?.page
+                    System.nanoTime() - it.storedAt in 0L until
+                        (if (it.page.items.isEmpty()) EMPTY_SEARCH_CACHE_NANOS else DISCOVERY_TTL_NANOS) &&
+                    (!forceRefresh || it.storedAt >= requestedAt) }?.page
             }?.let { return@withLock it }
             val result = if (sourceId == "copy") copy.search(key.query, page) else adapter(sourceId).search(key.query, page)
             if (synchronized(pageCache) { (pageCacheGenerations[sourceId] ?: 0L) == generation }) synchronized(sourceSearchCache) {
                 sourceSearchCache.remove(key)
-                sourceSearchCache[key] = CachedSearch(System.nanoTime(), generation, result)
-                while (sourceSearchCache.size > 64) sourceSearchCache.remove(sourceSearchCache.keys.first())
+                if (result.items.size <= MAX_SEARCH_CACHE_HITS)
+                    sourceSearchCache[key] = CachedSearch(System.nanoTime(), generation, result)
+                while (sourceSearchCache.size > MAX_SEARCH_CACHE_PAGES ||
+                    sourceSearchCache.values.sumOf { it.page.items.size } > MAX_SEARCH_CACHE_HITS)
+                    sourceSearchCache.remove(sourceSearchCache.keys.first())
             }
             result
         }
     }
 
     /** Each callback is an immutable cumulative snapshot of this requested batch only. */
-    suspend fun searchAll(query: String, pages: Map<String, Int>? = null,
+    suspend fun searchAll(query: String, pages: Map<String, Int>? = null, forceRefresh: Boolean = false,
         onUpdate: (FederatedSearchPage) -> Unit = {}): FederatedSearchPage = withContext(Dispatchers.IO) {
         val text = query.trim()
         require(text.length in 1..120) { "请输入 1–120 个字的漫画标题。" }
-        val requested = pages?.toMap() ?: sources.associate { it.id to 0 }
+        val eligibility = sourceEligibility
+        if (eligibility.ids.isEmpty()) throw SourceException("请先在设置中启用漫画源")
+        val requested = (pages?.toMap() ?: sources.associate { it.id to 0 }).filterKeys { it in eligibility.ids }
         val infos = sources.associateBy(BodySourceInfo::id)
         val states = LinkedHashMap<String, FederatedSearchSource>()
         requested.forEach { (id, _) ->
@@ -107,18 +155,17 @@ class UnifiedMangaRepository(
         val hits = LinkedHashMap<Pair<String, String>, Manga>()
         val updateLock = Mutex()
         fun snapshot() = FederatedSearchPage(hits.values.toList(), states.toMap())
+        ensureEligibility(eligibility)
         onUpdate(snapshot())
-        // Foreground search has its own slots, independent of background catalogue discovery.
-        val searchSlots = Semaphore(2)
+        // Different sources start independently; each adapter retains its own request limits.
         supervisorScope {
             requested.map { (sourceId, page) -> async {
                 var found: List<Manga> = emptyList()
                 val state = try {
                     require(sourceId in infos) { "这个正文来源尚未安装。" }
                     require(page >= 0) { "搜索分页无效。" }
-                    val result = searchSlots.withPermit {
-                        withTimeout(15_000L) { searchSourceTerms(sourceId, text, page) }
-                    }
+                    ensureEligibility(eligibility, sourceId)
+                    val result = withTimeout(15_000L) { searchSourceTerms(sourceId, text, page, forceRefresh) }
                     found = result.items.distinctBy(::federatedMangaIdentity)
                     val next = if (result.hasMore) result.nextPage ?: (page + 1) else null
                     require(next == null || next > page) { "该来源没有返回有效的下一页。" }
@@ -134,23 +181,24 @@ class UnifiedMangaRepository(
                 }
                 currentCoroutineContext().ensureActive()
                 updateLock.withLock {
+                    ensureEligibility(eligibility, sourceId)
                     found.forEach { hits[federatedMangaIdentity(it)] = it }
                     states[sourceId] = state
                     onUpdate(snapshot())
                 }
             } }.forEach { it.await() }
         }
+        ensureEligibility(eligibility)
         snapshot()
     }
 
-    private suspend fun searchSourceTerms(sourceId: String, query: String, page: Int): MangaPage {
+    private suspend fun searchSourceTerms(sourceId: String, query: String, page: Int, forceRefresh: Boolean): MangaPage {
         val retained = if (page > 0) synchronized(searchTerms) { searchTerms[query]?.get(sourceId) } else null
         val terms = retained?.let(::listOf) ?: bodySourceSearchTerms(query)
         var result = MangaPage(emptyList(), false)
         for (term in terms) {
             currentCoroutineContext().ensureActive()
-            // BrowseCache owns foreground reuse; an explicit refresh/retry must reach the source.
-            result = searchSource(sourceId, term, page, forceRefresh = true)
+            result = searchSource(sourceId, term, page, forceRefresh = forceRefresh)
             if (result.items.isNotEmpty()) {
                 synchronized(searchTerms) {
                     val selected = searchTerms.remove(query) ?: mutableMapOf()
@@ -170,6 +218,8 @@ class UnifiedMangaRepository(
         val baseline = cachedSourceDetail(work.id) ?: if (work.sourceId == "copy") copy.cachedDetail(work.id) else null
         val identity = SourceDiscoveryIdentity.signature(work, aliases, baseline)
         synchronized(discoveries) {
+            val eligibility = sourceEligibility
+            if (eligibility.ids.isEmpty()) return
             // Only the foreground work owns automatic search slots. Already loaded
             // catalogues and explicit refresh/link jobs have independent lifetimes.
             discoveries.filterKeys { it != work.id }.toList().forEach { (otherWorkId, run) ->
@@ -185,15 +235,17 @@ class UnifiedMangaRepository(
             active?.job?.cancel()
             val generation = (discoveryGenerations[work.id] ?: 0L) + 1L
             discoveryGenerations[work.id] = generation
+            val cacheEpoch = discoveryCacheEpoch
             val job = scope.async(start = CoroutineStart.LAZY) {
                 supervisorScope {
-                    sources.filter { it.id != work.sourceId }.map { info ->
+                    sources.filter { it.id != work.sourceId && it.id in eligibility.ids }.map { info ->
                         async {
+                            ensureEligibility(eligibility, info.id)
                             publishDiscovery(work.id, generation,
                                 SourceDiscoveryResult(info.id, info.name, SourceDiscoveryStatus.SEARCHING))
                             try {
                                 slots.withPermit {
-                                    withTimeout(25_000L) { discoverOneSource(work, aliases, baseline, info, generation, force) }
+                                    withTimeout(25_000L) { discoverOneSource(work, aliases, baseline, info, generation, force, eligibility) }
                                 }
                             } catch (cancel: CancellationException) {
                                 if (cancel is kotlinx.coroutines.TimeoutCancellationException) {
@@ -210,11 +262,13 @@ class UnifiedMangaRepository(
                     }.forEach { it.await() }
                 }
             }
-            discoveries[work.id] = DiscoveryRun(identity, generation, job)
+            discoveries[work.id] = DiscoveryRun(identity, generation, eligibility.generation, job)
             job.invokeOnCompletion { failure -> synchronized(discoveries) {
                 if (discoveries[work.id]?.job === job) {
                     discoveries.remove(work.id)
-                    if (failure == null) discoveryCompleted[work.id] = identity to System.nanoTime()
+                    if (failure == null && cacheEpoch == discoveryCacheEpoch &&
+                        eligibility.generation == sourceEligibility.generation)
+                        discoveryCompleted[work.id] = identity to System.nanoTime()
                     while (discoveryCompleted.size > 64) discoveryCompleted.remove(discoveryCompleted.keys.first())
                 }
             } }
@@ -230,6 +284,16 @@ class UnifiedMangaRepository(
         }
         synchronized(rawCatalogs) { catalogFetchedAt.keys.removeAll { SourceKeys.decodeManga(it).sourceId == sourceId } }
         synchronized(sourceSearchCache) { sourceSearchCache.keys.removeAll { it.source == sourceId } }
+        synchronized(searchTerms) {
+            searchTerms.values.forEach { it.remove(sourceId) }
+            searchTerms.entries.removeAll { it.value.isEmpty() }
+        }
+        synchronized(discoveries) {
+            // Completion TTL is work-wide; an in-flight scan of the former origin
+            // must not refill it after this explicit source configuration change.
+            discoveryCacheEpoch += 1L
+            discoveryCompleted.clear()
+        }
     }
 
     private fun retainedSourceCount(workId: String, sourceId: String): Int =
@@ -238,7 +302,8 @@ class UnifiedMangaRepository(
         }
 
     private suspend fun discoverOneSource(work: Manga, aliases: List<String>, baseline: MangaDetail?,
-        info: BodySourceInfo, generation: Long, force: Boolean) {
+        info: BodySourceInfo, generation: Long, force: Boolean, eligibility: SourceEligibility) {
+        ensureEligibility(eligibility, info.id)
         fun report(status: SourceDiscoveryStatus, message: String = "", candidates: List<Manga> = emptyList(), chapters: Int = 0) =
             publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name, status, chapters, message, candidates))
         val settings = unified.settings(work.id)
@@ -250,11 +315,14 @@ class UnifiedMangaRepository(
         if (linked.isNotEmpty()) {
             var count = 0
             linked.forEach { link ->
+                ensureEligibility(eligibility, info.id)
                 if (cachedSourceDetail(link.manga.id) == null) catalogStore?.read(link.manga.id)?.let {
+                    ensureEligibility(eligibility, info.id)
                     rememberRaw(it)
                     _catalogRevision.update { revision -> revision + 1L }
                 }
                 val loaded = detailSource(info.id, link.manga.id, forceRefresh = force)
+                ensureEligibility(eligibility, info.id)
                 count += loaded.chapters.size
                 _sourceErrors.update { errors ->
                     errors + (work.id to (errors[work.id].orEmpty() - link.manga.id))
@@ -269,7 +337,9 @@ class UnifiedMangaRepository(
         var results: List<Manga> = emptyList()
         for (query in bodySourceSearchTerms(work.title, aliases)) {
             currentCoroutineContext().ensureActive()
+            ensureEligibility(eligibility, info.id)
             results = searchSource(info.id, query, forceRefresh = force).items.distinctBy(Manga::id)
+            ensureEligibility(eligibility, info.id)
             if (results.isNotEmpty()) break
         }
         if (results.isEmpty()) {
@@ -288,7 +358,9 @@ class UnifiedMangaRepository(
         val verified = mutableListOf<MangaDetail>()
         val candidates = mutableListOf<Manga>()
         for (candidate in exact.sortedBy(Manga::id)) {
+            ensureEligibility(eligibility, info.id)
             val loaded = detailSource(info.id, candidate.id, forceRefresh = force)
+            ensureEligibility(eligibility, info.id)
             candidates += loaded.manga
             if (SourceDiscoveryIdentity.titleMatches(work, loaded.manga, aliases) &&
                 SourceDiscoveryIdentity.authorsMatch(work, loaded.manga) &&
@@ -300,13 +372,20 @@ class UnifiedMangaRepository(
                 else "已找到同名条目，作者或章节体系仍需确认。", candidates.distinctBy(Manga::id).take(6))
             return
         }
-        currentCoroutineContext().ensureActive()
-        if (!isCurrentDiscovery(work.id, generation)) return
         val selected = verified.single()
         val variant = selected.chapters.firstNotNullOfOrNull { it.variants.firstOrNull() }
-        val added = unified.attachAutomatically(work.id, selected.manga,
-            language = variant?.language ?: info.language, edition = "连载版", sameChapterSystem = true,
-            evidence = "完整标题与作者一致，至少三个正常话号及串行版别对应。")
+        val context = currentCoroutineContext()
+        val added = synchronized(discoveries) {
+            context.ensureActive()
+            ensureEligibility(eligibility, info.id)
+            if (!isCurrentDiscovery(work.id, generation)) return
+            // Eligibility mutation uses this same lock, so a disabled source cannot
+            // slip between the final check and the synchronous association commit.
+            unified.attachAutomatically(work.id, selected.manga,
+                language = variant?.language ?: info.language, edition = "连载版", sameChapterSystem = true,
+                evidence = "完整标题与作者一致，至少三个正常话号及串行版别对应。")
+        }
+        ensureEligibility(eligibility, info.id)
         val fresh = unified.settings(work.id)
         when {
             info.id in fresh.excludedSources -> report(SourceDiscoveryStatus.DISABLED)
@@ -320,12 +399,15 @@ class UnifiedMangaRepository(
     }
 
     private fun isCurrentDiscovery(workId: String, generation: Long): Boolean = synchronized(discoveries) {
-        discoveryGenerations[workId] == generation
+        discoveryGenerations[workId] == generation &&
+            discoveries[workId]?.eligibilityGeneration == sourceEligibility.generation
     }
 
     private fun publishDiscovery(workId: String, generation: Long, result: SourceDiscoveryResult) {
         synchronized(discoveries) {
-            if (discoveryGenerations[workId] != generation) return
+            if (discoveryGenerations[workId] != generation ||
+                discoveries[workId]?.eligibilityGeneration != sourceEligibility.generation ||
+                result.sourceId !in sourceEligibility.ids) return
             _sourceDiscovery.update { current ->
                 LinkedHashMap(current).apply {
                     remove(workId)
@@ -366,7 +448,7 @@ class UnifiedMangaRepository(
         val loaded = if (ref.sourceId == "copy") copy.detail(ref.mangaId, onMetadata)
         else adapter(ref.sourceId).detail(mangaId).also { onMetadata(it.manga) }
         rememberRaw(loaded)
-        val result = project(loaded)
+        val result = withContext(Dispatchers.Default) { project(loaded) }
         // A slow/refused additional source cannot block the available base catalog.
         startRefresh(mangaId, force = false)
         return result
@@ -488,26 +570,33 @@ class UnifiedMangaRepository(
     }
 
     private fun startRefresh(workId: String, force: Boolean): Deferred<Unit>? = synchronized(refreshes) {
-        refreshes[workId]?.takeIf { it.isActive }?.let { return@synchronized it }
+        val eligibility = sourceEligibility
+        refreshes[workId]?.takeIf { it.eligibilityGeneration == eligibility.generation && it.job.isActive }
+            ?.let { return@synchronized it.job }
+        refreshes[workId]?.job?.cancel()
         if (!force && System.currentTimeMillis() - (refreshedAt[workId] ?: 0L) < 60_000L) return@synchronized null
-        val links = unified.linkedSources(workId)
+        val links = unified.linkedSources(workId).filter { it.manga.sourceId in eligibility.ids }
         if (links.isEmpty()) {
-            _sourceErrors.update { it - workId }
+            if (eligibility.generation == sourceEligibility.generation) _sourceErrors.update { it - workId }
             return@synchronized null
         }
         val job = scope.async(start = CoroutineStart.LAZY) {
+            ensureEligibility(eligibility)
             val errors = supervisorScope {
                 links.map { link ->
                     async {
                         try {
                             slots.withPermit {
+                                ensureEligibility(eligibility, link.manga.sourceId)
                                 if (cachedSourceDetail(link.manga.id) == null) {
                                     catalogStore?.read(link.manga.id)?.let {
+                                        ensureEligibility(eligibility, link.manga.sourceId)
                                         rememberRaw(it)
                                         _catalogRevision.update { value -> value + 1 }
                                     }
                                 }
                                 withTimeout(25_000L) { detailSource(link.manga.sourceId, link.manga.id, forceRefresh = force) }
+                                ensureEligibility(eligibility, link.manga.sourceId)
                             }
                             null
                         } catch (cancel: CancellationException) {
@@ -521,12 +610,15 @@ class UnifiedMangaRepository(
                     }
                 }.mapNotNull { it.await() }.toMap()
             }
-            _sourceErrors.update { current -> current + (workId to errors) }
-            synchronized(refreshes) { refreshedAt[workId] = System.currentTimeMillis() }
-            _catalogRevision.update { it + 1 }
+            synchronized(refreshes) {
+                ensureEligibility(eligibility)
+                _sourceErrors.update { current -> current + (workId to errors) }
+                refreshedAt[workId] = System.currentTimeMillis()
+                _catalogRevision.update { it + 1 }
+            }
         }
-        refreshes[workId] = job
-        job.invokeOnCompletion { synchronized(refreshes) { if (refreshes[workId] === job) refreshes.remove(workId) } }
+        refreshes[workId] = RefreshRun(eligibility.generation, job)
+        job.invokeOnCompletion { synchronized(refreshes) { if (refreshes[workId]?.job === job) refreshes.remove(workId) } }
         job.start()
         job
     }
@@ -534,6 +626,9 @@ class UnifiedMangaRepository(
     private companion object {
         const val PAGE_CACHE_NANOS = 60_000_000_000L
         const val DISCOVERY_TTL_NANOS = 300_000_000_000L
+        const val EMPTY_SEARCH_CACHE_NANOS = 60_000_000_000L
+        const val MAX_SEARCH_CACHE_PAGES = 64
+        const val MAX_SEARCH_CACHE_HITS = 1_200
         const val CATALOG_CACHE_NANOS = 60_000_000_000L
     }
 }

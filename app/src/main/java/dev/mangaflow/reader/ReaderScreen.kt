@@ -182,7 +182,7 @@ import dev.mangaflow.ui.LibraryRestoreStatus
 import dev.mangaflow.ui.ChapterReadMark
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.ChapterSourcePicker
-import dev.mangaflow.ui.ChapterSourceBadge
+import dev.mangaflow.ui.ReaderSourceStack
 import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.rememberChapterPositions
 import dev.mangaflow.ui.GlassSurfaceRole
@@ -762,18 +762,15 @@ fun ReaderScreen(
                         Modifier.fillMaxWidth().padding(start = 5.dp, end = 5.dp, top = 1.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        ChapterSourceBadge(
+                        ReaderSourceStack(
                             chapter = chapter,
-                            modifier = Modifier.weight(1f),
                             enabled = controlsVisible && !sourceLoading && active && !leavingReader,
-                            onReadVariant = { selected, variant ->
-                                if (variant.storageId != chapter.id) onReadVariant(selected, variant, pageIndex)
-                            },
                             onOpen = {
                                 sourceCloseRequested = false
                                 sourceChapter = chapter
                             },
                         )
+                        Spacer(Modifier.weight(1f))
                         if (sourceLoading) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.2.dp)
                     }
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
