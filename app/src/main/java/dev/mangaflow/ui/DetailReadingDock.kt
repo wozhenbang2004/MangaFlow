@@ -102,7 +102,7 @@ internal fun DetailReadingDock(
         else -> "暂无可读章节"
     }
     if (visibility > .01f) BoxWithConstraints(modifier.fillMaxWidth()) {
-        val fullWidth = minOf(maxWidth, 336.dp * fontScale.coerceAtMost(1.4f))
+        val fullWidth = minOf(maxWidth, 280.dp + 40.dp * (fontScale - 1f).coerceIn(0f, 1f))
         val compactWidth = minOf(fullWidth, 104.dp * fontScale.coerceAtMost(1.6f))
         val width = lerp(fullWidth, compactWidth, collapse)
         Box(Modifier.align(BiasAlignment(collapse, 1f)).width(width).heightIn(min = 48.dp)
@@ -126,25 +126,25 @@ internal fun DetailReadingDock(
             LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().align(Alignment.Center),
                 cornerRadius = lerp(28.dp, 18.dp, collapse), role = GlassSurfaceRole.READING_DOCK,
                 interactionSource = interaction, trackPointer = true,
-                elevation = 4.dp, softCard = true) {
+                softCard = true) {
                 Row(Modifier.fillMaxWidth().heightIn(min = minimumHeight)
-                    .padding(horizontal = lerp(18.dp, 10.dp, collapse), vertical = 4.dp)
+                    .padding(horizontal = lerp(20.dp, 10.dp, collapse), vertical = 4.dp)
                     .semantics(mergeDescendants = true) {
                         contentDescription = listOf(actionTitle, chapterTitle, subtitle)
                             .filter(String::isNotBlank).joinToString("，")
                     }, verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Start) {
                     val progressColor = MaterialTheme.colorScheme.primary
-                    Box(Modifier.size(lerp(28.dp, 20.dp, collapse)), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(lerp(32.dp, 20.dp, collapse)), contentAlignment = Alignment.Center) {
                         if (fraction != null) Canvas(Modifier.matchParentSize().padding(1.dp)) {
                             val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
                             drawArc(progressColor.copy(alpha = .14f), -90f, 360f, false, style = stroke)
                             drawArc(progressColor.copy(alpha = .85f), -90f, 360f * displayedProgress, false, style = stroke)
                         }
                         Icon(Icons.Filled.PlayArrow, null, tint = progressColor,
-                            modifier = Modifier.size(lerp(20.dp, 16.dp, collapse)))
+                            modifier = Modifier.size(lerp(22.dp, 16.dp, collapse)))
                     }
-                    Spacer(Modifier.width(lerp(10.dp, 6.dp, collapse)))
+                    Spacer(Modifier.width(lerp(14.dp, 6.dp, collapse)))
                     Column(Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(2.dp * (1f - collapse))) {
                         Text(chapterTitle.ifBlank { if (loading) "正在读取章节" else "暂无可读章节" },
@@ -162,7 +162,8 @@ internal fun DetailReadingDock(
                         }
                     }
                     if (percent != null && collapse < 1f) {
-                        Box(Modifier.width(52.dp * fontScale * (1f - collapse)).clipToBounds()
+                        Spacer(Modifier.width(12.dp * (1f - collapse)))
+                        Box(Modifier.width(42.dp * fontScale * (1f - collapse)).clipToBounds()
                             .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) },
                             contentAlignment = Alignment.CenterEnd) {
                             Text("$percent%", color = DetailSecondary, fontSize = 13.sp,

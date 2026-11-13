@@ -110,6 +110,10 @@ internal fun LiquidGlassSurface(
                 chromaticAberrationStrength(0f)
                 contentNormalBlend(.025f)
             }
+            if (role == GlassSurfaceRole.READING_DOCK) {
+                // This floating action is separated by the shared soft shadow, not a dark rim.
+                edgeShadow(Color.Transparent)
+            }
             if (role == GlassSurfaceRole.GALLERY) {
                 optics { copy(refractionStrength = .12f,
                     progressive = HazeProgressive.verticalGradient(startIntensity = .25f, endIntensity = 1f)) }

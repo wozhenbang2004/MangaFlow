@@ -1,12 +1,12 @@
 package dev.mangaflow.ui
 
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.rememberTransition
 import androidx.compose.animation.expandVertically
@@ -54,7 +54,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
@@ -99,31 +98,32 @@ internal fun DetailCommentFilter(
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = visible
     val transition = rememberTransition(presence, label = "comment-filter")
-    val alpha = transition.animateFloat(transitionSpec = {
-        tween(if (motion) if (targetState) MangaMotion.Content else MangaMotion.Quick else 0)
-    }, label = "filter-opacity") { if (it) 1f else 0f }
-    val scale = transition.animateFloat(transitionSpec = {
-        if (motion) spring(MangaMotion.PanelDamping, MangaMotion.PanelStiffness) else snap()
-    }, label = "filter-scale") { if (it) 1f else .94f }
+    // One finite paint-only transition keeps labels and blur capture at their final size.
+    val reveal = transition.animateFloat(transitionSpec = {
+        if (motion) tween(if (targetState) MangaMotion.Content else MangaMotion.Quick,
+            easing = if (targetState) MangaMotion.EnterEasing else MangaMotion.ExitEasing) else snap()
+    }, label = "filter-reveal") { if (it) 1f else 0f }
     val present = presence.currentState || presence.targetState || !presence.isIdle
-    SideEffect { onPresenceChange(present) }
+    val reportPresence by rememberUpdatedState(onPresenceChange)
+    SideEffect { reportPresence(present) }
+    DisposableEffect(Unit) { onDispose { reportPresence(false) } }
     if (!present) return
     var sourceSettings by remember { mutableStateOf(false) }
-    val pending = sources.filter {
+    val pending = remember(sources) { sources.filter {
         it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null ||
             (it.status == ReviewStatus.NO_MATCH && it.candidates.isNotEmpty())
-    }
+    } }
+    val reviewSources = remember(sources) { sources.filter { it.hasWorkReviews }.distinctBy { it.id } }
     val width = (LocalConfiguration.current.screenWidthDp.dp - 32.dp).coerceAtMost(300.dp)
+    val height = (LocalConfiguration.current.screenHeightDp.dp - 96.dp).coerceIn(96.dp, 328.dp)
     val changed = selected != null || longOnly || !hidePromotions
     Popup(alignment = Alignment.TopEnd, offset = with(density) { IntOffset(-12.dp.roundToPx(), 0) },
         onDismissRequest = { if (visible) onDismiss() }, properties = PopupProperties(focusable = visible)) {
         LiquidGlassSurface(backdrop, Modifier.width(width).motionInputGate(visible).graphicsLayer {
-            this.alpha = alpha.value
-            scaleX = scale.value; scaleY = scale.value
-            transformOrigin = TransformOrigin(1f, 0f)
-            translationY = -8.dp.toPx() * (1f - alpha.value)
+            alpha = reveal.value
+            translationY = -4.dp.toPx() * (1f - reveal.value)
         }, cornerRadius = 24.dp, role = GlassSurfaceRole.POPOVER) {
-            Column(Modifier.heightIn(max = 328.dp).verticalScroll(rememberScrollState()).padding(12.dp),
+            Column(Modifier.heightIn(max = height).verticalScroll(rememberScrollState()).padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("评论来源", color = DetailSecondary, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
@@ -138,7 +138,7 @@ internal fun DetailCommentFilter(
                     FlowRow(Modifier.fillMaxWidth().selectableGroup(), maxItemsInEachRow = 3,
                         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         SourceChoice(null, "全部", selected == null, Modifier.width(tileWidth)) { onSelect(null) }
-                        sources.filter { it.hasWorkReviews }.distinctBy { it.id }.forEach { source ->
+                        reviewSources.forEach { source ->
                             SourceChoice(source.id, source.name, selected == source.id, Modifier.width(tileWidth)) { onSelect(source.id) }
                         }
                     }
@@ -212,4 +212,3 @@ private fun FilterToggle(icon: ImageVector, label: String, checked: Boolean, onC
         }
     }
 }
-

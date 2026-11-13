@@ -150,7 +150,11 @@ internal fun CommunityPanel(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     SideEffect { if (active) { onScrollTarget(listState); onFilterChanged(selectedSource != null || longOnly || !hidePromotions) } }
-    LaunchedEffect(active) { if (!active) { onFilterDismiss(); listState.stopScroll() } }
+    val filterObscuresContent = filterOpen || filterPresent
+    LaunchedEffect(active, filterObscuresContent) {
+        if (!active) onFilterDismiss()
+        if (!active || filterObscuresContent) listState.stopScroll()
+    }
     val mixed = remember(sources, selectedSource, longOnly) {
         val rows = sources.asSequence().filter { it.status == ReviewStatus.READY && it.hasWorkReviews }
             .filter { selectedSource == null || it.id == selectedSource }
@@ -184,15 +188,16 @@ internal fun CommunityPanel(
     }
     val nextSource = loadable.minWithOrNull(compareBy<ReviewSource> { it.reviews.size }
         .thenBy { CommunityProviders.indexOf(it.id).let { n -> if (n < 0) 99 else n } })
-    LaunchedEffect(mangaId, sources, nearEnd, loading, selectedSource, longOnly, active) {
-        if (active && !loading && nearEnd && sources.none { it.loadingMore } &&
+    LaunchedEffect(mangaId, sources, nearEnd, loading, selectedSource, longOnly, active, filterObscuresContent) {
+        if (active && !filterObscuresContent && !loading && nearEnd && sources.none { it.loadingMore } &&
             (clusters.isNotEmpty() || (!longOnly && selectedSource == null))) nextSource?.let { onMore(it.id) }
     }
     val resetPosition = { scope.launch { listState.scrollToItem(0) }; Unit }
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().then(if (captureBackdrop && (filterOpen || filterPresent) && active)
             Modifier.mangaHazeSource(backdrop) else Modifier)) {
-            LazyColumn(state = listState, userScrollEnabled = active, modifier = Modifier.weight(1f).fillMaxWidth(),
+            LazyColumn(state = listState, userScrollEnabled = active && !filterObscuresContent,
+                modifier = Modifier.weight(1f).fillMaxWidth().motionInputGate(active && !filterObscuresContent),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomPadding)) {
                 items(clusters, key = { it.key }) { cluster ->
                     CuratedReviewCluster(mangaId, cluster, hidePromotions, loadReplies)
@@ -663,4 +668,3 @@ private fun compactCommentDate(date: String): String {
         if (value.take(4) == LocalDate.now().year.toString()) value.substring(5, 10) else value.take(10)
     } else value
 }
-
