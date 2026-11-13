@@ -2,6 +2,7 @@ package dev.mangaflow.reader.panels
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -60,6 +61,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** One page cursor shared with the ordinary reader; panel positions never become vertical offsets. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun GuidedPanelReader(
     pages: List<Page>,

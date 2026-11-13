@@ -2,6 +2,8 @@
 
 ## Guided panel reading · 2026-11-13 (PANEL-01–08; source implemented, CI/device acceptance pending)
 
+CI follow-up (PANEL-CI-01): run 43374723210 / 0.1.129 reached Kotlin compilation during the Lint prerequisite and failed because PanelCamera omitted the existing Coil 3 crossfade extension import and GuidedPanelReader omitted the ExperimentalLayoutApi opt-in for navigationBarsIgnoringVisibility. The remember/listener/throwable inference errors are downstream of the missing extension. Add those declarations only; preserve camera behavior, original-image decoding, native models and static-analysis gates. Missing Lint reports are secondary because analysis never ran. Source/log review and independent read-only review only; no local build or tests. Replacement main CI trigger is delivery evidence, not compilation or device acceptance.
+
 Takeover request: “去接管漫画软件功能建议去做那个分镜功能”. Retrieved context for “漫画软件功能建议” (2026-11-13) retains “我们先做漫画分镜功能吧”, questions about realtime/preprocessing, image quality, model sizes and phone/PC feasibility, and the final choice “对的都弄进来才是合适的让用户自己抉择怎么开启以及开启哪个”. The retained context is an excerpt, not a new verbatim transcript of the whole discussion. Implement optional traditional, lightweight and higher-precision local detection with independently optional learned order; do not force one engine on every user.
 
 | ID | Adopted behavior and source implementation |

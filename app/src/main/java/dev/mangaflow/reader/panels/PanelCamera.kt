@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
+import coil3.request.crossfade
 import coil3.size.Scale
 import dev.mangaflow.data.Page
 import dev.mangaflow.ui.motion.LocalMotionEnabled
