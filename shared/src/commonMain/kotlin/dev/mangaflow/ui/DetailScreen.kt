@@ -89,7 +89,6 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Brush
@@ -184,6 +183,7 @@ fun DetailScreen(
     onRead: (Chapter) -> Unit,
     onContinue: (ReadingProgress) -> Unit,
     onDownload: (Chapter) -> Unit,
+    onDownloadVariant: (Chapter, ChapterVariant) -> Unit,
     onAuthor: (Manga, String) -> Unit = { _, _ -> },
     onTag: (Manga, String) -> Unit = { _, _ -> },
     onReviewMore: (String) -> Unit = {},
@@ -206,6 +206,9 @@ fun DetailScreen(
     sourcesChecking: Boolean = false,
 ) {
     val current = detail?.manga ?: manga
+    var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
+    val downloadSourceEntries = remember(downloadEntries) { downloadEntries.associateBy { it.chapter.id } }
+    LaunchedEffect(active, current.id) { if (!active) pendingDownload = null }
     val feedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
     val downloaded = remember(downloadEntries, manga.id) {
         downloadEntries.filter { it.manga.id == manga.id }.associateBy { it.chapter.id }
@@ -250,10 +253,7 @@ fun DetailScreen(
         if (DetailBackground.luminance() > .5f) .08f else .12f),
         animationSpec = if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(),
         label = "detail-information-tone")
-    val contentColor by animateColorAsState(lerp(DetailBackground, coverColor,
-        if (DetailBackground.luminance() > .5f) .025f else .045f),
-        animationSpec = if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(),
-        label = "detail-content-tone")
+    val lightDetail = DetailBackground.luminance() > .5f
     val dockDensity = LocalDensity.current
     var measuredDockHeight by remember(current.id, dockDensity) { mutableIntStateOf(0) }
     val window = LocalMangaWindow.current
@@ -291,12 +291,12 @@ fun DetailScreen(
 
     Box(Modifier.fillMaxSize().background(DetailBackground)) {
     BoxWithConstraints(
-        Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize().align(Alignment.TopCenter)
+        Modifier.fillMaxSize().align(Alignment.TopCenter)
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
             .navigationBarsPadding().imePadding(),
     ) {
         val density = LocalDensity.current
-        val viewportWidth = maxWidth
+        val viewportWidth = minOf(maxWidth, MangaLayout.DetailWidth)
         val fontScale = density.fontScale.coerceAtLeast(1f)
         // Retain the largest real dock clearance: condensing must not move the last chapter rows.
         val readingInset = maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
@@ -307,7 +307,10 @@ fun DetailScreen(
         val collapsedHero = availableHeight < 420.dp
         val seamHeight = 16.dp
         var naturalHeroHeight by remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
-        val heroHeight = if (collapsedHero) 0.dp else with(density) { naturalHeroHeight.toDp() }
+        val displayHeight = (availableHeight * (if (compactHero) .60f else .72f) - 56.dp - seamHeight)
+            .coerceAtLeast(0.dp)
+        val heroHeight = if (collapsedHero) 0.dp else maxOf(displayHeight,
+            with(density) { naturalHeroHeight.toDp() })
         val heroPixels = with(density) { heroHeight.toPx() }
         val header = rememberTopAppBarState(initialHeightOffsetLimit = -heroPixels)
         val dockScrollTravel = with(density) { 96.dp.toPx() }
@@ -366,16 +369,11 @@ fun DetailScreen(
                 }
             }
         }
-        // Capture wallpaper, artwork and foreground as one scene for the floating dock.
+        // The current cover is the stationary page background and the dock's real source.
+        // Keep the dock outside this captured scene so it cannot sample itself.
         Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(DetailBackground)) {
-            wallpaper()
-            // Sakurairo's fixed-background relationship: only the foreground moves.
-            // Keep this image's bounds independent of heightOffset to avoid recropping each frame.
             Box(
-                Modifier.fillMaxWidth().height(heroHeight + 56.dp + statusInset + seamHeight)
-                    .graphicsLayer {
-                        alpha = if (collapsedHero) 0f else 1f - ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
-                    }
+                Modifier.fillMaxSize()
                     .mangaHazeSource(artworkBackdrop).background(atmosphereColor),
                 contentAlignment = Alignment.TopCenter,
             ) {
@@ -385,27 +383,26 @@ fun DetailScreen(
                     painter = coverPainter, contentDescription = null,
                     modifier = Modifier.fillMaxSize().graphicsLayer {
                         scaleX = 1.12f; scaleY = 1.12f
-                        alpha = .46f
+                        alpha = .85f
                     }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur),
                     contentScale = ContentScale.Crop,
                 )
-                // A theme veil protects toolbar contrast; the same artwork hue reaches the seam.
+                // A translucent theme veil protects text without replacing the cover
+                // under the catalogue/comments, even after the header has collapsed.
                 Box(Modifier.matchParentSize().background(Brush.verticalGradient(
-                    0f to informationTone.copy(alpha = .56f),
-                    .35f to informationTone.copy(alpha = .90f),
-                    1f to contentColor,
+                    0f to DetailBackground.copy(alpha = if (lightDetail) .58f else .62f),
+                    .35f to DetailBackground.copy(alpha = if (lightDetail) .66f else .70f),
+                    1f to DetailBackground.copy(alpha = if (lightDetail) .70f else .74f),
                 )))
-                Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                    .height(128.dp + seamHeight)
-                    .background(Brush.verticalGradient(0f to Color.Transparent, 1f to contentColor)))
             }
-            Column(Modifier.fillMaxSize().nestedScroll(scrolling)) {
+            Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
+                .align(Alignment.TopCenter).nestedScroll(scrolling)) {
                 ArtworkToolbar(
                     header = header, compact = collapsedHero, title = current.title, backdrop = artworkBackdrop,
                     favorite = isFavorite, coverFailed = coverFailed, active = active,
-                    coverLight = contentColor.luminance() > .5f,
+                    coverLight = lightDetail,
                     comments = activeSection == 1, commentCount = commentCount,
-                    sceneColor = contentColor,
+                    sceneColor = informationTone.copy(alpha = .32f),
                     onBack = onBack, onIntroduction = { fullIntroduction = true },
                     onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() }, onRetryCover = {
                         coverFailed = false
@@ -414,6 +411,8 @@ fun DetailScreen(
                 )
                 Box(
                     Modifier.fillMaxWidth().clipToBounds()
+                        .scrollable(artworkScroll, Orientation.Vertical,
+                            reverseDirection = true, enabled = active)
                         .layout { measurable, constraints ->
                             // Read the moving offset during layout, without recomposing the whole detail.
                             // Measure the actual book content independently of the previous
@@ -421,7 +420,8 @@ fun DetailScreen(
                             val foreground = measurable.measure(
                                 constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity),
                             )
-                            val expanded = foreground.height
+                            val expanded = if (collapsedHero) 0 else maxOf(foreground.height,
+                                with(density) { displayHeight.roundToPx() })
                             val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
                             layout(foreground.width, (expanded + offset).coerceIn(constraints.minHeight, constraints.maxHeight)) {
                                 foreground.placeRelative(0, offset)
@@ -430,14 +430,12 @@ fun DetailScreen(
                 ) {
                     if (!collapsedHero) {
                         key(current.id, viewportWidth, density) {
-                            HeroBookInformation(current, coverPainter, informationTone,
+                            HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
                                 compact = compactHero, onIntroduction = { fullIntroduction = true },
                                 onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
                                 onTag = { onTag(current, it) },
                                 collapse = { header.collapsedFraction },
-                                onNaturalHeight = { naturalHeroHeight = it },
-                                modifier = Modifier.scrollable(artworkScroll, Orientation.Vertical,
-                                    reverseDirection = true, enabled = active))
+                                onNaturalHeight = { naturalHeroHeight = it })
                         }
                     }
                 }
@@ -446,13 +444,7 @@ fun DetailScreen(
                         // Share the grid's scroll mutex as well as its position: a new drag
                         // on the surrounding surface must cancel an existing grid fling.
                         .scrollable(artworkScroll, Orientation.Vertical,
-                            reverseDirection = true, enabled = active)
-                        .drawBehind {
-                            val seam = if (collapsedHero) 0f else seamHeight.toPx() * (1f - header.collapsedFraction)
-                            // The artwork already paints the seam. No translucent white layer is added.
-                            drawRect(contentColor, topLeft = Offset(0f, seam),
-                                size = Size(size.width, (size.height - seam).coerceAtLeast(0f)))
-                        },
+                            reverseDirection = true, enabled = active),
                 ) {
                     Spacer(Modifier.fillMaxWidth().layout { _, constraints ->
                         val seam = (if (collapsedHero) 0f else seamHeight.toPx() * (1f - header.collapsedFraction)).roundToInt()
@@ -480,7 +472,8 @@ fun DetailScreen(
                                     loading = loading, error = error,
                                     active = active && targetSection == activeSection,
                                     onScrollTarget = { catalogGrid = it },
-                                    onRetry = onRetry, onRead = onRead, onDownload = onDownload,
+                                    onRetry = onRetry, onRead = onRead,
+                                    onDownload = { if (active) pendingDownload = it },
                                     loadVolumeCover = loadVolumeCover, volumeImageHeaders = volumeImageHeaders,
                                     bottomPadding = 16.dp,
                                     downloadMode = chapterDownloadMode,
@@ -523,6 +516,18 @@ fun DetailScreen(
         onAuthor = { fullIntroduction = false; onAuthor(current, it) },
         onTag = { fullIntroduction = false; onTag(current, it) }, onDismiss = { fullIntroduction = false })
     if (fullRatings) DetailRatingSheet(current, backdrop = readingBackdrop) { fullRatings = false }
+    pendingDownload?.takeIf { active }?.let { pending ->
+        key(current.id, pending.logicalId, pending.id) {
+            ChapterDownloadSourceSheet(current, pending, downloadSourceEntries, readingBackdrop,
+                onSelect = { variant ->
+                    if (active && pendingDownload == pending) {
+                        if (pending.variants.isEmpty()) onDownload(pending)
+                        else onDownloadVariant(pending, variant)
+                    }
+                },
+                onDismiss = { if (pendingDownload == pending) pendingDownload = null })
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -607,6 +612,7 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
 private fun HeroBookInformation(
     manga: Manga,
     cover: Painter,
+    backdrop: HazeState,
     informationTone: Color,
     compact: Boolean,
     onIntroduction: () -> Unit,
@@ -620,6 +626,9 @@ private fun HeroBookInformation(
     val infoVisible by remember(collapse) { derivedStateOf { collapse() < .98f } }
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
+    val coverSize = cover.intrinsicSize
+    val posterAspect = if (coverSize.width.isFinite() && coverSize.height.isFinite() &&
+        coverSize.width > 0f && coverSize.height > 0f) coverSize.width / coverSize.height else 2f / 3f
     val ink = if (informationTone.luminance() > .5f) Color(0xFF242426) else Color.White
     val titleStyle = MaterialTheme.typography.headlineSmall.copy(
         fontSize = if (compact) 22.sp else 24.sp,
@@ -631,7 +640,7 @@ private fun HeroBookInformation(
         .padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 8.dp)
         .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })) {
         val contentWidth = maxWidth
-        val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .36f else .42f, 220.dp)
+        val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .38f else .48f, 240.dp)
         val infoWidth = with(density) {
             (contentWidth.roundToPx() - posterWidth.roundToPx() - 18.dp.roundToPx()).coerceAtLeast(1).toDp()
         }
@@ -642,28 +651,33 @@ private fun HeroBookInformation(
         val maximumInlineLines = if (density.fontScale >= 1.4f) 3 else 5
         val stacked = infoWidth < 112.dp || titleLayout.lineCount > maximumInlineLines
         val inlineSynopsis = !stacked && !compact && density.fontScale <= 1.2f && titleLayout.lineCount <= 3
-        // One content group sits directly in the artwork atmosphere. Its size is never
-        // derived from the previous expanded header or a percentage of the screen.
+        // Measure the content independently of the display-height floor so long text
+        // can expand through the existing scroll without a size-feedback loop.
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = if (stacked) 1 else 2,
                 horizontalArrangement = Arrangement.spacedBy(18.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Box(Modifier.width(posterWidth).aspectRatio(2f / 3f)
-                    .mangaSharedCover(manga.id).mangaCoverCard(12.dp), contentAlignment = Alignment.Center) {
-                    Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
-                        tint = ink.copy(alpha = .16f), modifier = Modifier.size(36.dp))
-                    Image(cover, contentDescription = null, contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize())
+                Box(Modifier.width(posterWidth).mangaSharedCover(manga.id)) {
+                    LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 12.dp,
+                        role = GlassSurfaceRole.ARTWORK, elevation = 0.dp, softCard = false) {
+                        Box(Modifier.fillMaxWidth().padding(2.dp), contentAlignment = Alignment.Center) {
+                            Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+                                tint = ink.copy(alpha = .16f), modifier = Modifier.size(36.dp))
+                            Image(cover, contentDescription = null, contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxWidth().aspectRatio(posterAspect)
+                                    .clip(RoundedCornerShape(10.dp)))
+                        }
+                    }
                 }
                 Column(Modifier.width(if (stacked) contentWidth else infoWidth),
                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(manga.title, color = ink, style = titleStyle,
                         modifier = Modifier.fillMaxWidth().clickable(enabled = infoVisible,
                             role = Role.Button, onClickLabel = "查看完整作品信息", onClick = onIntroduction))
-                    AuthorNames(manga.authors, ink.copy(alpha = .74f), enabled = infoVisible, onAuthor = onAuthor)
+                    AuthorNames(manga.authors, ink.copy(alpha = .82f), enabled = infoVisible, onAuthor = onAuthor)
                     val state = listOf(manga.status, manga.latestChapter.takeIf(String::isNotBlank)
                         ?.let { "更新 · $it" }.orEmpty()).filter(String::isNotBlank).joinToString(" · ")
-                    if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .66f),
+                    if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .80f),
                         fontSize = 11.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     if (inlineSynopsis) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
                 }
@@ -681,7 +695,7 @@ private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduct
     Row(Modifier.fillMaxWidth().clickable(enabled = enabled, role = Role.Button,
         onClickLabel = "展开简介与作品信息", onClick = onIntroduction).padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(manga.description.ifBlank { "作品信息" }, color = ink.copy(alpha = .76f),
+        Text(manga.description.ifBlank { "作品信息" }, color = ink.copy(alpha = .82f),
             fontSize = 13.sp, lineHeight = 21.sp, maxLines = 3, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f))
         Icon(Icons.Outlined.ChevronRight, null, tint = ink.copy(alpha = .55f), modifier = Modifier.size(16.dp))

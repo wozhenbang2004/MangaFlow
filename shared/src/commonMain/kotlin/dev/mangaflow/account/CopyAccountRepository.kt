@@ -107,6 +107,46 @@ class CopyAccountRepository(context: Context) {
         }
     }
 
+    /** One explicit password submission, followed by private token/profile verification. */
+    suspend fun loginWithPassword(username: String, password: String): AccountProfile {
+        val expected = beginAttempt()
+        return withContext(Dispatchers.IO) {
+            val name = username.trim()
+            if (name.length !in 1..120 || name.any(Char::isISOControl) ||
+                password.length !in 1..256 || password.any(Char::isISOControl)) {
+                throw SourceException("账号或密码格式无效，请检查后重新提交。")
+            }
+            requests.withLock {
+                ensureVersion(expected)
+                val submission = CopyRelayAccountProtocol.loginRequest(name, password)
+                val operation = "账号密码提交"
+                val response = try {
+                    accountHttp.request(submission.request, operation, readAccountErrors = true)
+                } catch (error: Exception) {
+                    ensureVersion(expected)
+                    throw error
+                }
+                ensureVersion(expected)
+                val data = envelope(response, submission.request.url, accountHttp, operation,
+                    256 * 1024, listOf(password, submission.passwordField)) as? JSONObject
+                    ?: throw SourceException("账号密码提交没有返回有效登录凭据。")
+                if (response.statusCode != 200) {
+                    throw SourceException("账号密码提交未确认成功（HTTP ${response.statusCode}）。",
+                        httpStatus = response.statusCode)
+                }
+                val token = try {
+                    AccountTokenInput.validate(data.opt("token") as? String ?: "")
+                } catch (_: SourceException) {
+                    throw SourceException("账号密码提交返回的登录凭据格式无效。")
+                }
+                ensureVersion(expected)
+                val lease = SessionLease(expected,
+                    StoredAccountCredential(token, AccountChannel.RELAY_WEB), committed = false)
+                finishLogin(retainLogin(lease))
+            }
+        }
+    }
+
     /** The actual official form owns password entry, encoding and submission. */
     fun beginWebsiteLogin(): Long = beginAttempt()
 
@@ -239,6 +279,7 @@ class CopyAccountRepository(context: Context) {
         AccountChannel.WEB_API -> relayProfileUrl
         AccountChannel.WEB -> webProfileUrl
         AccountChannel.WEBSITE -> websiteProfileUrl
+        AccountChannel.RELAY_WEB -> CopyRelayAccountProtocol.profileUrl
     }
 
     private fun websiteRequest(url: HttpUrl): Request.Builder = Request.Builder().url(url)
@@ -267,7 +308,9 @@ class CopyAccountRepository(context: Context) {
         }
         val websiteProfile = (lease.channel == AccountChannel.WEB && url == webProfileUrl) ||
             (lease.channel == AccountChannel.WEBSITE && url == websiteProfileUrl)
-        val request = if (!websiteProfile) {
+        val request = if (lease.channel == AccountChannel.RELAY_WEB) {
+            CopyRelayAccountProtocol.memberRequest(url, lease.token, body)
+        } else if (!websiteProfile) {
             val appUrl = url.newBuilder().removeAllQueryParameters("_t").removeAllQueryParameters("_update")
                 .setQueryParameter("platform", "3").apply {
                 if (CHAPTER_PATH.matches(url.encodedPath)) {
@@ -286,6 +329,9 @@ class CopyAccountRepository(context: Context) {
             catch (error: Exception) { ensureLease(lease); throw error }
         ensureLease(lease)
         val result = envelope(response, request.url, accountHttp, operation, maxChars, listOf(lease.token))
+        if (lease.channel == AccountChannel.RELAY_WEB && response.statusCode != 200) {
+            throw SourceException("$operation 未确认成功（HTTP ${response.statusCode}）。", httpStatus = response.statusCode)
+        }
         ensureLease(lease)
         return result
     }

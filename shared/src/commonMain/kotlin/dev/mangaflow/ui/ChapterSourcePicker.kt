@@ -63,6 +63,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.dismiss
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
@@ -84,6 +85,7 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import kotlin.math.roundToInt
@@ -306,6 +308,7 @@ private fun ChapterSourceContent(
         chapter.variants.sortedBy { if (it.storageId == chapter.id) 0 else 1 }
     }
     val editions = variants.map { it.edition }.filter(String::isNotBlank).distinct()
+    val languages = variants.map { it.language }.filter(String::isNotBlank).distinct()
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(chapter.title, color = DetailForeground, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
@@ -316,39 +319,49 @@ private fun ChapterSourceContent(
             val selected = variant.storageId == chapter.id
             val entry = downloaded[variant.storageId]
             val saved = positions?.get(variant.storageId)
+            val peers = variants.filter { it.sourceId == variant.sourceId }
+            val details = listOfNotNull(
+                variant.language.takeIf { languages.size > 1 && it.isNotBlank() },
+                variant.edition.takeIf { editions.size > 1 && it.isNotBlank() },
+                variant.scanlator.takeIf { peers.size > 1 && it.isNotBlank() },
+                variant.title.takeIf { peers.map { it.title }.distinct().size > 1 && it != chapter.title },
+                saved?.takeIf { !selected }?.let { "续读第${it.pageIndex + 1}页" },
+            ).distinct().joinToString(" · ")
             val interaction = remember(variant.storageId) { MutableInteractionSource() }
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
-                .background(if (selected) DetailForeground.copy(alpha = .055f) else Color.Transparent)
+                .background(if (selected) DetailForeground.copy(alpha = .035f) else Color.Transparent)
                 .clickable(enabled = !loading, interactionSource = interaction, indication = null,
                     role = Role.Button, onClickLabel = "使用${variant.sourceName}阅读本章",
                     onClick = { requestedVariant = variant; onRead(chapter, variant) })
                 .motionPress(interaction, enabled = !loading, pressedScale = .99f)
+                .semantics { stateDescription = listOfNotNull(
+                    "当前来源".takeIf { selected }, details.takeIf(String::isNotBlank),
+                    "已下载".takeIf { entry?.status == DownloadStatus.COMPLETED },
+                ).joinToString("，") }
                 .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(20.dp))
                 Spacer(Modifier.width(9.dp))
                 Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text(variant.sourceName, color = DetailForeground, fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false))
-                    }
-                    val sameSourceVersions = variants.count { it.sourceId == variant.sourceId } > 1
-                    val details = listOfNotNull(
-                        variant.language.takeIf(String::isNotBlank),
-                        variant.edition.takeIf { editions.size > 1 && it.isNotBlank() },
-                        variant.scanlator.takeIf { sameSourceVersions && it.isNotBlank() },
-                        variant.title.takeIf { sameSourceVersions && it != chapter.title },
-                        "已下载".takeIf { entry?.status == DownloadStatus.COMPLETED },
-                        saved?.let { "续读第${it.pageIndex + 1}页" },
-                    ).distinct().joinToString(" · ")
+                    Text(variant.sourceName, color = DetailForeground, fontSize = 13.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (details.isNotBlank()) Text(details, color = DetailMuted, fontSize = 11.sp,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Spacer(Modifier.width(8.dp))
-                if (loading && requestedVariant?.storageId == variant.storageId)
-                    MotionBusyIndicator(Modifier.size(16.dp), color = DetailSecondary, strokeWidth = 1.4.dp)
-                else if (selected) Icon(Icons.Outlined.Check, "当前来源", Modifier.size(16.dp), tint = DetailSecondary)
+                val indicator = when {
+                    loading && requestedVariant?.storageId == variant.storageId -> "preparing"
+                    selected -> "current"
+                    else -> "idle"
+                }
+                MotionSwap(indicator, Modifier.size(20.dp)) { state ->
+                    when (state) {
+                        "preparing" -> MotionBusyIndicator(Modifier.size(16.dp), color = DetailSecondary, strokeWidth = 1.4.dp)
+                        "current" -> Icon(Icons.Outlined.Check, "当前来源", Modifier.size(16.dp), tint = DetailSecondary)
+                        else -> Spacer(Modifier.size(16.dp))
+                    }
+                }
             }
         }
         if (loading && requestedVariant == null) Row(Modifier.fillMaxWidth().padding(8.dp),

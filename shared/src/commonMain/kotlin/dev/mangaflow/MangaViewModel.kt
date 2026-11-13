@@ -122,7 +122,7 @@ data class BrowseState(
     val cacheKey: String get() = when {
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
-            "${if (isFederatedSearch) "search-v7-scoped:$sourceScope" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+            "${if (isFederatedSearch) "search-v8-scoped:$sourceScope" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
         }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
@@ -1942,6 +1942,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         visibleReading = null
         chapterSyncJob?.cancel()
         lastChapterSync = null
+    }
+
+    fun loginWithPassword(username: String, password: String) = authenticate {
+        accountRepository.loginWithPassword(username, password)
     }
 
     fun loginWithCookie(input: String) = authenticate { accountRepository.loginWithCookie(input) }

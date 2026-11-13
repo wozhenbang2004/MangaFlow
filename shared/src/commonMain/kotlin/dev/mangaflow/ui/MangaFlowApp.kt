@@ -646,6 +646,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onRestart = model::restartChapter,
                                 onContinue = model::continueReading,
                                 onDownload = { onRequestNotifications(); model.downloadChapter(it) },
+                                onDownloadVariant = { chapter, variant ->
+                                    onRequestNotifications()
+                                    model.downloadChapterVariant(current.state.manga, chapter, variant)
+                                },
                                 onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                                 onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
                                 loadReplies = model::reviewReplies,
@@ -790,10 +794,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
                                         active = rootActive,
+                                        onLoginWithPassword = model::loginWithPassword,
                                         onLoginWithCookie = model::loginWithCookie,
-                                        onBeginWebsiteLogin = model::beginWebsiteLogin,
-                                        onCancelWebsiteLogin = model::cancelWebsiteLogin,
-                                        onWebsiteToken = model::loginWithWebsiteToken,
                                         onLogout = model::logout,
                                         onRefresh = model::refreshAccount,
                                         onMoreFavorites = model::moreCloudFavorites, onMoreHistory = model::moreCloudHistory,

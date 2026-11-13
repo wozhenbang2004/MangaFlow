@@ -37,7 +37,6 @@ internal val LocalWallpaperActive = compositionLocalOf { false }
 @Composable
 internal fun AppWallpaper(store: WallpaperStore, modifier: Modifier = Modifier, active: Boolean = true) {
     val selected by store.state.collectAsStateWithLifecycle()
-    val path = selected.mediaPath ?: return
     val revision = selected.revision
     val motion = LocalMotionEnabled.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -47,6 +46,13 @@ internal fun AppWallpaper(store: WallpaperStore, modifier: Modifier = Modifier, 
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
+    val owner = remember(store) { Any() }
+    val visible = active && resumed && selected.strength > 0f
+    DisposableEffect(store, owner, visible) {
+        store.setActive(owner, visible)
+        onDispose { store.setActive(owner, false) }
+    }
+    val path = selected.mediaPath ?: return
     val desaturate = remember { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(.70f) }) }
     Box(modifier.clearAndSetSemantics {}.graphicsLayer { alpha = selected.strength }) {
         val preview = if (selected.kind == WallpaperKind.VIDEO) selected.posterPath else path
@@ -57,7 +63,7 @@ internal fun AppWallpaper(store: WallpaperStore, modifier: Modifier = Modifier, 
                     onError = { store.reportError(path, "壁纸图片读取失败，请重试或重新选择。", revision) })
             }
         }
-        if (selected.kind == WallpaperKind.VIDEO && motion && selected.error == null && selected.strength > 0f) {
+        if (selected.kind == WallpaperKind.VIDEO && motion && selected.error == null && visible) {
             key(path, selected.revision) {
                 WallpaperVideo(path, resumed && active, Modifier.fillMaxSize()) { store.reportError(path, it, revision) }
             }

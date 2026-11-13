@@ -5,6 +5,10 @@ import dev.mangaflow.ui.platform.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.rememberTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.stopScroll
@@ -31,6 +35,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -44,12 +49,11 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.CloudOff
-import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material.icons.outlined.Female
 import androidx.compose.material.icons.outlined.Male
@@ -68,6 +72,7 @@ import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.snapshotFlow
@@ -76,11 +81,13 @@ import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
@@ -102,7 +109,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
@@ -341,7 +355,8 @@ internal fun DiscoverySearchResults(
         val resultReserve = if (showResults) minOf(contentRoom * .5f, 120.dp * fontScale) else 0.dp
         val controlsRoom = (contentRoom - resultReserve).coerceAtLeast(0.dp)
         val fixedScope = (if (tagsOnly) 0.dp else 42.dp) +
-            (if (search.selectedTags.isEmpty()) 0.dp else 42.dp) + if (showResults) 36.dp else 0.dp
+            (if (search.selectedTags.isEmpty()) 0.dp else 42.dp) +
+            if (showResults && search.items.isNotEmpty()) 28.dp else 0.dp
         val choicesRoom = (controlsRoom - fixedScope).coerceIn(0.dp, 200.dp)
         Column(Modifier.fillMaxWidth().heightIn(max = this.maxHeight).padding(if (tagsOnly) 0.dp else 8.dp)
             .motionInputGate(active && sourceChoices == null)) {
@@ -353,30 +368,33 @@ internal fun DiscoverySearchResults(
                     onTagQuery = onTagQuery, maxChoicesHeight = choicesRoom)
                 if (federated)
                     SearchSourceSummary(search.searchSources, onRetry)
-                if (showResults) Row(Modifier.fillMaxWidth().padding(start = if (tagsOnly) 0.dp else 6.dp,
-                    end = if (tagsOnly) 0.dp else 6.dp, top = if (tagsOnly) 16.dp else 6.dp, bottom = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (tagsOnly) "匹配作品" else "搜索结果", fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                    Spacer(Modifier.weight(1f))
-                    if (search.loading && search.items.isEmpty()) {
-                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    } else if (search.items.isNotEmpty()) {
-                        Text((if (search.hasMore) "已显示 " else "") + "${search.items.size} 本", style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                if (showResults && search.items.isNotEmpty()) Row(
+                    Modifier.fillMaxWidth().heightIn(min = 28.dp)
+                        .padding(horizontal = if (tagsOnly) 0.dp else 6.dp)
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = "已显示${search.items.size}本漫画" + if (search.hasMore) "，可继续加载" else ""
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(search.items.size.toString() + if (search.hasMore) "+" else "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (search.loading) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
                 }
             }
             when {
                 selectingTags || awaitingKeyword || !search.isSearch -> Unit
                 search.loading && search.items.isEmpty() -> Box(
                     Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center,
-                ) { Text("正在查找…", style = MaterialTheme.typography.bodySmall) }
+                ) { CircularProgressIndicator(Modifier.size(20.dp).semantics { contentDescription = "正在查找漫画" },
+                    strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 search.items.isEmpty() -> Column(
                     Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text(if (search.error != null) "搜索暂时不可用" else if (search.hasMore)
-                        "暂未找到匹配，仍有内容待筛选" else "没有找到相关漫画",
+                    Text(if (search.error != null) "暂不可用" else "没有匹配",
                         style = MaterialTheme.typography.bodyMedium)
                     if (search.error != null) {
                         Text(search.error, modifier = Modifier.padding(top = 6.dp),
@@ -407,7 +425,10 @@ internal fun DiscoverySearchResults(
                             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                                 if (search.loadingMore) {
                                     CircularProgressIndicator(Modifier.padding(12.dp).size(19.dp), strokeWidth = 2.dp)
-                                } else TextButton(onClick = onMore) { Text("更多结果") }
+                                } else MotionIconButton(onClick = onMore, modifier = Modifier.size(44.dp)) {
+                                    Icon(Icons.Outlined.ExpandMore, "加载更多结果", Modifier.size(20.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                     }
@@ -605,7 +626,7 @@ private fun DiscoveryPane(
         columns = GridCells.Fixed(visibleColumns), state = grid,
         contentPadding = PaddingValues(start = inset, end = inset, top = topPadding, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(gap),
-        verticalArrangement = Arrangement.spacedBy(if (ranking || columns == 1) 12.dp else 10.dp),
+        verticalArrangement = Arrangement.spacedBy(if (ranking) 6.dp else if (columns == 1) 12.dp else 10.dp),
         modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
     ) {
         if (state.loading && state.items.isEmpty()) {
@@ -748,31 +769,81 @@ private fun DiscoveryLayoutControl(
 ) {
     var expanded by remember { mutableStateOf(false) }
     LaunchedEffect(enabled) { if (!enabled) expanded = false }
-    val label = if (columns == 1) "列表" else "${columns.coerceIn(2, 4)}列"
-    Box {
-        MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(44.dp)
-            .semantics { stateDescription = label }, enabled = enabled) {
-            Icon(Icons.Outlined.ViewModule, "浏览布局：$label", Modifier.size(19.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    val motion = LocalMotionEnabled.current
+    val density = LocalDensity.current
+    val window = LocalMangaWindow.current
+    val labels = remember { listOf("列表", "2列", "3列", "4列") }
+    val selected = columns.coerceIn(1, 4) - 1
+    val presence = remember { MutableTransitionState(false) }
+    presence.targetState = expanded
+    val transition = rememberTransition(presence, label = "browse-layout-morph")
+    val expansion = transition.animateFloat(transitionSpec = {
+        if (motion) spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness) else snap()
+    }, label = "browse-layout-expansion") { if (it) 1f else 0f }
+    val progress = expansion.value.coerceIn(0f, 1f)
+    val present = presence.currentState || presence.targetState || !presence.isIdle
+    val reportPresence by rememberUpdatedState(onPresenceChange)
+    SideEffect { reportPresence(present) }
+    DisposableEffect(Unit) { onDispose { reportPresence(false) } }
+    val extendedWidth = (252.dp * density.fontScale.coerceIn(1f, 1.6f))
+        .coerceAtMost((window.width - 24.dp).coerceAtLeast(44.dp))
+    val rowHeight = morphGlassTabHeight()
+    val extendedHeight = rowHeight + 12.dp
+    val width = 44.dp + (extendedWidth - 44.dp) * progress
+    val height = 44.dp + (extendedHeight - 44.dp) * progress
+    val position = remember(density, extendedHeight) {
+        val margin = with(density) { 12.dp.roundToPx() }
+        val fullHeight = with(density) { extendedHeight.roundToPx() }
+        object : PopupPositionProvider {
+            override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize,
+                layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
+                val x = if (layoutDirection == LayoutDirection.Ltr) anchorBounds.right - popupContentSize.width else anchorBounds.left
+                val y = if (anchorBounds.top + fullHeight > windowSize.height - margin)
+                    anchorBounds.bottom - popupContentSize.height else anchorBounds.top
+                return IntOffset(x.coerceIn(margin, (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)),
+                    y.coerceIn(margin, (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin)))
+            }
         }
-        CompactGlassPopover(visible = expanded, backdrop = backdrop,
-            onDismiss = { expanded = false }, onPresenceChange = onPresenceChange, maximumWidth = 168.dp) {
-            (1..4).forEach { value ->
-                val selected = value == columns
-                val interaction = remember(value) { MutableInteractionSource() }
-                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                    .background(if (selected) MaterialTheme.colorScheme.onSurface.copy(alpha = .065f) else Color.Transparent)
-                    .selectable(selected = selected, role = Role.RadioButton,
-                        interactionSource = interaction, indication = null,
-                        onClick = { if (!selected) onChange(value); expanded = false })
-                    .motionPress(interaction, pressedScale = .98f)
-                    .heightIn(min = 48.dp).padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (value == 1) "列表" else "${value}列", Modifier.weight(1f),
-                        color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, lineHeight = 19.sp)
-                    if (selected) Icon(Icons.Outlined.Check, "已选中", Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    else Spacer(Modifier.size(18.dp))
+    }
+    // The same mounted icon/surface grows from its stationary 44dp slot and
+    // returns along that path; the four choices use the adopted Ovio indicator.
+    Box(Modifier.size(44.dp)) {
+        if (enabled || present) Popup(popupPositionProvider = position, onDismissRequest = { expanded = false },
+            properties = PopupProperties(focusable = expanded)) {
+            Box(Modifier.size(width, height)) {
+                LiquidGlassSurface(backdrop, Modifier.matchParentSize().graphicsLayer { alpha = progress },
+                    cornerRadius = 22.dp - 4.dp * progress, role = GlassSurfaceRole.POPOVER,
+                    softCard = true, materialExpansion = { progress }) {}
+                Box(Modifier.matchParentSize().padding(end = 44.dp).clipToBounds().motionInputGate(enabled && expanded)
+                    .graphicsLayer { alpha = ((progress - .18f) / .82f).coerceIn(0f, 1f) }) {
+                    Box(Modifier.align(Alignment.CenterEnd).wrapContentSize(Alignment.CenterEnd, unbounded = true)
+                        .width(extendedWidth - 44.dp).padding(horizontal = 6.dp)) {
+                        MotionTabs(selected, labels, onSelect = { index ->
+                            if (index != selected) onChange(index + 1)
+                            expanded = false
+                        }, modifier = Modifier.fillMaxWidth(), role = Role.RadioButton,
+                            controlHeight = rowHeight, indicatorHeight = rowHeight - 8.dp,
+                            fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+                            fontSize = 12.sp, itemContent = { index, _, color ->
+                                Text(if (index == 0) "列表" else (index + 1).toString(), color = color,
+                                    fontSize = 12.sp, maxLines = 1,
+                                    modifier = Modifier.semantics { contentDescription = labels[index] })
+                            })
+                    }
+                }
+                MotionIconButton(onClick = { expanded = !expanded },
+                    modifier = Modifier.align(Alignment.CenterEnd).size(44.dp)
+                        .motionInputGate(enabled)
+                        .semantics { stateDescription = labels[selected] + if (expanded) "，已展开" else "，已收起" },
+                    enabled = enabled) {
+                    Box(Modifier.size(23.dp), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.ViewModule, "浏览布局：${labels[selected]}", Modifier.size(19.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(columns.coerceIn(1, 4).toString(), Modifier.align(Alignment.BottomEnd)
+                            .clip(RoundedCornerShape(3.dp)).background(MaterialTheme.colorScheme.surface)
+                            .padding(horizontal = 1.dp), fontSize = 9.sp, lineHeight = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }
@@ -817,21 +888,21 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
             onClick()
         })
         .motionPress(interaction, pressedScale = .985f)
-        .padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        .padding(vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(manga.rank?.toString()?.padStart(2, '0') ?: "—", fontSize = 18.sp,
             style = MaterialTheme.typography.titleSmall.copy(fontFeatureSettings = "tnum"),
             fontWeight = if ((manga.rank ?: 99) <= 3) FontWeight.SemiBold else FontWeight.Normal,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = if ((manga.rank ?: 99) <= 3) .82f else .38f),
             maxLines = 1, modifier = Modifier.widthIn(min = 30.dp).padding(end = 4.dp))
-        MangaCover(manga, repository, Modifier.width(68.dp).height(98.dp)
-            .mangaSharedCover(manga.id, "ranking-$listKey").mangaCoverCard(8.dp))
-        Column(Modifier.weight(1f).padding(start = 10.dp).heightIn(min = 98.dp),
+        MangaCover(manga, repository, Modifier.width(54.dp).height(78.dp)
+            .mangaSharedCover(manga.id, "ranking-$listKey").mangaCoverCard(6.dp))
+        Column(Modifier.weight(1f).padding(start = 10.dp).heightIn(min = 78.dp),
             verticalArrangement = Arrangement.SpaceBetween) {
             Column {
                 Text(manga.title, fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
-                    minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(manga.authors.take(2).joinToString(" / "), fontSize = 12.sp, lineHeight = 16.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .46f), minLines = 1, maxLines = 1,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "), fontSize = 12.sp, lineHeight = 16.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .46f), maxLines = 1,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
             }
             RankingMetrics(manga, heatLabel = when (period) {

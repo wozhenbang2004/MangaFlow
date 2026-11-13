@@ -21,6 +21,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.gestures.Orientation
@@ -113,6 +114,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -380,6 +382,30 @@ fun ReaderScreen(
         }
     }
     val motionEnabled = LocalMotionEnabled.current
+    val sourceIdentity = ReaderSourceIdentity(chapter.logicalId.ifBlank { chapter.id },
+        chapter.id, chapter.sourceId, chapter.sourceMangaId)
+    val sourceArrival = remember(manga.id) { Animatable(1f) }
+    var lastVisibleSource by remember(manga.id) { mutableStateOf<ReaderSourceIdentity?>(null) }
+    var sourceArrivalPending by remember(manga.id) { mutableStateOf(false) }
+    LaunchedEffect(sourceIdentity, motionEnabled) {
+        val previous = lastVisibleSource
+        sourceArrivalPending = motionEnabled && previous != null &&
+            (previous.sourceId != sourceIdentity.sourceId || previous.sourceMangaId != sourceIdentity.sourceMangaId ||
+                (previous.logicalId == sourceIdentity.logicalId && previous.chapterId != sourceIdentity.chapterId))
+        sourceArrival.snapTo(if (sourceArrivalPending) 0f else 1f)
+    }
+    LaunchedEffect(sourceIdentity, imageVisible, loading, error, motionEnabled) {
+        if (!motionEnabled || error != null) {
+            sourceArrival.snapTo(1f)
+            sourceArrivalPending = false
+        } else if (imageVisible && !loading) {
+            lastVisibleSource = sourceIdentity
+            if (sourceArrivalPending) {
+                sourceArrival.animateTo(1f, tween(MangaMotion.Content, easing = MangaMotion.EnterEasing))
+                sourceArrivalPending = false
+            }
+        }
+    }
     val toolbarTravel = with(LocalDensity.current) { 12.dp.roundToPx() }
     val touchExploration = rememberReaderTouchExploration()
     val delayedLoading = rememberDelayedBusy(loading)
@@ -534,7 +560,12 @@ fun ReaderScreen(
 
     Box(Modifier.fillMaxSize()) {
         // Sample the existing artwork and dim layer; controls stay outside their own backdrop.
-        Box(Modifier.fillMaxSize().mangaHazeSource(readerBackdrop).background(background)) {
+        Box(Modifier.fillMaxSize().graphicsLayer {
+            // Only a real source handoff arms this finite arrival. Keep the current
+            // image readable, preserve its own zoom/cursor, and never fade to empty.
+            alpha = .90f + .10f * sourceArrival.value
+            translationX = (1f - sourceArrival.value) * 6.dp.toPx()
+        }.mangaHazeSource(readerBackdrop).background(background)) {
             when {
                 loading -> if (delayedLoading) Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(Modifier.size(28.dp), color = preferences.theme.foreground(), strokeWidth = 2.dp)
@@ -1332,6 +1363,9 @@ private fun ChapterPages(
         }
     }
 }
+
+private data class ReaderSourceIdentity(val logicalId: String, val chapterId: String,
+    val sourceId: String, val sourceMangaId: String)
 
 private class ReaderCursor(var scrollOffset: Int = 0, var panelIndex: Int = 0)
 

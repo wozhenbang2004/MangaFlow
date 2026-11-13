@@ -106,7 +106,9 @@ internal fun SearchScopeBar(
         onTag(tag)
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (!tagsOnly) MotionTabs(targets.indexOf(target).coerceAtLeast(0), labels, {
+        if (!tagsOnly) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        MotionTabs(targets.indexOf(target).coerceAtLeast(0), labels, {
             if (targets[it] == SearchTarget.TAG) releaseInput()
             onTarget(targets[it])
         },
@@ -120,6 +122,8 @@ internal fun SearchScopeBar(
                     Text(labels[index], color = color, fontSize = 11.sp, maxLines = 1)
                 }
             })
+        if (target != SearchTarget.TITLE) BodySourceMark("copy", "拷贝", Modifier.size(18.dp))
+        }
         if (selectedTags.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().heightIn(min = 36.dp), verticalAlignment = Alignment.CenterVertically) {
                 Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),

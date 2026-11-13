@@ -30,7 +30,7 @@ internal fun federatedMangaIdentity(manga: Manga): Pair<String, String> {
 
 /** One serialized search load owns these bounded derivatives; no shared ICU instance is retained. */
 internal class FederatedSearchGrouper(query: String) {
-    private data class AuthorSignature(val names: Set<String>, val scripts: Set<Int>)
+    private data class AuthorSignature(val names: Set<String>)
     private val titles = LinkedHashMap<String, String>()
     private val authors = LinkedHashMap<List<String>, AuthorSignature>()
     private val relevances = LinkedHashMap<String, Int>()
@@ -41,8 +41,7 @@ internal class FederatedSearchGrouper(query: String) {
     private fun authorSignature(manga: Manga): AuthorSignature = derive(authors, manga.authors.toList()) {
         val names = manga.authors.flatMap { it.split(AUTHOR_SEPARATOR) }.map(::normalizedBodySourceAuthor)
             .filter { it.isNotBlank() && it !in UNKNOWN_AUTHORS }.toSet()
-        val scripts = names.flatMap { name -> name.mapNotNull(::unicodeAuthorScript) }.toSet()
-        AuthorSignature(names, scripts)
+        AuthorSignature(names)
     }
 
     private fun relevance(title: String): Int {
@@ -65,23 +64,32 @@ internal class FederatedSearchGrouper(query: String) {
             // Keep sequel symbols, numbers and edition words in the complete title.
             normalizedTitle(manga.title).ifBlank { "identity:${federatedMangaIdentity(manga)}" }
         }.values.map { matches ->
-            val retained = matches.filter { it.id in previousOrder }.minByOrNull { previousOrder.getValue(it.id) }
-            val canonical = retained ?: matches.firstOrNull { federatedMangaIdentity(it).first == "copy" } ?: matches.first()
-            val signatures = matches.map(::authorSignature)
-            // Missing metadata and a Han/Latin transliteration are unknown, not contradictory.
-            val conflictingAuthors = signatures.indices.any { left ->
+            // An early non-Copy response must not permanently own the group when Copy arrives.
+            val ordered = matches.sortedWith(compareByDescending<Manga> { isCopy(it) }
+                .thenBy { previousOrder[it.id] ?: Int.MAX_VALUE })
+            val retained = ordered.firstOrNull { it.id in previousOrder }
+            val canonical = ordered.firstOrNull(::isCopy) ?: retained ?: ordered.first()
+            val signatures = ordered.map(::authorSignature)
+            // Equal titles are only a candidate group. Missing or different-script authors
+            // do not prove a conflict, but also cannot establish that the entries are one work.
+            val unverifiedAuthors = signatures.indices.any { left ->
                 (left + 1 until signatures.size).any { right ->
-                    signatures[left].names.intersect(signatures[right].names).isEmpty() &&
-                        signatures[left].scripts.intersect(signatures[right].scripts).isNotEmpty()
+                    signatures[left].names.intersect(signatures[right].names).isEmpty()
                 }
             }
-            val needsChoice = matches.size > 1 && (
-                matches.groupBy { federatedMangaIdentity(it).first }.any { it.value.size > 1 } || conflictingAuthors
+            val needsChoice = ordered.size > 1 && (
+                ordered.groupBy { federatedMangaIdentity(it).first }.any { it.value.size > 1 } || unverifiedAuthors
                 )
-            FederatedSearchGroup(canonical, matches, needsChoice)
-        }.sortedWith(compareByDescending<FederatedSearchGroup> { group -> group.matches.maxOf { relevance(it.title) } }
-            .thenByDescending { group -> group.matches.maxOf { it.totalPopularity ?: it.popularity ?: -1L } })
+            FederatedSearchGroup(canonical, ordered, needsChoice)
+        }.sortedWith(compareByDescending<FederatedSearchGroup> { group -> group.matches.any(::isCopy) }
+            .thenByDescending { group -> group.matches.maxOf { relevance(it.title) } }
+            // Copy heat is comparable within its own tier; providers' native heat scales are not.
+            .thenByDescending { group -> group.matches.firstOrNull(::isCopy)
+                ?.let { it.totalPopularity ?: it.popularity ?: -1L } ?: -1L }
+            .thenBy { group -> group.matches.mapNotNull { previousOrder[it.id] }.minOrNull() ?: Int.MAX_VALUE })
     }
+
+    private fun isCopy(manga: Manga): Boolean = federatedMangaIdentity(manga).first == "copy"
 
     private fun <K, V : Any> derive(cache: LinkedHashMap<K, V>, key: K, calculate: () -> V): V {
         cache[key]?.let { return it }

@@ -364,7 +364,12 @@ fun SettingsScreen(
                     }
                 }
                 SettingsSection("外观", sourceBackdrop) {
-                    SettingsDisclosure("壁纸", if (wallpaper.mediaPath == null) "默认" else wallpaper.name.ifBlank { "本地壁纸" }, Icons.Outlined.Image,
+                    SettingsDisclosure("壁纸", when {
+                        wallpaper.mediaPath == null -> "默认"
+                        wallpaper.rotationEnabled -> "${wallpaper.items.size} 张 · 每 ${wallpaper.rotationMinutes} 分钟"
+                        wallpaper.items.size > 1 -> "${wallpaper.items.size} 张 · 手动切换"
+                        else -> wallpaper.name.ifBlank { "本地壁纸" }
+                    }, Icons.Outlined.Image,
                         expandedSetting == "wallpaper", { toggleSetting("wallpaper") }) {
                         WallpaperSettings(store = wallpaperStore)
                     }

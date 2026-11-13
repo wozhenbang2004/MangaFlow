@@ -10,6 +10,8 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,6 +46,8 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutableInstalled = MutableStateFlow<List<ScriptSourcePackage>>(emptyList())
     actual val installed: StateFlow<List<ScriptSourcePackage>> = mutableInstalled.asStateFlow()
+    private val mutableRepositories = MutableStateFlow<List<SourcePluginRepository>>(emptyList())
+    actual val repositories: StateFlow<List<SourcePluginRepository>> = mutableRepositories.asStateFlow()
     private val mutableLoadError = MutableStateFlow<String?>(null)
     actual val loadError: StateFlow<String?> = mutableLoadError.asStateFlow()
     private var damagedFilePending = false
@@ -67,6 +71,7 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
                 val packages = decodePackages(root.getJSONArray("packages"))
                 descriptors = root.optJSONObject("descriptors") ?: JSONObject()
                 mutableInstalled.value = packages
+                mutableRepositories.value = decodeRepositories(root.optJSONArray("repositories") ?: JSONArray())
             } } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 damagedFilePending = true
@@ -76,6 +81,7 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
                     else "原文件仍已保留，请释放存储空间后重新导入或恢复备份。"
                 descriptors = JSONObject()
                 mutableInstalled.value = emptyList()
+                mutableRepositories.value = emptyList()
             }
         }
     }
@@ -114,6 +120,63 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
 
     actual suspend fun fetchPreview(url: String): List<SourcePluginCandidate> = preview(fetchText(url), url)
 
+    actual suspend fun fetchRepository(url: String): SourceRepositoryCatalog = withContext(Dispatchers.IO) {
+        val indexUrl = repositoryIndexUrl(url)
+        val text = fetchText(indexUrl).trim().removePrefix("\uFEFF")
+        val rows = when {
+            text.startsWith("[") -> JSONArray(text)
+            text.startsWith("{") -> JSONObject(text).let { root ->
+                root.optJSONArray("sources") ?: root.optJSONArray("manga")
+                    ?: throw SourceException("仓库目录缺少 sources / manga 列表，请使用 Mangayomi JS 仓库的 index.json 直链。")
+            }
+            else -> throw SourceException("这不是源仓库目录。请填写 index.json 的 HTTPS 直链；单个脚本请切换到文件或脚本。")
+        }
+        require(rows.length() in 1..MAX_INDEX_ITEMS) { "仓库目录为空或超过 2000 项。" }
+        val entries = (0 until rows.length()).map { index ->
+            currentCoroutineContext().ensureActive()
+            val metadata = rows.optJSONObject(index)
+            val name = metadata?.optString("name")?.trim()?.take(120).orEmpty().ifBlank { "未命名来源 ${index + 1}" }
+            val language = metadata?.optString("lang")?.take(40).orEmpty()
+            val version = metadata?.optString("version")?.take(80).orEmpty()
+            val site = metadata?.optString("baseUrl")?.take(4096).orEmpty()
+            var candidate: SourcePluginCandidate? = null
+            val reason = when {
+                metadata == null -> "条目不是有效的源声明"
+                metadata.optInt("sourceCodeLanguage", -1) == 0 -> "Dart 源暂不支持"
+                metadata.optInt("sourceCodeLanguage", -1) != 1 -> "未声明兼容的 JavaScript 源格式"
+                metadata.optInt("itemType", -1) != 0 && !metadata.optBoolean("isManga", false) -> "动画或小说源暂不支持"
+                metadata.optBoolean("hasCloudflare", false) -> "需要网页验证，此脚本宿主暂不支持"
+                else -> try {
+                    candidate = preview(JSONArray().put(metadata).toString(), indexUrl).single()
+                    require(!candidate?.codeUrl.isNullOrBlank()) { "条目没有可下载的脚本地址" }
+                    null
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (failure: Exception) { candidate = null; failure.message?.take(180) ?: "源声明暂不兼容" }
+            }
+            SourceRepositoryEntry(name, language, version, site, candidate, reason)
+        }
+        val checked = androidPluginUrl(indexUrl)
+        val name = if (checked.host == "raw.githubusercontent.com") checked.pathSegments.take(2).joinToString("/")
+            else checked.host
+        val repository = SourcePluginRepository(indexUrl, name)
+        ready.await()
+        mutex.withLock {
+            currentCoroutineContext().ensureActive()
+            val next = mutableRepositories.value.filterNot { it.url == indexUrl } + repository
+            require(next.size <= MAX_REPOSITORIES) { "最多添加 16 个源仓库，请先移除不再使用的仓库。" }
+            if (next != mutableRepositories.value) commit(mutableInstalled.value, descriptors, next)
+        }
+        SourceRepositoryCatalog(repository, entries)
+    }
+
+    actual suspend fun removeRepository(url: String) {
+        ready.await()
+        withContext(Dispatchers.IO) { mutex.withLock {
+            val next = mutableRepositories.value.filterNot { it.url == url }
+            if (next != mutableRepositories.value) commit(mutableInstalled.value, descriptors, next)
+        } }
+    }
+
     actual suspend fun prepare(candidate: SourcePluginCandidate): ScriptSourcePackage = withContext(Dispatchers.IO) {
         val code = candidate.code ?: fetchText(candidate.codeUrl ?: candidate.metadata.optString("sourceCodeUrl")
             .takeIf(String::isNotBlank) ?: throw SourceException("这个索引条目没有 sourceCodeUrl。"))
@@ -139,6 +202,7 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
         runtime.validate(checked)
         withContext(Dispatchers.IO) { mutex.withLock {
             val stable = checked
+            if (mutableInstalled.value.any { it.sourceId == stable.sourceId && it.digest == stable.digest }) return@withLock
             val next = mutableInstalled.value.filterNot { it.sourceId == stable.sourceId } + stable
             validatePackages(next)
             val nextDescriptors = JSONObject(descriptors.toString()).put(stable.sourceId, descriptor(stable))
@@ -173,10 +237,13 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
         } }
     }
 
-    private fun commit(packages: List<ScriptSourcePackage>, nextDescriptors: JSONObject) {
+    private fun commit(packages: List<ScriptSourcePackage>, nextDescriptors: JSONObject,
+        nextRepositories: List<SourcePluginRepository> = mutableRepositories.value) {
         check(preserveDamagedFile()) { "原损坏源文件尚不能安全隔离，未覆盖；请检查存储空间。" }
         val bytes = JSONObject().put("version", 1).put("packages", JSONArray(packages.map(::encodePackage)))
-            .put("descriptors", nextDescriptors).toString().toByteArray(Charsets.UTF_8)
+            .put("descriptors", nextDescriptors)
+            .put("repositories", JSONArray(nextRepositories.map { JSONObject().put("url", it.url).put("name", it.name) }))
+            .toString().toByteArray(Charsets.UTF_8)
         require(bytes.size <= MAX_STORE_BYTES) { "源包存储超过容量限制。" }
         check(file.baseFile.parentFile?.let { it.isDirectory || it.mkdirs() } == true) { "无法创建源包目录。" }
         val stream = file.startWrite()
@@ -184,6 +251,7 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
         catch (failure: Exception) { file.failWrite(stream); throw SourceException("源包未能保存，请检查存储空间。", cause = failure) }
         descriptors = nextDescriptors
         mutableInstalled.value = packages
+        mutableRepositories.value = nextRepositories
         mutableLoadError.value = null
     }
 
@@ -228,12 +296,33 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
         private const val MAX_STORE_BYTES = 24 * 1024 * 1024
         private const val MAX_INDEX_ITEMS = 2_000
         private const val MAX_INSTALLED = 64
+        private const val MAX_REPOSITORIES = 16
         @Volatile private var instance: SourcePluginStore? = null
         actual fun get(context: PlatformContext): SourcePluginStore = instance ?: synchronized(this) {
             instance ?: SourcePluginStore(context.applicationContext, JavascriptSourceRuntime(context.applicationContext)).also { instance = it }
         }
 
         private fun normalizedBase(value: String): String = androidPluginUrl(value).toString().trimEnd('/')
+        private fun repositoryIndexUrl(value: String): String {
+            val url = androidPluginUrl(value.trim())
+            require(value.length <= 4096) { "仓库地址过长。" }
+            if (url.host in setOf("github.com", "www.github.com")) {
+                val parts = url.pathSegments
+                require(parts.size >= 5 && parts[2] == "blob" && parts.last().endsWith(".json", true)) {
+                    "请填写仓库 index.json 的 HTTPS 直链，不是仓库首页。"
+                }
+                return androidPluginUrl("https://raw.githubusercontent.com/" +
+                    (parts.take(2) + parts.drop(3)).joinToString("/")).toString()
+            }
+            return url.newBuilder().fragment(null).build().toString()
+        }
+        private fun decodeRepositories(array: JSONArray): List<SourcePluginRepository> {
+            require(array.length() <= MAX_REPOSITORIES) { "源仓库数量超过限制。" }
+            return (0 until array.length()).map { index ->
+                val item = array.getJSONObject(index)
+                SourcePluginRepository(repositoryIndexUrl(item.getString("url")), item.optString("name").take(180))
+            }.distinctBy { it.url }
+        }
         private fun identity(metadata: JSONObject): String {
             val path = metadata.optString("pkgPath").trim().replace('\\', '/').ifBlank {
                 metadata.optString("sourceCodeUrl").toHttpUrlOrNull()?.encodedPath?.removePrefix("/").orEmpty()

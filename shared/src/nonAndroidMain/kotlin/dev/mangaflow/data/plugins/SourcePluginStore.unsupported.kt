@@ -16,10 +16,13 @@ private const val UNSUPPORTED = "此平台暂不支持导入或运行 JavaScript
 /** The native JavaScript host has not been ported. Never report an empty execution as success. */
 actual class SourcePluginStore actual constructor(context: PlatformContext, actual val runtime: JavascriptSourceRuntime) {
     actual val installed: StateFlow<List<ScriptSourcePackage>> = MutableStateFlow(emptyList<ScriptSourcePackage>()).asStateFlow()
+    actual val repositories: StateFlow<List<SourcePluginRepository>> = MutableStateFlow(emptyList<SourcePluginRepository>()).asStateFlow()
     actual val loadError: StateFlow<String?> = MutableStateFlow<String?>(UNSUPPORTED).asStateFlow()
     actual val ready: Deferred<Unit> = CompletableDeferred(Unit)
     actual suspend fun preview(codeOrJson: String, origin: String): List<SourcePluginCandidate> = unsupported()
     actual suspend fun fetchPreview(url: String): List<SourcePluginCandidate> = unsupported()
+    actual suspend fun fetchRepository(url: String): SourceRepositoryCatalog = unsupported()
+    actual suspend fun removeRepository(url: String): Unit = unsupported()
     actual suspend fun prepare(candidate: SourcePluginCandidate): ScriptSourcePackage = unsupported()
     actual suspend fun install(bundle: ScriptSourcePackage): Unit = unsupported()
     actual suspend fun remove(sourceId: String): Unit = unsupported()

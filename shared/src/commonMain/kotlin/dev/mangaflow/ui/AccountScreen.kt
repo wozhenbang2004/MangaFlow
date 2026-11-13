@@ -58,6 +58,8 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +69,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -78,6 +81,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.mangaflow.AccountUiState
 import dev.mangaflow.account.CloudHistoryEntry
 import dev.mangaflow.data.Manga
@@ -88,11 +94,9 @@ import dev.mangaflow.ui.motion.MotionTabContent
 fun AccountScreen(
     state: AccountUiState,
     repository: MangaRepository,
+    onLoginWithPassword: (String, String) -> Unit,
     onLoginWithCookie: (String) -> Unit,
     active: Boolean,
-    onBeginWebsiteLogin: () -> Long,
-    onCancelWebsiteLogin: (Long) -> Unit,
-    onWebsiteToken: (Long, String) -> Unit,
     onLogout: () -> Unit,
     onRefresh: () -> Unit,
     onMoreFavorites: () -> Unit,
@@ -106,24 +110,49 @@ fun AccountScreen(
     val colors = MaterialTheme.colorScheme
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     var cookieMode by rememberSaveable { mutableStateOf(false) }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     var cookie by remember { mutableStateOf("") }
-    var websiteEnabled by rememberSaveable { mutableStateOf(true) }
     var showSecret by remember { mutableStateOf(false) }
+    var submitting by remember { mutableStateOf(false) }
     var showHistory by remember(profile?.username) { mutableStateOf(false) }
     var removeFavorite by remember(profile?.username) { mutableStateOf<Manga?>(null) }
-    val clearInputs = {
+    val clearSecrets = {
+        password = ""
         cookie = ""
-        websiteEnabled = true
         showSecret = false
+    }
+    val clearInputs = {
+        clearSecrets()
         keyboard?.hide()
         focus.clearFocus()
     }
-    val submitCookie = {
-        if (!state.busy && cookie.isNotBlank()) {
-            val credential = cookie.trim()
+    LaunchedEffect(state.busy) { if (!state.busy) submitting = false }
+    LaunchedEffect(active) { if (!active) clearInputs() }
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) clearSecrets()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer); clearSecrets() }
+    }
+    val busy = state.busy || submitting
+    val submitPassword = {
+        if (active && !state.busy && !submitting && username.isNotBlank() && password.isNotEmpty()) {
+            val submittedUsername = username.trim()
+            val submittedPassword = password
+            submitting = true
             clearInputs()
-            websiteEnabled = false
+            onLoginWithPassword(submittedUsername, submittedPassword)
+        }
+    }
+    val submitCookie = {
+        if (active && !state.busy && !submitting && cookie.isNotBlank()) {
+            val credential = cookie.trim()
+            submitting = true
+            clearInputs()
             onLoginWithCookie(credential)
         }
     }
@@ -131,36 +160,59 @@ fun AccountScreen(
     if (profile == null) {
         BoxWithConstraints(Modifier.fillMaxSize().navigationBarsPadding().imePadding()
             .padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 16.dp)) {
-        val websiteVisible = !cookieMode && !state.busy && active && websiteEnabled
         val accountHeight = maxHeight
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxWidth().heightIn(max = accountHeight)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Keep the native website usable in landscape/with the keyboard open;
-            // supporting copy, errors and token import scroll in their own bounded region.
-            Column(Modifier.fillMaxWidth()
-                .heightIn(max = if (websiteVisible) accountHeight * .38f else accountHeight)
-                .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("匿名阅读已启用", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             Text("连接账号，同步个人收藏与阅读记录。", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
             if (cookieMode) {
                 OutlinedTextField(
                     value = cookie, onValueChange = { cookie = it },
-                    modifier = Modifier.fillMaxWidth(), enabled = !state.busy, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(), enabled = active && !busy, singleLine = true,
                     label = { Text("Cookie 或 Token") },
                     visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = { SecretVisibility(showSecret, !state.busy) { showSecret = !showSecret } },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                    trailingIcon = { SecretVisibility(showSecret, active && !busy) { showSecret = !showSecret } },
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { submitCookie() }),
                     shape = RoundedCornerShape(18.dp), colors = accountInputColors(),
                 )
                 Button(
-                    onClick = submitCookie, enabled = !state.busy && cookie.isNotBlank(),
+                    onClick = submitCookie, enabled = active && !busy && cookie.isNotBlank(),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = colors.primary, contentColor = colors.onPrimary,
                         disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant),
                 ) { Text("导入登录状态") }
+            } else {
+                OutlinedTextField(
+                    value = username, onValueChange = { username = it },
+                    modifier = Modifier.fillMaxWidth(), enabled = active && !busy, singleLine = true,
+                    label = { Text("账号") },
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Next),
+                    keyboardActions = KeyboardActions(onNext = { focus.moveFocus(FocusDirection.Down) }),
+                    shape = RoundedCornerShape(18.dp), colors = accountInputColors(),
+                )
+                OutlinedTextField(
+                    value = password, onValueChange = { password = it },
+                    modifier = Modifier.fillMaxWidth(), enabled = active && !busy, singleLine = true,
+                    label = { Text("密码") },
+                    visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = { SecretVisibility(showSecret, active && !busy) { showSecret = !showSecret } },
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { submitPassword() }),
+                    shape = RoundedCornerShape(18.dp), colors = accountInputColors(),
+                )
+                Button(
+                    onClick = submitPassword,
+                    enabled = active && !busy && username.isNotBlank() && password.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = colors.primary, contentColor = colors.onPrimary,
+                        disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant),
+                ) { Text("登录") }
             }
             if (state.busy) AccountBusyRow("正在验证账号…") { clearInputs(); onLogout() }
             state.error?.let { message ->
@@ -169,24 +221,10 @@ fun AccountScreen(
                 }
             }
             TextButton(
-                onClick = { clearInputs(); cookieMode = !cookieMode }, enabled = !state.busy,
+                onClick = { clearInputs(); cookieMode = !cookieMode }, enabled = active && !busy,
+                modifier = Modifier.heightIn(min = 48.dp),
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
             ) { Text(if (cookieMode) "使用账号密码" else "导入 Cookie / Token", style = MaterialTheme.typography.bodySmall) }
-            }
-            if (!cookieMode && !state.busy && active) {
-                if (websiteEnabled) {
-                    WebsiteAccountLogin(
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        onBegin = onBeginWebsiteLogin, onCancel = onCancelWebsiteLogin,
-                        onCredential = { generation, token ->
-                            websiteEnabled = false
-                            onWebsiteToken(generation, token)
-                        },
-                    )
-                } else {
-                    TextButton(onClick = { websiteEnabled = true }) { Text("重新登录") }
-                }
-            }
         }
         }
     } else {

@@ -16,13 +16,33 @@ data class ScriptSourcePackage(val sourceId: String, val metadata: JSONObject, v
 data class SourcePluginCandidate(val metadata: JSONObject, val code: String? = null,
     val origin: String, val codeUrl: String? = null)
 
+/** Repository browsing never executes code; candidates still require explicit package validation. */
+data class SourcePluginRepository(val url: String, val name: String)
+
+data class SourceRepositoryEntry(
+    val name: String,
+    val language: String,
+    val version: String,
+    val siteUrl: String,
+    val candidate: SourcePluginCandidate?,
+    val unavailableReason: String? = null,
+)
+
+data class SourceRepositoryCatalog(
+    val repository: SourcePluginRepository,
+    val entries: List<SourceRepositoryEntry>,
+)
+
 expect class SourcePluginStore(context: PlatformContext, runtime: JavascriptSourceRuntime) {
     val runtime: JavascriptSourceRuntime
     val installed: StateFlow<List<ScriptSourcePackage>>
+    val repositories: StateFlow<List<SourcePluginRepository>>
     val loadError: StateFlow<String?>
     val ready: Deferred<Unit>
     suspend fun preview(codeOrJson: String, origin: String): List<SourcePluginCandidate>
     suspend fun fetchPreview(url: String): List<SourcePluginCandidate>
+    suspend fun fetchRepository(url: String): SourceRepositoryCatalog
+    suspend fun removeRepository(url: String)
     suspend fun prepare(candidate: SourcePluginCandidate): ScriptSourcePackage
     suspend fun install(bundle: ScriptSourcePackage)
     suspend fun remove(sourceId: String)
