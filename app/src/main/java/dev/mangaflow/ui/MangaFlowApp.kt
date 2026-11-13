@@ -31,6 +31,8 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -100,6 +102,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
@@ -109,6 +112,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -150,6 +157,53 @@ private enum class Section(val title: String, val icon: ImageVector) {
 /** A new reference owns the motion; cancellation cannot replay a stale destination. */
 private class DrawerAction(val target: DrawerValue, val destination: Section? = null) {
     var rootCommitted by mutableStateOf(false)
+}
+
+/** Observe before the native drawer can catch an animating surface and consume the first DOWN. */
+@Composable
+private fun Modifier.drawerSelectionTapInput(
+    targets: Map<Section, Rect>,
+    canSelect: () -> Boolean,
+    catchAnimatingTap: () -> Boolean,
+    onSelect: (Section) -> Unit,
+): Modifier {
+    val latestCanSelect by rememberUpdatedState(canSelect)
+    val latestCatchAnimatingTap by rememberUpdatedState(catchAnimatingTap)
+    val latestOnSelect by rememberUpdatedState(onSelect)
+    var coordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    return onGloballyPositioned { coordinates = it }.pointerInput(targets) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            if (down.isConsumed || !latestCanSelect() || !latestCatchAnimatingTap() ||
+                (down.type != PointerType.Touch && down.type != PointerType.Stylus)) return@awaitEachGesture
+            val layout = coordinates?.takeIf { it.isAttached } ?: return@awaitEachGesture
+            val origin = layout.localToRoot(down.position)
+            val target = targets.entries.firstOrNull { it.value.contains(origin) } ?: return@awaitEachGesture
+            val destination = target.key
+            val hitBounds = target.value
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                val currentLayout = coordinates?.takeIf { it.isAttached } ?: break
+                val point = currentLayout.localToRoot(change.position)
+                // Root coordinates keep drawer travel out of the actual finger displacement.
+                // Never consume DOWN or MOVE: a real swipe still belongs to the native drawer.
+                if (!latestCanSelect() || event.changes.any {
+                        it.id != down.id && (it.pressed || it.previousPressed)
+                    } || (point - origin).getDistance() > viewConfiguration.touchSlop ||
+                    !hitBounds.contains(point)) break
+                if (!change.pressed) {
+                    // This node precedes anchoredDraggable. A consumed synthetic CANCEL is not UP.
+                    // Consuming only the real UP prevents Surface from delivering a second click.
+                    if (change.changedToUp()) {
+                        change.consume()
+                        latestOnSelect(destination)
+                    }
+                    break
+                }
+            }
+        }
+    }
 }
 
 private sealed interface Frame {
@@ -202,6 +256,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         drawerAction = DrawerAction(DrawerValue.Closed, destination)
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
+    val drawerScroll = rememberScrollState()
     val drawerBackdrop = rememberHazeState()
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -352,6 +407,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     val drawerCanSelect = frame is Frame.Root && drawerExposed
+    val drawerTargets = remember { mutableMapOf<Section, Rect>() }
+    val canSelectDrawer: () -> Boolean = {
+        frame is Frame.Root && drawer.currentOffset.let { it.isFinite() && it > -drawerWidthPx + .5f }
+    }
+    val selectDrawer: (Section) -> Unit = { destination ->
+        if (canSelectDrawer()) {
+            if ((drawerAction?.destination ?: Section.valueOf(sectionName)) != destination)
+                feedback.perform(FeelEvent.Selection)
+            changeSection(destination)
+        }
+    }
     BackHandler(drawerVisible || libraryOpening != null) {
         if (drawerVisible) drawerAction = DrawerAction(DrawerValue.Closed)
         else model.cancelLibraryReading()
@@ -362,7 +428,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         LocalWallpaperActive provides (frame is Frame.Root && wallpaper.mediaPath != null),
     ) {
     ModalNavigationDrawer(
-        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant)
+            .drawerSelectionTapInput(drawerTargets, canSelectDrawer,
+                { drawer.isAnimationRunning && !drawerScroll.isScrollInProgress }, selectDrawer),
         drawerState = drawer,
         gesturesEnabled = frame is Frame.Root,
         scrimColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.14f),
@@ -395,7 +463,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             Text("MANGAFLOW", fontSize = 10.sp, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                    Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(drawerScroll)) {
                     CompositionLocalProvider(LocalRippleConfiguration provides null) {
                     MotionNavigationColumn(
                         selected = (drawerAction?.destination ?: section).ordinal,
@@ -416,12 +484,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 }
                             },
                             selected = selected,
-                            onClick = {
-                                if (drawerCanSelect) {
-                                    if (!selected) feedback.perform(FeelEvent.Selection)
-                                    drawerAction = DrawerAction(DrawerValue.Closed, destination)
-                                }
-                            },
+                            onClick = { selectDrawer(destination) },
                             shape = RoundedCornerShape(14.dp),
                             colors = NavigationDrawerItemDefaults.colors(
                                 selectedContainerColor = Color.Transparent,
@@ -431,7 +494,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 unselectedTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .88f),
                                 unselectedIconColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .82f),
                             ),
-                            modifier = itemModifier,
+                            modifier = itemModifier.onGloballyPositioned {
+                                drawerTargets[destination] = it.boundsInRoot()
+                            },
                             interactionSource = interactions,
                         )
                     }
