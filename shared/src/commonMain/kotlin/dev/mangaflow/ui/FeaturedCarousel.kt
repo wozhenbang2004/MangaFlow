@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
@@ -140,18 +141,23 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         val preferredWidth = minOf(galleryWidth, (galleryWidth * .72f).coerceAtMost(292.dp))
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
         val window = LocalMangaWindow.current
+        // Reserve one stable portrait slot before decode; typical 2:3 covers now
+        // nearly fill it instead of sitting narrow inside the former squat frame.
         val artworkHeight = if (window.shortHeight)
-            (preferredWidth * 1.12f).coerceAtMost((window.height * .45f).coerceAtLeast(96.dp))
-            else (preferredWidth * 1.12f).coerceIn(216.dp, 300.dp)
+            (preferredWidth * 1.40f).coerceAtMost((window.height * .45f).coerceAtLeast(96.dp))
+            else (preferredWidth * 1.40f).coerceIn(216.dp, 360.dp)
         val itemHeight = artworkHeight + captionHeight
         val imageWidthPx = with(density) { preferredWidth.roundToPx() }.coerceAtLeast(1)
-        val imageHeightPx = with(density) { itemHeight.roundToPx() }.coerceAtLeast(1)
+        val imageHeightPx = with(density) { artworkHeight.roundToPx() }.coerceAtLeast(1)
         Column(Modifier.padding(bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             HorizontalPager(state = state, pageSize = PageSize.Fixed(preferredWidth),
-                contentPadding = PaddingValues(horizontal = edgePadding), pageSpacing = 10.dp,
+                // The adopted cover shadow draws outside its mask. Give its vertical
+                // falloff room without changing the pager's equal horizontal insets.
+                contentPadding = PaddingValues(start = edgePadding, end = edgePadding, top = 12.dp, bottom = 16.dp),
+                pageSpacing = 10.dp,
                 beyondViewportPageCount = 1, flingBehavior = fling, userScrollEnabled = visible,
                 key = { manga[it].id },
-                modifier = Modifier.fillMaxWidth().height(itemHeight)
+                modifier = Modifier.fillMaxWidth().height(itemHeight + 28.dp)
                     .semantics { stateDescription = "推荐 ${state.currentPage + 1} / ${manga.size}" }) { index ->
                 val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
                 FeaturedManga(manga[index], repository, captionHeight, imageWidthPx, imageHeightPx,
@@ -161,7 +167,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                         val scale = if (motion) .92f + .08f * emphasis() else 1f
                         scaleX = scale; scaleY = scale
                         alpha = .72f + .28f * emphasis()
-                    }.mangaCoverCard(22.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(22.dp)),
+                    }.mangaCoverCard(22.dp),
                     emphasis = emphasis,
                     offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
                         (if (rtl) -1f else 1f) else 0f },
@@ -265,45 +271,38 @@ private fun FeaturedManga(
                     translationX = offset() * 10.dp.toPx()
                     alpha = if (modernPlatformBlur) .22f else .12f
                 }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur))
-            Box(Modifier.matchParentSize().drawBehind {
-                drawRect(Brush.verticalGradient(0f to atmosphere.value.copy(alpha = .05f),
-                    .55f to Color.Transparent, 1f to surface.copy(alpha = .62f)))
-            })
-            // Side previews show recognizable cover pixels, rather than blurred side strips.
+            // Side previews retain real artwork. Only the centered poster is fitted;
+            // every image stays inside the same outer 22dp cover mask.
             Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize().graphicsLayer { alpha = 1f - emphasis() })
-            Box(Modifier.fillMaxSize().padding(top = 4.dp, bottom = captionHeight), contentAlignment = Alignment.Center) {
+            BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = 6.dp)
+                .padding(top = 6.dp, bottom = captionHeight + 4.dp),
+                contentAlignment = Alignment.Center) {
                 if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                     tint = ink.copy(alpha = .22f), modifier = Modifier.size(28.dp))
+                val intrinsic = painter.intrinsicSize
+                val aspect = if (intrinsic.width.isFinite() && intrinsic.height.isFinite() &&
+                    intrinsic.width > 0f && intrinsic.height > 0f)
+                    intrinsic.width / intrinsic.height else 2f / 3f
+                val posterWidth = minOf(maxWidth, maxHeight * aspect)
+                val posterHeight = posterWidth / aspect
+                // Clip the actual fitted artwork, not the larger Fit container. The
+                // inner radius follows the outer radius minus its 6dp minimum inset.
                 Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize().mangaSharedCover(manga.id, "discovery-featured")
+                    modifier = Modifier.size(posterWidth, posterHeight)
+                        .mangaSharedCover(manga.id, "discovery-featured")
                         .graphicsLayer {
                             translationX = offset() * 4.dp.toPx()
                             alpha = emphasis()
-                            compositingStrategy = CompositingStrategy.Offscreen
-                        }.drawWithContent {
-                            drawContent()
-                            val intrinsic = painter.intrinsicSize
-                            if (intrinsic.width.isFinite() && intrinsic.height.isFinite() &&
-                                intrinsic.width > 0f && intrinsic.height > 0f && size.minDimension > 0f) {
-                                val fit = minOf(size.width / intrinsic.width, size.height / intrinsic.height)
-                                val width = intrinsic.width * fit
-                                val height = intrinsic.height * fit
-                                val left = (size.width - width) * .5f
-                                val top = (size.height - height) * .5f
-                                val horizontal = (1.5.dp.toPx() / width).coerceAtMost(.05f)
-                                val vertical = (1.5.dp.toPx() / height).coerceAtMost(.05f)
-                                drawRect(Brush.horizontalGradient(0f to Color.Transparent,
-                                    horizontal to Color.Black, (1f - horizontal) to Color.Black,
-                                    1f to Color.Transparent, startX = left, endX = left + width),
-                                    blendMode = BlendMode.DstIn)
-                                drawRect(Brush.verticalGradient(0f to Color.Transparent,
-                                    vertical to Color.Black, (1f - vertical) to Color.Black,
-                                    1f to Color.Transparent, startY = top, endY = top + height),
-                                    blendMode = BlendMode.DstIn)
-                            }
-                        })
+                        }.clip(RoundedCornerShape(16.dp)))
             }
+            // A short cover-colored seam joins artwork and caption; no broad veil,
+            // white inset card, border or second image request is introduced.
+            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(captionHeight + 24.dp)
+                .drawBehind {
+                    drawRect(Brush.verticalGradient(0f to Color.Transparent,
+                        .34f to surface.copy(alpha = .16f), 1f to surface.copy(alpha = .76f)))
+                })
         }
         // Only the material fades at its upper edge. Labels stay sharp and unmasked.
         Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(captionHeight)

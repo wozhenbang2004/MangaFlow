@@ -289,7 +289,7 @@ fun DetailScreen(
     val artworkBackdrop = rememberHazeState()
     val readingBackdrop = rememberHazeState()
 
-    Box(Modifier.fillMaxSize().background(DetailBackground)) {
+    Box(Modifier.fillMaxSize().background(informationTone)) {
     BoxWithConstraints(
         Modifier.fillMaxSize().align(Alignment.TopCenter)
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))

@@ -21,6 +21,7 @@ import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.Animatable
@@ -271,6 +272,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val keyboard = LocalSoftwareKeyboardController.current
     val motion = LocalMotionEnabled.current
     val feedback = rememberFeelFeedback()
+    val historyReveal = animateFloatAsState(if (recentReadingOpen) 1f else 0f,
+        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
+        label = "recent-reading-clock")
 
     LaunchedEffect(drawerAction, motion) {
         val action = drawerAction
@@ -693,8 +697,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             searchExpanded = false
                             model.clearSearch()
                         }
-                        Box(Modifier.fillMaxSize().windowInsetsPadding(
-                            WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
+                        // The backdrop reaches every edge; only foreground controls
+                        // consume the system/cutout safe area.
+                        Box(Modifier.fillMaxSize()) {
                         // The persistent lower source holds the real media; foreground page
                         // sources and headers sample it without owning the player lifecycle.
                         Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop, zIndex = -1f)
@@ -707,7 +712,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             Section.DOWNLOADS -> MangaLayout.ListWidth
                             else -> MangaLayout.BrowseWidth
                         }
-                        BoxWithConstraints(Modifier.widthIn(max = contentWidth).fillMaxSize().align(Alignment.TopCenter).graphicsLayer {
+                        BoxWithConstraints(Modifier
+                            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                            .widthIn(max = contentWidth).fillMaxSize().align(Alignment.TopCenter).graphicsLayer {
                             // Only the incoming foreground settles; the real backdrop never disappears.
                             alpha = rootOpacity.value
                             translationY = ((1f - rootOpacity.value) / (1f - MangaMotion.RootEntryAlpha))
@@ -841,10 +848,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             .motionInputGate(rootActive && chromeReady),
                                             verticalAlignment = Alignment.CenterVertically) {
                                             if (history.isNotEmpty()) MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
+                                                feedback.perform(FeelEvent.Selection)
                                                 closeSearch()
                                                 recentReadingOpen = true
                                             }) {
-                                                Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
+                                                Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp).graphicsLayer {
+                                                    rotationZ = -32f * historyReveal.value
+                                                    val pressure = 1f - .12f * historyReveal.value.coerceIn(0f, 1f)
+                                                    scaleX = pressure; scaleY = pressure
+                                                })
                                             }
                                             // Match the fixed search trigger's 8dp inset in the root overlay.
                                             Spacer(Modifier.size(44.dp))

@@ -2,6 +2,12 @@
 
 Updated: 2026-11-13. Route: DELIVERY with focused research branches. Execution: cloud-only GitHub connector and in-memory edits, per the latest explicit user instruction.
 
+## Latest delivery and continuation · 2026-11-13
+
+First cloud repair is main db49643275e6f8605540060305c86c26a7fe45c4, Android0.1.175 run43443672348 completed/success and published v0.1.175. This proves packaging, not phone appearance/feel. The checkpoint here adds CAROUSEL-48, EDGE-49, HISTORY-50 and WALLPAPER-47 management: actual poster rounding/soft shadow/local caption seam, full-window backdrop with safe foreground, history-clock spring feedback and persistent current preview with thumbnail/add/manage controls. All work remains cloud-only.
+
+User additionally requests richer wallpaper adjustments. wallpaper_fix owns only WallpaperStore/WallpaperSettings/AppWallpaper and necessary native WallpaperVideo expect/actual geometry. Implement real per-item placement/appearance with live preview and end-of-drag persistence, preserving old defaults and video lifecycle; do not claim unsupported video color/blur. Root alone integrates refs. Next exact action: publish this finished batch to latest main/CI, then integrate that final wallpaper-controls slice; do not repeat first-batch repairs or touch the local machine.
+
 ## Current repair checkpoint · 2026-11-13
 
 Authoritative active scope: DESIGN.md BUGFIX-45 / CHAPTER-DENSITY-46 / WALLPAPER-47. User feedback reports recommendation/filter jitter, Copy heat order and excessive search text, missing press feel, wallpaper loss, comment translation spacing, detail gaps and oversized three-column chapters. Latest correction explicitly rejects whole-screen background blur. User separately requests wallpaper UX redesign, and forbids local computer operations.

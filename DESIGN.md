@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## Carousel, wallpaper and edge continuity · 2026-11-13 (CAROUSEL-48 / EDGE-49 / HISTORY-50)
+
+Latest user additions: “壁纸那个好好设计下uiux吧”; “轮播图也好好设计一下啊外面圆框内部就是很硬的直角…渐变…阴影”; “软件界面…完全没铺满”; “很多uiux都得用最小信息原则，微型图标元素原则，格式塔原则好好改造”; “壁纸那个的调节可以做更丰富…现在只有一个模糊可以调”; “历史记录那个图标点了没有任何动画”. Repeated “别连我电脑” remains a hard cloud-only execution boundary.
+
+- CAROUSEL-48: retain the actual centered manual pager; a stable portrait slot provides complete, larger artwork. Fit the clear poster to its measured intrinsic bounds and round that actual image to16dp inside the22dp outer mask with6dp minimum inset. Adapt existing mangaCoverCard's low-contrast diffuse shadow and leave12/16dp vertical pager room for it. Only the caption seam uses a short cover-color gradient; preserve data, side previews and one decode. No broad image veil or extra white nested frame.
+- EDGE-49: wallpaper/background paints to window edges; foreground alone consumes system/cutout safety. Detail's navigation-strip background matches its clean information tone. Preserve safe buttons, chapter reading content and device system gestures.
+- HISTORY-50: the history toolbar icon rotates and compresses with the actual recent-sheet state using existing press springs, returning on close; selection feedback is semantic and reduced motion snaps. Existing recent sheet/continuation and real chapter history remain intact.
+- WALLPAPER-47 management: current preview always remains visible when a second item is added; thumbnail taps select only, with a clear current mark and separate add/manage actions. Rotation/interval/strength and remove/clear are progressively disclosed. Destructive management binds the exact chosen path so rotation cannot delete another item. Rich per-wallpaper appearance/placement controls are the next explicitly authorized slice; do not claim unimplemented video filters.
+
+Existing component sources: mangaCoverCard/softSurfaceShadow, motionPress/MotionTabs/MotionBottomSheet/MotionDialog and current Haze/PANEL. These are bounded adaptations; no new UI library or rendering dependency. Source code and CI are engineering evidence; appearance, gesture comfort and phone persistence await real user feedback.
+
 ## Current corrections · 2026-11-13 (BUGFIX-45 / CHAPTER-DENSITY-46 / WALLPAPER-47)
 
 The user's latest feedback supersedes DETAIL-COVER-32's full-page blur and screen-percentage height, GRID-34's 76dp cells and SEARCH-RESULTS-13's relevance-first Copy ordering. Current source baseline: d9b21abe53bcf6fae77c8f4c4366eda7e9fbfc9b. Implement only these repairs and the separately requested wallpaper management UX; preserve concurrent account, source, download and platform work.
