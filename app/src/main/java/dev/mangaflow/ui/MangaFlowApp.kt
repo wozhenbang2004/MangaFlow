@@ -53,7 +53,6 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.CloudQueue
-import androidx.compose.material.icons.outlined.SystemUpdateAlt
 import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FileDownload
@@ -608,11 +607,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             val toolbar: @Composable (@Composable () -> Unit) -> Unit = { actions ->
                             Row(Modifier.padding(horizontal = 4.dp).height(44.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                if (hasUpdate && current.section != Section.DISCOVER) {
-                                    MotionIconButton(modifier = Modifier.size(44.dp), onClick = { changeSection(Section.SETTINGS) }) {
-                                        Icon(Icons.Outlined.SystemUpdateAlt, "有新版本", Modifier.size(21.dp))
-                                    }
-                                }
                                 if (current.section == Section.LIBRARY) {
                                     MotionIconButton(modifier = Modifier.size(44.dp), onClick = { changeSection(Section.ACCOUNT) }) {
                                         Icon(Icons.Outlined.CloudQueue, "云端书架", Modifier.size(21.dp))
@@ -689,8 +683,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 PageTitleHeader(if (current.section == Section.ACCOUNT) "账号" else "设置",
                                     searchBackdrop, navigation,
                                     modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
-                                        .onSizeChanged { chromeHeightPx = it.height },
-                                    actions = if (hasUpdate) ({ toolbar {} }) else null)
+                                        .onSizeChanged { chromeHeightPx = it.height })
                             } else if (current.section == Section.DISCOVER) {
                                 SegmentedGlassHeader(searchBackdrop, navigation,
                                     controlsWidth = discoveryTabsWidth,

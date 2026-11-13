@@ -1,5 +1,9 @@
 # MangaFlow detail · 2026-11-12
 
+## Remove global update shortcut · 2026-11-13 (UPDATE-SHORTCUT-20)
+
+User with Settings and Downloads screenshots: “右上角那个下载按钮都删干净啊”. The depicted tray/arrow is the global SystemUpdateAlt software-update shortcut. Remove it from the shared root toolbar for every destination, including Library and Downloads, and omit the now-empty account/settings trailing action capsule. Keep the actual Settings software-update row, signed update/download/install flow, contextual comic download actions and drawer destinations. Existing action groups measure their remaining children, so the removed 44dp slot is not reserved. Source review only, no tests/local build; direct latest main and CI-trigger-only delivery, appearance pending the replacement build.
+
 ## Coordinated sidebar motion · 2026-11-13 (DRAWER-MOTION-19; implemented, device acceptance pending)
 
 User on the supplied 0.1.138 drawer screenshot: “是你动画没做好吧点击另一个 tab 的切换特别硬不丝滑我感觉是动画动效方面时序方面没做好”. This clarifies that visible continuity and event ordering are part of the unresolved issue. DRAWER-RENDER-18's lifetime/caching work remains; it did not establish a smooth transition. This contract supersedes DRAWER-CONTINUITY-17's commit/wait/then-close order and the direct body substitution left in the shared root shell.
