@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityManager
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.SizeTransform
@@ -15,7 +16,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.updateTransition
+import androidx.compose.animation.core.rememberTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -24,6 +25,9 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
@@ -35,7 +39,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.contentColorFor
@@ -67,6 +70,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.window.Dialog
@@ -89,6 +93,15 @@ internal object MangaMotion {
     // beUI PRESS: stiffness 500, damping 30, mass .6, converted to Compose's unit mass.
     const val PressStiffness = 833f
     const val PressDamping = .866f
+    const val PressAttackStiffness = 1_600f
+    const val IconPressScale = .94f
+    const val SurfacePressScale = .985f
+    const val HapticInterval = 70L
+    const val BusyDelay = 160L
+    const val TabLeadingStiffness = 520f
+    const val TabTrailingStiffness = 230f
+    const val TabLeadingDamping = 1.009f
+    const val TabTrailingDamping = .989f
     const val PanelStiffness = 840f
     const val PanelDamping = 1.38f
     // Approximate Compose counterpart of beUI Morphing Search's 580ms / .22 bounce role.
@@ -110,11 +123,21 @@ internal object MangaMotion {
 }
 
 internal val LocalMotionEnabled = staticCompositionLocalOf { true }
+internal val LocalTouchExplorationEnabled = staticCompositionLocalOf { false }
 internal val LocalTabVisibilityScope = staticCompositionLocalOf<AnimatedVisibilityScope?> { null }
 
 @Composable
 internal fun MangaMotionProvider(content: @Composable () -> Unit) {
-    val resolver = LocalContext.current.contentResolver
+    val context = LocalContext.current
+    val resolver = context.contentResolver
+    val accessibility = remember(context) { context.getSystemService(AccessibilityManager::class.java) }
+    var touchExploration by remember(accessibility) { mutableStateOf(accessibility?.isTouchExplorationEnabled == true) }
+    DisposableEffect(accessibility) {
+        val listener = AccessibilityManager.TouchExplorationStateChangeListener { touchExploration = it }
+        accessibility?.addTouchExplorationStateChangeListener(listener)
+        touchExploration = accessibility?.isTouchExplorationEnabled == true
+        onDispose { accessibility?.removeTouchExplorationStateChangeListener(listener) }
+    }
     fun enabled() = Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
     var motionEnabled by remember(resolver) { mutableStateOf(enabled()) }
     DisposableEffect(resolver) {
@@ -125,12 +148,13 @@ internal fun MangaMotionProvider(content: @Composable () -> Unit) {
         motionEnabled = enabled()
         onDispose { resolver.unregisterContentObserver(observer) }
     }
-    CompositionLocalProvider(LocalMotionEnabled provides motionEnabled, content = content)
+    CompositionLocalProvider(LocalMotionEnabled provides motionEnabled,
+        LocalTouchExplorationEnabled provides touchExploration, content = content)
 }
 
 /** Delay presentation only: the operation and its result never wait for this clock. */
 @Composable
-internal fun rememberDelayedBusy(busy: Boolean, delayMillis: Long = 160L): Boolean {
+internal fun rememberDelayedBusy(busy: Boolean, delayMillis: Long = MangaMotion.BusyDelay): Boolean {
     var shown by remember { mutableStateOf(false) }
     LaunchedEffect(busy, delayMillis) {
         shown = false
@@ -147,16 +171,48 @@ internal fun rememberDelayedBusy(busy: Boolean, delayMillis: Long = 160L): Boole
 internal fun Modifier.motionPress(
     interaction: MutableInteractionSource,
     enabled: Boolean = true,
-    pressedScale: Float = .985f,
+    pressedScale: Float = MangaMotion.SurfacePressScale,
 ): Modifier {
-    val pressed by interaction.collectIsPressedAsState()
+    val interactionPressed by interaction.collectIsPressedAsState()
+    var down by remember(interaction) { mutableStateOf(false) }
+    var directPress by remember(interaction) { mutableStateOf(false) }
+    val pressed = enabled && if (down) directPress else interactionPressed
     val motion = LocalMotionEnabled.current
     val scale = animateFloatAsState(
-        if (enabled && pressed && motion) pressedScale else 1f,
-        if (motion) spring(dampingRatio = MangaMotion.PressDamping, stiffness = MangaMotion.PressStiffness) else snap(),
+        if (pressed && motion) pressedScale else 1f,
+        if (!motion) snap() else if (pressed) spring(1f, MangaMotion.PressAttackStiffness)
+        else spring(MangaMotion.PressDamping, MangaMotion.PressStiffness),
         label = "surface-press",
     )
-    return graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+    // clickable intentionally delays its Press inside scrolling parents. Observe down without
+    // consuming it; Foundation still owns click/long-click/scroll, keyboard and TalkBack.
+    val input = if (enabled) Modifier.pointerInput(interaction) {
+        awaitEachGesture {
+            val first = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            down = true
+            directPress = true
+            try {
+                do {
+                    val event = awaitPointerEvent(PointerEventPass.Final)
+                    val change = event.changes.firstOrNull { it.id == first.id }
+                    if (change == null || !change.pressed) break
+                    if (event.changes.count { it.pressed } > 1 ||
+                        (change.position - first.position).getDistance() > viewConfiguration.touchSlop ||
+                        (change.isConsumed && change.position != change.previousPosition) ||
+                        change.position.x !in 0f..size.width.toFloat() ||
+                        change.position.y !in 0f..size.height.toFloat()) directPress = false
+                } while (true)
+            } finally {
+                directPress = false
+                down = false
+            }
+        }
+    } else Modifier
+    return then(input).graphicsLayer {
+        scaleX = scale.value
+        scaleY = scale.value
+        if (!motion) alpha = if (pressed) .72f else 1f
+    }
 }
 
 /** beUI PresenceGate: outgoing visuals do not expose controls or handle new input. */
@@ -175,8 +231,12 @@ internal fun MotionIconButton(
     content: @Composable () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    IconButton(onClick = onClick, modifier = modifier, enabled = enabled, interactionSource = interaction) {
-        Box(Modifier.motionPress(interaction, enabled, pressedScale = .94f), contentAlignment = Alignment.Center) { content() }
+    Box(modifier.size(48.dp)
+        .clickable(enabled = enabled, interactionSource = interaction, indication = null,
+            role = Role.Button, onClick = onClick)
+        .motionPress(interaction, enabled, MangaMotion.IconPressScale), contentAlignment = Alignment.Center) {
+        Box(Modifier.graphicsLayer { alpha = if (enabled) 1f else .38f },
+            contentAlignment = Alignment.Center) { content() }
     }
 }
 
@@ -199,8 +259,9 @@ internal fun <T> MotionSwap(target: T, modifier: Modifier = Modifier, content: @
 internal fun MotionTabContent(
     selected: Int,
     modifier: Modifier = Modifier,
+    soft: Boolean = false,
     content: @Composable (Int) -> Unit,
-) = MotionTabContent(selected, modifier, contentKey = { it }, order = { it }, content = content)
+) = MotionTabContent(selected, modifier, contentKey = { it }, order = { it }, soft = soft, content = content)
 
 /** Keep the leaving selection's data while updates to the current key stay in place. */
 @Composable
@@ -256,7 +317,7 @@ internal fun MotionDialog(
     val motion = LocalMotionEnabled.current
     val state = remember { MutableTransitionState(false) }
     state.targetState = visible
-    val transition = updateTransition(state, label = "panel-presence")
+    val transition = rememberTransition(state, label = "panel-presence")
     val alpha = transition.animateFloat(
         transitionSpec = { tween(if (!motion) 0 else if (targetState) MangaMotion.Content else MangaMotion.Quick) },
         label = "panel-alpha",

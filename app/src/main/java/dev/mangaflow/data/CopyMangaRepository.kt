@@ -170,11 +170,11 @@ class CopyMangaRepository(
 
     override suspend fun detail(mangaId: String): MangaDetail = withContext(Dispatchers.IO) {
         // An explicit refresh always obtains a new public directory.
-        readCatalog(segment(mangaId)).detail
+        foregroundRequest("章节目录", 35_000L) { readCatalog(segment(mangaId)).detail }
     }
 
     suspend fun detail(mangaId: String, onMetadata: (Manga) -> Unit): MangaDetail = withContext(Dispatchers.IO) {
-        readCatalog(segment(mangaId), onMetadata).detail
+        foregroundRequest("章节目录", 35_000L) { readCatalog(segment(mangaId), onMetadata).detail }
     }
 
     /** A reading session may reuse a recent directory without refreshing it. */

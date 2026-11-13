@@ -2,7 +2,7 @@ package dev.mangaflow.ui
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.LocalFireDepartment
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -79,7 +79,7 @@ internal fun ReviewSourceMark(
         when {
             heat -> Icon(Icons.Outlined.LocalFireDepartment, null, tint = color,
                 modifier = Modifier.size(size * (.88f * fontScale)))
-            id == "copy" -> Icon(Icons.Outlined.MenuBook, null, tint = color,
+            id == "copy" -> Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = color,
                 modifier = Modifier.size(size * (.88f * fontScale)))
             resource != null -> {
                 // The original AL path fills 75% of its viewport height; MAL fills 42%.

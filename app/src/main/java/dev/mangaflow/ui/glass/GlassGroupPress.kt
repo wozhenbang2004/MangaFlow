@@ -19,12 +19,17 @@ internal fun Modifier.glassGroupPress(source: MutableInteractionSource): Modifie
             val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
             val press = PressInteraction.Press(down.position)
             var active = source.tryEmit(press)
+            var released = false
             try {
                 do {
-                    val change = awaitPointerEvent(PointerEventPass.Main).changes.firstOrNull { it.id == down.id }
-                    if (change == null || !change.pressed) break
+                    val event = awaitPointerEvent(PointerEventPass.Final)
+                    val change = event.changes.firstOrNull { it.id == down.id }
+                    if (change == null) break
+                    if (!change.pressed) { released = true; break }
                     val slop = viewConfiguration.touchSlop
                     if (active && ((change.isConsumed && change.position != change.previousPosition) ||
+                            (change.position - down.position).getDistance() > slop ||
+                            event.changes.count { it.pressed } > 1 ||
                             change.position.x < -slop || change.position.y < -slop ||
                             change.position.x > size.width + slop || change.position.y > size.height + slop)) {
                         source.tryEmit(PressInteraction.Cancel(press))
@@ -32,7 +37,7 @@ internal fun Modifier.glassGroupPress(source: MutableInteractionSource): Modifie
                     }
                 } while (true)
             } finally {
-                if (active) source.tryEmit(PressInteraction.Release(press))
+                if (active) source.tryEmit(if (released) PressInteraction.Release(press) else PressInteraction.Cancel(press))
             }
         }
     }

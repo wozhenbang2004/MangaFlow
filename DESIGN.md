@@ -1,5 +1,11 @@
 # MangaFlow detail · 2026-11-12
 
+## Feel System · 2026-11-13 (FEEL-20261113; current task)
+
+User outcome: “快而不硬，软而不拖，活而不乱。” Current user authorization requires an independent branch/PR, completed CI/static/Lint/debug/release builds and real Android operation when available; it supersedes historical direct-main/CI-trigger-only/no-build delivery limits for this task. The existing Ovio/beUI/Vaul/AndroidX/Haze architecture remains authoritative. No second animation runtime, palette/navigation redesign or shelf sorting is introduced.
+
+The audit, adopted role parameters, per-page integration and explicit runtime evidence boundary are in [Feel System](research/feel-system-20261113.md). Existing M2-01–14 and fixed glass-role rules stay in force except where that document identifies a specific correction. Original source implementation is not device acceptance.
+
 ## Guided panel reading · 2026-11-13 (PANEL-01–08; source implemented, CI/device acceptance pending)
 
 CI follow-up (PANEL-CI-01): run 43374723210 / 0.1.129 reached Kotlin compilation during the Lint prerequisite and failed because PanelCamera omitted the existing Coil 3 crossfade extension import and GuidedPanelReader omitted the ExperimentalLayoutApi opt-in for navigationBarsIgnoringVisibility. The remember/listener/throwable inference errors are downstream of the missing extension. Add those declarations only; preserve camera behavior, original-image decoding, native models and static-analysis gates. Missing Lint reports are secondary because analysis never ran. Source/log review and independent read-only review only; no local build or tests. Replacement main CI trigger is delivery evidence, not compilation or device acceptance.

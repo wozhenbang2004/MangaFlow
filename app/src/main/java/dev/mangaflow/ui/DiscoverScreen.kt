@@ -5,6 +5,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -45,18 +46,18 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Female
 import androidx.compose.material.icons.outlined.Male
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.StarOutline
-import androidx.compose.material3.Button
+import dev.mangaflow.ui.motion.MotionButton as Button
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -79,6 +80,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
@@ -279,6 +281,7 @@ internal fun DiscoverySearchResults(
         while (positions.size > 24) positions.remove(positions.keys.first())
         saved
     }
+    LaunchedEffect(active, retainedResults) { if (!active) retainedResults.stopScroll() }
     Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).padding(8.dp)
         .motionInputGate(active)) {
         SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
@@ -327,7 +330,7 @@ internal fun DiscoverySearchResults(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 items(search.items, key = Manga::id) { manga ->
-                    SearchResultRow(manga, repository) { onOpen(manga) }
+                    SearchResultRow(manga, repository, "search-${search.cacheKey}") { onOpen(manga) }
                 }
                 if (search.hasMore || search.loadingMore) {
                     item(key = "search-more") {
@@ -493,6 +496,7 @@ private fun DiscoveryPane(
     val loadingGrid = remember(state.cacheKey) { LazyGridState() }
     // Hydrate disk snapshots before a short loading layout can clamp the saved position.
     val grid = if (state.loading && state.items.isEmpty()) loadingGrid else retainedGrid
+    LaunchedEffect(active, grid) { if (!active) grid.stopScroll() }
     val heroVisible by remember(grid) {
         derivedStateOf { grid.layoutInfo.visibleItemsInfo.any { it.key == "hero" } }
     }
@@ -507,6 +511,10 @@ private fun DiscoveryPane(
         canScrollForward = { grid.canScrollForward },
         onLoadMore = onMore,
     )
+    dev.mangaflow.ui.motion.MotionRefreshBox(
+        enabled = active && !state.loading && !state.loadingMore, refreshing = state.refreshing,
+        onRefresh = onRefresh, indicatorTop = topPadding + 4.dp,
+    ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(if (ranking) 1 else columns), state = grid,
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = topPadding, bottom = 32.dp),
@@ -574,23 +582,24 @@ private fun DiscoveryPane(
             }
         }
     }
+    }
 }
 
 @Composable
-private fun SearchResultRow(manga: Manga, repository: MangaRepository, onOpen: () -> Unit) {
+private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement: String, onOpen: () -> Unit) {
     val transition = LocalMangaCoverTransition.current
     val interaction = remember { MutableInteractionSource() }
     Row(
         Modifier.fillMaxWidth()
             .clickable(interactionSource = interaction, indication = null, onClick = {
-                transition?.select?.invoke(MangaCoverKey(manga.id, "search-result"))
+                transition?.select?.invoke(MangaCoverKey(manga.id, placement))
                 onOpen()
             })
             .motionPress(interaction, pressedScale = .985f)
             .padding(horizontal = 6.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).mangaSharedCover(manga.id, "search-result").mangaCoverCard(7.dp))
+        MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).mangaSharedCover(manga.id, placement).mangaCoverCard(7.dp))
         Column(Modifier.weight(1f).padding(start = 11.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(manga.title, style = MaterialTheme.typography.titleSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -842,7 +851,7 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
             }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
     }
     Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-        Icon(Icons.Outlined.MenuBook, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(25.dp))
+        Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(25.dp))
         AsyncImage(model = request, contentDescription = null, contentScale = scale, modifier = Modifier.fillMaxSize())
     }
 }
@@ -861,9 +870,10 @@ internal fun QuietLoading(message: String) {
 
 @Composable
 internal fun EmptyMessage(title: String, description: String, action: String? = null, onAction: () -> Unit = {}) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 48.dp, horizontal = 12.dp),
+    Column(Modifier.fillMaxWidth().semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite }
+        .padding(vertical = 48.dp, horizontal = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Icon(Icons.Outlined.MenuBook, null, Modifier.size(36.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+        Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(36.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
         Text(title, style = MaterialTheme.typography.titleMedium)
         Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center)

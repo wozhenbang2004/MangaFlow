@@ -39,16 +39,16 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import dev.mangaflow.ui.motion.MotionButton as Button
 import androidx.compose.material3.ButtonDefaults
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import dev.mangaflow.ui.motion.MotionIconButton as IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -142,7 +142,7 @@ fun AccountScreen(
                 )
                 Button(
                     onClick = submitCookie, enabled = !state.busy && cookie.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(16.dp), elevation = null,
+                    modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = colors.primary, contentColor = colors.onPrimary,
                         disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant),
                 ) { Text("导入登录状态") }

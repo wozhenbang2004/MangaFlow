@@ -28,7 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -269,7 +269,7 @@ private fun FeaturedManga(
             Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize().graphicsLayer { alpha = 1f - emphasis() })
             Box(Modifier.fillMaxSize().padding(top = 4.dp, bottom = captionHeight), contentAlignment = Alignment.Center) {
-                if (decoded == null) Icon(Icons.Outlined.MenuBook, null,
+                if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                     tint = ink.copy(alpha = .22f), modifier = Modifier.size(28.dp))
                 Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize().mangaSharedCover(manga.id, "discovery-featured")

@@ -54,7 +54,7 @@ import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Menu
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Close
@@ -123,6 +123,7 @@ import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.update.UpdatePhase
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 private enum class Section(val title: String, val icon: ImageVector) {
@@ -202,7 +203,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
 
-    LaunchedEffect(Unit) { model.events.collect { snackbar.showSnackbar(it) } }
+    LaunchedEffect(Unit) { model.events.collectLatest { snackbar.showSnackbar(it) } }
     LaunchedEffect(openUpdatesRequest) {
         if (openUpdatesRequest > 0) {
             tagSearchVisible = false
@@ -331,7 +332,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         .focusProperties { canFocus = false })
                     .padding(horizontal = 14.dp, vertical = 12.dp)) {
                     Row(Modifier.padding(12.dp, 12.dp, 12.dp, 28.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(28.dp))
+                        Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(28.dp))
                         Spacer(Modifier.width(12.dp))
                         Column {
                             Text("漫流", style = MaterialTheme.typography.titleLarge)
@@ -415,7 +416,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 LaunchedEffect(current.key, entry.currentState, entry.isRunning) {
                     if (current is Frame.Detail && current.key == frame.key &&
                         entry.currentState == EnterExitState.Visible && !entry.isRunning &&
-                        searchExpanded && selectedCover?.placement == "search-result") {
+                        searchExpanded && selectedCover?.placement?.startsWith("search-") == true) {
                         searchExpanded = false
                         model.clearSearch()
                     }
@@ -608,7 +609,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, repository = model.repository, onRead = model::openDownload,
                                         onRetry = model::retryDownload, backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         wallpaper = backdropWallpaper,
-                                        refreshingIds = refreshingDownloads, history = history)
+                                        active = rootActive && !searchVisible, refreshingIds = refreshingDownloads, history = history)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
                                         active = current.key == frame.key,

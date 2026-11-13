@@ -47,7 +47,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -56,7 +55,6 @@ import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
@@ -290,7 +288,7 @@ internal class BottomPullLoadState private constructor(
             actionLabel: String,
             orientation: Orientation,
         ): BottomPullLoadState {
-            val haptics = LocalHapticFeedback.current
+            val haptics = rememberFeelFeedback()
             val inputs = rememberUpdatedState(BottomPullLoadInputs(
                 enabled = enabled,
                 loading = loading,
@@ -298,7 +296,7 @@ internal class BottomPullLoadState private constructor(
                 canScrollForward = canScrollForward,
                 onLoadMore = onLoadMore,
                 onThresholdReached = {
-                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    haptics.perform(FeelEvent.Threshold)
                 },
                 actionLabel = actionLabel,
             ))

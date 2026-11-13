@@ -14,7 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Refresh
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -109,7 +109,7 @@ internal fun VolumeBookTile(
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(.7f).mangaCoverCard()
             .background(DetailSurface), contentAlignment = Alignment.Center) {
-            if (!busy && cover.error == null) Icon(Icons.Outlined.MenuBook, null,
+            if (!busy && cover.error == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                 Modifier.size(25.dp), tint = DetailMuted.copy(alpha = .35f))
             if (request != null && cover.error == null) AsyncImage(
                 model = request, contentDescription = null, contentScale = ContentScale.Fit,

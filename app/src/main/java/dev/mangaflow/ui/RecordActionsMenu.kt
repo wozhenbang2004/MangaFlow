@@ -4,7 +4,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -32,7 +32,7 @@ internal fun RecordActionsMenu(
     ) {
         if (onDetails != null) DropdownMenuItem(
             text = { Text("详情与目录") },
-            leadingIcon = { Icon(Icons.Outlined.MenuBook, null, Modifier.size(19.dp)) },
+            leadingIcon = { Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(19.dp)) },
             onClick = { onDismiss(); onDetails() },
         )
     }
