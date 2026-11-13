@@ -60,6 +60,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.dismiss
@@ -76,6 +77,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import coil3.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.R
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.storage.DownloadEntry
@@ -92,12 +94,11 @@ import kotlin.math.roundToInt
 
 private val failedSourceMarks = mutableStateMapOf<String, Boolean>()
 
-/** The site's own mark; a failed favicon remains an honest source name, never a fabricated logo. */
+/** Copy uses our local paired-page marker; other providers retain their own marks/name fallback. */
 @Composable
 internal fun ChapterSourceLogo(sourceId: String, sourceName: String, modifier: Modifier = Modifier,
     muted: Boolean = false) {
     val favicon = when (sourceId) {
-        "copy" -> "https://www.copy4000.com/favicon.ico"
         "komiic" -> "https://komiic.com/favicon.ico"
         "mangadex" -> "https://mangadex.org/favicon.ico"
         else -> null
@@ -105,7 +106,9 @@ internal fun ChapterSourceLogo(sourceId: String, sourceName: String, modifier: M
     val failed = failedSourceMarks[sourceId] == true
     val monochrome = remember { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) }) }
     Box(modifier, contentAlignment = Alignment.Center) {
-        if (favicon != null && !failed) AsyncImage(
+        if (sourceId == "copy") Icon(painterResource(R.drawable.ic_source_copy), null,
+            modifier = Modifier.fillMaxSize(), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        else if (favicon != null && !failed) AsyncImage(
             model = favicon, contentDescription = null, contentScale = ContentScale.Fit,
             colorFilter = if (muted) monochrome else null,
             modifier = Modifier.fillMaxSize(), onError = { failedSourceMarks[sourceId] = true },

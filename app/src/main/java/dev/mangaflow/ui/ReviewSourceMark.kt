@@ -2,7 +2,6 @@ package dev.mangaflow.ui
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.LocalFireDepartment
-import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -26,7 +25,7 @@ import dev.mangaflow.R
 import dev.mangaflow.data.ReviewProviders
 
 internal fun reviewSourceAccent(id: String, onDark: Boolean): Color = when (id) {
-    "copy" -> if (onDark) Color(0xFFE7BA88) else Color(0xFF94653F)
+    "copy" -> if (onDark) Color(0xFFD6D8DD) else Color(0xFF585A60)
     "bangumi" -> if (onDark) Color(0xFFE9B1C8) else Color(0xFF9D5C78)
     "anilist" -> if (onDark) Color(0xFFAFCBE9) else Color(0xFF53749A)
     "mangaupdates" -> if (onDark) Color(0xFFD4BFE8) else Color(0xFF7B638F)
@@ -56,7 +55,7 @@ internal fun reviewSourceLabelScale(mark: String): Float {
     return minOf(.68f, 2.8f / units)
 }
 
-/** Original CC0 vectors and honest wordmarks share one optically balanced reference box. */
+/** Local source markers and honest wordmarks share one optically balanced reference box. */
 @Composable
 internal fun ReviewSourceMark(
     id: String,
@@ -69,6 +68,7 @@ internal fun ReviewSourceMark(
     val color = reviewSourceAccent(id, onDark)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val resource = when (id) {
+        "copy" -> R.drawable.ic_source_copy
         "anilist" -> R.drawable.ic_source_anilist
         "myanimelist" -> R.drawable.ic_source_myanimelist
         "kitsu" -> R.drawable.ic_source_kitsu
@@ -79,12 +79,10 @@ internal fun ReviewSourceMark(
         when {
             heat -> Icon(Icons.Outlined.LocalFireDepartment, null, tint = color,
                 modifier = Modifier.size(size * (.88f * fontScale)))
-            id == "copy" -> Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = color,
-                modifier = Modifier.size(size * (.88f * fontScale)))
             resource != null -> {
                 // The original AL path fills 75% of its viewport height; MAL fills 42%.
                 // Match their visible ink instead of making every 24px viewport equally tall.
-                val opticalScale = when (id) { "anilist" -> .76f; "myanimelist" -> 1.14f; else -> .66f }
+                val opticalScale = when (id) { "copy" -> 1.05f; "anilist" -> .76f; "myanimelist" -> 1.14f; else -> .66f }
                 Icon(painterResource(resource), null, tint = color,
                     modifier = Modifier.requiredSize(size * (opticalScale * fontScale)))
             }
