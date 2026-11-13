@@ -370,7 +370,7 @@ private fun FeaturedManga(
 }
 
 /** Color values only: no bitmap copies, full-size readback, per-frame sampling or disk records. */
-private object FeaturedCoverColors {
+internal object FeaturedCoverColors {
     private val cache = LruCache<String, Color>(96)
     fun get(url: String): Color? = cache.get(url)
 

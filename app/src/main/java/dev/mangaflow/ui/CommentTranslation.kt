@@ -39,11 +39,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.ui.motion.MotionDialog
 
+private val commentNonLanguageTokens = Regex("""https?://\S+|(?<!\S)@[\p{L}\p{N}_.-]+""", RegexOption.IGNORE_CASE)
+
 /** An affordance heuristic only; no language model, source request or background translation. */
 internal fun hasForeignCommentText(text: String): Boolean {
     var han = 0
     var foreign = 0
-    text.forEach { character ->
+    // Explicit mentions and URLs alone are not text that benefits from translation.
+    text.replace(commentNonLanguageTokens, "").forEach { character ->
         if (!character.isLetter()) return@forEach
         when (Character.UnicodeScript.of(character.code)) {
             Character.UnicodeScript.HAN -> han++
@@ -72,7 +75,7 @@ internal fun CommentTranslationAction(text: String, color: Color, modifier: Modi
     }
 
     val interaction = remember { MutableInteractionSource() }
-    Box(modifier.heightIn(min = 20.dp)
+    Box(modifier.heightIn(min = 28.dp)
         .semantics { contentDescription = "用手机上的翻译应用翻译评论" }
         .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = {
             // Stay well below Binder's transaction limit; never silently translate a truncated review.

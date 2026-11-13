@@ -428,28 +428,34 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             initialValue = model.downloads.entries.value.filter { it.manga.id == current.state.manga.id })
                         val chapterPositions = rememberChapterPositions(current.state.manga, model.library,
                             active = current.key == frame.key)
-                        DetailScreen(
-                            manga = current.state.manga, detail = current.state.detail,
-                            loading = current.state.loading, error = current.state.error,
-                            reviews = current.state.reviews, reviewsLoading = current.state.reviewsLoading,
-                            isFavorite = favorites.any { it.id == current.state.manga.id },
-                            progress = history.firstOrNull { it.manga.id == current.state.manga.id },
-                            chapterPositions = chapterPositions,
-                            downloadEntries = downloads,
-                            loadVolumeCover = { chapter, refresh -> model.volumeCover(current.state.manga.id, chapter, refresh) },
-                            volumeImageHeaders = { chapter -> model.repository.imageHeaders(current.state.manga.id, chapter.id) },
-                            onBack = model::closeDetail, onRetry = model::retryDetail,
-                            onToggleFavorite = { model.toggleFavorite(current.state.manga) },
-                            onRead = model::readChapter, onAuthor = model::openAuthor,
-                            onTag = { manga, tag -> model.openTagSearch(manga, tag); tagSearchVisible = true },
-                            onRestart = model::restartChapter,
-                            onContinue = model::continueReading,
-                            onDownload = { onRequestNotifications(); model.downloadChapter(it) },
-                            onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
-                            onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
-                            loadReplies = model::reviewReplies,
-                            active = current.key == frame.key && authorWorks == null && !tagSearchVisible,
-                        )
+                        CompositionLocalProvider(LocalWallpaperActive provides (wallpaper.mediaPath != null)) {
+                            DetailScreen(
+                                manga = current.state.manga, detail = current.state.detail,
+                                loading = current.state.loading, error = current.state.error,
+                                reviews = current.state.reviews, reviewsLoading = current.state.reviewsLoading,
+                                isFavorite = favorites.any { it.id == current.state.manga.id },
+                                progress = history.firstOrNull { it.manga.id == current.state.manga.id },
+                                chapterPositions = chapterPositions,
+                                downloadEntries = downloads,
+                                loadVolumeCover = { chapter, refresh -> model.volumeCover(current.state.manga.id, chapter, refresh) },
+                                volumeImageHeaders = { chapter -> model.repository.imageHeaders(current.state.manga.id, chapter.id) },
+                                onBack = model::closeDetail, onRetry = model::retryDetail,
+                                onToggleFavorite = { model.toggleFavorite(current.state.manga) },
+                                onRead = model::readChapter, onAuthor = model::openAuthor,
+                                onTag = { manga, tag -> model.openTagSearch(manga, tag); tagSearchVisible = true },
+                                onRestart = model::restartChapter,
+                                onContinue = model::continueReading,
+                                onDownload = { onRequestNotifications(); model.downloadChapter(it) },
+                                onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
+                                onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
+                                loadReplies = model::reviewReplies,
+                                active = current.key == frame.key && authorWorks == null && !tagSearchVisible,
+                                wallpaper = {
+                                    if (wallpaper.mediaPath != null) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
+                                        active = current.key == frame.key && authorWorks == null && !tagSearchVisible)
+                                },
+                            )
+                        }
                     }
                     is Frame.Root -> savedState.SaveableStateProvider(current.key) {
                         val searchBackdrop = rememberHazeState()

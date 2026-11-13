@@ -1,5 +1,9 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
@@ -35,11 +39,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Schedule
-import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -60,7 +64,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -78,6 +86,8 @@ import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
@@ -196,7 +206,7 @@ internal fun DetailCatalog(
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val showGroup = targetGroup == null && groups.size > 1
                 val volumesOnly = visibleChapters.all { isVolumeGroup(it.group) }
-                val tileHeight = (44f * fontScale).dp
+                val tileHeight = (42f * fontScale).dp
                 // Source groups are consecutive. Keep that exact order and give each run
                 // its own grid row so a book cover never stretches a normal chapter row.
                 val runs = remember(visibleChapters) {
@@ -207,76 +217,89 @@ internal fun DetailCatalog(
                         }
                     }
                 }
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = ((if (volumesOnly) 96f else 88f) * fontScale).dp),
-                    state = grid, userScrollEnabled = paneActive,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
-                    horizontalArrangement = Arrangement.spacedBy(if (volumesOnly) 12.dp else 5.dp),
-                    verticalArrangement = Arrangement.spacedBy(if (volumesOnly) 14.dp else 5.dp),
-                ) {
-                    runs.forEachIndexed { runIndex, run ->
-                        if (showGroup) item(key = "group:$runIndex:${run.first().group}",
-                            span = { GridItemSpan(maxLineSpan) }, contentType = "group") {
-                            Text(chapterGroupLabel(run.first().group), color = DetailMuted, fontSize = 11.sp,
-                                modifier = Modifier.padding(top = if (runIndex == 0) 2.dp else 10.dp, bottom = 3.dp))
-                        }
-                        items(run, key = Chapter::id,
-                            contentType = { if (isVolumeGroup(it.group)) "volume" else "chapter" }) { chapter ->
-                            if (isVolumeGroup(chapter.group)) {
-                                val cover = volumeCovers[chapter.id] ?: VolumeCoverState()
-                                LaunchedEffect(chapter.id, paneActive, cover.attempt) {
-                                    if (!paneActive || cover.page != null || cover.error != null) return@LaunchedEffect
-                                    val pending = cover.copy(loading = true)
-                                    volumeCovers[chapter.id] = pending
-                                    try {
-                                        val page = coverPermits.withPermit {
-                                            loadVolumeCover(chapter, cover.attempt > 0)
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    val chapterWidth = (maxWidth - 32.dp).coerceAtLeast(0.dp)
+                    val chapterColumns = when {
+                        chapterWidth >= (72f * fontScale * 4f).dp + 15.dp -> 4
+                        chapterWidth >= (72f * fontScale * 3f).dp + 10.dp -> 3
+                        else -> 2
+                    }
+                    LazyVerticalGrid(
+                        columns = if (volumesOnly) GridCells.Adaptive(minSize = (96f * fontScale).dp)
+                            else GridCells.Fixed(chapterColumns),
+                        state = grid, userScrollEnabled = paneActive,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
+                        horizontalArrangement = Arrangement.spacedBy(if (volumesOnly) 12.dp else 5.dp),
+                        // Each 42dp visual cell owns a separate 48dp hit row; its 3dp
+                        // top/bottom insets provide the 6dp visible vertical gap.
+                        verticalArrangement = Arrangement.spacedBy(if (volumesOnly) 14.dp else 0.dp),
+                    ) {
+                        runs.forEachIndexed { runIndex, run ->
+                            if (showGroup) item(key = "group:$runIndex:${run.first().group}",
+                                span = { GridItemSpan(maxLineSpan) }, contentType = "group") {
+                                Text(chapterGroupLabel(run.first().group), color = DetailMuted, fontSize = 11.sp,
+                                    modifier = Modifier.padding(top = if (runIndex == 0) 2.dp else 10.dp, bottom = 3.dp))
+                            }
+                            items(run, key = Chapter::id,
+                                contentType = { if (isVolumeGroup(it.group)) "volume" else "chapter" }) { chapter ->
+                                if (isVolumeGroup(chapter.group)) {
+                                    val cover = volumeCovers[chapter.id] ?: VolumeCoverState()
+                                    LaunchedEffect(chapter.id, paneActive, cover.attempt) {
+                                        if (!paneActive || cover.page != null || cover.error != null) return@LaunchedEffect
+                                        val pending = cover.copy(loading = true)
+                                        volumeCovers[chapter.id] = pending
+                                        try {
+                                            val page = coverPermits.withPermit {
+                                                loadVolumeCover(chapter, cover.attempt > 0)
+                                            }
+                                            currentCoroutineContext().ensureActive()
+                                            if (volumeCovers[chapter.id] === pending)
+                                                volumeCovers[chapter.id] = pending.copy(page = page, loading = false)
+                                        } catch (cancelled: CancellationException) { throw cancelled }
+                                        catch (failure: Exception) {
+                                            if (volumeCovers[chapter.id] === pending)
+                                                volumeCovers[chapter.id] = pending.copy(loading = false,
+                                                    error = failure.message ?: "这一卷封面暂不可用")
+                                        } finally {
+                                            if (volumeCovers[chapter.id] === pending)
+                                                volumeCovers[chapter.id] = VolumeCoverState(attempt = pending.attempt)
                                         }
-                                        currentCoroutineContext().ensureActive()
-                                        if (volumeCovers[chapter.id] === pending)
-                                            volumeCovers[chapter.id] = pending.copy(page = page, loading = false)
-                                    } catch (cancelled: CancellationException) { throw cancelled }
-                                    catch (failure: Exception) {
-                                        if (volumeCovers[chapter.id] === pending)
-                                            volumeCovers[chapter.id] = pending.copy(loading = false,
-                                                error = failure.message ?: "这一卷封面暂不可用")
-                                    } finally {
-                                        if (volumeCovers[chapter.id] === pending)
-                                            volumeCovers[chapter.id] = VolumeCoverState(attempt = pending.attempt)
                                     }
-                                }
-                                VolumeBookTile(
-                                    mangaId = mangaId, chapter = chapter, cover = cover,
-                                    imageHeaders = { volumeImageHeaders(chapter) },
+                                    Box(Modifier.padding(bottom = if (volumesOnly) 0.dp else 10.dp)) {
+                                        VolumeBookTile(
+                                            mangaId = mangaId, chapter = chapter, cover = cover,
+                                            imageHeaders = { volumeImageHeaders(chapter) },
+                                            entry = downloaded[chapter.id],
+                                            progress = chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id },
+                                            progressKnown = chapterPositions != null,
+                                            current = progress?.chapterId == chapter.id,
+                                            downloadMode = downloadMode,
+                                            enabled = !downloadMode || canDownload(downloaded[chapter.id]),
+                                            onRead = { onRead(chapter) }, onDownload = { onDownload(chapter) },
+                                            onActions = { selectedChapterId = chapter.id },
+                                            onCoverError = {
+                                                if (paneActive && volumeCovers[chapter.id] === cover)
+                                                    volumeCovers[chapter.id] = cover.copy(error = "封面图片暂不可用")
+                                            },
+                                            onRetryCover = {
+                                                volumeCovers[chapter.id] = VolumeCoverState(attempt = cover.attempt + 1)
+                                            },
+                                        )
+                                    }
+                                } else ChapterTile(
+                                    chapter = chapter,
                                     entry = downloaded[chapter.id],
                                     progress = chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id },
-                                    progressKnown = chapterPositions != null,
                                     current = progress?.chapterId == chapter.id,
+                                    progressKnown = chapterPositions != null,
                                     downloadMode = downloadMode,
-                                    enabled = !downloadMode || canDownload(downloaded[chapter.id]),
-                                    onRead = { onRead(chapter) }, onDownload = { onDownload(chapter) },
+                                    height = tileHeight,
+                                    onRead = { onRead(chapter) },
+                                    onDownload = { onDownload(chapter) },
                                     onActions = { selectedChapterId = chapter.id },
-                                    onCoverError = {
-                                        if (paneActive && volumeCovers[chapter.id] === cover)
-                                            volumeCovers[chapter.id] = cover.copy(error = "封面图片暂不可用")
-                                    },
-                                    onRetryCover = {
-                                        volumeCovers[chapter.id] = VolumeCoverState(attempt = cover.attempt + 1)
-                                    },
                                 )
-                            } else ChapterTile(
-                                chapter = chapter,
-                                entry = downloaded[chapter.id],
-                                progress = chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id },
-                                current = progress?.chapterId == chapter.id,
-                                progressKnown = chapterPositions != null,
-                                downloadMode = downloadMode,
-                                height = tileHeight,
-                                onRead = { onRead(chapter) },
-                                onDownload = { onDownload(chapter) },
-                                onActions = { selectedChapterId = chapter.id },
-                            )
+                            }
                         }
                     }
                 }
@@ -411,8 +434,17 @@ private fun ChapterTile(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val enabled = !downloadMode || canDownload(entry)
-    Row(
-        Modifier.fillMaxWidth().height(height)
+    val fraction = detailReadingFraction(progress)
+    val complete = fraction == 1f
+    val readingLine by animateFloatAsState(
+        targetValue = fraction?.takeIf { it < 1f } ?: 0f,
+        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
+        label = "chapter-reading-line",
+    )
+    val readingColor = MaterialTheme.colorScheme.primary.copy(alpha = .65f)
+    val hasDownloadMark = downloadMode || entry != null
+    Box(
+        Modifier.fillMaxWidth().height((height + 6.dp).coerceAtLeast(48.dp))
             .combinedClickable(
                 interactionSource = interaction, indication = null, enabled = enabled,
                 role = Role.Button,
@@ -421,58 +453,71 @@ private fun ChapterTile(
                 onClick = if (downloadMode) onDownload else onRead,
                 onLongClick = onActions,
             )
-            .motionPress(interaction, enabled = enabled)
-            .clip(RoundedCornerShape(9.dp))
-            .background(DetailForeground.copy(alpha = when {
-                current -> .08f
-                detailReadingFraction(progress) == 1f -> .025f
-                else -> .045f
-            }))
             .semantics {
                 contentDescription = chapter.title
                 stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
                     .filter(String::isNotBlank).joinToString("，")
-            }
-            .padding(horizontal = 7.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            },
     ) {
-        Text(
-            chapter.title, color = if (current) DetailForeground else if (enabled) DetailSecondary else DetailMuted,
-            fontSize = 11.sp, lineHeight = 15.sp, maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
-            modifier = Modifier.weight(1f),
-        )
-        Spacer(Modifier.width(3.dp))
-        // Reading and download have independent, stable micro-mark slots.
-        Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
-            ChapterReadMark(progress, progressKnown)
+        Box(Modifier.fillMaxSize().padding(vertical = 3.dp)
+            .motionPress(interaction, enabled = enabled, pressedScale = .98f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(DetailForeground.copy(alpha = when {
+                current -> .08f
+                complete -> .018f
+                else -> .03f
+            }))) {
+            Text(
+                chapter.title, color = if (current) DetailForeground else if (enabled) DetailSecondary else DetailMuted,
+                fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier.align(Alignment.Center).fillMaxWidth()
+                    .padding(start = 7.dp, end = 19.dp),
+            )
+            Canvas(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp)
+                .padding(horizontal = 7.dp)) {
+                if (readingLine > 0f) drawLine(readingColor,
+                    Offset(0f, size.height / 2f), Offset(size.width * readingLine, size.height / 2f),
+                    strokeWidth = size.height, cap = StrokeCap.Round)
+            }
+            MotionSwap(complete, Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 4.dp).size(12.dp)) { read ->
+                if (read) Icon(Icons.Outlined.Check, null, tint = readingColor, modifier = Modifier.size(12.dp))
+            }
+            if (hasDownloadMark) Box(Modifier.align(Alignment.BottomEnd).padding(bottom = 4.dp, end = 4.dp)) {
+                ChapterDownloadMark(entry, downloadMode, size = 12.dp)
+            }
         }
-        Spacer(Modifier.width(3.dp))
-        ChapterDownloadMark(entry, downloadMode)
     }
 }
 
 @Composable
-internal fun ChapterDownloadMark(entry: DownloadEntry?, showDownload: Boolean) {
-    MotionSwap(entry?.status to showDownload, Modifier.size(14.dp)) { (status, showDownload) ->
+internal fun ChapterDownloadMark(entry: DownloadEntry?, showDownload: Boolean, size: Dp = 14.dp) {
+    val fraction = entry?.takeIf { it.totalPages > 0 }?.let {
+        (it.completedPages.toFloat() / it.totalPages).coerceIn(0f, 1f)
+    }
+    val downloadProgress by animateFloatAsState(fraction ?: 0f,
+        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Content) else snap(),
+        label = "chapter-download-mark")
+    MotionSwap(entry?.status to showDownload, Modifier.size(size)) { (status, showDownload) ->
         when (status) {
-            DownloadStatus.RUNNING -> if (entry != null && entry.totalPages > 0) {
-                CircularProgressIndicator(
-                    progress = { (entry.completedPages.toFloat() / entry.totalPages).coerceIn(0f, 1f) },
-                    modifier = Modifier.size(12.dp), color = DetailSecondary, strokeWidth = 1.dp)
-            } else Icon(Icons.Outlined.Download, "正在准备下载",
-                tint = DetailMuted, modifier = Modifier.size(14.dp))
+            DownloadStatus.RUNNING -> Box(Modifier.size(size)) {
+                Icon(Icons.Outlined.Download, "正在下载", tint = DetailMuted.copy(alpha = .3f), modifier = Modifier.size(size))
+                Icon(Icons.Outlined.Download, null, tint = DetailForeground,
+                    modifier = Modifier.size(size).drawWithContent {
+                        clipRect(top = this.size.height * (1f - downloadProgress)) { this@drawWithContent.drawContent() }
+                    })
+            }
             DownloadStatus.QUEUED -> Icon(Icons.Outlined.Schedule, "等待下载",
-                tint = DetailMuted, modifier = Modifier.size(14.dp))
-            DownloadStatus.COMPLETED -> Icon(Icons.Outlined.Check, "已下载",
-                tint = DetailForeground, modifier = Modifier.size(14.dp))
+                tint = DetailMuted, modifier = Modifier.size(size))
+            DownloadStatus.COMPLETED -> Icon(Icons.Outlined.DownloadDone, "已下载",
+                tint = DetailForeground, modifier = Modifier.size(size))
             DownloadStatus.PAUSED, DownloadStatus.WAITING -> Icon(Icons.Outlined.Pause,
-                "下载暂停", tint = DetailMuted, modifier = Modifier.size(14.dp))
+                "下载暂停", tint = DetailMuted, modifier = Modifier.size(size))
             DownloadStatus.FAILED -> Icon(Icons.Outlined.Refresh, "下载失败",
-                tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
+                tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(size))
             else -> if (showDownload) Icon(Icons.Outlined.Download, "下载",
-                tint = DetailMuted, modifier = Modifier.size(14.dp))
+                tint = DetailMuted, modifier = Modifier.size(size))
         }
     }
 }

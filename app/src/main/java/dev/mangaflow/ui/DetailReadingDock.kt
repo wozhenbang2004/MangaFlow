@@ -1,6 +1,7 @@
 package dev.mangaflow.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -34,6 +35,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -47,6 +49,7 @@ import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 
@@ -59,6 +62,7 @@ internal fun DetailReadingDock(
     firstChapter: Chapter?,
     loading: Boolean,
     hidden: Boolean,
+    compact: Boolean = false,
     active: Boolean,
     modifier: Modifier = Modifier,
     onContinue: (ReadingProgress) -> Unit,
@@ -69,8 +73,15 @@ internal fun DetailReadingDock(
     val canRead = resume != null || firstChapter != null
     val interaction = remember { MutableInteractionSource() }
     var actions by remember(mangaId) { mutableStateOf(false) }
+    val motion = LocalMotionEnabled.current
+    val fontScale = LocalDensity.current.fontScale
+    val widthFraction by animateFloatAsState(
+        if (compact) (if (fontScale >= 1.3f) .72f else .58f) else 1f,
+        tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "reading-dock-width")
+    val minimumHeight by animateDpAsState(if (compact) 48.dp else 56.dp,
+        tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "reading-dock-height")
     val visibility by animateFloatAsState(if (hidden && !actions) 0f else 1f,
-        tween(if (LocalMotionEnabled.current) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
+        tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
         label = "reading-dock")
     val fraction = resume?.takeIf { it.pageCount > 0 }?.let {
         ((it.pageIndex + 1).toFloat() / it.pageCount).coerceIn(0f, 1f)
@@ -83,7 +94,7 @@ internal fun DetailReadingDock(
         else -> "暂无可读章节"
     }
     if (visibility > .01f) LiquidGlassSurface(backdrop,
-        modifier.graphicsLayer {
+        modifier.fillMaxWidth(widthFraction).graphicsLayer {
             alpha = visibility
             translationY = (1f - visibility) * 86.dp.toPx()
         }.motionInputGate(active && visibility > .9f)
@@ -102,22 +113,28 @@ internal fun DetailReadingDock(
             }.motionPress(interaction, enabled = canRead, pressedScale = .985f),
         cornerRadius = 24.dp, role = GlassSurfaceRole.READING_DOCK,
         interactionSource = interaction, trackPointer = true) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 16.dp, vertical = 8.dp)
+        Row(Modifier.fillMaxWidth().heightIn(min = minimumHeight).padding(horizontal = 14.dp, vertical = 6.dp)
             .semantics(mergeDescendants = true) { contentDescription = "${if (resume != null) "继续阅读" else "开始阅读"}，$subtitle" },
             verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.PlayArrow, null, tint = reviewSourceAccent("anilist", DetailForeground.luminance() > .5f),
                 modifier = Modifier.size(23.dp))
             Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(if (resume != null) "继续阅读" else "开始阅读", color = DetailForeground,
-                    fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold)
-                Text(subtitle, color = DetailSecondary, fontSize = 11.sp, lineHeight = 16.sp,
+            MotionSwap(compact, Modifier.weight(1f)) { condensed ->
+                if (condensed) Text(resume?.chapterTitle?.ifBlank { "继续阅读" }
+                    ?: firstChapter?.title ?: if (loading) "正在读取章节" else "暂无可读章节",
+                    color = DetailForeground, fontSize = 13.sp, lineHeight = 19.sp, fontWeight = FontWeight.Medium,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
+                else Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(if (resume != null) "继续阅读" else "开始阅读", color = DetailForeground,
+                        fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Text(subtitle, color = DetailSecondary, fontSize = 11.sp, lineHeight = 16.sp,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
-            if (fraction != null) {
+            if (fraction != null && !compact) {
                 val color = DetailForeground
-                Canvas(Modifier.padding(start = 12.dp).size(25.dp)) {
-                    val stroke = Stroke(2.dp.toPx(), cap = StrokeCap.Round)
+                Canvas(Modifier.padding(start = 10.dp).size(18.dp)) {
+                    val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
                     drawArc(color.copy(alpha = .12f), -90f, 360f, false, style = stroke)
                     drawArc(color.copy(alpha = .8f), -90f, 360f * fraction, false, style = stroke)
                 }
