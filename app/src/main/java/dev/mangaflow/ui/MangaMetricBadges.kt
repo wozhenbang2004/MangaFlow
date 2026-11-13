@@ -20,18 +20,25 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
@@ -93,6 +100,7 @@ internal fun observedMangaMetrics(manga: Manga, requestDelay: Long = 180L): List
 
 private data class MetricToken(
     val value: String,
+    val fullValue: String,
     val description: String,
     val sourceId: String,
 )
@@ -114,16 +122,22 @@ internal fun MangaMetricBadges(
     valueSize: TextUnit? = null,
     onExpand: (() -> Unit)? = null,
 ) {
-    val metrics = observedMangaMetrics(manga)
+    val fan = LocalMetricSourceFan.current
+    val anchorKey = remember(manga.id) { Any() }
+    DisposableEffect(fan, anchorKey) {
+        onDispose { if (fan != null && fan.request?.key === anchorKey) fan.clear() }
+    }
+    val liveMetrics = observedMangaMetrics(manga)
+    val metrics = fan?.request?.takeIf { it.key === anchorKey }?.metrics ?: liveMetrics
     val heat = if (manga.rank != null) manga.popularity
         else manga.totalPopularity ?: metrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: manga.popularity
-    val heatToken = heat?.let { MetricToken(metricCount(it), "$heatLabel $it", "copy") }
+    val heatToken = heat?.let { MetricToken(metricCount(it), metricCount(it), "$heatLabel $it", "copy") }
     val scores = metrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
         .sortedBy { ReviewProviders.order(it.sourceId) }.map { metric ->
             val score = requireNotNull(metric.score)
             val nativeScore = metricScore(score) +
                 (if (metric.scoreScale > 0 && (!compact || metric.scoreScale != 10)) "/${metric.scoreScale}" else "")
-            MetricToken(nativeScore,
+            MetricToken(nativeScore, metricScore(score) + (if (metric.scoreScale > 0) "/${metric.scoreScale}" else ""),
                 "${metric.name}，${metric.scoreLabel}${metricScore(score)} 分" +
                     (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "，原站满分未知") +
                     (metric.ratingCount?.let { "，$it 人评分" } ?: ""), metric.sourceId)
@@ -153,10 +167,14 @@ internal fun MangaMetricBadges(
     val tokens = listOfNotNull(heatToken) + scores
     val showOverflow = compact || showMore
     val interaction = remember(manga.id) { MutableInteractionSource() }
+    var stackBounds by remember(manga.id) { mutableStateOf(Rect.Zero) }
     BoxWithConstraints(modifier) {
         val availableWidth = with(density) { maxWidth.roundToPx() }
+        LaunchedEffect(availableWidth, density.fontScale) {
+            if (fan != null && fan.request?.key === anchorKey) fan.clear()
+        }
         val narrow = compact && maxWidth < 120.dp * fontScale
-        val scoreLimit = if (narrow) 0 else maxScores.coerceIn(0, scores.size)
+        val scoreLimit = maxScores.coerceIn(0, scores.size)
         val fittedHeatMark = minOf(heatMarkWidth, availableWidth * .20f).coerceAtLeast(0f)
         val heatTextRoom = (availableWidth - fittedHeatMark - innerGap - tokenPadding * 2f - 1f).coerceAtLeast(1f)
         val heatTextWidth = heatToken?.let { measurer.measure(it.value, textStyle, maxLines = 1).size.width } ?: 0
@@ -205,7 +223,17 @@ internal fun MangaMetricBadges(
             if (count == 0) break
             count--
         }
-        val disclose = onExpand?.takeIf { count < scores.size }
+        val disclose = onExpand?.takeIf { count < scores.size }?.let { details ->
+            {
+                if (fan != null && stack.isNotEmpty() && stackBounds.width > 0f && stackBounds.height > 0f) {
+                    fan.open(MetricSourceFanRequest(anchorKey, metrics, stackBounds,
+                        stack.mapIndexed { index, item ->
+                            MetricSourceFanItem(item.token.sourceId, item.token.fullValue, item.token.description,
+                                item.leftPx, item.widthPx, item.clipStartPx, item.markSize, index)
+                        }, lineHeight, foreground, details))
+                } else details()
+            }
+        }
         if (heatToken == null && count == 0 && stack.isEmpty()) return@BoxWithConstraints
         Row(Modifier.fillMaxWidth().heightIn(min = lineHeight)
             .then(if (disclose != null) Modifier.clickable(interactionSource = interaction, indication = null,
@@ -224,24 +252,41 @@ internal fun MangaMetricBadges(
                 MetricBadge(it, if (compact) foreground.copy(alpha = .76f) else foreground,
                     textStyle, plain, compact)
             }
-            if (stack.isNotEmpty()) MetricSourceStack(stack, foreground, lineHeight)
+            if (stack.isNotEmpty()) MetricSourceStack(stack, foreground, lineHeight,
+                Modifier.onGloballyPositioned {
+                    val position = it.localToScreen(Offset.Zero)
+                    stackBounds = if (position.isSpecified) Rect(position,
+                        Size(it.size.width.toFloat(), it.size.height.toFloat())) else Rect.Zero
+                }
+                    .graphicsLayer {
+                        val request = fan?.request
+                        alpha = if (request != null && request.key === anchorKey && request.popupOrigin != null) 0f else 1f
+                    })
         }
     }
 }
 
 /** Front mark is complete; rear marks peek through transparent cutouts, never a painted plate. */
 @Composable
-private fun MetricSourceStack(items: List<StackedMetric>, foreground: Color, height: Dp) {
+private fun MetricSourceStack(items: List<StackedMetric>, foreground: Color, height: Dp,
+    modifier: Modifier = Modifier) {
     val density = LocalDensity.current
     val width = with(density) { (items.last().leftPx + items.last().widthPx).toDp() }
     val onDark = foreground.luminance() > .5f
-    Box(Modifier.width(width).height(height).clipToBounds()) {
+    Box(modifier.width(width).height(height)) {
         items.indices.reversed().forEach { index ->
             val item = items[index]
             ReviewSourceMark(item.token.sourceId,
                 Modifier.offset { IntOffset(item.leftPx, 0) }
                     .width(with(density) { item.widthPx.toDp() }).height(height)
-                    .graphicsLayer { alpha = 1f - .06f * index.coerceAtMost(3) }
+                    .graphicsLayer {
+                        val depth = index.coerceAtMost(4)
+                        translationY = -depth * .8.dp.toPx()
+                        scaleX = 1f - depth * .045f
+                        scaleY = scaleX
+                        rotationZ = if (index == 0) 0f else -2f - depth
+                        alpha = 1f - .06f * depth
+                    }
                     .drawWithContent {
                         if (layoutDirection == LayoutDirection.Ltr) clipRect(left = item.clipStartPx.toFloat()) {
                             this@drawWithContent.drawContent()
@@ -288,3 +333,4 @@ private fun metricCount(value: Long): String = when {
     value >= 10_000 -> String.format(Locale.ROOT, "%.1f万", value / 10_000.0)
     else -> value.toString()
 }
+

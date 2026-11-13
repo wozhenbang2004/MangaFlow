@@ -59,6 +59,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
@@ -154,11 +155,13 @@ fun DiscoverScreen(
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
     var actionsManga by remember { mutableStateOf<Manga?>(null) }
     var ratingsManga by remember { mutableStateOf<Manga?>(null) }
+    val sourceFan = remember { MetricSourceFanState() }
     val coverTransition = LocalMangaCoverTransition.current
     LaunchedEffect(active, searchExpanded) {
-        if (!active || searchExpanded) { actionsManga = null; ratingsManga = null }
+        if (!active || searchExpanded) { actionsManga = null; ratingsManga = null; sourceFan.clear() }
     }
-    val unobscured = active && !searchExpanded && actionsManga == null && ratingsManga == null
+    LaunchedEffect(browse.cacheKey) { sourceFan.clear() }
+    val unobscured = active && !searchExpanded && actionsManga == null && ratingsManga == null && sourceFan.request == null
     var retainedBrowse by remember { mutableStateOf(browse) }
     // Wait on data, never on an animation clock. A slow uncached selection keeps the previous
     // real list visible instead of replacing it with loading and then entering a second time.
@@ -167,6 +170,7 @@ fun DiscoverScreen(
     SideEffect { if (!holdingContent) retainedBrowse = browse }
     val retainedAlpha = animateFloatAsState(if (holdingContent) .48f else 1f,
         if (motion) tween(MangaMotion.Content) else snap(), label = "browse-pending-content")
+    CompositionLocalProvider(LocalMetricSourceFan provides sourceFan) {
     Box(Modifier.fillMaxSize().navigationBarsPadding().mangaHazeSource(searchBackdrop)
         .background(MaterialTheme.colorScheme.background)
         .motionInputGate(active && !searchExpanded)) {
@@ -208,6 +212,8 @@ fun DiscoverScreen(
             }
         }
     }
+    }
+    MetricSourceFan(sourceFan)
     actionsManga?.let { manga ->
         MotionBottomSheet(onDismissRequest = { actionsManga = null }) { dismiss ->
             Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 16.dp)) {
@@ -886,3 +892,4 @@ private val SearchPositionsSaver = listSaver<LinkedHashMap<String, LazyListState
         }
     } },
 )
+
