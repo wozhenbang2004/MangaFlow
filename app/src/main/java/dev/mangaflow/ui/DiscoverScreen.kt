@@ -1,23 +1,10 @@
 package dev.mangaflow.ui
 
-import android.view.accessibility.AccessibilityManager
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.material3.carousel.CarouselDefaults
-import androidx.compose.material3.carousel.CarouselItemInfo
-import androidx.compose.material3.carousel.HorizontalMultiBrowseCarousel
-import androidx.compose.material3.carousel.rememberCarouselState
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
-
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -33,7 +20,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -78,7 +64,6 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -86,20 +71,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
@@ -112,7 +90,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
@@ -145,11 +122,9 @@ import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.rememberHazeState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
-import kotlinx.coroutines.delay
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -672,150 +647,6 @@ private fun DiscoveryRefresh(state: BrowseState, onRefresh: () -> Unit) {
             if (state.refreshing) "正在刷新漫画" else if (state.updatedAt > 0) "刷新漫画，${browseUpdatedAt(state.updatedAt)}" else "刷新漫画",
             Modifier.size(19.dp).graphicsLayer { rotationZ = rotation.value },
             tint = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-/** Material 3 Multi-browse owns changing item widths, rounded masks, inertia and snapping. */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
-@Composable
-private fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, visible: Boolean, onOpen: (Manga) -> Unit) {
-    if (manga.isEmpty()) return
-    val state = rememberCarouselState { manga.size }
-    val fling = CarouselDefaults.singleAdvanceFlingBehavior(state)
-    val items = remember { mutableStateMapOf<Int, CarouselItemInfo>() }
-    val focused by remember(items, manga.size) {
-        derivedStateOf { items.entries.filter { it.key in manga.indices }.maxByOrNull { it.value.size }?.key ?: 0 }
-    }
-    val position by remember(items, manga.size) {
-        derivedStateOf {
-            var total = 0f
-            var weighted = 0f
-            items.forEach { (index, info) ->
-                if (index in manga.indices) {
-                    val weight = ((info.size / info.maxSize.coerceAtLeast(1f) - .35f) / .65f).coerceIn(0f, 1f)
-                    total += weight
-                    weighted += index * weight
-                }
-            }
-            if (total > 0f) weighted / total else focused.toFloat()
-        }
-    }
-    var touched by remember { mutableStateOf(false) }
-    var direction by remember { mutableIntStateOf(1) }
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val accessibility = LocalContext.current.getSystemService(AccessibilityManager::class.java)
-    val motion = LocalMotionEnabled.current
-    val speed = with(LocalDensity.current) { 900.dp.toPx() }
-    val autoAdvance = motion && visible && !touched && manga.size > 1 && accessibility?.isTouchExplorationEnabled != true
-    LaunchedEffect(autoAdvance, state, fling, manga.map { it.id }, lifecycle) {
-        if (autoAdvance) lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            while (true) {
-                delay(6_000)
-                if (!state.isScrollInProgress) {
-                    if (focused >= manga.lastIndex) direction = -1
-                    if (focused <= 0) direction = 1
-                    // Delegate one-item settling to the same native fling behavior used by touch.
-                    state.scroll { with(fling) { performFling(speed * direction) } }
-                }
-            }
-        }
-    }
-    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-    val indicator by animateFloatAsState(focused.toFloat(),
-        if (motion) tween(240, easing = MangaMotion.EnterEasing) else snap(), label = "featured-position")
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val itemHeight = (224f * LocalDensity.current.fontScale.coerceAtLeast(1f)).dp
-            val peekWidth = (maxWidth * .15f).coerceIn(44.dp, 80.dp)
-            HorizontalMultiBrowseCarousel(state = state,
-                preferredItemWidth = if (manga.size == 1) maxWidth else (maxWidth - peekWidth - 8.dp).coerceAtLeast(180.dp),
-                itemSpacing = 8.dp, minSmallItemWidth = peekWidth, maxSmallItemWidth = peekWidth,
-                contentPadding = PaddingValues(0.dp), flingBehavior = fling,
-                modifier = Modifier.fillMaxWidth().height(itemHeight)
-                    .semantics { stateDescription = "推荐 ${focused + 1} / ${manga.size}" }
-                    .pointerInput(manga.size) {
-                        awaitEachGesture {
-                            try {
-                                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                                touched = true
-                                do {
-                                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                                } while (event.changes.any { it.id == down.id && it.pressed })
-                            } finally { touched = false }
-                        }
-                    },
-            ) { index ->
-                val info = carouselItemInfo
-                DisposableEffect(index, info) {
-                    items[index] = info
-                    onDispose { if (items[index] === info) items.remove(index) }
-                }
-                FeaturedManga(manga[index], repository,
-                    modifier = Modifier.fillMaxWidth().height(itemHeight).mangaCoverCard(20.dp).maskClip(RoundedCornerShape(20.dp)),
-                    emphasis = { ((info.size / info.maxSize.coerceAtLeast(1f) - .35f) / .65f).coerceIn(0f, 1f) },
-                    offset = { if (motion) (index - position).coerceIn(-1f, 1f) * (if (rtl) -1f else 1f) else 0f },
-                    onOpen = onOpen)
-            }
-        }
-        if (manga.size > 1) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            val color = MaterialTheme.colorScheme.onSurface
-            Canvas(Modifier.size(width = (manga.size * 16).dp, height = 4.dp).clearAndSetSemantics { }) {
-                repeat(manga.size) { index ->
-                    val visualIndex = if (rtl) manga.lastIndex - index else index
-                    val weight = (1f - kotlin.math.abs(indicator - index)).coerceIn(0f, 1f)
-                    val width = (4f + 10f * weight).dp.toPx()
-                    drawRoundRect(color.copy(alpha = .13f + .45f * weight),
-                        topLeft = Offset((visualIndex * 16 + 8).dp.toPx() - width / 2f, 0f),
-                        size = Size(width, size.height), cornerRadius = CornerRadius(size.height / 2f))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun FeaturedManga(
-    manga: Manga,
-    repository: MangaRepository,
-    modifier: Modifier,
-    emphasis: () -> Float,
-    offset: () -> Float,
-    onOpen: (Manga) -> Unit,
-) {
-    val interaction = remember(manga.id) { MutableInteractionSource() }
-    val transition = LocalMangaCoverTransition.current
-    // The cached cover is also the soft chromatic halo in the portrait's side gutters.
-    Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
-        onClickLabel = "查看${manga.title}") {
-            transition?.select?.invoke(MangaCoverKey(manga.id, "discovery-featured"))
-            onOpen(manga)
-        }.motionPress(interaction, pressedScale = .988f)
-        .background(MaterialTheme.colorScheme.surfaceVariant)) {
-        Box(Modifier.matchParentSize()) {
-            MangaCover(manga, repository, Modifier.matchParentSize().blur(26.dp).graphicsLayer {
-                alpha = .45f + .22f * emphasis().coerceIn(0f, 1f)
-            }.clearAndSetSemantics { }, ContentScale.Crop)
-            MangaCover(manga, repository, Modifier.matchParentSize()
-                .then(if (emphasis() >= .98f) Modifier.mangaSharedCover(manga.id, "discovery-featured") else Modifier)
-                .graphicsLayer { translationX = offset() * 4.dp.toPx() }.clearAndSetSemantics { }, ContentScale.Fit)
-        }
-        // A continuous bottom fade belongs to the artwork, without a separate panel edge.
-        Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().fillMaxHeight(.42f)
-            .background(Brush.verticalGradient(0f to Color.Transparent,
-                .5f to Color.Black.copy(alpha = .22f), 1f to Color.Black.copy(alpha = .72f))))
-        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth()
-            .graphicsLayer {
-                alpha = emphasis().coerceIn(0f, 1f)
-                translationX = offset() * 8.dp.toPx()
-                translationY = (1f - emphasis().coerceIn(0f, 1f)) * 6.dp.toPx()
-            }.padding(horizontal = 15.dp).padding(bottom = 13.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(manga.title, color = Color.White, style = MaterialTheme.typography.titleSmall.copy(
-                shadow = Shadow(Color.Black.copy(alpha = .45f), Offset(0f, 1f), 4f)),
-                fontSize = 17.sp, lineHeight = 23.sp,
-                fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = Color.White, compact = true, plain = true)
-        }
     }
 }
 

@@ -62,7 +62,7 @@ import kotlin.math.roundToInt
 
 internal val LocalGlassSkin = compositionLocalOf { GlassSkin.LIQUID }
 
-internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER, DRAWER }
+internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER, DRAWER, GALLERY }
 
 /** Haze captures the background; the adapted Haze Glass optics affect that layer only. */
 @OptIn(ExperimentalHazeApi::class)
@@ -202,7 +202,7 @@ internal fun LiquidGlassSurface(
                     } else null
                 }
                 .hazeEffect(state, style) { inputScale = if (liquid) HazeInputScale.None else HazeInputScale.Auto })
-            if (liquid || !softCard) Box(Modifier.matchParentSize().drawBehind {
+            if (role != GlassSurfaceRole.GALLERY && (liquid || !softCard)) Box(Modifier.matchParentSize().drawBehind {
                 val stroke = .65.dp.toPx()
                 val inset = stroke * .5f
                 val radius = min(cornerRadius.toPx(), size.minDimension * .5f)

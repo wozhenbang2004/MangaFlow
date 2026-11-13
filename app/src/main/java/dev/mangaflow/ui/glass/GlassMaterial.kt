@@ -38,6 +38,16 @@ internal fun glassMaterial(
     softCard: Boolean,
     shortestSide: Dp,
 ): GlassMaterial {
+    // The gallery caption is a continuation of the artwork, with no separate rim or lens wall.
+    // Other glass roles retain their existing authored response.
+    if (role == GlassSurfaceRole.GALLERY) return GlassMaterial(
+        blurRadius = 18.dp, tintOpacity = if (liquid) .12f else .28f,
+        depth = .92f, edgeWidth = 8.dp, displacement = 8.dp,
+        refractionStrength = if (liquid) .12f else 0f, heightFraction = .12f,
+        whitePoint = if (light) .10f else -.08f, contrast = 0f, chroma = 1.05f,
+        ambient = .03f, specular = 0f, edgeShadow = 0f, dispersion = 0f,
+        contentNormalBlend = .05f,
+    )
     if (!liquid) {
         val tint = if (softCard && role == GlassSurfaceRole.NAVIGATION) {
             if (light) .54f else .62f
