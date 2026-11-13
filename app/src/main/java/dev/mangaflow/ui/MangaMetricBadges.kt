@@ -43,6 +43,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -91,7 +94,8 @@ internal fun observedMangaMetrics(manga: Manga, requestDelay: Long = 180L): List
     val updates = remember(state, manga.id) {
         state.values.map { it[manga.id].orEmpty() }.distinctUntilChanged()
     }
-    val metrics by updates.collectAsStateWithLifecycle(initialValue = state.values.value[manga.id].orEmpty())
+    val initialMetrics = remember(state, manga.id) { state.values.value[manga.id].orEmpty() }
+    val metrics by updates.collectAsStateWithLifecycle(initialValue = initialMetrics)
     return metrics
 }
 
@@ -144,12 +148,12 @@ internal fun MangaMetricBadges(
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
     val tokenPadding = with(density) { (if (plain) 0.dp else 2.dp).roundToPx().toFloat() }
-    val innerGap = with(density) { (if (compact) 2.dp else 3.dp).roundToPx().toFloat() }
-    val groupGap = if (compact) 4.dp else 7.dp
+    val innerGap = with(density) { 3.dp.roundToPx().toFloat() }
+    val groupGap = if (compact) 8.dp else 11.dp
     val outerGap = with(density) { groupGap.roundToPx().toFloat() }
     val fontScale = density.fontScale.coerceAtLeast(1f)
-    val markSlot = reviewSourceMarkWidth(15.dp, density.fontScale)
-    val markWidth = with(density) { markSlot.roundToPx().toFloat() }
+    val sourceWidths = scores.associate { it.sourceId to metricSourceWidth(it.sourceId) }
+    val heatSeparation = with(density) { 5.dp.toPx() }
     val heatMarkSize = 14.dp * fontScale
     val heatMarkWidth = with(density) { heatMarkSize.roundToPx().toFloat() }
     val lineHeight = 22.dp * fontScale
@@ -157,8 +161,8 @@ internal fun MangaMetricBadges(
         fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
         lineHeight = 15.sp, letterSpacing = 0.sp)
     fun tokenWidth(token: MetricToken): Float {
-        val sourceWidth = if (token.sourceId == "copy") heatMarkWidth else markWidth
-        return sourceWidth + innerGap + measurer.measure(token.value, textStyle, maxLines = 1).size.width + tokenPadding * 2f
+        val sourceWidth = if (token.sourceId == "copy") heatMarkWidth else with(density) { requireNotNull(sourceWidths[token.sourceId]).toPx() }
+        return sourceWidth + innerGap + measurer.measure(metricValueText(token.value, textStyle.fontSize), textStyle, maxLines = 1).size.width + tokenPadding * 2f
     }
     if (heatToken == null && scores.isEmpty()) return
 
@@ -214,8 +218,10 @@ internal fun MangaMetricBadges(
         var stack = emptyList<StackedMetric>()
         while (true) {
             val groups = count + if (heatToken != null) 1 else 0
-            val fullWidth = heatWidth + widths.take(count).sum() + outerGap * (groups - 1).coerceAtLeast(0)
-            val room = availableWidth - fullWidth - if (groups > 0) outerGap else 0f
+            val fullWidth = heatWidth + widths.take(count).sum() + outerGap * (groups - 1).coerceAtLeast(0) +
+                if (heatToken != null && count > 0) heatSeparation else 0f
+            val room = availableWidth - fullWidth - (if (groups > 0) outerGap else 0f) -
+                (if (heatToken != null && count == 0) heatSeparation else 0f)
             stack = if (count < scores.size) stackFor(count, room) else emptyList()
             if (fullWidth <= availableWidth && (count == scores.size || !showOverflow || stack.isNotEmpty())) break
             if (count == 0) break
@@ -244,8 +250,14 @@ internal fun MangaMetricBadges(
                 }
             },
             horizontalArrangement = Arrangement.spacedBy(groupGap), verticalAlignment = Alignment.CenterVertically) {
-            heatToken?.let { MetricBadge(it, foreground, heatStyle, plain, compact,
-                heatIconSize = with(density) { fittedHeatMark.toDp() }) }
+            heatToken?.let {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    MetricBadge(it, foreground, heatStyle, plain, compact,
+                        heatIconSize = with(density) { fittedHeatMark.toDp() })
+                    if (count > 0 || stack.isNotEmpty())
+                        androidx.compose.foundation.layout.Spacer(Modifier.width(with(density) { heatSeparation.toDp() }))
+                }
+            }
             scores.take(count).forEach {
                 MetricBadge(it, if (compact) foreground.copy(alpha = .76f) else foreground,
                     textStyle, plain, compact)
@@ -310,15 +322,40 @@ private fun MetricBadge(
     Row(modifier.semantics(mergeDescendants = true) { contentDescription = token.description }
         .padding(horizontal = if (plain) 0.dp else 2.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 3.dp)) {
+        horizontalArrangement = Arrangement.spacedBy(3.dp)) {
         if (token.sourceId == "copy") {
             val size = heatIconSize ?: 14.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
             MangaHeatFlame(token.popularity ?: 0L,
                 Modifier.size(width = size, height = size * (16f / 14f)), onDark = onDark)
-        } else ReviewSourceMark(token.sourceId, size = 15.dp, onDark = onDark)
-        Text(token.value, color = foreground.copy(alpha = foreground.alpha * .86f), style = textStyle,
+        } else ReviewSourceMark(token.sourceId, Modifier.width(metricSourceWidth(token.sourceId)), size = 15.dp, onDark = onDark)
+        Text(metricValueText(token.value, textStyle.fontSize, foreground.copy(alpha = foreground.alpha * .56f)),
+            color = foreground.copy(alpha = foreground.alpha * .90f), style = textStyle,
             maxLines = 1, softWrap = false)
     }
+}
+
+/** Measure and render the same native value; denominators are visually secondary. */
+private fun metricValueText(value: String, size: TextUnit, denominator: Color = Color.Unspecified) =
+    buildAnnotatedString {
+        val slash = value.indexOf('/')
+        if (slash < 0) append(value) else {
+            append(value.substring(0, slash))
+            withStyle(SpanStyle(fontSize = size * .74f, fontWeight = FontWeight.Normal, color = denominator)) {
+                append(value.substring(slash))
+            }
+        }
+    }
+
+@Composable
+private fun metricSourceWidth(sourceId: String): Dp {
+    val density = LocalDensity.current
+    val scale = density.fontScale.coerceAtLeast(1f)
+    val wordmark = reviewSourceWordmark(sourceId) ?: return 16.dp * scale
+    val measurer = rememberTextMeasurer()
+    val width = measurer.measure(wordmark, TextStyle(fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium, fontSize = (15f * reviewSourceLabelScale(wordmark)).sp,
+        letterSpacing = 0.sp), maxLines = 1).size.width
+    return with(density) { width.toDp() } + 1.dp * scale
 }
 
 private fun metricScore(value: Double): String =
@@ -329,4 +366,3 @@ private fun metricCount(value: Long): String = when {
     value >= 10_000 -> String.format(Locale.ROOT, "%.1f万", value / 10_000.0)
     else -> value.toString()
 }
-

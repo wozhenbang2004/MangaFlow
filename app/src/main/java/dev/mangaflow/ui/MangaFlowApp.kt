@@ -9,6 +9,7 @@ import dev.mangaflow.ui.motion.MotionBackState
 import dev.mangaflow.ui.motion.LocalMotionBackState
 import dev.mangaflow.ui.motion.motionBackPreview
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
@@ -382,9 +383,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 clip = progress > 0f
             },
             containerColor = MaterialTheme.colorScheme.background,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
             snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
-        ) { _ ->
-            Box(Modifier.fillMaxSize()) {
+        ) { innerPadding ->
+            Box(Modifier.fillMaxSize().padding(innerPadding)) {
             SharedTransitionLayout {
             val coverScope = this
             AnimatedContent(
@@ -408,6 +410,16 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 label = "page",
                 modifier = Modifier.fillMaxSize(),
             ) { current ->
+                // Retain the outgoing search cover until its real route transition finishes.
+                val entry = transition
+                LaunchedEffect(current.key, entry.currentState, entry.isRunning) {
+                    if (current is Frame.Detail && current.key == frame.key &&
+                        entry.currentState == EnterExitState.Visible && !entry.isRunning &&
+                        searchExpanded && selectedCover?.placement == "search-result") {
+                        searchExpanded = false
+                        model.clearSearch()
+                    }
+                }
                 val currentBack = remember(current.key) { MotionBackState() }
                 MotionBackHandler(
                     enabled = current.key == frame.key && !drawerVisible && libraryOpening == null &&
@@ -447,8 +459,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val downloadFlow = remember(model, current.state.manga.id) {
                             model.downloads.observeManga(current.state.manga.id)
                         }
-                        val downloads by downloadFlow.collectAsStateWithLifecycle(
-                            initialValue = model.downloads.entries.value.filter { it.manga.id == current.state.manga.id })
+                        val initialDownloads = remember(model, current.state.manga.id) {
+                            model.downloads.entries.value.filter { it.manga.id == current.state.manga.id }
+                        }
+                        val downloads by downloadFlow.collectAsStateWithLifecycle(initialValue = initialDownloads)
                         val chapterPositions = rememberChapterPositions(current.state.manga, model.library,
                             active = current.key == frame.key)
                         CompositionLocalProvider(LocalWallpaperActive provides (wallpaper.mediaPath != null)) {
@@ -697,7 +711,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onRetry = model::retryBrowse, onMore = model::loadMore,
                                 onTarget = model::setSearchTarget, onTag = model::toggleSearchTag,
                                 onRetryTags = model::retrySearchTags,
-                                onOpen = { manga -> selectedCover = null; closeSearch(); model.openManga(manga) },
+                                onOpen = { manga ->
+                                    keyboard?.hide()
+                                    focus.clearFocus(force = true)
+                                    model.openManga(manga)
+                                },
                             )
                         }
                         }

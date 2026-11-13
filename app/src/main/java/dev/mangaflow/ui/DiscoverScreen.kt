@@ -578,15 +578,19 @@ private fun DiscoveryPane(
 
 @Composable
 private fun SearchResultRow(manga: Manga, repository: MangaRepository, onOpen: () -> Unit) {
+    val transition = LocalMangaCoverTransition.current
     val interaction = remember { MutableInteractionSource() }
     Row(
         Modifier.fillMaxWidth()
-            .clickable(interactionSource = interaction, indication = null, onClick = onOpen)
+            .clickable(interactionSource = interaction, indication = null, onClick = {
+                transition?.select?.invoke(MangaCoverKey(manga.id, "search-result"))
+                onOpen()
+            })
             .motionPress(interaction, pressedScale = .985f)
             .padding(horizontal = 6.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).mangaCoverCard(7.dp))
+        MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).mangaSharedCover(manga.id, "search-result").mangaCoverCard(7.dp))
         Column(Modifier.weight(1f).padding(start = 11.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(manga.title, style = MaterialTheme.typography.titleSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -892,4 +896,3 @@ private val SearchPositionsSaver = listSaver<LinkedHashMap<String, LazyListState
         }
     } },
 )
-

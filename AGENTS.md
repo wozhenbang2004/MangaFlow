@@ -1,6 +1,8 @@
 # MangaFlow
 
-- User sequencing: “等 125 成功你再发布新的 lint 工作流”. Do not push the Lint changes until run 43367315040 has completed successfully and v0.1.125 is published.
+- UI-CONTINUITY-13A–G in DESIGN.md owns the current screenshot batch: centered large reading dock with continuous compact end-edge collapse; grouped native scores in both cover strip and sheet; always-centered manual recommendation gallery; bounded per-volume retry and unified cover columns; flowing primary/subtabs and contextual tools; retained search-cover route transition; download chapter grid and compact storage/action menu. Reuse existing shared motion/materials and preserve actions, actual data, full Haze 2.1, startup and auth changes. Five real errors from first Lint run 43368251904 are corrected directly; retain the gate and warnings. Source/independent review only, no tests/local build; latest main, confirm CI trigger, device acceptance pending.
+
+- User sequencing “等 125 成功你再发布新的 lint 工作流” was fulfilled: run 43367315040 succeeded and v0.1.125 was published before CI-LINT-01 was submitted.
 
 - CI-LINT-01 in DESIGN.md supersedes earlier instructions to disable Android Lint. User explicitly restored full static analysis: enable all warning checks, release checks, dependency analysis, error blocking and HTML/XML reports; keep warnings nonfatal. Both workflows invoke :app:lintRelease before packaging, require both reports to exist and upload reports even on analysis failure. Never disable lint tasks via the test-task name filter, add a blanket baseline/ignore/continue-on-error, or equate Lint with runtime/device acceptance. Executable tests/local builds remain prohibited; use existing main CI and confirm its trigger only.
 

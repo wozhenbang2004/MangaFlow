@@ -94,6 +94,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.stateDescription
@@ -155,6 +156,7 @@ fun SettingsScreen(
         return
     }
     val context = LocalContext.current
+    val locale = LocalConfiguration.current.locales[0] ?: Locale.ROOT
     val lifecycleOwner = LocalLifecycleOwner.current
     val preferences by libraryStore.preferences.collectAsStateWithLifecycle()
     val update by updateManager.state.collectAsStateWithLifecycle()
@@ -452,7 +454,7 @@ fun SettingsScreen(
                             val activity = context.settingsActivity()
                             val checked = update.lastChecked.takeIf { it > 0 }?.let(::settingsLastCheck)
                             val timestamp = update.lastChecked.takeIf { it > 0 }?.let {
-                                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()).format(Date(it))
+                                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, locale).format(Date(it))
                             }
                             val updateAction = when (update.phase) {
                                 UpdatePhase.CHECKING -> "检查中"
@@ -773,6 +775,7 @@ private fun BackupRestoreDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
+    val locale = LocalConfiguration.current.locales[0] ?: Locale.ROOT
     MotionDialog(visible = pending != null, onDismissRequest = onDismiss) {
         pending?.let { restore ->
             val colors = MaterialTheme.colorScheme
@@ -785,7 +788,7 @@ private fun BackupRestoreDialog(
                     verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("恢复阅读备份？", style = MaterialTheme.typography.titleMedium)
                     val date = restore.info.createdAt.takeIf { it > 0 }?.let {
-                        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.getDefault())
+                        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, locale)
                             .format(Date(it))
                     } ?: "未知时间"
                     Text("备份时间 $date", style = MaterialTheme.typography.bodyMedium)
@@ -1008,4 +1011,3 @@ private fun settingsLastCheck(time: Long): String {
     return if (now - time < DateUtils.MINUTE_IN_MILLIS) "刚刚检查"
         else "${DateUtils.getRelativeTimeSpanString(time, now, DateUtils.MINUTE_IN_MILLIS, DateUtils.FORMAT_ABBREV_RELATIVE)}检查"
 }
-
