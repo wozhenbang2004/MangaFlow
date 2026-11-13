@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">漫流</string>
+    <string name="error_report_shortcut">错误日志</string>
 </resources>

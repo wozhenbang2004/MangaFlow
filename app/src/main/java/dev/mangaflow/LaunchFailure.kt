@@ -21,18 +21,7 @@ internal object LaunchFailure {
         if (installed) return
         installed = true
         record = runCatching { AtomicFile(File(context.noBackupFilesDir, "last-failure.txt")) }.getOrNull()
-        recoveryReport = runCatching {
-            record?.openRead()?.use { input ->
-                val bytes = ByteArray(MAX_BYTES)
-                var count = 0
-                while (count < bytes.size) {
-                    val n = input.read(bytes, count, bytes.size - count)
-                    if (n <= 0) break
-                    count += n
-                }
-                bytes.decodeToString(0, count).takeIf { it.isNotBlank() }
-            }
-        }.getOrNull()
+        recoveryReport = readSavedReport(context)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, failure ->
             runCatching { save(thread, failure) }
@@ -44,6 +33,20 @@ internal object LaunchFailure {
             }
         }
     }
+
+    /** Read from the isolated diagnostics process without installing a second crash writer. */
+    fun readSavedReport(context: Context): String? = runCatching {
+        AtomicFile(File(context.noBackupFilesDir, "last-failure.txt")).openRead().use { input ->
+            val bytes = ByteArray(MAX_BYTES)
+            var count = 0
+            while (count < bytes.size) {
+                val n = input.read(bytes, count, bytes.size - count)
+                if (n <= 0) break
+                count += n
+            }
+            bytes.decodeToString(0, count).takeIf { it.isNotBlank() }
+        }
+    }.getOrNull()
 
     fun retry() {
         record?.delete()
@@ -79,7 +82,7 @@ internal object LaunchFailure {
         }
     }
 
-    private fun redact(message: String): String = message
+    internal fun redact(message: String): String = message
         .replace(Regex("(?i)bearer\\s+[^\\s,;]+"), "Bearer [redacted]")
         .replace(Regex("(?i)(password|passwd|token|cookie|authorization)([\\\"'\\s:=]+)[^\\s,;\\\"']+"), "$1$2[redacted]")
         .replace(Regex("(https?://[^\\s?]+)\\?[^\\s]+"), "$1?[redacted]")

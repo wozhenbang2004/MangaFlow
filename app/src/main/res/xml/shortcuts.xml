@@ -1,0 +1,13 @@
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="error_report"
+        android:enabled="true"
+        android:icon="@drawable/ic_mangaflow_mono"
+        android:shortcutShortLabel="@string/error_report_shortcut"
+        android:shortcutLongLabel="@string/error_report_shortcut">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="dev.mangaflow"
+            android:targetClass="dev.mangaflow.CrashReportActivity" />
+    </shortcut>
+</shortcuts>

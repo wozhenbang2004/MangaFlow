@@ -19,12 +19,12 @@ class MangaFlowApplication : Application() {
 
     override fun attachBaseContext(base: Context) {
         super.attachBaseContext(base)
-        LaunchFailure.install(this)
+        if (!isDiagnosticsProcess()) LaunchFailure.install(this)
     }
 
     override fun onCreate() {
         super.onCreate()
-        if (LaunchFailure.recoveryReport == null) initializeServices()
+        if (!isDiagnosticsProcess() && LaunchFailure.recoveryReport == null) initializeServices()
     }
 
     internal fun initializeServices() {

@@ -1,5 +1,13 @@
 # MangaFlow detail · 2026-11-12
 
+## Phone-only crash report shortcut · 2026-11-13 (LAUNCH-118-02; implemented, device acceptance pending)
+
+User: “点都点不开”; “点了就秒退”; “有本地错误日志吗”; “我能不能在我手机⬆️我自己找找这个路径在哪？”; “不行啊怎么办啊现在我现在也没办法连到电脑。”. The prior Compose recovery page and a private filesystem path do not provide a usable phone-only diagnostic route for this report. This slice changes the evidence-access path, not the unconfirmed crash cause.
+
+- A static launcher shortcut labelled “错误日志” starts CrashReportActivity directly in :diagnostics, with a separate task affinity, no recents entry and software rendering. Application detects that process before installing the Java handler or running app services, so it cannot repeat main's Haze/Coil/update initialization or overwrite the original crash record. Default-process automatic providers do not start in this process. MainActivity, Compose and the normal app scene are not attached. The main-process initialization and complete Haze 2.1 capabilities remain unchanged.
+- Reuse Android's system Sharesheet as the only visible diagnostic surface. User chooses copy/share there; no custom replacement UI, automatic clipboard write, chosen recipient or upload. The exported Activity ignores caller extras and reads only this app's bounded saved Java report plus API-30+ system exit metadata filtered to its exact main-process name. The latter can retain clues from versions without our recorder; it is not a native tombstone/stack, and Android may provide no record. Keep at most six entries from a bounded twelve-entry query, bound/redact descriptions and preserve the original report, credentials, history and downloads.
+- Source review covers shortcut metadata/resource/target names, API guards, Activity/task/process isolation, service initialization gates, privacy/handler ownership and the system sharing route. No tests, local build, emulator, UI automation or product API probes. Direct latest main; confirm release CI triggered only. Phone launcher support, actual report contents and the original startup cause remain pending user evidence. User route after installing this build: long-press the app icon, choose “错误日志”, then copy/share its text without opening the main app.
+
 ## Startup investigation after 113 → 118 · 2026-11-13 (LAUNCH-118-01; diagnosis remains open)
 
 User: “最新版 118 安装完直接打不开”; “立即闪退啊分析代码好吗就更新完 118 就这样了我之前是 113”. Current takeover: “接手液态玻璃优化提交对话”. Exact original message IDs are unavailable. Preserve the user's requirement to use the complete official Haze 2.1 runtime and all newer concurrent UI changes.
