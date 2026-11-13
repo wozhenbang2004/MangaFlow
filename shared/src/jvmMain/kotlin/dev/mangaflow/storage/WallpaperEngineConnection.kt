@@ -51,7 +51,11 @@ import kotlinx.serialization.json.put
  * Legacy per-frame CBC/IV reuse is required by that protocol, not a new
  * cryptographic design. The caller pins the computer key before sending secrets.
  */
-internal class WallpaperEngineConnection(private val temporaryDirectory: File) : AutoCloseable {
+internal class WallpaperEngineConnection(
+    private val temporaryDirectory: File,
+    private val routeDiscovery: (MulticastSocket) -> NetworkInterface? = { null },
+    private val routeConnection: (Socket, Inet4Address) -> Unit = { _, _ -> },
+) : AutoCloseable {
     private val guard = Any()
     private val sockets = mutableSetOf<Closeable>()
     @Volatile private var closed = false
@@ -59,11 +63,13 @@ internal class WallpaperEngineConnection(private val temporaryDirectory: File) :
     fun discover(onDevice: (WallpaperPcDevice) -> Unit) {
         val socket = own(MulticastSocket(null))
         try {
+            val localInterface = routeDiscovery(socket)
             socket.reuseAddress = true
             socket.bind(InetSocketAddress(DISCOVERY_PORT))
             socket.soTimeout = 1000
             val group = InetAddress.getByAddress(byteArrayOf(239.toByte(), 100, 0, 1))
-            val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            val interfaces = localInterface?.let { listOf(it) }
+                ?: NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
             for (network in interfaces) {
                 if (closed) return
                 try {
@@ -90,13 +96,18 @@ internal class WallpaperEngineConnection(private val temporaryDirectory: File) :
                 if (!isLocal(address)) continue
                 val payload = decodeUtf8(bytes.copyOfRange(packet.offset, packet.offset + packet.length))
                     ?: continue
-                val parts = payload.trim('\u0000', '\r', '\n').split(':')
-                if (parts.size !in 4..5 || !parts[0].equals("WallpaperEngine/Ping", true)) continue
+                // The identifier is opaque and may itself contain colons (legacy MAC form).
+                // Split only the fixed prefix; a known single-digit version precedes the ID.
+                val parts = payload.trim('\u0000', '\r', '\n').split(':', limit = 4)
+                if (parts.size != 4 || !parts[0].equals("WallpaperEngine/Ping", true)) continue
                 val port = parts[1].takeIf { it.length in 1..5 && it.all(Char::isDigit) }
-                    ?.toIntOrNull()?.takeIf { it in 1..65535 } ?: continue
-                val version = if (parts.size == 5) parts[3].toIntOrNull() ?: continue else 4
+                    ?.toIntOrNull()?.takeIf { it in 0..65535 } ?: continue
+                val tail = parts[3].split(':', limit = 2)
+                val hasVersion = tail.size == 2 && tail[0].length == 1 && tail[0][0] in '0'..'9'
+                val version = if (hasVersion) tail[0].toInt() else 4
                 if (version != 4) continue
-                val identifier = parts.last().takeIf { it.isNotBlank() && it.length <= 128 } ?: continue
+                val identifier = (if (hasVersion) tail[1] else parts[3])
+                    .takeIf { it.isNotBlank() && it.length <= 128 && it.none { character -> Character.isISOControl(character) } } ?: continue
                 val host = address.hostAddress ?: continue
                 val id = identifier + "@" + host + ":" + port
                 if (id in reported || reported.size >= 64) continue
@@ -132,6 +143,7 @@ internal class WallpaperEngineConnection(private val temporaryDirectory: File) :
         var ownedDirectory: File? = null
         var current: Upload? = null
         try {
+            routeConnection(socket, address)
             socket.connect(InetSocketAddress(address, device.port), AUTH_TIMEOUT)
             socket.tcpNoDelay = true
             socket.soTimeout = AUTH_TIMEOUT

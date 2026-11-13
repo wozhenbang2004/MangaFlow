@@ -42,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -92,6 +93,7 @@ internal fun WallpaperPcSheet(
     var manual by remember(visible) { mutableStateOf(false) }
     var address by remember(visible) { mutableStateOf("") }
     var paused by remember(visible) { mutableStateOf(false) }
+    val panelVisible by rememberUpdatedState(visible)
 
     DisposableEffect(client, lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
@@ -99,6 +101,9 @@ internal fun WallpaperPcSheet(
                 pin = ""
                 paused = true
                 client.disconnect()
+            } else if (event == Lifecycle.Event.ON_START && panelVisible) {
+                paused = false
+                client.discover()
             }
         }
         lifecycle.addObserver(observer)
@@ -113,6 +118,14 @@ internal fun WallpaperPcSheet(
             paused = false
             client.discover()
         } else client.disconnect()
+    }
+    LaunchedEffect(state.devices, target?.id) {
+        // A computer can announce before its TCP pairing listener is ready.
+        // Keep the row visible and promote it when the real ready announcement arrives.
+        val selected = target
+        if (selected != null && selected.port == 0) {
+            state.devices.firstOrNull { it.id == selected.id && it.port > 0 }?.let { target = it }
+        }
     }
     LaunchedEffect(state.connectedName) {
         if (state.connectedName != null) {
@@ -197,38 +210,43 @@ internal fun WallpaperPcSheet(
                         }
                     }
                 } else {
-                    Text("电脑和本设备连接同一网络。在电脑打开「移动设备 → 连接新设备」。",
+                    Text("电脑和本设备需在同一局域网。先在电脑打开「移动设备 → 连接新设备」，保持四位配对码页面。",
                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                     val selected = target
                     if (selected != null) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            MotionIconButton(onClick = { target = null; pin = ""; client.disconnect() },
+                            MotionIconButton(onClick = { target = null; pin = ""; client.disconnect(); client.discover() },
                                 enabled = !state.connecting, modifier = Modifier.size(40.dp)) {
                                 Icon(Icons.Outlined.ChevronLeft, "返回电脑列表", Modifier.size(20.dp))
                             }
                             Text(selected.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                            .background(colors.onSurface.copy(alpha = .045f)).padding(start = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            BasicTextField(pin, onValueChange = { value ->
-                                pin = value.filter { it in '0'..'9' }.take(4)
-                            }, modifier = Modifier.weight(1f).padding(vertical = 14.dp)
-                                .semantics { contentDescription = "电脑显示的四位配对码" },
-                                enabled = !state.connecting, singleLine = true,
-                                visualTransformation = PasswordVisualTransformation(),
-                                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface, letterSpacing = 7.sp),
-                                cursorBrush = SolidColor(colors.onSurface),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Go),
-                                keyboardActions = KeyboardActions(onGo = { connect() }),
-                                decorationBox = { input -> Box {
-                                    if (pin.isEmpty()) Text("四位配对码", style = MaterialTheme.typography.bodyMedium,
-                                        color = colors.onSurfaceVariant)
-                                    input()
-                                } })
-                            MotionTextButton(onClick = connect, enabled = pin.length == 4 && !state.connecting) {
-                                Text(if (state.connecting) "连接中…" else "连接")
+                        if (selected.port == 0) {
+                            Text("已收到电脑广播，连接尚未开放。在电脑打开「连接新设备」后，这里会继续显示配对入口。",
+                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        } else {
+                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                .background(colors.onSurface.copy(alpha = .045f)).padding(start = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                BasicTextField(pin, onValueChange = { value ->
+                                    pin = value.filter { it in '0'..'9' }.take(4)
+                                }, modifier = Modifier.weight(1f).padding(vertical = 14.dp)
+                                    .semantics { contentDescription = "电脑显示的四位配对码" },
+                                    enabled = !state.connecting, singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface, letterSpacing = 7.sp),
+                                    cursorBrush = SolidColor(colors.onSurface),
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Go),
+                                    keyboardActions = KeyboardActions(onGo = { connect() }),
+                                    decorationBox = { input -> Box {
+                                        if (pin.isEmpty()) Text("四位配对码", style = MaterialTheme.typography.bodyMedium,
+                                            color = colors.onSurfaceVariant)
+                                        input()
+                                    } })
+                                MotionTextButton(onClick = connect, enabled = pin.length == 4 && !state.connecting) {
+                                    Text(if (state.connecting) "连接中…" else "连接")
+                                }
                             }
                         }
                         if (selected.paired && !state.connecting) Row(Modifier.fillMaxWidth(),
@@ -251,7 +269,7 @@ internal fun WallpaperPcSheet(
                                     .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                                         onClickLabel = "连接 ${device.name}") {
                                         target = device; pin = ""; manual = false; paused = false
-                                        if (device.paired) client.connect(device, "")
+                                        if (device.paired && device.port > 0) client.connect(device, "")
                                     }.motionPress(interaction).padding(vertical = 10.dp, horizontal = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -259,7 +277,8 @@ internal fun WallpaperPcSheet(
                                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                         Text(device.name, style = MaterialTheme.typography.bodyMedium,
                                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        Text(if (device.paired) "${device.address} · 已配对" else device.address,
+                                        Text(if (device.port == 0) "${device.address} · 连接未开放"
+                                            else if (device.paired) "${device.address} · 已配对" else device.address,
                                             style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                                     }
                                     if (device.paired) MotionIconButton(onClick = { target = device; pin = "" },
@@ -301,7 +320,7 @@ internal fun WallpaperPcSheet(
                                 }
                             }
                         } else MotionTextButton(onClick = { manual = true }) {
-                            Text("输入电脑地址", style = MaterialTheme.typography.labelMedium)
+                            Text("用 IP 直连", style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
@@ -325,8 +344,12 @@ internal fun WallpaperPcSheet(
 
 private fun validPcAddress(value: String): Boolean {
     val parts = value.split('.')
-    return parts.size == 4 && parts.all { part -> part.isNotEmpty() && part.length <= 3 &&
-        part.all { it in '0'..'9' } && (part.toIntOrNull() ?: -1) in 0..255 }
+    if (parts.size != 4 || parts.any { part -> part.isEmpty() || part.length > 3 ||
+        part.any { it !in '0'..'9' } || (part.toIntOrNull() ?: -1) !in 0..255 }) return false
+    val first = parts[0].toInt()
+    val second = parts[1].toInt()
+    return first == 10 || first == 127 || (first == 192 && second == 168) ||
+        (first == 172 && second in 16..31) || (first == 169 && second == 254)
 }
 
 private fun pcByteLabel(value: Long): String = when {

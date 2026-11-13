@@ -1,5 +1,18 @@
 # MangaFlow · current work
 
+## Current follow-up: real aliases / LAN discovery / quality comparison / Steam route
+
+Raw requirements and scope are DESIGN.md SOURCE-ALIAS-119 through STEAM-WORKSHOP-122. The user explicitly requested multi-channel higher-resolution image comparison and then reported1000121659's still-pending association plus missing PC discovery; the additional question requests Steam authentication/direct Workshop acquisition research.
+
+Source batch: Copy preserves true comma-delimited upstream alias metadata in search/list and detail; no fuzzy identity or edition migration. Wallpaper foreground discovery no longer expires after15seconds, resumes on foreground, preserves legacy colon identifiers, shows port0 readiness, and routes Android sockets over a physical LAN while retaining existing PIN/security/media/cancel behavior. Direct IP already existed.
+
+Real anonymous public source comparison, newly authorized only for this investigation: Copy native chapter45/22image and Komiic work3625/chapter121288/21image responses were obtained. Visually same colour page is Copy1500×2076/196732bytes versus Komiic1200×1660/147351bytes at different native indexes. Two Copy URL suffix removals returned404; MangaDex chapter responses were HTML. Actual file dimensions do not prove extra detail, uniform chapter quality, equal edition/page indexes or user-phone speed. Preserve real native bytes/IDs and existing cache/request-sharing paths; no automatic winner or suffix rewrite is introduced.
+
+Steam QR/client-session download route is evidenced in haru/tapline/Open Wallpaper Engine, pinned in research/wallpaper-engine-integration-20261113.md. No Android binding/account login/Workshop download exists in this batch. The route needs JNI/build/token-store adaptation plus actual media validation, account ownership, progress/cancel and original-media import. PC PIN remains a separate working path candidate.
+
+Root alone integrates five source blobs plus existing documentation in one expected-head latest-main commit; earlier normalization blobs are explicitly discarded. Parent a2730c1 Android43487843192 and native43487843080 were observed completed/success before this batch. Use the existing normal main publication/native workflows without tests/local builds/new review gate; confirm matching CI identities and keep main stable. Device association/official-PC pairing/appearance remain pending the real new artifact. Public source sampling was the user's new scoped authorization, not permission to probe user devices or retry accounts.
+
+
 ## Visible manga resolution · 2026-11-14
 
 Current raw requirement is DESIGN.md RESOLUTION-116–118 / resumed QUALITY-42: “我之前要的漫画分辨率信息怎么还没弄出来”, repeated twice. The earlier downloaded-record/long-inspection-only field was insufficient; current scope adds actual visible reader and read/download source-row information.

@@ -374,6 +374,7 @@ class CopyMangaRepository(
                     title = title,
                     coverUrl = cover,
                     authors = authors,
+                    alternativeTitles = comicAliases(comic),
                     authorPaths = authorPaths(comic),
                     tags = comic.optJSONArray("theme")?.objects()?.mapNotNull { it.text("name").takeIf(String::isNotBlank) }.orEmpty(),
                     tagPaths = themePaths(comic),
@@ -389,6 +390,10 @@ class CopyMangaRepository(
         val total = data.optInt("total", -1)
         return MangaPage(items.distinctBy(Manga::id), list.length() > 0 && if (total >= 0) next < total else list.length() == size)
     }
+
+    /** The App API supplies real alternative names as a comma-delimited alias string. */
+    private fun comicAliases(comic: JSONObject): List<String> =
+        comic.text("alias").split(',').map(String::trim).filter(String::isNotBlank).distinct()
 
     private suspend fun comicMetadata(mangaId: String): JSONObject {
         val url = apiOrigin.newBuilder().addPathSegments("api/v3/comic2").addPathSegment(mangaId).build()
@@ -412,6 +417,7 @@ class CopyMangaRepository(
             title = comic.requiredText("name"),
             coverUrl = optionalCover(comic.text("cover")),
             authors = comic.optJSONArray("author")?.objects()?.mapNotNull { it.text("name").takeIf(String::isNotBlank) }.orEmpty(),
+            alternativeTitles = comicAliases(comic),
             authorPaths = authorPaths(comic),
             tagPaths = themePaths(comic),
             description = comic.text("brief"),

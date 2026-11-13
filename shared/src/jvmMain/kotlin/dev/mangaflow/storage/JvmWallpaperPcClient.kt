@@ -10,6 +10,10 @@ import dev.mangaflow.platform.storage.readSecret
 import dev.mangaflow.platform.storage.writeSecret
 import dev.mangaflow.platform.storage.deleteSecret
 import java.io.File
+import java.net.Inet4Address
+import java.net.MulticastSocket
+import java.net.NetworkInterface
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -38,6 +42,8 @@ internal class JvmWallpaperPcClient(
     private val displayWidth: Int,
     private val displayHeight: Int,
     private val acquireDiscovery: () -> (() -> Unit) = { {} },
+    private val routeDiscovery: (MulticastSocket) -> NetworkInterface? = { null },
+    private val routeConnection: (Socket, Inet4Address) -> Unit = { _, _ -> },
 ) : WallpaperPcClient {
     private val app = applicationContext(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -51,7 +57,7 @@ internal class JvmWallpaperPcClient(
     @Volatile private var currentDevice: WallpaperPcDevice? = null
     @Volatile private var pairedIds: Set<String> = emptySet()
     private var scanJob: Job? = null
-    private var scanTimeout: Job? = null
+    private var scanHintJob: Job? = null
     private var connectionJob: Job? = null
 
     override fun discover() {
@@ -59,7 +65,7 @@ internal class JvmWallpaperPcClient(
         stopDiscovery()
         val token = scanGeneration.incrementAndGet()
         _state.update { it.copy(discovering = true, devices = emptyList(), error = null, message = null) }
-        val transport = WallpaperEngineConnection(File(cacheDirectory(app).path, "wallpaper-pc"))
+        val transport = WallpaperEngineConnection(File(cacheDirectory(app).path, "wallpaper-pc"), routeDiscovery, routeConnection)
         scan = transport
         scanJob = scope.launch {
             var release: (() -> Unit)? = null
@@ -71,14 +77,14 @@ internal class JvmWallpaperPcClient(
                     if (!closed && scanGeneration.get() == token) _state.update { previous ->
                         val device = found.copy(paired = found.id in pairedIds)
                         previous.copy(devices = (previous.devices.filterNot { it.id == device.id } + device)
-                            .take(64).sortedBy { it.name.lowercase() })
+                            .take(64).sortedBy { it.name.lowercase() }, message = null)
                     }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: SecurityException) {
                 if (scanGeneration.get() == token) _state.update {
-                    it.copy(error = "局域网权限不可用，请在系统设置允许附近设备后重试。")
+                    it.copy(error = "局域网访问被系统阻止，请检查网络权限后重试。")
                 }
             } catch (_: Exception) {
                 if (scanGeneration.get() == token) _state.update {
@@ -92,14 +98,24 @@ internal class JvmWallpaperPcClient(
                 }
             }
         }
-        scanTimeout = scope.launch {
-            delay(15_000)
-            if (scanGeneration.get() == token) transport.close()
+        scanHintJob = scope.launch {
+            delay(8_000)
+            // Keep the foreground listener alive while the user opens the PC's pairing screen.
+            // A late announcement must not require another refresh.
+            if (scanGeneration.get() == token) _state.update {
+                if (it.devices.isEmpty()) it.copy(message =
+                    "仍在等待电脑广播。保持电脑的四位配对码页面打开，也可以输入电脑 IP 直连。")
+                else it
+            }
         }
     }
 
     override fun connect(device: WallpaperPcDevice, pin: String) {
         if (closed || _state.value.connecting || _state.value.connectedName != null) return
+        if (device.port == 0) {
+            _state.update { it.copy(error = "已发现电脑，但它尚未开放连接。请在电脑打开「移动设备 → 连接新设备」。") }
+            return
+        }
         if (pin.isNotEmpty() && (pin.length != 4 || pin.any { it !in '0'..'9' })) {
             _state.update { it.copy(error = "请输入电脑显示的四位配对码。") }
             return
@@ -109,7 +125,7 @@ internal class JvmWallpaperPcClient(
         connection?.close()
         connectionJob?.cancel()
         currentDevice = device
-        val transport = WallpaperEngineConnection(File(cacheDirectory(app).path, "wallpaper-pc"))
+        val transport = WallpaperEngineConnection(File(cacheDirectory(app).path, "wallpaper-pc"), routeDiscovery, routeConnection)
         connection = transport
         _state.update { it.copy(connecting = true, connectedName = null, discovering = false,
             transferName = null, receivedBytes = 0, totalBytes = 0, error = null, message = null) }
@@ -185,7 +201,7 @@ internal class JvmWallpaperPcClient(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: SecurityException) {
-                update(token) { it.copy(error = "局域网权限不可用，请允许附近设备后重试。") }
+                update(token) { it.copy(error = "局域网访问被系统阻止，请检查网络权限后重试。") }
             } catch (failure: Exception) {
                 update(token) { it.copy(error = failure.message ?: "电脑连接已断开，请重新连接。") }
             } finally {
@@ -238,9 +254,9 @@ internal class JvmWallpaperPcClient(
         scan?.close()
         scan = null
         scanJob?.cancel()
-        scanTimeout?.cancel()
+        scanHintJob?.cancel()
         scanJob = null
-        scanTimeout = null
+        scanHintJob = null
     }
 
     private fun update(token: Long, transform: (WallpaperPcState) -> WallpaperPcState) {

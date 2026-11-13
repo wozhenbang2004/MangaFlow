@@ -1,5 +1,40 @@
 # MangaFlow detail · 2026-11-12
 
+## Alias confirmation, LAN discovery and real source comparison (119–122)
+
+Raw user requirements (exact message IDs unavailable): “关于分辨率你要不要测试下多个渠道获取更高分辨率的图片呢？”; “这个也没法自动确认啊以及 wallpaperengine 那个一直搜不到电脑啊” with1000121659.jpg; “以及能不能实现我们直接认证 steam 我们自己可以调 wallpaperengine 的 api 说不定已经有人做了第三方客户端”. Preserve the existing resolution, download-progress/filter-settling, loading, font, updater and cross-platform work.
+
+| ID | Scope, decision and evidence |
+| --- | --- |
+| SOURCE-ALIAS-119 | Copy search/list and detail/onMetadata now retain actual comma-delimited comic.alias values in the existing Manga.alternativeTitles field, trimming blanks and duplicates. Live public search and comic2 metadata for pengyoujiejiezhifanwo returned 姊姊朋友只煩我（連載版）, authorあずさきな, with explicit aliases 姐姐的朋友只煩我/姐姐的朋友只烦我; Komiic3625 returned 姐姐的朋友只煩我 and the same author. The mapper previously discarded this exact evidence. Use the existing strict title/author/native-directory/ID/ambiguity checks and existing alias persistence; no guessed kinship/的 substitutions or fuzzy threshold change. The normalization draft was withdrawn and is not part of the source batch. User associations and native numbering remain unchanged. |
+| PC-DISCOVERY-120 | Remove the15-second listener shutdown while the foreground panel remains open; show an8-second actionable hint while continuing to receive. ON_START resumes discovery after ON_STOP cleanup. Parse only the fixed broadcast prefix, preserving bounded opaque legacy MAC identifiers and rejecting unsupported explicit protocol versions. A port0 announcement is visible as connection not yet open and can be promoted by a ready announcement. Android discovery/connection sockets prefer the physical Wi-Fi/Ethernet LAN without a process-wide network change; multicast lock/permission already existed. Keep manual IP, PIN, public-key pinning, encrypted secrets, validated image/video import and foreground cancellation. Official Windows/phone interoperation is not observed. |
+| QUALITY-COMPARE-121 | The user's explicit request authorizes bounded anonymous public source/API/image comparison in the cloud for this slice only. It does not authorize tests/local builds/user-device probes/account login. Real image bytes were decoded for dimensions, format, length and SHA256. Same-artwork comparison and failures are below. Preserve current native URLs/original bytes, provider IDs/edition boundaries and existing source selection; this sample does not justify auto-switching every title, scanning every page or claiming larger pixel dimensions prove finer detail. |
+| STEAM-WORKSHOP-122 | Investigate direct account login and Workshop downloads independent of LAN transfer. Primary source confirms haru and Open Wallpaper Engine implement this route, and tapline exposes actual QR-login/download/progress/cancel C ABI jobs. Steam OpenID identity alone does not supply a content-download session. Candidate direction is a Steam client session with owned-content permission, followed by validated actual image/video extraction; preserve PC PIN transfer separately. Android bindings/build/session storage have not been integrated or verified, so this batch has no Steam login UI or download capability claim. Details and pinned sources are in research/wallpaper-engine-integration-20261113.md. |
+
+### Actual source observations for119/121
+
+Anonymous Copy App3.1.1 public metadata returned code200, is_banned=false, is_lock=false and 免費/value1 for comic UUIDa8964016-b393-11ef-941b-3f487b7d9a9a. Its native limit100 directory returned45 chapters and chapter c23dd290-b393-11ef-941b-3f487b7d9a9a had22 ordered images, with both comic relationships verified. An initial limit3 exploratory directory returned an empty list/total0; the unchanged production adapter already uses100. The earlier exploratory /api/v3/comic path returned404; the actual production metadata route is /api/v3/comic2. These corrected requests are observations, not an adapter-protocol change. No private account/token or restricted-content fallback was used.
+
+Komiic search and native chapter/image queries returned work3625, chapter121288,21 images. Its title/author prove work evidence alongside Copy's own aliases;21 versus22 and observed cover/blank-page differences do not establish equal page indexes or edition/numbering identity.
+
+| Actual request/image | Decoded result | Byte length / identity | Interpretation |
+| --- | --- | --- | --- |
+| Copy native image1733463384980005.jpeg.c1500x.webp, page1 | WEBP1438×2048 |321446; SHA256e2bc3a538127b0805d43afdd3d5414f4c03e399f961867a69d6fd046187ed6fe|Chapter-image cover; not a website preview. |
+| Copy native image1733463387590002.jpg.c1500x.webp, page2 | WEBP1500×1942 |6434; SHA25658a7198537e9737515a727d4ee3c7f2c209af6a99c3c058da0b1635486238e24|Visually inspected blank page with watermark; low bytes do not mean invalid dimensions. |
+| Copy native image1733463390240009.jpg.c1500x.webp, page3 | WEBP1500×2076 |196732; SHA2568b48a2d473336d206b575389d7efc7b8b26c4b924ae2bacf137cf55060c68641|Visually matches the colour artwork in Komiic page2, with different watermark. |
+| Komiic kid469507c4-0046-44a2-b72a-ac71c355497d, page1 | JPEG1200×1552 |13152; SHA2568b37d85f2923b7613089691214918672c73ebca30dc40a8050ebbf59d7869450|Response Content-Type said image/webp while the decoded file was JPEG; measure actual headers/bytes. |
+| Komiic kidc937df45-a805-41ff-a764-1d07cd518a96, page2 | JPEG1200×1660 |147351; SHA256e18e76352e302382bbad626c49ec2855d486e1a0b4c8b413abc09d089622876d|Same colour artwork as Copy page3, not the same native index. |
+| Komiic kida9192e81-f022-4628-9b3f-23cbc6ba0ce6, page3 | JPEG1200×1660 |36443; SHA256dffd1843bc7f24a04a6a10910bc676c08577f6f3c11e0775b923c153c126fb0b|Visually inspected table of contents, not equivalent to Copy page3. |
+| Copy observed first-two URLs with only .c1500x.webp removed | HTTP404 for both |No decodable image|Do not deploy blind suffix removal as an “original image” strategy. No arbitrary size suffixes were enumerated. |
+| MangaDex original Frieren workb0b721ff-c388-4486-aa0f-c2b0bb321512 |Search/ping returned usable responses; chapter/feed queries returned HTML rather than chapter JSON|No original/data-saver pair obtained|Current adapter already requests chapter.data originals; this observation cannot rank its images or justify switching to compressed dataSaver. No access-wall solver or account was used. |
+
+Comparison result: for the one visually aligned colour page, Copy's returned width is25% larger and its pixel count about56% higher than Komiic's. This is a real native-file size comparison, not a whole-work quality ranking or a claim of extra original detail. Keep exposing true per-page/source sample sizes. No image rewriting, upscaling, full-chapter image scan, authentication bypass or measured device speed claim is included.
+
+### Integration and acceptance
+
+Root integrates the five source blobs and these records once onto the latest main with expected-head protection. The parent a2730c1 Android43487843192 and native43487843080 were observed completed/success before integration. Existing main release/native workflows build/package; no test/lint/local-build/review gate is added. Confirm matching new CI identities after publication, keep main stable, and distinguish source completion from the phone's automatic association/LAN pairing acceptance. Source files preserve the loading/cache fast paths and genuine source/history/download identity. Steam direct-download remains researched and unimplemented; its Android build, session lifecycle, original media import and artifact acceptance are outstanding.
+
+
 ## Visible original-page resolution · 2026-11-14 (RESOLUTION-116–118)
 
 Raw user (exact message IDs unavailable): “我之前要的漫画分辨率信息怎么还没弄出来” repeated twice. This resumes QUALITY-42; it does not withdraw the existing current loading, fonts, downloads or filter requirements.

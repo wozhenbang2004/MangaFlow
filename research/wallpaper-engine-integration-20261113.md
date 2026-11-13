@@ -1,5 +1,37 @@
 # Wallpaper Engine 与 MangaFlow 壁纸接入研究
 
+## 当前补充：电脑发现修正与 Steam 直接下载调研
+
+用户原话：“这个也没法自动确认啊以及 wallpaperengine 那个一直搜不到电脑啊”；“以及能不能实现我们直接认证 steam 我们自己可以调 wallpaperengine 的 api 说不定已经有人做了第三方客户端”。本段补充现有PC-WALLPAPER-40，不把Steam内容下载与局域网PIN传输混成一个API。
+
+### 当前源码修正
+
+- 前台发现不再15秒后自动停止，8秒后给出保持电脑配对码页打开／IP直连的提示，监听继续。
+- ON_STOP仍停止接收并清PIN；返回ON_START恢复发现。离开面板仍关闭资源。
+- UDP固定前缀后保留带冒号的旧式机器标识；有界校验、显式非4版本拒绝。端口0作为已发现但未开放连接，收到真实可连接广播后更新。
+- Android单个UDP/TCP socket优先绑定物理Wi-Fi/Ethernet及目标子网，不全局切网。已有multicast权限和锁保留；没有臆加当前targetSdk35不适用的未来Android运行时权限。
+- 手动IP原本就存在，本轮是表达与地址校验对齐；不把它当成新功能。加密/PIN/RSA指纹/秘密存储/媒体完整验证保持。
+- 官方流程仍是同一局域网，PC“移动设备→连接新设备”并保持四位配对码页。未进入用户电脑/手机或探测其网络，不能确认路由隔离、防火墙或实际互通。
+
+主来源：[官方配对](https://help.wallpaperengine.io/en/mobile/pairing.html)、[官方排障/端口](https://help.wallpaperengine.io/en/mobile/pairing-fixes.html)、[固定Mirage协议来源](https://github.com/laobamac/MirageWallpaper/blob/e66f14b9cffa8129602b3582711f5881df91d159/Mirage/Mirage%20Wallpaper/Services/MobilePairingService.swift)、[Android Network单socket绑定](https://developer.android.com/reference/android/net/Network)、[Android局域网权限适用版本](https://developer.android.com/privacy-and-security/local-network-permission)。
+
+### 已核对的直接下载路线
+
+结论：有第三方成品和可复用下载核心；可以设计成Steam登录后从创意工坊取内容，脱离电脑搜索/配对。此处“脱离”是接入路线的能力，不代表MangaFlow已实现。没有找到可简单声称为官方Wallpaper Engine公开媒体下载SDK的依据。Steam网页OpenID返回身份/SteamID，不能单凭该返回值当Steam内容会话；原文件获取还涉及Steam会话、Workshop manifest/depot与账号许可。[Steam官方身份/所有权文档](https://partner.steamgames.com/doc/features/auth)、[PublishedFile接口](https://partner.steamgames.com/doc/webapi/IPublishedFileService)。不同WebAPI方法的key要求各异，不能把某个方法的要求扩大成所有接口，也不能在App放发布者秘密key。
+
+| 固定来源 | 实际读取／已有能力 | 平台／采用边界 |
+| --- | --- | --- |
+| [haru292ee12](https://github.com/UnhingedSoftware/haru/tree/292ee12a86099067ef8232d413555c50ad8b5a48) | primaryREADME和结构；MPL-2.0。Linux/macOS第三方Wallpaper Engine客户端，Workshop浏览／安装使用tapline，QR登录、账号持有431960，下载不需Steam客户端运行。 | 成品参考；不是安卓成品。README提到分离的haru-core/haru-workshop，不把桌面渲染器作为当前必要依赖。作者自己的性能/条目数量不是我们的实测。 |
+| [taplinef541366](https://github.com/UnhingedSoftware/tapline/tree/f54136611519bef50cf31336e0c28a78eb175657) | primaryREADME、workspace Cargo、完整FFI lib.rs、auth入口和LICENSE；MPL-2.0。Rust CM/PICS/SteamPipe/Workshop，匿名浏览和许可账号下载，真实C ABI QR登录、workshop_search/download、异步进度／取消／释放函数。 | 优先评估的协议核心；bindings只有JS，没有Android/JNI/Kotlin绑定或本项目Android构建证据。不能把“Rust/C ABI可适配”当已支持Android。 |
+| [Open Wallpaper Engine4f4df35](https://github.com/deepratna-awale/open-wallpaper-engine-mac/tree/4f4df35428ce5beee953f64a6fc22d078fb5aaef) | primaryREADME：macOS14+第三方客户端，Steam移动App扫码/密码登录下载，beta13起不再用SteamCMD/WebAPIkey；Metal Scene等为该项目能力。 | App GPL3，README明确SteamHelper为GPL2-or-later、SteamKit2 LGPL2.1/DepotDownloader GPL2来源。不是直接塞进Android的SDK，不引入整套.NET/Metal/Scene运行时。 |
+
+tapline实际FFI签名tapline_qr_login(timeout_secs,out)返回异步job；发kind=qr/url事件，成功发kind=loggedIn/account。目前实现直接TokenStore::default_file().save(token)，所以“照搬FFI就自动符合手机秘密存储”是错误的。适配需要会话/令牌存储回调或受控修改，接AndroidKeystore与WindowsDPAPI，错误/日志脱敏、取消/退出/账号切换清理；不向本轮用户收集密码，也未登录任何Steam账号。
+
+建议接入顺序：先只做已拥有Wallpaper Engine账号的二维码登录、会话恢复/退出和Workshop图片/视频条目搜索；后台任务下载实际原文件并显示真实进度/取消，再按project.json主媒体和真实文件签名走既有WallpaperStore。只有原视频/图片可入库，预览封面不等于原图，下载Scene/Web/.pkg不等于可以播放；继续保持用户不要交互场景播放器的范围。安卓Rust目标/JNI绑定、CI产物、可选组件体积与完整依赖许可需要随实施核实，当前未添加任何依赖或虚假入口。
+
+本轮状态：电脑发现源码修正就绪；Steam路线调研完成并固定来源，尚未接入MangaFlow。未运行本地构建/测试/设备探测，也没有Steam账号会话或真实Workshop下载/移动解码成功证据。源码准备、CI触发/成功与真实互操作必须分开报告。
+
+
 ## 当前直接配对实现 · 2026-11-14
 
 本段替代下方2026-11-13的“外部LocalSend首片”作为当前采用路线。用户本轮原话：“我们要的能直接和 wallpaper 那个配对直接拿到壁纸的功能怎么没看到？只要精态和动态的继续交互的没必要”，随后明确“去做啊”。“精态”按此前已确认的静态图片理解；范围是静态图片/动态视频，不实现交互场景播放器。历史LocalSend研究保留，不能当成已满足直接配对。
