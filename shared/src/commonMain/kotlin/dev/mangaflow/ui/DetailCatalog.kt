@@ -499,7 +499,7 @@ private fun ChapterGroups(
         choices.indices.maxOf { index ->
             measurer.measure(labels[index], textStyle.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold), maxLines = 1).size.width +
                 measurer.measure(choices[index].second.toString(), textStyle.copy(fontSize = 10.sp), maxLines = 1).size.width
-        }.toDp() + 32.dp
+        }.toDp() + 20.dp
     }
     BoxWithConstraints(modifier) {
         val tabsWidth = maxOf(maxWidth, minimumSlot * choices.size)
@@ -508,8 +508,8 @@ private fun ChapterGroups(
                 modifier = Modifier.width(tabsWidth),
                 selected = choices.indexOfFirst { it.first == selected }, labels = labels,
                 onSelect = { onSelect(choices[it].first) },
-                foreground = DetailForeground, muted = DetailSecondary, indicator = DetailForeground.copy(alpha = .065f),
-                fullWidthIndicator = true, controlHeight = 40.dp, fontSize = 12.sp,
+                foreground = DetailForeground, muted = DetailSecondary, indicator = DetailForeground.copy(alpha = .045f),
+                fullWidthIndicator = true, controlHeight = 40.dp, indicatorHeight = 28.dp, fontSize = 12.sp,
                 treatment = MotionTabTreatment.Soft,
                 itemContent = { index, chosen, color ->
                     val label = labels[index]

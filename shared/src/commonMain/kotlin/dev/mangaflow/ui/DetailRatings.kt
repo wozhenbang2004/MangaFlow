@@ -53,14 +53,14 @@ import dev.mangaflow.ui.motion.MotionSwap
 /** One measured band shares heat priority and source stacking with discovery cards. */
 @Composable
 internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean = true, compact: Boolean = false, onExpand: () -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min = if (compact) 28.dp else 40.dp)
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
         .clickable(enabled = enabled, role = Role.Button, onClickLabel = "查看各站评分、样本与口径", onClick = onExpand),
         verticalAlignment = Alignment.CenterVertically) {
         MangaMetricBadges(manga, Modifier.weight(1f), foreground = foreground, compact = true,
             plain = true, valueSize = if (compact) 12.sp else 14.sp,
             onExpand = onExpand.takeIf { enabled })
         Spacer(Modifier.width(6.dp))
-        Icon(Icons.Outlined.ChevronRight, "展开评分", tint = foreground.copy(alpha = .8f), modifier = Modifier.size(18.dp))
+        Icon(Icons.Outlined.ChevronRight, "展开评分", tint = foreground.copy(alpha = .60f), modifier = Modifier.size(16.dp))
     }
 }
 

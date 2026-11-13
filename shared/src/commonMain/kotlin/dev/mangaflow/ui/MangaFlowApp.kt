@@ -751,6 +751,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         state = browse, repository = model.repository,
                                         discoverColumns = preferences.discoverColumns,
                                         updateColumns = preferences.updateColumns,
+                                        onDiscoverColumnsChange = { columns ->
+                                            model.library.updatePreferences(model.library.preferences.value.copy(discoverColumns = columns))
+                                        },
+                                        onUpdateColumnsChange = { columns ->
+                                            model.library.updatePreferences(model.library.preferences.value.copy(updateColumns = columns))
+                                        },
                                         backgroundState = discoveryBackground,
                                         searchExpanded = searchVisible,
                                         searchBackdrop = searchBackdrop,

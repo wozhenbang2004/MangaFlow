@@ -360,7 +360,7 @@ actual fun WallpaperVideo(path: String, playing: Boolean, modifier: Modifier, on
     DisposableEffect(player) {
         val center = NSNotificationCenter.defaultCenter
         val completed = center.addObserverForName(AVPlayerItemDidPlayToEndTimeNotification, player.currentItem, null) {
-            player.seekToTime(kCMTimeZero)
+            player.seekToTime(kCMTimeZero.readValue())
             if (latestPlaying.value) player.play()
         }
         val failed = center.addObserverForName(AVPlayerItemFailedToPlayToEndTimeNotification, player.currentItem, null) {

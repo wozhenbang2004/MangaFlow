@@ -75,6 +75,36 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon --console=plain --max-workers=2 -PmangaVersionName="$MANGA_VERSION" :desktopApp:packageDistributionForCurrentOS
           python scripts/native_release.py stage
+      - name: Show Windows packaging failure details
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $logRoot = 'desktopApp/build/compose/logs'
+          if (Test-Path -LiteralPath $logRoot) {
+            Get-ChildItem -LiteralPath $logRoot -Recurse -File -Filter '*.txt' | ForEach-Object {
+              Write-Output "::group::$($_.FullName)"
+              Get-Content -LiteralPath $_.FullName
+              Write-Output '::endgroup::'
+            }
+          }
+          $argumentRoot = 'desktopApp/build/compose/tmp'
+          if (Test-Path -LiteralPath $argumentRoot) {
+            Get-ChildItem -LiteralPath $argumentRoot -File -Filter 'package*.args.txt' | ForEach-Object {
+              Write-Output "::group::$($_.FullName)"
+              Get-Content -LiteralPath $_.FullName
+              Write-Output '::endgroup::'
+            }
+          }
+      - name: Preserve Windows packaging diagnostics
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mangaflow-packaging-diagnostics-${{ matrix.target }}-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            desktopApp/build/compose/logs/
+            desktopApp/build/compose/tmp/package*.args.txt
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Preserve desktop installers
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

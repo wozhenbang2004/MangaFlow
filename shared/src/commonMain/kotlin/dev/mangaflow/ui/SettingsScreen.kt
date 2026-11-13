@@ -52,7 +52,6 @@ import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Update
 import androidx.compose.material.icons.outlined.UploadFile
 import androidx.compose.material.icons.outlined.ViewDay
-import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.Image
@@ -333,7 +332,7 @@ fun SettingsScreen(
         item {
             // Keep the import controls composed while scrolling; their in-progress copy owns this lifetime.
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                SettingsSection("阅读") {
+                SettingsSection("阅读", sourceBackdrop) {
                     SettingsDisclosure("翻页方式", when (preferences.mode) {
                         ReadingMode.VERTICAL -> "纵向滚动"
                         ReadingMode.LEFT_TO_RIGHT -> "从左至右"
@@ -364,25 +363,13 @@ fun SettingsScreen(
                         }
                     }
                 }
-                SettingsSection("外观") {
-                    SettingsDisclosure("发现页布局", settingsLayoutLabel(preferences.discoverColumns),
-                        Icons.Outlined.ViewModule, expandedSetting == "discover-layout", { toggleSetting("discover-layout") }) {
-                        SettingsChoices(settingsLayoutChoices, preferences.discoverColumns) { columns ->
-                            libraryStore.updatePreferences(libraryStore.preferences.value.copy(discoverColumns = columns))
-                        }
-                    }
-                    SettingsDisclosure("更新页布局", settingsLayoutLabel(preferences.updateColumns),
-                        Icons.Outlined.Update, expandedSetting == "update-layout", { toggleSetting("update-layout") }) {
-                        SettingsChoices(settingsLayoutChoices, preferences.updateColumns) { columns ->
-                            libraryStore.updatePreferences(libraryStore.preferences.value.copy(updateColumns = columns))
-                        }
-                    }
+                SettingsSection("外观", sourceBackdrop) {
                     SettingsDisclosure("壁纸", if (wallpaper.mediaPath == null) "默认" else wallpaper.name.ifBlank { "本地壁纸" }, Icons.Outlined.Image,
                         expandedSetting == "wallpaper", { toggleSetting("wallpaper") }) {
                         WallpaperSettings(store = wallpaperStore)
                     }
                 }
-                SettingsSection("数据") {
+                SettingsSection("数据", sourceBackdrop) {
                     sourceRegistry?.let { registry ->
                         val sources by registry.entries.collectAsStateWithLifecycle()
                         val added = sources.count { !it.removed }
@@ -455,7 +442,7 @@ fun SettingsScreen(
                         modifier = Modifier.padding(vertical = 6.dp)) }
                 }
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SettingsSection("应用") {
+                    SettingsSection("应用", sourceBackdrop) {
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                             .animateContentSize(if (LocalMotionEnabled.current) tween(MangaMotion.Content) else snap()),
                             verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -855,17 +842,26 @@ private fun settingsInputColors() = OutlinedTextFieldDefaults.colors(
 )
 
 @Composable
-private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+private fun SettingsSection(title: String, backdrop: HazeState?, content: @Composable ColumnScope.() -> Unit) {
     val colors = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(20.dp)
+    val body: @Composable () -> Unit = {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp), content = content)
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(title, style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .8f),
             fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 4.dp))
-        Surface(Modifier.fillMaxWidth().softSurfaceShadow(shape, colors.surface.luminance() > .5f, strength = .48f),
-            shape = shape, color = lerp(colors.background, colors.surface, .85f), tonalElevation = 0.dp) {
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp), content = content)
+        val surfaceModifier = Modifier.fillMaxWidth()
+            .softSurfaceShadow(shape, colors.surface.luminance() > .5f, strength = .48f)
+        if (backdrop != null) {
+            // The root source ancestor excludes itself; PANEL samples the lower wallpaper source.
+            LiquidGlassSurface(state = backdrop, modifier = surfaceModifier, cornerRadius = 20.dp,
+                role = GlassSurfaceRole.PANEL, elevation = 0.dp) { body() }
+        } else {
+            Surface(surfaceModifier, shape = shape, color = lerp(colors.background, colors.surface, .85f),
+                tonalElevation = 0.dp) { body() }
         }
     }
 }
@@ -925,9 +921,6 @@ private fun SettingsRowIcon(icon: ImageVector) {
     Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
-private val settingsLayoutChoices = listOf(1 to "列表", 2 to "2列", 3 to "3列", 4 to "4列")
-
-private fun settingsLayoutLabel(columns: Int): String = if (columns == 1) "列表" else "${columns.coerceIn(2, 4)}列"
 
 @Composable
 private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onSelected: (T) -> Unit) {

@@ -44,10 +44,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.outlined.CloudOff
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material.icons.outlined.Female
 import androidx.compose.material.icons.outlined.Male
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
@@ -153,6 +156,8 @@ fun DiscoverScreen(
     repository: MangaRepository,
     discoverColumns: Int = 3,
     updateColumns: Int = 3,
+    onDiscoverColumnsChange: (Int) -> Unit,
+    onUpdateColumnsChange: (Int) -> Unit,
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onMore: () -> Unit,
@@ -199,6 +204,8 @@ fun DiscoverScreen(
             ) { pane ->
                 DiscoveryPane(pane, positions, repository,
                     columns = (if (pane.mode == DiscoveryMode.LATEST) updateColumns else discoverColumns).coerceIn(1, 4),
+                    onColumnsChange = if (pane.mode == DiscoveryMode.LATEST) onUpdateColumnsChange else onDiscoverColumnsChange,
+                    backdrop = searchBackdrop,
                     active = unobscured && !holdingContent && pane.cacheKey == browse.cacheKey,
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
@@ -545,6 +552,8 @@ private fun DiscoveryPane(
     positions: LinkedHashMap<String, LazyGridState>,
     repository: MangaRepository,
     columns: Int,
+    onColumnsChange: (Int) -> Unit,
+    backdrop: HazeState,
     active: Boolean,
     canAutoAdvance: Boolean,
     onRefresh: () -> Unit,
@@ -555,6 +564,7 @@ private fun DiscoveryPane(
     onRatings: (Manga) -> Unit,
     topPadding: Dp,
 ) {
+    var layoutPresent by remember(state.cacheKey) { mutableStateOf(false) }
     val retainedGrid = remember(state.cacheKey) {
         val saved = positions.remove(state.cacheKey) ?: LazyGridState()
         positions[state.cacheKey] = saved
@@ -612,15 +622,17 @@ private fun DiscoveryPane(
             if (state.mode == DiscoveryMode.RECOMMENDED) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "hero") {
                     FeaturedCarousel(state.items.take(6), repository,
-                        active && heroVisible && canAutoAdvance && !grid.isScrollInProgress,
+                        active && heroVisible && canAutoAdvance && !grid.isScrollInProgress && !layoutPresent,
                         onOpen = onOpen, onRatings = onRatings)
                 }
             }
             if (!ranking) item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现",
+                        modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-                    Spacer(Modifier.weight(1f))
+                    DiscoveryLayoutControl(columns, backdrop, active, onColumnsChange,
+                        onPresenceChange = { layoutPresent = it })
                     DiscoveryRefresh(state, onRefresh)
                 }
             }
@@ -722,6 +734,47 @@ private fun BrowseListRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             MangaMetricBadges(manga, Modifier.fillMaxWidth(), showMore = true, plain = true, onExpand = onRatings)
+        }
+    }
+}
+
+@Composable
+private fun DiscoveryLayoutControl(
+    columns: Int,
+    backdrop: HazeState,
+    enabled: Boolean,
+    onChange: (Int) -> Unit,
+    onPresenceChange: (Boolean) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    LaunchedEffect(enabled) { if (!enabled) expanded = false }
+    val label = if (columns == 1) "列表" else "${columns.coerceIn(2, 4)}列"
+    Box {
+        MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(44.dp)
+            .semantics { stateDescription = label }, enabled = enabled) {
+            Icon(Icons.Outlined.ViewModule, "浏览布局：$label", Modifier.size(19.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        CompactGlassPopover(visible = expanded, backdrop = backdrop,
+            onDismiss = { expanded = false }, onPresenceChange = onPresenceChange, maximumWidth = 168.dp) {
+            (1..4).forEach { value ->
+                val selected = value == columns
+                val interaction = remember(value) { MutableInteractionSource() }
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(if (selected) MaterialTheme.colorScheme.onSurface.copy(alpha = .065f) else Color.Transparent)
+                    .selectable(selected = selected, role = Role.RadioButton,
+                        interactionSource = interaction, indication = null,
+                        onClick = { if (!selected) onChange(value); expanded = false })
+                    .motionPress(interaction, pressedScale = .98f)
+                    .heightIn(min = 48.dp).padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (value == 1) "列表" else "${value}列", Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, lineHeight = 19.sp)
+                    if (selected) Icon(Icons.Outlined.Check, "已选中", Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    else Spacer(Modifier.size(18.dp))
+                }
+            }
         }
     }
 }

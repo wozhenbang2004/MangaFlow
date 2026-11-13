@@ -179,13 +179,13 @@ internal actual fun ReaderWindow(keepScreenOn: Boolean, controlsVisible: Boolean
         val oldStyle = application.statusBarStyle
         onDispose {
             application.setIdleTimerDisabled(oldIdle)
-            application.statusBarStyle = oldStyle
+            application.setStatusBarStyle(oldStyle, animated = false)
             application.setStatusBarHidden(oldStatus, UIStatusBarAnimation.UIStatusBarAnimationFade)
         }
     }
     LaunchedEffect(application, keepScreenOn, controlsVisible, lightChrome) {
         application.setIdleTimerDisabled(keepScreenOn)
-        application.statusBarStyle = if (lightChrome) UIStatusBarStyleDarkContent else UIStatusBarStyleLightContent
+        application.setStatusBarStyle(if (lightChrome) UIStatusBarStyleDarkContent else UIStatusBarStyleLightContent, animated = false)
         application.setStatusBarHidden(!controlsVisible, UIStatusBarAnimation.UIStatusBarAnimationFade)
     }
 }

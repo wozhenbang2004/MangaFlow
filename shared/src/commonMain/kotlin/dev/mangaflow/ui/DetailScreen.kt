@@ -74,6 +74,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -104,6 +105,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
@@ -243,9 +246,10 @@ fun DetailScreen(
     val atmosphereColor by animateColorAsState(lerp(DetailBackground, coverColor, .36f),
         animationSpec = if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(),
         label = "detail-artwork-atmosphere")
-    val heroSurface by animateColorAsState(lerp(MaterialTheme.colorScheme.surface, coverColor, .14f),
+    val informationTone by animateColorAsState(lerp(DetailBackground, coverColor,
+        if (DetailBackground.luminance() > .5f) .08f else .12f),
         animationSpec = if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(),
-        label = "detail-glass-tone")
+        label = "detail-information-tone")
     val contentColor by animateColorAsState(lerp(DetailBackground, coverColor,
         if (DetailBackground.luminance() > .5f) .025f else .045f),
         animationSpec = if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(),
@@ -302,11 +306,7 @@ fun DetailScreen(
         val collapsedHero = availableHeight < 420.dp
         val seamHeight = 16.dp
         var naturalHeroHeight by remember(current.id, maxWidth, density) { mutableIntStateOf(0) }
-        val heroFraction = if (compactHero) .60f else .72f
-        val minimumInfoHeight = ((if (compactHero) 260f else 340f) * fontScale + 22f).dp
-        val heroHeight = if (collapsedHero) 0.dp else
-            maxOf(availableHeight * heroFraction - 56.dp - seamHeight, minimumInfoHeight,
-                with(density) { naturalHeroHeight.toDp() } + 64.dp)
+        val heroHeight = if (collapsedHero) 0.dp else with(density) { naturalHeroHeight.toDp() }
         val heroPixels = with(density) { heroHeight.toPx() }
         val header = rememberTopAppBarState(initialHeightOffsetLimit = -heroPixels)
         val dockScrollTravel = with(density) { 96.dp.toPx() }
@@ -389,7 +389,11 @@ fun DetailScreen(
                     contentScale = ContentScale.Crop,
                 )
                 // A theme veil protects toolbar contrast; the same artwork hue reaches the seam.
-                Box(Modifier.matchParentSize().background(contentColor.copy(alpha = .30f)))
+                Box(Modifier.matchParentSize().background(Brush.verticalGradient(
+                    0f to informationTone.copy(alpha = .56f),
+                    .35f to informationTone.copy(alpha = .90f),
+                    1f to contentColor,
+                )))
                 Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                     .height(128.dp + seamHeight)
                     .background(Brush.verticalGradient(0f to Color.Transparent, 1f to contentColor)))
@@ -411,25 +415,21 @@ fun DetailScreen(
                     Modifier.fillMaxWidth().clipToBounds()
                         .layout { measurable, constraints ->
                             // Read the moving offset during layout, without recomposing the whole detail.
-                            val expanded = heroPixels.roundToInt().coerceAtLeast(0)
+                            // Measure the actual book content independently of the previous
+                            // header height. Long titles/type remain reachable by this scroll.
                             val foreground = measurable.measure(
-                                constraints.copy(minHeight = expanded, maxHeight = expanded),
+                                constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity),
                             )
+                            val expanded = foreground.height
                             val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
                             layout(foreground.width, (expanded + offset).coerceIn(constraints.minHeight, constraints.maxHeight)) {
                                 foreground.placeRelative(0, offset)
                             }
                         },
                 ) {
-                    Box(Modifier.fillMaxSize().scrollable(artworkScroll, Orientation.Vertical,
-                        reverseDirection = true, enabled = active))
-                    Column(
-                        Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.Bottom,
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        if (!collapsedHero) {
-                            HeroBookInformation(current, coverPainter, artworkBackdrop, heroSurface,
+                    if (!collapsedHero) {
+                        key(current.id, maxWidth, density) {
+                            HeroBookInformation(current, coverPainter, informationTone,
                                 compact = compactHero, onIntroduction = { fullIntroduction = true },
                                 onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
                                 onTag = { onTag(current, it) },
@@ -467,7 +467,9 @@ fun DetailScreen(
                         downloadMode = chapterDownloadMode,
                         onToggleDownload = { chapterDownloadMode = !chapterDownloadMode },
                     )
-                    MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth(),
+                    // The dock has a stable lane, so it cannot cover the first or last row.
+                    // Keep the largest measured clearance while its visual body condenses.
+                    MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth().padding(bottom = readingInset),
                         contentKey = { it }, order = { it }, soft = true) { targetSection ->
                         sections.SaveableStateProvider(targetSection) {
                             when (targetSection) {
@@ -479,7 +481,7 @@ fun DetailScreen(
                                     onScrollTarget = { catalogGrid = it },
                                     onRetry = onRetry, onRead = onRead, onDownload = onDownload,
                                     loadVolumeCover = loadVolumeCover, volumeImageHeaders = volumeImageHeaders,
-                                    bottomPadding = readingInset,
+                                    bottomPadding = 16.dp,
                                     downloadMode = chapterDownloadMode,
                                     backdrop = readingBackdrop,
                                     onReadVariant = onReadVariant,
@@ -498,7 +500,7 @@ fun DetailScreen(
                                     onRelink = onReviewRelink, loadReplies = loadReplies,
                                     onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
                                     captureBackdrop = false,
-                                    active = active && targetSection == activeSection, bottomPadding = readingInset,
+                                    active = active && targetSection == activeSection, bottomPadding = 16.dp,
                                     filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
                                     onFilterChanged = { commentFilterChanged = it },
                                 )
@@ -599,12 +601,12 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun HeroBookInformation(
     manga: Manga,
     cover: Painter,
-    backdrop: HazeState,
-    surface: Color,
+    informationTone: Color,
     compact: Boolean,
     onIntroduction: () -> Unit,
     onRatings: () -> Unit,
@@ -617,50 +619,57 @@ private fun HeroBookInformation(
     val infoVisible by remember(collapse) { derivedStateOf { collapse() < .98f } }
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
-    val ink = if (surface.luminance() > .5f) Color(0xFF242426) else Color.White
+    val ink = if (informationTone.luminance() > .5f) Color(0xFF242426) else Color.White
     val titleStyle = MaterialTheme.typography.headlineSmall.copy(
         fontSize = if (compact) 22.sp else 24.sp,
         lineHeight = if (compact) 29.sp else 31.sp,
         fontWeight = FontWeight.SemiBold,
     )
-    BoxWithConstraints(modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 14.dp)
+    BoxWithConstraints(modifier.fillMaxWidth().wrapContentHeight(unbounded = true)
+        .onSizeChanged { onNaturalHeight(it.height) }
+        .padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 8.dp)
         .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })) {
-        val innerWidth = (maxWidth - 36.dp).coerceAtLeast(0.dp)
-        val posterWidth = innerWidth * if (density.fontScale >= 1.4f) .36f else .44f
-        val infoWidth = (innerWidth - posterWidth - 18.dp).coerceAtLeast(1.dp)
+        val posterWidth = minOf(maxWidth * if (density.fontScale >= 1.4f) .36f else .42f, 220.dp)
+        val infoWidth = with(density) {
+            (maxWidth.roundToPx() - posterWidth.roundToPx() - 18.dp.roundToPx()).coerceAtLeast(1).toDp()
+        }
         val titleLayout = remember(manga.title, titleStyle, infoWidth, density) {
             measurer.measure(manga.title, style = titleStyle,
                 constraints = Constraints(maxWidth = with(density) { infoWidth.roundToPx() }))
         }
-        val inlineSynopsis = !compact && density.fontScale <= 1.2f && titleLayout.lineCount <= 3
-        LiquidGlassSurface(backdrop, Modifier.fillMaxSize(), cornerRadius = 28.dp,
-            role = GlassSurfaceRole.DETAIL_HERO, surfaceColor = surface, softCard = true) {
-            // Natural text height owns overflow. The outer collapsing header reveals it
-            // with the same scroll mutex as the chapters, without a nested text scroller.
-            Column(Modifier.fillMaxWidth().align(Alignment.Center).padding(18.dp)
-                .wrapContentHeight(unbounded = true).onSizeChanged { onNaturalHeight(it.height) },
+        val maximumInlineLines = if (density.fontScale >= 1.4f) 3 else 5
+        val stacked = infoWidth < 112.dp || titleLayout.lineCount > maximumInlineLines
+        val inlineSynopsis = !stacked && !compact && density.fontScale <= 1.2f && titleLayout.lineCount <= 3
+        // One content group sits directly in the artwork atmosphere. Its size is never
+        // derived from the previous expanded header or a percentage of the screen.
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = if (stacked) 1 else 2,
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                    Box(Modifier.width(posterWidth).aspectRatio(2f / 3f)
-                        .mangaSharedCover(manga.id).mangaCoverCard(12.dp), contentAlignment = Alignment.Center) {
-                        Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
-                            tint = ink.copy(alpha = .16f), modifier = Modifier.size(36.dp))
-                        Image(cover, contentDescription = null, contentScale = ContentScale.Fit,
-                            modifier = Modifier.fillMaxSize())
-                    }
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(manga.title, color = ink, style = titleStyle,
-                            modifier = Modifier.fillMaxWidth().clickable(enabled = infoVisible,
-                                role = Role.Button, onClickLabel = "查看完整作品信息", onClick = onIntroduction))
-                        AuthorNames(manga.authors, ink.copy(alpha = .74f), enabled = infoVisible, onAuthor = onAuthor)
-                        if (inlineSynopsis) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
-                    }
+                Box(Modifier.width(posterWidth).aspectRatio(2f / 3f)
+                    .mangaSharedCover(manga.id).mangaCoverCard(12.dp), contentAlignment = Alignment.Center) {
+                    Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+                        tint = ink.copy(alpha = .16f), modifier = Modifier.size(36.dp))
+                    Image(cover, contentDescription = null, contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize())
                 }
-                if (!inlineSynopsis) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
-                DetailTags(manga, enabled = infoVisible, onTag = onTag)
-                DetailRatingStrip(manga, ink, enabled = infoVisible, onExpand = onRatings)
+                Column(Modifier.width(if (stacked) maxWidth else infoWidth),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(manga.title, color = ink, style = titleStyle,
+                        modifier = Modifier.fillMaxWidth().clickable(enabled = infoVisible,
+                            role = Role.Button, onClickLabel = "查看完整作品信息", onClick = onIntroduction))
+                    AuthorNames(manga.authors, ink.copy(alpha = .74f), enabled = infoVisible, onAuthor = onAuthor)
+                    val state = listOf(manga.status, manga.latestChapter.takeIf(String::isNotBlank)
+                        ?.let { "更新 · $it" }.orEmpty()).filter(String::isNotBlank).joinToString(" · ")
+                    if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .66f),
+                        fontSize = 11.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (inlineSynopsis) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
+                }
             }
+            if (!inlineSynopsis) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
+            DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag)
+            DetailRatingStrip(manga, ink.copy(alpha = .86f), enabled = infoVisible,
+                compact = true, onExpand = onRatings)
         }
     }
 }
@@ -679,15 +688,15 @@ private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduct
 
 @Composable
 private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: Boolean = false,
-    enabled: Boolean = true, onTag: (String) -> Unit) {
-    val tags = remember(manga.status, manga.tags, manga.latestChapter) {
+    includeState: Boolean = true, enabled: Boolean = true, onTag: (String) -> Unit) {
+    val tags = remember(manga.status, manga.tags, manga.latestChapter, includeState) {
         buildList<Pair<String, Boolean>> {
             val status = manga.status.trim()
             val update = manga.latestChapter.takeIf(String::isNotBlank)?.let { "更新 · $it" }
-            if (status.isNotEmpty()) add(status to false)
+            if (includeState && status.isNotEmpty()) add(status to false)
             manga.tags.map(String::trim).filter { it.isNotBlank() && it != status && it != update }
                 .distinct().forEach { add(it to true) }
-            if (update != null) add(update to false)
+            if (includeState && update != null) add(update to false)
         }.distinctBy { it.first }
     }
     if (tags.isNotEmpty()) Row(
@@ -794,21 +803,25 @@ private fun DetailSections(
     BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 4.dp)) {
         val availableWidth = maxWidth
         val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-        val tabWidth = (184f * scale).dp.coerceAtMost((availableWidth - 52.dp).coerceAtLeast(0.dp))
+        val tabWidth = (208f * scale).dp.coerceAtMost((availableWidth - 52.dp).coerceAtLeast(0.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             MotionTabs(selected, labels, onSelect, modifier = Modifier.width(tabWidth),
                 foreground = DetailForeground, muted = DetailSecondary,
-                track = DetailForeground.copy(alpha = .025f), indicator = DetailForeground.copy(alpha = .065f),
-                compact = false, fullWidthIndicator = true, controlHeight = 44.dp,
-                indicatorHeight = 32.dp, indicatorCornerRadius = 9.dp, fontSize = 13.sp,
-                treatment = MotionTabTreatment.Soft,
+                track = Color.Transparent, indicator = DetailForeground.copy(alpha = .85f),
+                compact = false, controlHeight = 48.dp, fontSize = 15.sp,
+                treatment = MotionTabTreatment.Underline,
                 itemContent = { index, chosen, color ->
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(labels[index], color = color, fontSize = 13.sp,
-                            fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium)
-                        val count = if (index == 0) chapterCount.takeIf { it > 0 }?.toString() else commentCount
-                        count?.let { Text(it, color = color.copy(alpha = .65f), fontSize = 11.sp) }
+                    val count = if (index == 0) chapterCount.takeIf { it > 0 }?.toString() else commentCount
+                    Row(Modifier.semantics(mergeDescendants = true) {
+                        contentDescription = listOfNotNull(labels[index], count).joinToString("，")
+                    }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(labels[index], color = color, fontSize = 15.sp,
+                            fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Medium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        count?.let { Text(it, Modifier.weight(1f, fill = false),
+                            color = color.copy(alpha = .65f), fontSize = 11.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
                 })
             val comments = selected == 1
