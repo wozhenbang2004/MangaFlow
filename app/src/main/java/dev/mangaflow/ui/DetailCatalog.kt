@@ -44,6 +44,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Pause
@@ -71,6 +72,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -84,6 +86,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.ChapterVariant
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Page
 import dev.mangaflow.storage.DownloadEntry
@@ -130,6 +133,15 @@ internal fun DetailCatalog(
     bottomPadding: Dp = 16.dp,
     downloadMode: Boolean,
     backdrop: HazeState,
+    onReadVariant: (Chapter, ChapterVariant) -> Unit = { chapter, _ -> onRead(chapter) },
+    onSetPreferredSource: (String) -> Unit = {},
+    onClearChapterSource: (Chapter) -> Unit = {},
+    onSplitVariant: (Chapter, ChapterVariant) -> Unit = { _, _ -> },
+    onRelinkVariant: (Chapter, ChapterVariant, Chapter) -> Unit = { _, _, _ -> },
+    onManageSources: () -> Unit = {},
+    sourceLoading: Boolean = false,
+    sourceError: String? = null,
+    onCancelSourceSelection: () -> Unit = {},
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
@@ -139,6 +151,21 @@ internal fun DetailCatalog(
     var shownError by remember { mutableStateOf<String?>(null) }
     var selectedChapterId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var closingChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
+    var pendingSourceChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
+    var sourceChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
+    var sourceAnchor by remember(mangaId) { mutableStateOf<Rect?>(null) }
+    var sourcePresent by remember(mangaId) { mutableStateOf(false) }
+    var sourceCloseRequested by remember(mangaId) { mutableStateOf(false) }
+    val sourceCount = remember(chapters) { chapters.flatMap { it.variants }.map { it.sourceId }.distinct().size }
+    LaunchedEffect(active, chapters, sourceLoading) {
+        val selected = sourceChapter
+        val current = selected?.let { original ->
+            chapters.firstOrNull { it.logicalId.ifBlank { it.id } == original.logicalId.ifBlank { original.id } }
+        }
+        if (selected != null && (!active || (!sourceLoading && current != null && current.id != selected.id))) {
+            sourceCloseRequested = true
+        }
+    }
     val volumeCovers = remember(mangaId) { mutableStateMapOf<String, VolumeCoverState>() }
     val coverPermits = remember(mangaId) { Semaphore(2) }
 
@@ -159,7 +186,7 @@ internal fun DetailCatalog(
     }
 
     Column(Modifier.fillMaxSize()) {
-        if (groups.size > 1 || error != null) Row(
+        Row(
             Modifier.fillMaxWidth().then(flow).heightIn(min = 44.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -172,7 +199,12 @@ internal fun DetailCatalog(
                     }, modifier = Modifier.weight(1f),
                 )
             } else {
-                Spacer(Modifier.weight(1f))
+                Text(if (sourceCount > 1) "已合并 $sourceCount 源" else "章节 ${chapters.size}",
+                    color = DetailMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            }
+            TextButton(onClick = onManageSources) {
+                if (groups.size > 1) Text("$sourceCount 源", color = DetailMuted, fontSize = 11.sp)
+                Icon(Icons.Outlined.Add, "添加或管理漫画来源", Modifier.size(17.dp), tint = DetailSecondary)
             }
             if (error != null) {
                 DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { shownError = error })
@@ -189,7 +221,7 @@ internal fun DetailCatalog(
             contentKey = { if (it == null) "all" else "group:$it" },
             order = { if (it == null) 0 else groups.keys.indexOf(it) + 1 },
         ) { targetGroup ->
-            val paneActive = active && targetGroup == group
+            val paneActive = active && targetGroup == group && !sourcePresent
             val grid = rememberLazyGridState()
             SideEffect {
                 if (paneActive) onScrollTarget(grid)
@@ -263,7 +295,7 @@ internal fun DetailCatalog(
                             }
                             if (!showGroup && runIndex > 0) item(key = "run-break:$runIndex",
                                 span = { GridItemSpan(maxLineSpan) }, contentType = "run-break") { Spacer(Modifier.height(4.dp)) }
-                            items(run, key = Chapter::id,
+                            items(run, key = { it.logicalId.ifBlank { it.id } },
                                 span = { GridItemSpan(if (isVolumeChapter(it)) chapterColumns else volumeColumns) },
                                 contentType = { if (isVolumeChapter(it)) "volume" else "chapter" }) { chapter ->
                                 if (isVolumeChapter(chapter)) {
@@ -298,18 +330,18 @@ internal fun DetailCatalog(
                                                 volumeCovers[chapter.id] = VolumeCoverState(attempt = pending.attempt, automaticRetries = pending.automaticRetries)
                                         }
                                     }
-                                    Box(Modifier.padding(horizontal = 3.dp).padding(bottom = 10.dp)) {
+                                    Column(Modifier.padding(horizontal = 3.dp).padding(bottom = 10.dp)) {
                                         VolumeBookTile(
                                             mangaId = mangaId, chapter = chapter, cover = cover,
                                             imageHeaders = { volumeImageHeaders(chapter) },
-                                            entry = downloaded[chapter.id],
-                                            progress = chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id },
+                                            entry = chapterDownload(chapter, downloaded),
+                                            progress = logicalChapterProgress(chapter, chapterPositions, progress),
                                             progressKnown = chapterPositions != null,
-                                            current = progress?.chapterId == chapter.id,
+                                            current = chapterContainsProgress(chapter, progress),
                                             downloadMode = downloadMode,
                                             enabled = !downloadMode || canDownload(downloaded[chapter.id]),
                                             onRead = { onRead(chapter) }, onDownload = { onDownload(chapter) },
-                                            onActions = { selectedChapterId = chapter.id },
+                                            onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id } },
                                             onCoverError = {
                                                 if (paneActive && volumeCovers[chapter.id] === cover)
                                                     volumeCovers[chapter.id] = cover.copy(error = "封面图片暂不可用")
@@ -318,18 +350,29 @@ internal fun DetailCatalog(
                                                 volumeCovers[chapter.id] = VolumeCoverState(attempt = cover.attempt + 1)
                                             },
                                         )
+                                        if (chapter.variants.isNotEmpty()) ChapterSourceBadge(
+                                            chapter, Modifier.fillMaxWidth(),
+                                            onOpen = { anchor ->
+                                                sourceCloseRequested = false
+                                                sourceChapter = chapter; sourceAnchor = anchor
+                                            },
+                                        )
                                     }
                                 } else ChapterTile(
                                     chapter = chapter,
-                                    entry = downloaded[chapter.id],
-                                    progress = chapterPositions?.get(chapter.id) ?: progress?.takeIf { it.chapterId == chapter.id },
-                                    current = progress?.chapterId == chapter.id,
+                                    entry = chapterDownload(chapter, downloaded),
+                                    progress = logicalChapterProgress(chapter, chapterPositions, progress),
+                                    current = chapterContainsProgress(chapter, progress),
                                     progressKnown = chapterPositions != null,
                                     downloadMode = downloadMode,
                                     height = tileHeight,
                                     onRead = { onRead(chapter) },
                                     onDownload = { onDownload(chapter) },
-                                    onActions = { selectedChapterId = chapter.id },
+                                    onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id } },
+                                    onSources = { anchor ->
+                                        sourceCloseRequested = false
+                                        sourceChapter = chapter; sourceAnchor = anchor
+                                    },
                                 )
                             }
                         }
@@ -357,10 +400,29 @@ internal fun DetailCatalog(
             }
         }
     }
-    (chapters.firstOrNull { it.id == selectedChapterId } ?: closingChapter)?.let { chapter ->
-        val entry = downloaded[chapter.id]
+    ChapterSourcePicker(
+        chapter = sourceChapter, backdrop = backdrop,
+        onDismiss = { sourceChapter = null; sourceAnchor = null; sourceCloseRequested = false },
+        onReadVariant = onReadVariant, onSetPreferredSource = onSetPreferredSource,
+        onClearChapterSource = onClearChapterSource, onSplitVariant = onSplitVariant,
+        onRelinkVariant = onRelinkVariant, chapters = chapters, downloaded = downloaded,
+        chapterPositions = chapterPositions, anchor = sourceAnchor,
+        closeRequested = sourceCloseRequested,
+        onCancelSelection = onCancelSourceSelection,
+        loading = sourceLoading, error = sourceError, onPresenceChange = { sourcePresent = it },
+    )
+    (chapters.firstOrNull { it.logicalId.ifBlank { it.id } == selectedChapterId } ?: closingChapter)?.let { chapter ->
+        val entry = chapterDownload(chapter, downloaded)
         MotionBottomSheet(
-            onDismissRequest = { selectedChapterId = null; closingChapter = null },
+            onDismissRequest = {
+                selectedChapterId = null
+                closingChapter = null
+                pendingSourceChapter?.let {
+                    sourceCloseRequested = false
+                    sourceChapter = it; sourceAnchor = null
+                }
+                pendingSourceChapter = null
+            },
             backdrop = backdrop,
             containerColor = DetailSurface, contentColor = DetailForeground,
         ) { dismiss ->
@@ -383,6 +445,12 @@ internal fun DetailCatalog(
                 TextButton(onClick = { dismissActions(); onRead(chapter) },
                     modifier = Modifier.fillMaxWidth()) {
                     Text(if (isVolumeChapter(chapter)) "阅读这一卷" else "阅读这一章", color = DetailForeground)
+                }
+                if (chapter.variants.isNotEmpty()) TextButton(onClick = {
+                    pendingSourceChapter = chapter
+                    dismissActions()
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("选择本章来源", color = DetailForeground)
                 }
                 TextButton(onClick = { dismissActions(); onDownload(chapter) },
                     enabled = canDownload(entry), modifier = Modifier.fillMaxWidth()) {
@@ -473,6 +541,7 @@ private fun ChapterTile(
     onRead: () -> Unit,
     onDownload: () -> Unit,
     onActions: () -> Unit,
+    onSources: (Rect?) -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val enabled = !downloadMode || canDownload(entry)
@@ -481,7 +550,8 @@ private fun ChapterTile(
     val hasDownloadMark = downloadMode || entry != null
     val markSize = 10.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
     Box(
-        Modifier.fillMaxWidth().height((height + 6.dp).coerceAtLeast(48.dp))
+        Modifier.fillMaxWidth().height((height + 6.dp).coerceAtLeast(
+            if (chapter.variants.isEmpty()) 48.dp else 56.dp))
             .combinedClickable(
                 interactionSource = interaction, indication = null, enabled = enabled,
                 role = Role.Button,
@@ -500,7 +570,9 @@ private fun ChapterTile(
             .motionPress(interaction, enabled = enabled, pressedScale = .98f)
             .clip(RoundedCornerShape(10.dp))
             .background(if (current) readingColor.copy(alpha = .075f) else Color.Transparent)) {
-            Row(Modifier.align(Alignment.CenterStart).fillMaxWidth().padding(horizontal = 4.dp),
+            Row(Modifier.align(if (chapter.variants.isEmpty()) Alignment.CenterStart else Alignment.TopStart)
+                .heightIn(min = if (chapter.variants.isEmpty()) 0.dp else 25.dp)
+                .fillMaxWidth().padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     chapter.title, color = when {
@@ -522,9 +594,31 @@ private fun ChapterTile(
                     if (hasDownloadMark) ChapterDownloadMark(entry, downloadMode, size = markSize)
                 }
             }
+            if (chapter.variants.isNotEmpty()) ChapterSourceBadge(chapter,
+                Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(horizontal = 4.dp),
+                onOpen = onSources)
         }
     }
 }
+
+private fun chapterContainsProgress(chapter: Chapter, progress: ReadingProgress?): Boolean =
+    progress != null && (progress.chapterId == chapter.id || chapter.variants.any { it.storageId == progress.chapterId })
+
+private fun logicalChapterProgress(
+    chapter: Chapter,
+    positions: Map<String, ReadingProgress>?,
+    latest: ReadingProgress?,
+): ReadingProgress? {
+    val records = (chapter.variants.mapNotNull { positions?.get(it.storageId) } +
+        listOfNotNull(positions?.get(chapter.id), latest?.takeIf { chapterContainsProgress(chapter, it) }))
+        .distinctBy { it.chapterId }
+    return records.firstOrNull { detailReadingFraction(it) == 1f }
+        ?: records.firstOrNull { it.chapterId == chapter.id } ?: records.maxByOrNull { it.updatedAt }
+}
+
+private fun chapterDownload(chapter: Chapter, entries: Map<String, DownloadEntry>): DownloadEntry? =
+    entries[chapter.id] ?: chapter.variants.mapNotNull { entries[it.storageId] }
+        .let { variants -> variants.firstOrNull { it.status == DownloadStatus.COMPLETED } ?: variants.firstOrNull() }
 
 @Composable
 internal fun ChapterDownloadMark(entry: DownloadEntry?, showDownload: Boolean, size: Dp = 14.dp) {

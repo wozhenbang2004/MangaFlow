@@ -74,6 +74,18 @@ internal class ChapterDiscussionState(
     private var pageJob: Job? = null
     private var started = false
 
+    // A merged chapter may display a different edition while still having a confirmed
+    // Copy counterpart. The displayed ID owns this UI; only the native UUID reaches Copy.
+    private val copyVariant = chapter.variants.firstOrNull { it.sourceId == "copy" }
+    private val copyChapter = copyVariant?.let { variant ->
+        chapter.copy(id = variant.chapterId, title = variant.title, sourceId = "copy",
+            sourceMangaId = variant.mangaId, sourceChapterId = variant.chapterId)
+    } ?: chapter.takeIf { it.sourceId == "copy" && !it.id.startsWith("@source") }
+    private val copyManga = copyChapter?.let { native ->
+        val nativeId = native.sourceMangaId.ifBlank { manga.sourceMangaId.ifBlank { manga.id } }
+        manga.copy(id = nativeId, sourceId = "copy", sourceMangaId = nativeId)
+    }
+
     var sources by mutableStateOf(initialSources())
         private set
     var refreshing by mutableStateOf(false)
@@ -91,16 +103,16 @@ internal class ChapterDiscussionState(
     }
 
     private fun initialSources(): List<ReaderDiscussionSource> {
-        val cached = chapters.cachedChapterComments(chapter)
-        val chapterSource = ReviewSource(
+        val native = copyChapter
+        val cached = native?.let(chapters::cachedChapterComments)
+        val copySources = if (native == null) emptyList() else listOf(ReaderDiscussionSource(ReviewSource(
             id = "copy", name = "拷贝", status = ReviewStatus.READY,
             url = cached?.items?.firstOrNull()?.url ?: manga.sourceUrl,
-            matchedTitle = chapter.title, subjectId = chapter.id,
+            matchedTitle = native.title, subjectId = chapter.id,
             reviews = cached?.items.orEmpty().filter { it.kind == ReviewKind.CHAPTER }, reviewCount = cached?.total,
             nextPage = if (cached == null) 0 else cached.nextPage,
-        )
-        return listOf(ReaderDiscussionSource(chapterSource, loaded = cached != null)) +
-            reviews.chapterProviderIds.map { id -> ReaderDiscussionSource(ReviewSource(
+        ), loaded = cached != null))
+        return copySources + reviews.chapterProviderIds.map { id -> ReaderDiscussionSource(ReviewSource(
                 id = id, name = "Dantotsu", status = ReviewStatus.NO_MATCH, url = "https://api.dantotsu.app",
                 matchedTitle = chapter.title, subjectId = chapter.id,
             )) }
@@ -183,8 +195,11 @@ internal class ChapterDiscussionState(
                 }
                 return
             }
-            val result = if (current.source.id == "copy") chapters.chapterComments(manga, chapter, page, forceRefresh)
-                else reviews.chapterPage(manga, chapter, current.source, page)
+            val result = if (current.source.id == "copy") {
+                val native = copyChapter ?: throw IllegalStateException("本话没有已确认的拷贝章节")
+                val owner = copyManga ?: throw IllegalStateException("本话没有已确认的拷贝作品")
+                chapters.chapterComments(owner, native, page, forceRefresh)
+            } else reviews.chapterPage(manga, chapter, current.source, page)
             currentCoroutineContext().ensureActive()
             if (version != generation) return
             updateSource(sourceKey) { state ->

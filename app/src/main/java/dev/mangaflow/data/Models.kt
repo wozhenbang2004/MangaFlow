@@ -18,6 +18,9 @@ data class Manga(
     val totalPopularity: Long? = null,
     val authorPaths: Map<String, String> = emptyMap(),
     val tagPaths: Map<String, String> = emptyMap(),
+    val sourceId: String = "copy",
+    /** Opaque upstream identity; empty retains the legacy Copy identity in [id]. */
+    val sourceMangaId: String = "",
 )
 
 data class Chapter(
@@ -25,6 +28,12 @@ data class Chapter(
     val title: String,
     val index: Int,
     val group: String = "默认",
+    /** Stable logical identity, independent of the selected readable variant. */
+    val logicalId: String = "",
+    val variants: List<ChapterVariant> = emptyList(),
+    val sourceId: String = "copy",
+    val sourceMangaId: String = "",
+    val sourceChapterId: String = "",
 )
 
 data class MangaPage(val items: List<Manga>, val hasMore: Boolean, val nextPage: Int? = null)

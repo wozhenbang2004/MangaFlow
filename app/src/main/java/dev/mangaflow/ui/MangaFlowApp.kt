@@ -140,7 +140,7 @@ private sealed interface Frame {
     val key: String
     data class Root(val section: Section) : Frame { override val key = "root-${section.name}" }
     data class Detail(val state: DetailState) : Frame { override val key = "detail-${state.manga.id}" }
-    data class Reader(val session: ReadingSession) : Frame { override val key = "reader-${session.manga.id}-${session.chapterId}-${session.collection?.key.orEmpty()}" }
+    data class Reader(val session: ReadingSession) : Frame { override val key = "reader-${session.manga.id}-${session.collection?.key.orEmpty()}" }
 }
 
 private val Frame.depth: Int get() = when (this) {
@@ -160,6 +160,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val detail by model.detail.collectAsStateWithLifecycle()
     val authorWorks by model.authorWorks.collectAsStateWithLifecycle()
     val reading by model.reading.collectAsStateWithLifecycle()
+    val sourceManagement by model.sourceManagement.collectAsStateWithLifecycle()
+    val sourceOperation by model.chapterSourceOperation.collectAsStateWithLifecycle()
+    val sourceCatalogErrors by model.repository.sourceErrors.collectAsStateWithLifecycle()
     val libraryOpening by model.libraryOpening.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
     val history by model.library.history.collectAsStateWithLifecycle()
@@ -232,6 +235,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)
+    sourceManagement?.let { state ->
+        UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
+            onSearch = model::searchBodySource, onAttach = model::attachBodySource,
+            onDetach = model::detachBodySource, onPrefer = model::preferBodySource)
+    }
     val focus = LocalFocusManager.current
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
     if (recentReadingOpen) {
@@ -451,7 +459,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         chaptersLoading = current.session.chaptersLoading,
                         chaptersError = current.session.chaptersError,
                         onRetryChapters = model::retryReadingChapters,
-                        active = current.key == frame.key,
+                        active = current.key == frame.key && sourceManagement == null,
+                        onReadVariant = model::readChapterVariant,
+                        onSetPreferredSource = model::preferBodySource,
+                        onClearChapterSource = model::clearChapterSource,
+                        onCancelSourceSelection = model::cancelSourceSelection,
+                        sourceLoading = sourceOperation.loading, sourceError = sourceOperation.error,
                     )
                     is Frame.Detail -> savedState.SaveableStateProvider(current.key) {
                         val downloadFlow = remember(model, current.state.manga.id) {
@@ -477,6 +490,16 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onBack = model::closeDetail, onRetry = model::retryDetail,
                                 onToggleFavorite = { model.toggleFavorite(current.state.manga) },
                                 onRead = model::readChapter, onAuthor = model::openAuthor,
+                                onReadVariant = model::readChapterVariant,
+                                onSetPreferredSource = model::preferBodySource,
+                                onClearChapterSource = model::clearChapterSource,
+                                onSplitVariant = model::splitChapterSource,
+                                onRelinkVariant = model::relinkChapterSource,
+                                onManageSources = model::manageSources,
+                                onCancelSourceSelection = model::cancelSourceSelection,
+                                sourceLoading = sourceOperation.loading,
+                                sourceError = sourceOperation.error ?: sourceCatalogErrors[current.state.manga.id]
+                                    ?.values?.takeIf { it.isNotEmpty() }?.joinToString("；"),
                                 onTag = { manga, tag -> model.openTagSearch(manga, tag); tagSearchVisible = true },
                                 onRestart = model::restartChapter,
                                 onContinue = model::continueReading,
@@ -484,7 +507,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                                 onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
                                 loadReplies = model::reviewReplies,
-                                active = current.key == frame.key && authorWorks == null && !tagSearchVisible,
+                                active = current.key == frame.key && authorWorks == null && !tagSearchVisible && sourceManagement == null,
                                 wallpaper = {
                                     if (wallpaper.mediaPath != null) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
                                         active = current.key == frame.key && authorWorks == null && !tagSearchVisible)

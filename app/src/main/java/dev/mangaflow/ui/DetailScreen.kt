@@ -110,6 +110,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.data.Page
@@ -173,6 +174,15 @@ fun DetailScreen(
     active: Boolean = true,
     onRestart: (Chapter) -> Unit = onRead,
     wallpaper: @Composable () -> Unit = {},
+    onReadVariant: (Chapter, ChapterVariant) -> Unit = { _, _ -> },
+    onSetPreferredSource: (String) -> Unit = {},
+    onClearChapterSource: (Chapter) -> Unit = {},
+    onSplitVariant: (Chapter, ChapterVariant) -> Unit = { _, _ -> },
+    onRelinkVariant: (Chapter, ChapterVariant, Chapter) -> Unit = { _, _, _ -> },
+    onManageSources: () -> Unit = {},
+    onCancelSourceSelection: () -> Unit = {},
+    sourceLoading: Boolean = false,
+    sourceError: String? = null,
 ) {
     val current = detail?.manga ?: manga
     val feedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
@@ -439,6 +449,14 @@ fun DetailScreen(
                                     bottomPadding = readingInset,
                                     downloadMode = chapterDownloadMode,
                                     backdrop = readingBackdrop,
+                                    onReadVariant = onReadVariant,
+                                    onSetPreferredSource = onSetPreferredSource,
+                                    onClearChapterSource = onClearChapterSource,
+                                    onSplitVariant = onSplitVariant,
+                                    onRelinkVariant = onRelinkVariant,
+                                    onManageSources = onManageSources,
+                                    onCancelSourceSelection = onCancelSourceSelection,
+                                    sourceLoading = sourceLoading, sourceError = sourceError,
                                 )
                                 else -> CommunityPanel(
                                     mangaId = current.id, sources = reviews, loading = reviewsLoading,

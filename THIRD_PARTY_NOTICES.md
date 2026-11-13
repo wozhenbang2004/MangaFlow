@@ -486,3 +486,19 @@ core-before-JNI absolute loading. The original loader class is excluded from the
 all other upstream API classes/native signatures remain. See third_party/onnxruntime/ADAPTATION.md.
 There is no downloaded Java/Dex code or new runtime license claim. This source adaptation and
 packaging inspection do not establish Android runtime execution or on-device verification.
+## Unified Chapters / additional body sources
+
+The logical-parent/source-variant and priority-view mechanism is adapted from the
+Apache-2.0 Komikku/TachiyomiSY implementation, reviewed at Komikku
+`383ffaa81667f45fc6c2975edb1760a7606531d3` (SmartSearchMerge,
+GetMergedChaptersByMangaId, merged.sq and ChapterLoader). MangaFlow's storage,
+semantic safeguards, explicit identities and retained source selector are modified
+integrations of that mechanism with its existing reader and motion components.
+
+Komiic's public GraphQL and image protocol is adapted from Keiyoushi at
+`c3bc55d548b0a5f1b316a323bde9e6e2516e4bea`. Its Apache-2.0 license and precise
+source/modification record are in `third_party/multi-source/`. MangaDex uses its
+public manga/feed/chapter/At-home API; no Venera script or runtime is bundled.
+Source favicon images are requested from the corresponding official site and are
+not claimed to be MangaFlow artwork. Refer to ADAPTATION.md for the unverified
+source-access and implementation boundaries.

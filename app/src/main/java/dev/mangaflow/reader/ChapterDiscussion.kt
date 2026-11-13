@@ -56,7 +56,7 @@ internal fun rememberChapterDiscussionState(
     reviews: ReviewRepository,
 ): ChapterDiscussionState {
     val scope = rememberCoroutineScope()
-    val state = remember(manga.id, manga.title, manga.sourceUuid, chapter.id, chapter.title, chapter.group, repository, reviews) {
+    val state = remember(manga.id, manga.title, manga.sourceUuid, chapter.id, chapter.title, chapter.group, chapter.variants, repository, reviews) {
         ChapterDiscussionState(manga, chapter, repository, reviews, scope)
     }
     DisposableEffect(state) { onDispose { state.dispose() } }

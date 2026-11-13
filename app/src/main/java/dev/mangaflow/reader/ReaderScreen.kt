@@ -62,6 +62,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.Source
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
@@ -148,6 +149,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
@@ -168,6 +170,7 @@ import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.LibraryRestoreStatus
 import dev.mangaflow.ui.ChapterReadMark
 import dev.mangaflow.ui.CompactGlassPopover
+import dev.mangaflow.ui.ChapterSourcePicker
 import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.rememberChapterPositions
 import dev.mangaflow.ui.GlassSurfaceRole
@@ -219,6 +222,12 @@ fun ReaderScreen(
     onRetryChapters: () -> Unit = {},
     active: Boolean = true,
     startAtBeginning: Boolean = false,
+    onReadVariant: (Chapter, ChapterVariant) -> Unit = { _, _ -> },
+    onSetPreferredSource: (String) -> Unit = {},
+    onClearChapterSource: (Chapter) -> Unit = {},
+    onCancelSourceSelection: () -> Unit = {},
+    sourceLoading: Boolean = false,
+    sourceError: String? = null,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -226,7 +235,7 @@ fun ReaderScreen(
         LibraryRestoreStatus(libraryStore)
         return
     }
-    var chapterId by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(initialChapterId) }
+    var chapterId by rememberSaveable(manga.id, initialChapterId, initialCollection?.key) { mutableStateOf(initialChapterId) }
     var collectionPresentation by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(initialCollection != null) }
     var collectionPositionApplied by rememberSaveable(manga.id, initialCollection?.key) { mutableStateOf(false) }
     val presentedCollection = initialCollection?.takeIf { collectionPresentation && it.chapter.id == chapterId }
@@ -273,6 +282,12 @@ fun ReaderScreen(
     var showPageNavigator by remember(chapterId) { mutableStateOf(false) }
     var showReaderActions by remember(chapterId) { mutableStateOf(false) }
     var readerActionsPresent by remember(chapterId) { mutableStateOf(false) }
+    var sourceChapter by remember(manga.id) { mutableStateOf<Chapter?>(null) }
+    var sourceCloseRequested by remember(manga.id) { mutableStateOf(false) }
+    var sourcePickerPresent by remember(manga.id) { mutableStateOf(false) }
+    val sourcePickerBlocking = sourceChapter != null || sourcePickerPresent
+    val canChooseSource = !localImport && chapter.variants.size > 1
+    val currentSourceName = chapter.variants.firstOrNull { it.storageId == chapter.id }?.sourceName
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -300,7 +315,7 @@ fun ReaderScreen(
     val nextChapter = siblings.getOrNull(chapterIndex + 1).takeIf { chapterIndex >= 0 }
     val openNextChapter: (() -> Unit)? = nextChapter?.let { next ->
         {
-            if (active && !leavingReader && !nextRequested && chapterId == chapter.id) {
+            if (active && !leavingReader && !sourcePickerBlocking && !nextRequested && chapterId == chapter.id) {
                 nextRequested = true
                 chapterId = next.id
                 controlsVisible = true
@@ -347,15 +362,17 @@ fun ReaderScreen(
     val toolbarTravel = with(LocalDensity.current) { 12.dp.roundToPx() }
     val touchExploration = rememberReaderTouchExploration()
     val delayedLoading = rememberDelayedBusy(loading)
+    // Old page panes may save their own cursor while a source switch disposes them.
+    val chapterPageCount = pages.size
 
     val clock = rememberReaderClock(active && !leavingReader)
     val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
         !showSettings && !showPanelModels && !showChapters && !showComments && !showSpreadAdjustment && !showPageNavigator &&
-        !showReaderActions && !readerActionsPresent
+        !showReaderActions && !readerActionsPresent && !sourcePickerBlocking
     RecordReaderActivity(manga, readingEligible, libraryStore, chapterId) { owner, confirmedChapter ->
         if (owner == manga.id && confirmedChapter == chapterId && readingEligible) {
             recentConfirmed = true
-            libraryStore.saveProgress(manga, chapter, pageIndex, pages.size, cursor.scrollOffset,
+            libraryStore.saveProgress(manga, chapter, pageIndex, chapterPageCount, cursor.scrollOffset,
                 panelIndex = if (preferences.panelEngine != PanelEngine.OFF) cursor.panelIndex else -1,
                 panelLayout = if (preferences.panelEngine != PanelEngine.OFF) preferences.panelLayoutKey else "")
         }
@@ -404,43 +421,56 @@ fun ReaderScreen(
         }
     }
 
-    if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showPanelModels || showChapters || showSpreadAdjustment || showComments, lightChrome)
+    if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showPanelModels || showChapters || showSpreadAdjustment || showComments || sourcePickerBlocking, lightChrome)
     val leaveReader = { leavingReader = true; onBack() }
     MotionBackHandler(enabled = active, onBack = leaveReader)
     LaunchedEffect(active) { leavingReader = !active }
+    LaunchedEffect(initialChapterId) {
+        if (sourceChapter != null && sourceChapter?.id != initialChapterId) sourceCloseRequested = true
+    }
+    LaunchedEffect(active, leavingReader) {
+        if ((!active || leavingReader) && sourceChapter != null) {
+            onCancelSourceSelection()
+            sourceChapter = null
+        }
+    }
 
     LaunchedEffect(chapterId, retry, initialCollection?.key) {
+        val requestedChapterId = chapterId
+        val requestedChapter = chapter
         loading = true
         error = null
         try {
             // A stable source manifest represents the chapter, even when only some pages are saved.
             // File selection belongs to each image request and never creates a separate offline mode.
-            val stored = downloadStore.storedPages(manga.id, chapterId)
+            val stored = downloadStore.storedPages(manga.id, requestedChapterId)
             val loaded = stored ?: if (localImport) {
                 throw IllegalStateException("本地章节不存在，请重新导入")
             } else dev.mangaflow.data.foregroundRequest("章节图片") {
-                repository.pages(manga.id, chapterId, forceRefresh = retry > 0)
+                repository.pages(manga.id, requestedChapterId, forceRefresh = retry > 0)
             }
+            currentCoroutineContext().ensureActive()
+            if (chapterId != requestedChapterId) return@LaunchedEffect
             if (loaded.isEmpty()) throw IllegalStateException("这一章还没有可读取的图片")
             val restarting = restartPending && chapterId == initialChapterId && initialCollection == null
-            val saved = if (restarting) null else libraryStore.progressFor(manga.id, chapterId)
+            val saved = if (restarting) null else libraryStore.progressFor(manga.id, requestedChapterId)
             val collection = initialCollection?.takeIf { collectionPresentation && !collectionPositionApplied && it.chapter.id == chapterId }
             pageIndex = (collection?.firstPage ?: saved?.pageIndex ?: 0).coerceIn(0, loaded.lastIndex)
             cursor.scrollOffset = if (collection != null) 0 else saved?.scrollOffset ?: 0
             cursor.panelIndex = if (collection == null && saved?.panelLayout == preferences.panelLayoutKey)
                 saved.panelIndex.coerceAtLeast(0) else 0
             if (collection != null) collectionPositionApplied = true
-            libraryStore.migratePageBookmarks(manga, chapter, loaded)
+            libraryStore.migratePageBookmarks(manga, requestedChapter, loaded)
             downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
             pages = loaded
-            if (restarting) libraryStore.saveProgress(manga, chapter, 0, loaded.size,
+            if (restarting) libraryStore.saveProgress(manga, requestedChapter, 0, loaded.size,
                 clearLegacyLongImagePosition = true)
             restartPending = false
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
-            error = failure.message ?: "章节暂时无法读取"
-        } finally { loading = false }
+            if (chapterId == requestedChapterId) error = failure.message ?: "章节暂时无法读取"
+        } finally { if (chapterId == requestedChapterId) loading = false }
     }
 
     LaunchedEffect(chapterId, pageIndex) {
@@ -448,9 +478,9 @@ fun ReaderScreen(
     }
 
     LaunchedEffect(controlsVisible, showSettings, showChapters, showSpreadAdjustment, showComments,
-        showPageNavigator, showReaderActions, readerActionsPresent, loading, error, progressInteracting, touchExploration) {
+        showPageNavigator, showReaderActions, readerActionsPresent, sourcePickerBlocking, loading, error, progressInteracting, touchExploration) {
         if (controlsVisible && !showSettings && !showChapters && !showSpreadAdjustment && !showComments &&
-            !showPageNavigator && !showReaderActions && !readerActionsPresent &&
+            !showPageNavigator && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking &&
             !loading && error == null && !progressInteracting && !touchExploration) {
             delay(5000)
             controlsVisible = false
@@ -492,6 +522,9 @@ fun ReaderScreen(
                     Text(error.orEmpty(), color = preferences.theme.foreground(), style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(16.dp))
                     TextButton(onClick = { retry++ }) { Text("重新读取", color = preferences.theme.foreground()) }
+                    if (canChooseSource) TextButton(onClick = { sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true }) {
+                        Text("其他来源", color = preferences.theme.foreground())
+                    }
                 }
                 pages.isNotEmpty() -> key(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles,
                     preferences.panelLayoutKey) {
@@ -501,20 +534,20 @@ fun ReaderScreen(
                         targetPage = targetPage,
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },
                         onLocation = { index, panel -> pageIndex = index; cursor.panelIndex = panel; cursor.scrollOffset = 0 },
-                        onSave = { index, panel -> libraryStore.saveProgress(manga, chapter, index, pages.size,
+                        onSave = { index, panel -> libraryStore.saveProgress(manga, chapter, index, chapterPageCount,
                             updateRecent = recentConfirmed && chapterId == chapter.id && active && !leavingReader,
                             panelIndex = panel, panelLayout = preferences.panelLayoutKey) },
                         onReadingNavigation = { if (chapterId == chapter.id && readingEligible) recentConfirmed = true },
                         onVisibleImageChanged = { visible ->
                             imageVisible = visible
-                            if (visible && readerForeground && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
+                            if (visible && readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !chapterVisibilityReported) {
                                 chapterVisibilityReported = true
                                 chapterVisible(manga, chapter)
                             }
                         },
                         onNearEnd = {
                             val next = nextChapter
-                            if (readerForeground && !leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
+                            if (readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
                                 nextChapterPrefetched = true
                                 nearChapterEnd(manga, next)
                             }
@@ -523,7 +556,7 @@ fun ReaderScreen(
                         onTap = { controlsVisible = !controlsVisible }, onNext = openNextChapter,
                         onDisable = { updatePreferences(preferences.copy(panelEngine = PanelEngine.OFF)) },
                         active = readerForeground && !leavingReader && !showSettings && !showPanelModels && !showChapters &&
-                            !showSpreadAdjustment && !showComments && !showPageNavigator && !nextRequested,
+                            !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking && !nextRequested,
                         backdrop = readerBackdrop,
                         bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
                     ) else ChapterPages(
@@ -539,7 +572,7 @@ fun ReaderScreen(
                         targetOffset = targetOffset,
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },
                         onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
-                        onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, pages.size, offset,
+                        onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, chapterPageCount, offset,
                             clearLegacyLongImagePosition = preferences.mode == ReadingMode.VERTICAL,
                             updateRecent = recentConfirmed && chapterId == chapter.id && active && !leavingReader) },
                         onReadingNavigation = {
@@ -548,21 +581,21 @@ fun ReaderScreen(
                         longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
                         onVisibleImageChanged = { visible ->
                             imageVisible = visible
-                            if (visible && readerForeground && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
+                            if (visible && readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !chapterVisibilityReported) {
                                 chapterVisibilityReported = true
                                 chapterVisible(manga, chapter)
                             }
                         },
                         onNearEnd = {
                             val next = nextChapter
-                            if (readerForeground && !leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
+                            if (readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
                                 nextChapterPrefetched = true
                                 nearChapterEnd(manga, next)
                             }
                         },
                         onTap = { controlsVisible = !controlsVisible },
                         active = readerForeground && !leavingReader && !showSettings && !showChapters &&
-                            !showSpreadAdjustment && !showComments && !nextRequested,
+                            !showSpreadAdjustment && !showComments && !sourcePickerBlocking && !nextRequested,
                         onAtEndChanged = { atChapterEnd = it },
                         onNext = openNextChapter,
                         endContent = { pull ->
@@ -593,7 +626,7 @@ fun ReaderScreen(
 
         if (!localImport && active && !leavingReader && atChapterEnd && !loading && error == null &&
             !showComments && !showSettings && !showChapters && !showSpreadAdjustment &&
-            !showReaderActions && !readerActionsPresent && !showPageNavigator && !progressInteracting) {
+            !showReaderActions && !readerActionsPresent && !showPageNavigator && !sourcePickerBlocking && !progressInteracting) {
             ChapterEndComments(
                 chapterId = chapterId, state = discussionState, backdrop = readerBackdrop,
                 bottomClearance = if (controlsVisible) with(LocalDensity.current) {
@@ -629,7 +662,8 @@ fun ReaderScreen(
                     Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)) {
                         Text(manga.title, color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title).joinToString(" · "),
+                        Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title,
+                            currentSourceName.takeIf { chapter.variants.size > 1 }).joinToString(" · "),
                             color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     if (preferences.panelEngine == PanelEngine.OFF &&
@@ -683,7 +717,7 @@ fun ReaderScreen(
                         val actionsScroll = rememberScrollState()
                         val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
                             preferences.mode in setOf(ReadingMode.RIGHT_TO_LEFT, ReadingMode.LEFT_TO_RIGHT)
-                        val hasMoreActions = canCorrectSpread || returnLocation != null
+                        val hasMoreActions = canCorrectSpread || returnLocation != null || canChooseSource
                         val narrow = maxWidth < (if (hasMoreActions) 348.dp else 300.dp)
                         Row(Modifier.fillMaxWidth().then(if (narrow) Modifier.horizontalScroll(actionsScroll) else Modifier),
                             verticalAlignment = Alignment.CenterVertically) {
@@ -776,6 +810,13 @@ fun ReaderScreen(
                                             onDismiss = { showReaderActions = false },
                                             onPresenceChange = { readerActionsPresent = it },
                                         ) {
+                                            if (canChooseSource) {
+                                                CompactMenuAction(Icons.Outlined.Source, "本章来源", enabled = showReaderActions) {
+                                                    showReaderActions = false
+                                                    sourceCloseRequested = false
+                                                    sourceChapter = chapter
+                                                }
+                                            }
                                             if (canCorrectSpread) {
                                                 CompactMenuAction(Icons.Rounded.Tune, "校正双页", enabled = showReaderActions) {
                                                     showReaderActions = false
@@ -882,6 +923,34 @@ fun ReaderScreen(
         loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
         onSelect = { chapterId = it; showChapters = false; controlsVisible = true },
         onDismiss = { showChapters = false },
+    )
+    val sourcePositions = rememberChapterPositions(manga, libraryStore, active = sourcePickerBlocking)
+    val sourceDownloads = if (sourcePickerBlocking) {
+        val flow = remember(downloadStore, manga.id) { downloadStore.observeManga(manga.id) }
+        val initial = remember(downloadStore, manga.id) {
+            downloadStore.entries.value.filter { it.manga.id == manga.id }
+        }
+        val entries by flow.collectAsStateWithLifecycle(initialValue = initial)
+        remember(entries) { entries.associateBy { it.chapter.id } }
+    } else emptyMap()
+    ChapterSourcePicker(
+        chapter = sourceChapter, backdrop = readerBackdrop,
+        onDismiss = { sourceChapter = null; sourceCloseRequested = false },
+        onCancelSelection = onCancelSourceSelection,
+        onReadVariant = { selected, variant ->
+            if (variant.storageId == chapter.id) {
+                onCancelSourceSelection()
+                sourceCloseRequested = true
+            } else onReadVariant(selected, variant)
+        },
+        onSetPreferredSource = onSetPreferredSource,
+        onClearChapterSource = onClearChapterSource,
+        chapters = chapters,
+        allowCorrections = false,
+        downloaded = sourceDownloads, chapterPositions = sourcePositions,
+        closeRequested = sourceCloseRequested,
+        loading = sourceLoading, error = sourceError,
+        onPresenceChange = { sourcePickerPresent = it },
     )
     if (showComments) ChapterDiscussion(
         chapter, colors.background, colors.onSurface,

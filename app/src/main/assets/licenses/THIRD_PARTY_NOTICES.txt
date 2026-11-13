@@ -447,3 +447,11 @@ core-before-JNI absolute loading. The original loader class is excluded from the
 all other upstream API classes/native signatures remain. See third_party/onnxruntime/ADAPTATION.md.
 There is no downloaded Java/Dex code or new runtime license claim. This source adaptation and
 packaging inspection do not establish Android runtime execution or on-device verification.
+Unified Chapters / additional body sources
+
+Komikku/TachiyomiSY merge mechanism (Komikku 383ffaa81667f45fc6c2975edb1760a7606531d3),
+and Keiyoushi Komiic protocol (c3bc55d548b0a5f1b316a323bde9e6e2516e4bea):
+Apache License 2.0. Modified for MangaFlow source identities, semantic safeguards,
+storage, reader and shared motion. Original source and modifications are recorded
+in third_party/multi-source/ADAPTATION.md in the project repository.
+MangaDex uses its public API; no third-party source script/runtime is bundled.

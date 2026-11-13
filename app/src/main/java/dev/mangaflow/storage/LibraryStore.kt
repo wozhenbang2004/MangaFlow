@@ -2,8 +2,10 @@ package dev.mangaflow.storage
 
 import android.content.Context
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
+import dev.mangaflow.data.SourceKeys
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
@@ -254,7 +256,7 @@ class LibraryStore(context: Context) {
                     is Set<*> -> editor.putStringSet(key, value.filterIsInstance<String>().toSet())
                 }
             }
-            check(editor.commit()) { "无法写入备份，请检查存储空间" }
+            check(UnifiedChapterStore.withLibraryRestore { editor.commit() }) { "无法写入备份，请检查存储空间" }
 
             progressEpoch++
             readingActivityRevision++
@@ -309,6 +311,8 @@ class LibraryStore(context: Context) {
             }
             values[key] = value
         }
+        (values[UnifiedChapterStore.KEY] as? String)?.let { UnifiedChapterStore.validateBackup(it) }
+        (values[UnifiedChapterStore.ANCHOR_KEY] as? String)?.let { UnifiedChapterStore.validateAnchors(it) }
         return DecodedBackup(root.optLong("createdAt").coerceAtLeast(0L), values)
     }
 
@@ -881,6 +885,9 @@ internal fun Manga.toJson(): JSONObject = JSONObject().apply {
     put("tags", JSONArray(tags))
     put("latestChapter", latestChapter)
     put("sourceUrl", sourceUrl)
+    put("sourceUuid", sourceUuid)
+    put("sourceId", sourceId)
+    put("sourceMangaId", sourceMangaId)
 }
 
 internal fun readManga(json: JSONObject): Manga = Manga(
@@ -899,6 +906,13 @@ internal fun readManga(json: JSONObject): Manga = Manga(
     tags = json.optJSONArray("tags").strings(),
     latestChapter = json.optString("latestChapter"),
     sourceUrl = json.optString("sourceUrl"),
+    sourceUuid = json.optString("sourceUuid"),
+    sourceId = json.optString("sourceId").ifBlank {
+        if (json.optString("sourceUrl") == DownloadStore.LOCAL_SOURCE_URL) "local"
+        else if (SourceKeys.isEncoded(json.getString("id"))) SourceKeys.decodeManga(json.getString("id")).sourceId
+        else "copy"
+    },
+    sourceMangaId = json.optString("sourceMangaId"),
 )
 
 internal fun Chapter.toJson(): JSONObject = JSONObject().apply {
@@ -906,6 +920,22 @@ internal fun Chapter.toJson(): JSONObject = JSONObject().apply {
     put("title", title)
     put("index", index)
     put("group", group)
+    put("logicalId", logicalId)
+    put("sourceId", sourceId)
+    put("sourceMangaId", sourceMangaId)
+    put("sourceChapterId", sourceChapterId)
+    put("variants", JSONArray(variants.map { variant -> JSONObject().apply {
+        put("sourceId", variant.sourceId)
+        put("sourceName", variant.sourceName)
+        put("mangaId", variant.mangaId)
+        put("chapterId", variant.chapterId)
+        put("title", variant.title)
+        put("language", variant.language)
+        put("edition", variant.edition)
+        put("scanlator", variant.scanlator)
+        put("url", variant.url)
+        variant.pageCount?.let { put("pageCount", it) }
+    } }))
 }
 
 internal fun readChapter(json: JSONObject): Chapter = Chapter(
@@ -913,6 +943,20 @@ internal fun readChapter(json: JSONObject): Chapter = Chapter(
     title = json.getString("title"),
     index = json.optInt("index"),
     group = json.optString("group", "默认"),
+    logicalId = json.optString("logicalId"),
+    sourceId = json.optString("sourceId", "copy"),
+    sourceMangaId = json.optString("sourceMangaId"),
+    sourceChapterId = json.optString("sourceChapterId"),
+    variants = json.optJSONArray("variants")?.let { array ->
+        (0 until array.length()).map { i ->
+            val variant = array.getJSONObject(i)
+            ChapterVariant(variant.getString("sourceId"), variant.getString("sourceName"),
+                variant.getString("mangaId"), variant.getString("chapterId"), variant.getString("title"),
+                variant.optString("language", "简中"), variant.optString("edition", "连载版"),
+                variant.optString("scanlator"), variant.optString("url"),
+                variant.optInt("pageCount", -1).takeIf { it >= 0 })
+        }
+    }.orEmpty(),
 )
 
 internal fun Page.toJson(): JSONObject = JSONObject().apply {
