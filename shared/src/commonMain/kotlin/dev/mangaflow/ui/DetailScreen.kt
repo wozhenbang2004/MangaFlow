@@ -393,7 +393,7 @@ fun DetailScreen(
                 Box(Modifier.matchParentSize().background(contentColor.copy(alpha = .30f)))
                 Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                     .height(128.dp + seamHeight)
-                    .background(Brush.verticalGradient(Color.Transparent, contentColor)))
+                    .background(Brush.verticalGradient(0f to Color.Transparent, 1f to contentColor)))
             }
             Column(Modifier.fillMaxSize().nestedScroll(scrolling)) {
                 ArtworkToolbar(

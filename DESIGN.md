@@ -2,6 +2,8 @@
 
 ## Large glass artwork header · 2026-11-13 (DETAIL-GLASS-27; device acceptance pending)
 
+Follow-up: run43414753296 / release162 reached Kotlin compilation and rejected the new seam's `Brush.verticalGradient(Color, Color)` call; Compose exposes list-of-colors or float/color-stop overloads. Use explicit `0f/1f` color stops, matching existing gradient calls. Latest main afbe5e3 moved the production screen into commonMain; apply the correction there and preserve the full platform migration. No layout/material behavior changes; replacement Release build and device acceptance remain separate.
+
 User supplied the left-cover/right-information J2K + artwork atmosphere + continuous transition proposal and screenshot 1000121568, then explicitly requested “参考这个改造但我希望可以大胆弄玻璃以及这个大页能占更大空间现在好像只有40%左右”. This authorizes the larger glass treatment of the **detail header**, superseding the old 44–46% hero and dark artwork-label scrim in this region. Chapter/comment layout, reading dock, discovery carousel and navigation remain outside this change.
 
 - **27A / layout:** target 72% of the normal portrait content height including the toolbar/seam, 60% on short windows; short landscape keeps the existing collapsed information entry. Poster left, title/authors right; full-width tags/native scores below. Cover uses the complete artwork with Fit, approximately 44% of the panel's inner width (reduced for large fonts); title wraps and long synopsis moves to the full-width lower region. Natural text height can enlarge the header beyond the target; its existing shared scroll mutex/collapsing offset reveals overflow instead of compressing fonts or permanently clipping information. The full-information sheet remains available.
