@@ -86,6 +86,35 @@ jobs:
           set -o pipefail
           "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0'
 
+      - name: Android Lint (release)
+        id: lint
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --console=plain --max-workers=2 \
+            -PmangaVersionCode="$RELEASE_VERSION_CODE" \
+            -PmangaVersionName="$RELEASE_VERSION_NAME" \
+            :app:lintRelease
+          python3 - <<'PY'
+          from pathlib import Path
+          for suffix in ("html", "xml"):
+              report = Path(f"app/build/reports/lint-results-release.{suffix}")
+              if not report.is_file() or report.stat().st_size == 0:
+                  raise SystemExit(f"Android Lint did not produce the required report: {report}")
+          PY
+
+      - name: Preserve Lint reports
+        if: always() && steps.lint.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mangaflow-lint-release-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            app/build/reports/lint-results-release.html
+            app/build/reports/lint-results-release.xml
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Assemble release APK
         if: env.RELEASE_ALREADY_PUBLISHED != 'true'
         run: |

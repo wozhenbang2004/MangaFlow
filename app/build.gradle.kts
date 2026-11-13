@@ -27,15 +27,26 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true; buildConfig = true }
-    lint { checkReleaseBuilds = false }
+    lint {
+        abortOnError = true
+        checkAllWarnings = true
+        checkDependencies = true
+        checkReleaseBuilds = true
+        warningsAsErrors = false
+        htmlReport = true
+        xmlReport = true
+    }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
 
-// This project intentionally has no test tasks, test dependencies or lint gates.
+// Lint analyzes sources; executable test tasks remain disabled.
 tasks.configureEach {
-    if (name.contains("test", ignoreCase = true) || name.contains("lint", ignoreCase = true)) {
+    if (!name.contains("lint", ignoreCase = true) && name.contains("test", ignoreCase = true)) {
         enabled = false
     }
+}
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    enabled = false
 }
 
 dependencies {

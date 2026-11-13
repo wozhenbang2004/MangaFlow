@@ -1,4 +1,9 @@
 # MangaFlow
+
+- User sequencing: “等 125 成功你再发布新的 lint 工作流”. Do not push the Lint changes until run 43367315040 has completed successfully and v0.1.125 is published.
+
+- CI-LINT-01 in DESIGN.md supersedes earlier instructions to disable Android Lint. User explicitly restored full static analysis: enable all warning checks, release checks, dependency analysis, error blocking and HTML/XML reports; keep warnings nonfatal. Both workflows invoke :app:lintRelease before packaging, require both reports to exist and upload reports even on analysis failure. Never disable lint tasks via the test-task name filter, add a blanket baseline/ignore/continue-on-error, or equate Lint with runtime/device acceptance. Executable tests/local builds remain prohibited; use existing main CI and confirm its trigger only.
+
 - ACCOUNT-WEBSITE-04 in DESIGN.md owns the current login repair. The single default account-password form is the real official www page inside AccountScreen, without an additional external-login button or copied native password POST. Keep exact-origin/main-frame/document/attempt/submission guards, fresh isolated WebKit profiles, complete cleanup and TLS rejection. New `website` credentials must pass the same www website profile before encrypted commit; preserve old channels and signed owner operations, with public reading anonymous. Token arrival and desktop website success are not Android success or a proven 210 fix. No tests/local build; latest main and CI-trigger-only delivery.
 
 
