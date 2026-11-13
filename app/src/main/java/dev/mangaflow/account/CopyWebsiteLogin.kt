@@ -92,7 +92,8 @@ internal class CopyWebsiteLogin(
                 cacheMode = WebSettings.LOAD_NO_CACHE
                 // The verified /web form is the desktop site. Keep this installed
                 // engine's real Chrome version; never advertise an invented Edge build.
-                userAgentString = userAgentString.replace(Regex("\\([^)]*\\)"), "(X11; Linux x86_64)")
+                // Replace only the platform comment; retain (KHTML, like Gecko).
+                userAgentString = userAgentString.replaceFirst(Regex("\\([^)]*\\)"), "(X11; Linux x86_64)")
                     .replace(" Version/4.0", "").replace(" Mobile", "")
                 useWideViewPort = true
                 loadWithOverviewMode = true
