@@ -23,6 +23,7 @@ import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -97,6 +98,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -119,11 +121,13 @@ import dev.mangaflow.reader.ReaderScreen
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionNavigationColumn
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.update.UpdatePhase
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 private enum class Section(val title: String, val icon: ImageVector) {
@@ -174,6 +178,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val section = Section.valueOf(sectionName)
     var drawerAction by remember { mutableStateOf<DrawerAction?>(null) }
     var drawerRootTransition by remember { mutableStateOf<Section?>(null) }
+    val rootOpacity = remember { Animatable(1f) }
+    val rootHandoff by remember {
+        derivedStateOf { drawerAction?.destination != null || rootOpacity.value < .999f }
+    }
     val changeSection: (Section) -> Unit = { destination ->
         model.cancelLibraryReading()
         drawerAction = null
@@ -193,23 +201,43 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val motion = LocalMotionEnabled.current
 
     LaunchedEffect(drawerAction, motion) {
-        val action = drawerAction ?: return@LaunchedEffect
+        val action = drawerAction
+        if (action == null) {
+            rootOpacity.snapTo(1f)
+            return@LaunchedEffect
+        }
         try {
-            if (action.destination != null && drawerAction === action) {
-                // Commit behind the stationary drawer, not after its close has already finished.
-                val changingRoot = sectionName != action.destination.name
-                model.cancelLibraryReading()
-                drawerRootTransition = action.destination
-                sectionName = action.destination.name
-                if (motion && changingRoot) snapshotFlow {
-                    action.rootCommitted || reading != null || detail != null
-                }.first { it }
+            coroutineScope {
+                // Native travel begins with selection feedback, rather than waiting for a new page.
+                launch {
+                    if (!motion) drawer.snapTo(action.target)
+                    else if (action.target == DrawerValue.Open) drawer.open() else drawer.close()
+                }
+                val destination = action.destination
+                if (destination != null && sectionName != destination.name &&
+                    reading == null && detail == null) {
+                    model.cancelLibraryReading()
+                    if (motion) rootOpacity.animateTo(0f,
+                        tween(MangaMotion.RootFadeOut, easing = MangaMotion.ExitEasing))
+                    // A later selection or external route owns the scene after interruption.
+                    if (drawerAction !== action || reading != null || detail != null) return@coroutineScope
+                    drawerRootTransition = destination
+                    sectionName = destination.name
+                    if (motion) snapshotFlow {
+                        action.rootCommitted || reading != null || detail != null
+                    }.first { it }
+                }
+                if (drawerAction === action) {
+                    if (motion) rootOpacity.animateTo(1f,
+                        tween(MangaMotion.RootFadeIn, easing = MangaMotion.EnterEasing))
+                    else rootOpacity.snapTo(1f)
+                }
             }
-            if (drawerAction !== action) return@LaunchedEffect
-            if (!motion) drawer.snapTo(action.target)
-            else if (action.target == DrawerValue.Open) drawer.open() else drawer.close()
         } finally {
-            if (drawerAction === action && currentCoroutineContext().isActive) drawerAction = null
+            if (drawerAction === action && currentCoroutineContext().isActive) {
+                rootOpacity.snapTo(1f)
+                drawerAction = null
+            }
         }
     }
 
@@ -299,8 +327,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 (offset.isFinite() && offset > -drawerWidthPx + .5f)
         }
     }
-    val drawerCanSelect = drawerVisible && drawer.targetValue == DrawerValue.Open &&
-        drawerAction?.target != DrawerValue.Closed
+    val drawerCanSelect = drawerVisible && (drawer.isOpen || drawer.targetValue == DrawerValue.Open)
     BackHandler(drawerVisible || libraryOpening != null) {
         if (drawerVisible) drawerAction = DrawerAction(DrawerValue.Closed)
         else model.cancelLibraryReading()
@@ -344,23 +371,26 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             Text("MANGAFLOW", fontSize = 10.sp, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    Section.entries.forEach { destination ->
+                    MotionNavigationColumn(
+                        selected = (drawerAction?.destination ?: section).ordinal,
+                        itemCount = Section.entries.size,
+                    ) { index, itemModifier ->
+                        val destination = Section.entries[index]
                         NavigationDrawerItem(
-                            label = { Text(destination.title,
-                                fontWeight = if ((drawerAction?.destination ?: section) == destination) FontWeight.SemiBold else FontWeight.Normal) },
+                            label = { Text(destination.title, fontWeight = FontWeight.Medium) },
                             selected = (drawerAction?.destination ?: section) == destination,
                             onClick = { if (drawerCanSelect) drawerAction = DrawerAction(DrawerValue.Closed, destination) },
                             icon = { Icon(destination.icon, null, modifier = Modifier.size(21.dp)) },
                             shape = RoundedCornerShape(14.dp),
                             colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f),
+                                selectedContainerColor = Color.Transparent,
                                 selectedTextColor = MaterialTheme.colorScheme.onSurface,
                                 selectedIconColor = MaterialTheme.colorScheme.onSurface,
                                 unselectedContainerColor = Color.Transparent,
                                 unselectedTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .88f),
                                 unselectedIconColor = MaterialTheme.colorScheme.onSurface.copy(alpha = .82f),
                             ),
-                            modifier = Modifier.padding(vertical = 3.dp),
+                            modifier = itemModifier,
                         )
                     }
                     Spacer(Modifier.weight(1f))
@@ -410,8 +440,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     val selection = pendingDrawerSelection ?: return@LaunchedEffect
                     if (current is Frame.Root && current.key == frame.key &&
                         selection.destination == current.section) {
-                        // Effects start after this root's composition commits. Close on the next
-                        // frame, so destination composition does not compete with drawer motion.
+                        // Only the foreground reveal waits for a committed target frame.
+                        // Native drawer travel has already started independently.
                         if (motion) withFrameNanos { }
                         selection.rootCommitted = true
                     }
@@ -540,7 +570,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val chromeReady by remember {
                             derivedStateOf { !searchExpanded && (searchForeground?.value ?: 0f) <= .02f }
                         }
-                        val rootActive = current.key == frame.key && !drawerVisible && !recentReadingOpen && authorWorks == null && !tagSearchVisible &&
+                        val rootActive = current.key == frame.key && !drawerVisible && !rootHandoff && !recentReadingOpen && authorWorks == null && !tagSearchVisible &&
                             !currentBack.gesturing && !currentBack.completed
                         val closeSearch: () -> Unit = {
                             keyboard?.hide()
@@ -555,7 +585,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             .background(MaterialTheme.colorScheme.background)) {
                             AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = rootWallpaperActive)
                         }
-                        Box(Modifier.fillMaxSize()) {
+                        Box(Modifier.fillMaxSize().graphicsLayer {
+                            // A single foreground fades through; wallpaper/player never join this layer.
+                            alpha = rootOpacity.value
+                            translationY = (1f - rootOpacity.value) * 6.dp.toPx()
+                        }.motionInputGate(!rootHandoff)) {
                             val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
                             val navigation: @Composable () -> Unit = {
                                 Box {
@@ -632,7 +666,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         active = rootActive && !searchVisible, refreshingIds = refreshingDownloads, history = history)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
-                                        active = current.key == frame.key,
+                                        active = rootActive,
                                         onLoginWithCookie = model::loginWithCookie,
                                         onBeginWebsiteLogin = model::beginWebsiteLogin,
                                         onCancelWebsiteLogin = model::cancelWebsiteLogin,
@@ -705,7 +739,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     }
                                 }
                             }
-                        }
                         if (current.section == Section.DISCOVER) ExpandingSearchBar(
                             expanded = searchExpanded,
                             query = browse.query,
@@ -735,6 +768,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     model.openManga(manga)
                                 },
                             )
+                        }
                         }
                         }
                     }

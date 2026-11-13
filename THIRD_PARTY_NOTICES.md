@@ -136,6 +136,8 @@ and `ui/BrowseTabs.kt` are adapted from the same fixed Ovio version:
 `components/ovio/liquid-tabs/worlds/minimal.tsx`.
 The Compose port preserves independently animated indicator edges and stationary labels,
 uses Android's animation clock and system duration scale, and omits the web deployment demo.
+The sidebar's MotionNavigationColumn also adapts these independent edges vertically over measured
+native row bounds, keeping labels and hit regions fixed and bounding long-jump stretch.
 
 MIT License
 

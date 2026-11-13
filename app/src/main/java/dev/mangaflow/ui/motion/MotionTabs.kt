@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -56,6 +57,70 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
 internal enum class MotionTabTreatment { Capsule, Soft, Underline }
+
+/** Vertical adaptation of the same Ovio two-edge motion; labels and hit cells stay stationary. */
+@Composable
+internal fun MotionNavigationColumn(
+    selected: Int,
+    itemCount: Int,
+    modifier: Modifier = Modifier,
+    item: @Composable (Int, Modifier) -> Unit,
+) {
+    if (itemCount <= 0) return
+    val index = selected.coerceIn(0, itemCount - 1)
+    val latest = rememberUpdatedState(index)
+    val top = remember { Animatable(index.toFloat()) }
+    val bottom = remember { Animatable(index + 1f) }
+    val heights = remember(itemCount) { mutableStateMapOf<Int, Int>() }
+    val motion = LocalMotionEnabled.current
+    val indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f)
+    LaunchedEffect(motion, itemCount) {
+        snapshotFlow { latest.value }.collect { target ->
+            val down = target > top.value
+            val topVelocity = top.velocity
+            val bottomVelocity = bottom.velocity
+            launch {
+                if (!motion) top.snapTo(target.toFloat())
+                else top.animateTo(target.toFloat(), spring(
+                    dampingRatio = if (down) MangaMotion.TabTrailingDamping else MangaMotion.TabLeadingDamping,
+                    stiffness = if (down) MangaMotion.TabTrailingStiffness else MangaMotion.TabLeadingStiffness,
+                ), initialVelocity = topVelocity)
+            }
+            launch {
+                if (!motion) bottom.snapTo(target + 1f)
+                else bottom.animateTo(target + 1f, spring(
+                    dampingRatio = if (down) MangaMotion.TabLeadingDamping else MangaMotion.TabTrailingDamping,
+                    stiffness = if (down) MangaMotion.TabLeadingStiffness else MangaMotion.TabTrailingStiffness,
+                ), initialVelocity = bottomVelocity)
+            }
+        }
+    }
+    Column(modifier.fillMaxWidth().padding(vertical = 3.dp).drawBehind {
+        if (heights.size != itemCount) return@drawBehind
+        var y = 0f
+        val gap = 6.dp.roundToPx().toFloat()
+        val starts = (0 until itemCount).map { i ->
+            y.also { y += heights.getValue(i) + gap }
+        }
+        val ends = starts.mapIndexed { i, start -> start + heights.getValue(i) }
+        fun interpolate(position: Float, values: List<Float>): Float {
+            val value = position.coerceIn(0f, itemCount - 1f)
+            val from = value.toInt()
+            val to = (from + 1).coerceAtMost(itemCount - 1)
+            return values[from] + (values[to] - values[from]) * (value - from)
+        }
+        val start = interpolate(top.value, starts)
+        val end = interpolate(bottom.value - 1f, ends)
+        val restingHeight = heights.getValue(index).toFloat().coerceAtLeast(1f)
+        // A long jump should travel between rows, not turn into a full-column selection panel.
+        val height = (end - start).coerceIn(restingHeight * .9f, restingHeight * 1.22f)
+        val offset = ((start + end - height) / 2f).coerceIn(0f, (size.height - height).coerceAtLeast(0f))
+        drawRoundRect(indicator, topLeft = Offset(0f, offset), size = Size(size.width, height),
+            cornerRadius = CornerRadius(14.dp.toPx()))
+    }.selectableGroup(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        repeat(itemCount) { i -> item(i, Modifier.onSizeChanged { heights[i] = it.height }) }
+    }
+}
 
 /** Ovio Minimal Liquid Tabs, 81a1bcb: two independent edges, with stationary labels/hit regions. */
 @Composable

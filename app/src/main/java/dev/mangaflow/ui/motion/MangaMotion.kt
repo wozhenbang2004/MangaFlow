@@ -111,6 +111,8 @@ internal object MangaMotion {
     const val NavigationStiffness = 520f
     const val NavigationDamping = 1f
     const val NavigationFade = 160
+    const val RootFadeOut = 70
+    const val RootFadeIn = 180
     const val GestureStiffness = 420f
     const val GestureDamping = .86f
     const val SwitchStiffness = 300f
