@@ -907,6 +907,8 @@ class LibraryStore(context: Context) {
             dimAmount = optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
             discoverColumns = optInt("discoverColumns", 3).coerceIn(1, 4),
             updateColumns = optInt("updateColumns", 3).coerceIn(1, 4),
+            desktopDiscoverColumns = optInt("desktopDiscoverColumns", 0).coerceIn(0, 8),
+            desktopUpdateColumns = optInt("desktopUpdateColumns", 0).coerceIn(0, 8),
             panelEngine = dev.mangaflow.reader.panels.PanelEngine.entries.firstOrNull {
                 it.name == optString("panelEngine")
             } ?: dev.mangaflow.reader.panels.PanelEngine.OFF,
@@ -919,7 +921,9 @@ class LibraryStore(context: Context) {
 
     private fun ReaderPreferences.sanitized(): ReaderPreferences =
         copy(dimAmount = dimAmount.coerceIn(0f, 0.65f),
-            discoverColumns = discoverColumns.coerceIn(1, 4), updateColumns = updateColumns.coerceIn(1, 4))
+            discoverColumns = discoverColumns.coerceIn(1, 4), updateColumns = updateColumns.coerceIn(1, 4),
+            desktopDiscoverColumns = desktopDiscoverColumns.coerceIn(0, 8),
+            desktopUpdateColumns = desktopUpdateColumns.coerceIn(0, 8))
 
     private fun ReaderPreferences.toJson(): JSONObject = JSONObject().apply {
         put("mode", mode.name)
@@ -931,6 +935,8 @@ class LibraryStore(context: Context) {
         put("dimAmount", dimAmount.toDouble())
         put("discoverColumns", discoverColumns)
         put("updateColumns", updateColumns)
+        put("desktopDiscoverColumns", desktopDiscoverColumns)
+        put("desktopUpdateColumns", desktopUpdateColumns)
         put("panelEngine", panelEngine.name)
         put("panelDirection", panelDirection.name)
         put("panelLearnedOrder", panelLearnedOrder)

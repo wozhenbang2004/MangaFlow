@@ -32,6 +32,12 @@ object MangaLayout {
     val PanelWidth = 640.dp
     val ReaderPageWidth = 864.dp
 
+    fun desktopBrowseWidth(windowWidth: Dp): Dp =
+        (windowWidth - 48.dp).coerceAtLeast(1.dp).coerceAtMost(1560.dp)
+
+    fun automaticDesktopColumns(width: Dp, fontScale: Float, gap: Dp, inset: Dp): Int =
+        columns(width, 8, 156.dp * fontScale.coerceAtLeast(1f), gap, inset)
+
     fun sidePadding(width: Dp): Dp = if (width < 360.dp) 12.dp else 20.dp
 
     fun columns(width: Dp, maximum: Int, minimum: Dp, gap: Dp, inset: Dp = 0.dp): Int {

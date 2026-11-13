@@ -217,7 +217,9 @@ fun DiscoverScreen(
                 soft = true,
             ) { pane ->
                 DiscoveryPane(pane, positions, repository,
-                    columns = (if (pane.mode == DiscoveryMode.LATEST) updateColumns else discoverColumns).coerceIn(1, 4),
+                    columns = (if (pane.mode == DiscoveryMode.LATEST) updateColumns else discoverColumns).let {
+                        if (platformKind == PlatformKind.DESKTOP) it.coerceIn(0, 8) else it.coerceIn(1, 4)
+                    },
                     onColumnsChange = if (pane.mode == DiscoveryMode.LATEST) onUpdateColumnsChange else onDiscoverColumnsChange,
                     backdrop = searchBackdrop,
                     active = unobscured && !holdingContent && pane.cacheKey == browse.cacheKey,
@@ -618,10 +620,15 @@ private fun DiscoveryPane(
     val inset = MangaLayout.sidePadding(maxWidth) + if (ranking)
         ((maxWidth - MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp) else 0.dp
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-    val gap = if (columns == 4) 8.dp else 10.dp
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val gap = if (desktop) 12.dp else if (columns == 4) 8.dp else 10.dp
     // The saved setting is the preferred maximum; narrow windows and large type reflow.
-    val visibleColumns = if (ranking || columns == 1) 1 else MangaLayout.columns(
-        maxWidth, columns, (if (columns == 4) 68.dp else 88.dp) * fontScale, gap, inset)
+    val visibleColumns = when {
+        ranking || columns == 1 -> 1
+        desktop && columns == 0 -> MangaLayout.automaticDesktopColumns(maxWidth, fontScale, gap, inset)
+        else -> MangaLayout.columns(maxWidth, columns,
+            (if (!desktop && columns == 4) 68.dp else 88.dp) * fontScale, gap, inset)
+    }
     LazyVerticalGrid(
         columns = GridCells.Fixed(visibleColumns), state = grid,
         contentPadding = PaddingValues(start = inset, end = inset, top = topPadding, bottom = 32.dp),
@@ -652,7 +659,7 @@ private fun DiscoveryPane(
                     Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现",
                         modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-                    DiscoveryLayoutControl(columns, backdrop, active, onColumnsChange,
+                    DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
                         onPresenceChange = { layoutPresent = it })
                     DiscoveryRefresh(state, onRefresh)
                 }
@@ -670,7 +677,7 @@ private fun DiscoveryPane(
                     if (columns == 1) BrowseListRow(manga, repository,
                         showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
                         onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
-                    else CoverTile(manga, repository, dense = true, narrow = visibleColumns == 4,
+                    else CoverTile(manga, repository, dense = true, narrow = visibleColumns >= 4,
                         showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
                         onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
                 }
@@ -762,6 +769,7 @@ private fun BrowseListRow(
 @Composable
 private fun DiscoveryLayoutControl(
     columns: Int,
+    actualColumns: Int,
     backdrop: HazeState,
     enabled: Boolean,
     onChange: (Int) -> Unit,
@@ -772,8 +780,10 @@ private fun DiscoveryLayoutControl(
     val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
     val window = LocalMangaWindow.current
-    val labels = remember { listOf("列表", "2列", "3列", "4列") }
-    val selected = columns.coerceIn(1, 4) - 1
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val choices = remember(desktop) { if (desktop) listOf(0, 1, 2, 3, 4, 6, 8) else listOf(1, 2, 3, 4) }
+    val labels = remember(choices) { choices.map { if (it == 0) "自动" else if (it == 1) "列表" else "${it}列" } }
+    val selected = choices.indexOf(columns).coerceAtLeast(0)
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = expanded
     val transition = rememberTransition(presence, label = "browse-layout-morph")
@@ -785,7 +795,7 @@ private fun DiscoveryLayoutControl(
     val reportPresence by rememberUpdatedState(onPresenceChange)
     SideEffect { reportPresence(present) }
     DisposableEffect(Unit) { onDispose { reportPresence(false) } }
-    val extendedWidth = (252.dp * density.fontScale.coerceIn(1f, 1.6f))
+    val extendedWidth = ((if (desktop) 388.dp else 252.dp) * density.fontScale.coerceIn(1f, 1.6f))
         .coerceAtMost((window.width - 24.dp).coerceAtLeast(44.dp))
     val rowHeight = morphGlassTabHeight()
     val extendedHeight = rowHeight + 12.dp
@@ -822,13 +832,13 @@ private fun DiscoveryLayoutControl(
                         Box(Modifier.align(Alignment.CenterEnd).wrapContentSize(Alignment.CenterEnd, unbounded = true)
                             .width(extendedWidth - 44.dp).padding(horizontal = 6.dp)) {
                             MotionTabs(selected, labels, onSelect = { index ->
-                                if (index != selected) onChange(index + 1)
+                                if (index != selected) onChange(choices[index])
                                 expanded = false
                             }, modifier = Modifier.fillMaxWidth(), role = Role.RadioButton,
                                 controlHeight = rowHeight, indicatorHeight = rowHeight - 8.dp,
                                 fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
                                 fontSize = 12.sp, itemContent = { index, _, color ->
-                                    Text(if (index == 0) "列表" else (index + 1).toString(), color = color,
+                                    Text(if (desktop) { if (choices[index] == 0) "自" else choices[index].toString() } else if (index == 0) "列表" else choices[index].toString(), color = color,
                                         fontSize = 12.sp, maxLines = 1,
                                         modifier = Modifier.semantics { contentDescription = labels[index] })
                                 })
@@ -837,12 +847,12 @@ private fun DiscoveryLayoutControl(
                     MotionIconButton(onClick = { expanded = !expanded },
                         modifier = Modifier.align(Alignment.CenterEnd).size(44.dp)
                             .motionInputGate(enabled)
-                            .semantics { stateDescription = labels[selected] + if (expanded) "，已展开" else "，已收起" },
+                            .semantics { stateDescription = labels[selected] + "，当前${actualColumns}列" + if (expanded) "，已展开" else "，已收起" },
                         enabled = enabled) {
                         Box(Modifier.size(23.dp), contentAlignment = Alignment.Center) {
                             Icon(Icons.Outlined.ViewModule, "浏览布局：${labels[selected]}", Modifier.size(19.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(columns.coerceIn(1, 4).toString(), Modifier.align(Alignment.BottomEnd)
+                            Text(if (desktop && columns == 0) "自" else actualColumns.toString(), Modifier.align(Alignment.BottomEnd)
                                 .clip(RoundedCornerShape(3.dp)).background(MaterialTheme.colorScheme.surface)
                                 .padding(horizontal = 1.dp), fontSize = 9.sp, lineHeight = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)

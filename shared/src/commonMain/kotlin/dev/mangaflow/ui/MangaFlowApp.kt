@@ -710,6 +710,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             Section.SETTINGS -> MangaLayout.SettingsWidth
                             Section.ACCOUNT -> MangaLayout.AccountWidth
                             Section.DOWNLOADS -> MangaLayout.ListWidth
+                            Section.DISCOVER -> if (platformKind == PlatformKind.DESKTOP)
+                                MangaLayout.desktopBrowseWidth(windowSize.width) else MangaLayout.BrowseWidth
                             else -> MangaLayout.BrowseWidth
                         }
                         BoxWithConstraints(Modifier
@@ -767,13 +769,19 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
-                                        discoverColumns = preferences.discoverColumns,
-                                        updateColumns = preferences.updateColumns,
+                                        discoverColumns = if (platformKind == PlatformKind.DESKTOP)
+                                            preferences.desktopDiscoverColumns else preferences.discoverColumns,
+                                        updateColumns = if (platformKind == PlatformKind.DESKTOP)
+                                            preferences.desktopUpdateColumns else preferences.updateColumns,
                                         onDiscoverColumnsChange = { columns ->
-                                            model.library.updatePreferences(model.library.preferences.value.copy(discoverColumns = columns))
+                                            val current = model.library.preferences.value
+                                            model.library.updatePreferences(if (platformKind == PlatformKind.DESKTOP)
+                                                current.copy(desktopDiscoverColumns = columns) else current.copy(discoverColumns = columns))
                                         },
                                         onUpdateColumnsChange = { columns ->
-                                            model.library.updatePreferences(model.library.preferences.value.copy(updateColumns = columns))
+                                            val current = model.library.preferences.value
+                                            model.library.updatePreferences(if (platformKind == PlatformKind.DESKTOP)
+                                                current.copy(desktopUpdateColumns = columns) else current.copy(updateColumns = columns))
                                         },
                                         backgroundState = discoveryBackground,
                                         searchExpanded = searchVisible,

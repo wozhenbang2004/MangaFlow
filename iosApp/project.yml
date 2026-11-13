@@ -62,7 +62,12 @@ targets:
         script: |
           set -euo pipefail
           cd "$SRCROOT/.."
-          ./gradlew --no-daemon --console=plain --max-workers=2 :shared:embedAndSignAppleFrameworkForXcode
+          set -- --no-daemon --console=plain --no-parallel --max-workers=1
+          if [ -n "${MANGAFLOW_IOS_GRADLE_JVMARGS:-}" ]; then
+            set -- "$@" "-Dorg.gradle.jvmargs=$MANGAFLOW_IOS_GRADLE_JVMARGS" \
+              -Pkotlin.native.disableCompilerDaemon=false
+          fi
+          ./gradlew "$@" :shared:embedAndSignAppleFrameworkForXcode
 schemes:
   MangaFlow:
     build:

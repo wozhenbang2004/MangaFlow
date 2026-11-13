@@ -18,6 +18,9 @@ data class ReaderPreferences(
     // App-wide browse presentation: 1 is a list; 2–4 are cover columns.
     val discoverColumns: Int = 3,
     val updateColumns: Int = 3,
+    // Desktop keeps its own explicit automatic/fixed density; phone preferences stay 1–4.
+    val desktopDiscoverColumns: Int = 0,
+    val desktopUpdateColumns: Int = 0,
     val panelEngine: PanelEngine = PanelEngine.OFF,
     val panelDirection: PanelDirection = PanelDirection.RIGHT_TO_LEFT,
     val panelLearnedOrder: Boolean = false,

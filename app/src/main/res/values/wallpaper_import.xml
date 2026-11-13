@@ -1,0 +1,27 @@
+<resources>
+    <string name="wallpaper_import_target">添加到漫流壁纸</string>
+    <string name="wallpaper_import_title">添加壁纸</string>
+    <string name="wallpaper_import_checking">正在检查分享的文件…</string>
+    <string name="wallpaper_import_count">%1$d 项 · 图片或静音视频</string>
+    <string name="wallpaper_import_confirm_hint">确认后加入壁纸库；每项最多 512 MB。</string>
+    <string name="wallpaper_import_confirm">添加 %1$d 项</string>
+    <string name="wallpaper_import_cancel">取消</string>
+    <string name="wallpaper_import_stop">停止</string>
+    <string name="wallpaper_import_done">完成</string>
+    <string name="wallpaper_import_open">打开漫流</string>
+    <string name="wallpaper_import_progress">正在添加 %1$d / %2$d</string>
+    <string name="wallpaper_import_result">已添加 %1$d 项 · 未添加 %2$d 项</string>
+    <string name="wallpaper_import_stopped">已停止，已添加的壁纸会保留。未完成文件可重新分享。</string>
+    <string name="wallpaper_import_interrupted">导入已中断，已有壁纸保留。请重新分享未完成的文件。</string>
+    <string name="wallpaper_import_empty">没有收到可读取的图片或视频。</string>
+    <string name="wallpaper_import_limit">一次最多添加 20 项，请分批分享。</string>
+    <string name="wallpaper_import_unreadable">无法读取，请从来源应用重新分享。</string>
+    <string name="wallpaper_import_unsupported">仅支持图片或视频，不支持壁纸工程。</string>
+    <string name="wallpaper_import_too_large">文件超过 512 MB。</string>
+    <string name="wallpaper_import_empty_file">文件为空。</string>
+    <string name="wallpaper_import_failed">添加失败，文件可能不可读、格式不支持或空间不足。</string>
+    <string name="wallpaper_import_unknown_name">共享文件 %1$d</string>
+    <string name="wallpaper_import_busy">正在添加壁纸，请完成后再次分享。</string>
+    <string name="wallpaper_import_saved">已添加</string>
+    <string name="wallpaper_import_not_added">未添加</string>
+</resources>

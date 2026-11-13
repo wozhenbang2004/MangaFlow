@@ -126,6 +126,8 @@ internal fun ReaderSettingsDialog(
                         PaperThemePicker(preferences.theme) { update(preferences.copy(theme = it)) }
                     }
 
+                    LocalReaderKeyboard.current?.settings?.invoke(preferences.mode == ReadingMode.RIGHT_TO_LEFT)
+
                     ReaderSettingsSection("屏幕") {
                         ReaderToggle("保持常亮", preferences.keepScreenOn) { update(preferences.copy(keepScreenOn = it)) }
                         Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {

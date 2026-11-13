@@ -1,5 +1,15 @@
 # Third-party notices
 
+## Windows native caption integration
+
+Java Native Access (JNA) 5.19.1 is used only by the Windows application to apply
+documented DWM caption/text/border colours while preserving the native frame.
+JNA is available under Apache-2.0 OR LGPL-2.1-or-later; this distribution selects
+Apache-2.0. The original artifact retains its bundled notices and licence text.
+Upstream: https://github.com/java-native-access/jna/tree/5.19.1
+Mechanism reference: MayakaApps/ComposeWindowStyler (Apache-2.0); no library source
+was copied. No custom window procedure, non-client replacement or JBR is used.
+
 ## Multiplatform dependencies
 
 Author-script classification retains the original per-UTF16-character contract

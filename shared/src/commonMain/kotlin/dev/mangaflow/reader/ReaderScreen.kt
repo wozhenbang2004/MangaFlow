@@ -23,6 +23,9 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.horizontalScroll
@@ -118,6 +121,12 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
@@ -558,7 +567,29 @@ fun ReaderScreen(
         if (atChapterEnd && !touchExploration) controlsVisible = false
     }
 
-    Box(Modifier.fillMaxSize()) {
+    val keyboard = LocalReaderKeyboard.current
+    val keyboardFocus = remember { FocusRequester() }
+    var keyboardFocused by remember { mutableStateOf(false) }
+    var keyboardSerial by remember(chapterId) { mutableIntStateOf(0) }
+    var keyboardRequest by remember(chapterId) { mutableStateOf<ReaderKeyboardRequest?>(null) }
+    val keyboardReady = keyboard != null && readingEligible && !showPageNavigator &&
+        preferences.panelEngine == PanelEngine.OFF
+    LaunchedEffect(keyboardReady) { if (keyboardReady) keyboardFocus.requestFocus() }
+    val keyboardModifier = if (keyboard == null) Modifier else Modifier
+        .focusRequester(keyboardFocus)
+        .onFocusChanged { keyboardFocused = it.isFocused }
+        // Bubble only while this reading surface itself owns focus. Editors,
+        // dialogs and their text/IME handling never share its shortcut target.
+        .onKeyEvent { event ->
+            if (!keyboardReady || !keyboardFocused || event.type != KeyEventType.KeyDown) false
+            else keyboard.actionFor(event, preferences.mode == ReadingMode.RIGHT_TO_LEFT)?.let { action ->
+                if (action == ReaderKeyboardAction.TOGGLE_CONTROLS) controlsVisible = !controlsVisible
+                else keyboardRequest = ReaderKeyboardRequest(++keyboardSerial, action)
+                true
+            } ?: false
+        }.focusable(enabled = keyboardReady)
+
+    Box(Modifier.fillMaxSize().then(keyboardModifier)) {
         // Sample the existing artwork and dim layer; controls stay outside their own backdrop.
         Box(Modifier.fillMaxSize().graphicsLayer {
             // Only a real source handoff arms this finite arrival. Keep the current
@@ -626,6 +657,8 @@ fun ReaderScreen(
                         initialOffset = cursor.scrollOffset,
                         targetPage = targetPage,
                         targetOffset = targetOffset,
+                        keyboardRequest = keyboardRequest,
+                        onKeyboardConsumed = { serial -> if (keyboardRequest?.serial == serial) keyboardRequest = null },
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },
                         onLocation = { index, offset -> cursor.scrollOffset = offset; pageIndex = index },
                         onSave = { index, offset -> libraryStore.saveProgress(manga, chapter, index, chapterPageCount, offset,
@@ -649,7 +682,10 @@ fun ReaderScreen(
                                 nearChapterEnd(manga, next)
                             }
                         },
-                        onTap = { controlsVisible = !controlsVisible },
+                        onTap = {
+                            if (keyboardReady) keyboardFocus.requestFocus()
+                            controlsVisible = !controlsVisible
+                        },
                         active = readerForeground && !leavingReader && !showSettings && !showChapters &&
                             !showSpreadAdjustment && !showComments && !sourcePickerBlocking && !chapterChangeRequested,
                         onAtEndChanged = { atChapterEnd = it },
@@ -1058,6 +1094,8 @@ private fun ChapterPages(
     initialOffset: Int,
     targetPage: Int?,
     targetOffset: Int,
+    keyboardRequest: ReaderKeyboardRequest?,
+    onKeyboardConsumed: (Int) -> Unit,
     onTargetConsumed: () -> Unit,
     onLocation: (Int, Int) -> Unit,
     onSave: (Int, Int) -> Unit,
@@ -1086,6 +1124,7 @@ private fun ChapterPages(
     val startPage = remember { initialPage.coerceIn(0, pages.lastIndex) }
     val startOffset = remember { initialOffset.coerceAtLeast(0) }
     val endRevealPx = with(LocalDensity.current) { 24.dp.roundToPx() }
+    val keyboardMotion = LocalMotionEnabled.current
     if (preferences.mode == ReadingMode.VERTICAL) {
         val list = rememberLazyListState(initialFirstVisibleItemIndex = startPage)
         val pageLayoutReady = remember { mutableStateMapOf<Int, Boolean>() }
@@ -1187,6 +1226,42 @@ private fun ChapterPages(
                 onTargetConsumed()
             }
         }
+        LaunchedEffect(keyboardRequest?.serial, active, restoring) {
+            val request = keyboardRequest ?: return@LaunchedEffect
+            if (!active || restoring) return@LaunchedEffect
+            try {
+                readingNavigation()
+                suspend fun moveTo(index: Int) {
+                    if (keyboardMotion) list.animateScrollToItem(index.coerceIn(0, pages.lastIndex))
+                    else list.scrollToItem(index.coerceIn(0, pages.lastIndex))
+                }
+                when (request.action) {
+                    ReaderKeyboardAction.FIRST_PAGE -> moveTo(0)
+                    ReaderKeyboardAction.LAST_PAGE -> moveTo(pages.lastIndex)
+                    ReaderKeyboardAction.PREVIOUS_PAGE -> when {
+                        list.firstVisibleItemScrollOffset > 0 -> moveTo(list.firstVisibleItemIndex)
+                        list.firstVisibleItemIndex > 0 -> moveTo(list.firstVisibleItemIndex - 1)
+                        else -> onPrevious?.invoke()
+                    }
+                    ReaderKeyboardAction.NEXT_PAGE -> when {
+                        list.firstVisibleItemIndex < pages.lastIndex -> moveTo(list.firstVisibleItemIndex + 1)
+                        list.canScrollForward -> {
+                            val step = (list.layoutInfo.viewportEndOffset - list.layoutInfo.viewportStartOffset) * .85f
+                            if (keyboardMotion) list.animateScrollBy(step) else list.scrollBy(step)
+                        }
+                        else -> onNext?.invoke()
+                    }
+                    ReaderKeyboardAction.SCROLL_UP, ReaderKeyboardAction.SCROLL_DOWN -> {
+                        val forward = request.action == ReaderKeyboardAction.SCROLL_DOWN
+                        if (if (forward) list.canScrollForward else list.canScrollBackward) {
+                            val step = (list.layoutInfo.viewportEndOffset - list.layoutInfo.viewportStartOffset) * .85f * if (forward) 1 else -1
+                            if (keyboardMotion) list.animateScrollBy(step) else list.scrollBy(step)
+                        } else if (forward) onNext?.invoke() else onPrevious?.invoke()
+                    }
+                    ReaderKeyboardAction.TOGGLE_CONTROLS -> Unit
+                }
+            } finally { onKeyboardConsumed(request.serial) }
+        }
         DisposableEffect(list) {
             onDispose {
                 visibleImageChanged(false)
@@ -1244,6 +1319,26 @@ private fun ChapterPages(
             groups.indexOfFirst { it.contains(startPage) }.coerceAtLeast(0)
         }
         val pager = rememberPagerState(initialPage = startingGroup, pageCount = { groups.size })
+        LaunchedEffect(keyboardRequest?.serial, active) {
+            val request = keyboardRequest ?: return@LaunchedEffect
+            if (!active) return@LaunchedEffect
+            try {
+                readingNavigation()
+                val destination = when (request.action) {
+                    ReaderKeyboardAction.FIRST_PAGE -> 0
+                    ReaderKeyboardAction.LAST_PAGE -> groups.lastIndex
+                    ReaderKeyboardAction.PREVIOUS_PAGE, ReaderKeyboardAction.SCROLL_UP -> pager.currentPage - 1
+                    ReaderKeyboardAction.NEXT_PAGE, ReaderKeyboardAction.SCROLL_DOWN -> pager.currentPage + 1
+                    ReaderKeyboardAction.TOGGLE_CONTROLS -> pager.currentPage
+                }
+                when {
+                    destination < 0 -> onPrevious?.invoke()
+                    destination > groups.lastIndex -> onNext?.invoke()
+                    keyboardMotion -> pager.animateScrollToPage(destination)
+                    else -> pager.scrollToPage(destination)
+                }
+            } finally { onKeyboardConsumed(request.serial) }
+        }
         val dragging by pager.interactionSource.collectIsDraggedAsState()
         LaunchedEffect(dragging) { if (dragging) readingNavigation() }
         val swipeReadyPages = remember { mutableStateMapOf<Int, Boolean>() }

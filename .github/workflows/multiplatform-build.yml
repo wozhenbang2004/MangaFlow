@@ -117,6 +117,9 @@ jobs:
     name: iOS application (unsigned)
     runs-on: macos-latest
     timeout-minutes: 60
+    env:
+      # Standard arm64 macOS runners have 7 GB; leave room for Xcode and native linking.
+      MANGAFLOW_IOS_GRADLE_JVMARGS: '-Xmx4g -Dfile.encoding=UTF-8'
     defaults:
       run:
         shell: bash
@@ -146,18 +149,21 @@ jobs:
           chmod +x gradlew
           command -v xcodegen >/dev/null || brew install xcodegen
           (cd iosApp && xcodegen generate)
-      - name: Compile the complete simulator application
-        run: |
-          set -euo pipefail
-          xcodebuild -project iosApp/MangaFlow.xcodeproj -scheme MangaFlow -configuration Debug \
-            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$RUNNER_TEMP/MangaFlow-simulator" CODE_SIGNING_ALLOWED=NO MARKETING_VERSION="$MANGA_VERSION" CURRENT_PROJECT_VERSION="$MANGA_BUILD_NUMBER" build
       - name: Archive the unsigned device application
         run: |
           set -euo pipefail
           xcodebuild -project iosApp/MangaFlow.xcodeproj -scheme MangaFlow -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/MangaFlow.xcarchive" CODE_SIGNING_ALLOWED=NO MARKETING_VERSION="$MANGA_VERSION" CURRENT_PROJECT_VERSION="$MANGA_BUILD_NUMBER" archive
+      - name: Compile the complete simulator application
+        run: |
+          set -euo pipefail
+          xcodebuild -project iosApp/MangaFlow.xcodeproj -scheme MangaFlow -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/MangaFlow-simulator" CODE_SIGNING_ALLOWED=NO MARKETING_VERSION="$MANGA_VERSION" CURRENT_PROJECT_VERSION="$MANGA_BUILD_NUMBER" build
+      - name: Package the unsigned iOS applications
+        run: |
+          set -euo pipefail
           mkdir -p dist
           tar -czf dist/MangaFlow-ios-simulator.tar.gz \
             -C "$RUNNER_TEMP/MangaFlow-simulator/Build/Products/Debug-iphonesimulator" MangaFlow.app

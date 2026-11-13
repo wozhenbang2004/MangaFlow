@@ -36,12 +36,18 @@ import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterVariant
+import dev.mangaflow.data.ChapterQualityInfo
+import dev.mangaflow.data.CHAPTER_DIMENSION_SAMPLE_LIMIT
+import dev.mangaflow.data.chapterQualityInfo
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
+import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.reader.ReaderDimensionCache
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionPress
@@ -56,6 +62,8 @@ internal fun ChapterDownloadSourceSheet(
     onSelect: (ChapterVariant) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val context = LocalMangaContext.current
+    val downloads = remember(context) { DownloadStore.get(context) }
     val variants = remember(manga.id, manga.sourceName, chapter) {
         downloadSourceVariants(manga, chapter)
     }
@@ -77,6 +85,8 @@ internal fun ChapterDownloadSourceSheet(
                         tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            Text("仅显示下载记录中的尺寸样本，不代表整章画质", Modifier.padding(top = 6.dp, bottom = 4.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, lineHeight = 16.sp)
             if (variants.isEmpty()) {
                 Text("本章暂时没有可用的下载来源。请更新目录后重试。",
                     Modifier.fillMaxWidth().padding(vertical = 18.dp),
@@ -86,6 +96,20 @@ internal fun ChapterDownloadSourceSheet(
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
                     items(variants, key = { it.storageId }) { variant ->
                         val entry = entries[variant.storageId]
+                        val quality = remember(variant.storageId, variant.pageCount, entry?.id,
+                            entry?.totalPages, entry?.completedPages, entry?.status) {
+                            val retained = entry?.let { downloads.record(it.id) }
+                                ?.takeIf { it.entry.chapter.id == variant.storageId }?.pages.orEmpty()
+                            val samples = retained.take(CHAPTER_DIMENSION_SAMPLE_LIMIT).map { page ->
+                                // In-memory header dimensions only; this never opens a file or image request.
+                                ReaderDimensionCache.get(page.url)?.let { size ->
+                                    page.copy(width = size.width, height = size.height)
+                                } ?: page
+                            }
+                            chapterQualityInfo(samples,
+                                entry?.totalPages?.takeIf { it > 0 } ?: variant.pageCount)
+                        }
+                        val qualityText = chapterQualityLabel(quality)
                         val canStart = entry?.status !in setOf(DownloadStatus.COMPLETED,
                             DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
                         val enabled = canStart && !submitted
@@ -121,7 +145,7 @@ internal fun ChapterDownloadSourceSheet(
                                     }
                                 })
                             .motionPress(interaction, enabled = enabled, pressedScale = .99f)
-                            .semantics { stateDescription = listOf(details, status)
+                            .semantics { stateDescription = listOf(details, status, qualityText)
                                 .filter(String::isNotBlank).joinToString("，") }
                             .padding(horizontal = 6.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically) {
@@ -133,6 +157,9 @@ internal fun ChapterDownloadSourceSheet(
                                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 if (details.isNotBlank()) Text(details,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 11.sp, lineHeight = 16.sp, maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis)
+                                Text(qualityText, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 11.sp, lineHeight = 16.sp, maxLines = 2,
                                     overflow = TextOverflow.Ellipsis)
                             }
@@ -149,6 +176,17 @@ internal fun ChapterDownloadSourceSheet(
             }
         }
     }
+}
+
+private fun chapterQualityLabel(info: ChapterQualityInfo): String {
+    val count = info.totalPages?.let { "$it 页 · " }.orEmpty()
+    if (info.dimensionPages == 0) return count + "尺寸未知"
+    fun range(minimum: Int?, maximum: Int?): String =
+        if (minimum == maximum) minimum.toString() else "$minimum–$maximum"
+    val dimensions = "${range(info.minWidth, info.maxWidth)} × ${range(info.minHeight, info.maxHeight)} px"
+    val coverage = info.totalPages?.let { "${info.dimensionPages}/$it 页" }
+        ?: "${info.dimensionPages} 页，整章页数未知"
+    return "样本 $dimensions · 覆盖 $coverage"
 }
 
 private fun downloadSourceVariants(manga: Manga, chapter: Chapter): List<ChapterVariant> {

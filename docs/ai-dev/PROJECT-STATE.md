@@ -53,3 +53,10 @@ All recently created screenshots/baselines are under the sibling `../evidence/`,
 ## Handoff
 
 Status: RESUMED in this chat. Preserve current unfinished writer ownership before compaction/restart. Recovery: fully reload runtime policy, this state and active requirements, inspect live agents and actual files, then continue the exact integration action. Do not repeat installed-Relay diagnosis, old170 width repair, or already finished UI implementations; do not claim pending CI/device/visual results passed.
+
+
+## Completed remaining functional delivery · 2026-11-13
+
+This writer is only publishing completed desktop keyboard/custom bindings/F11/native-window theme and explicit wide layouts, cached chapter-size samples, Android image/video share-import through external LocalSend, and iOS build-memory/serial execution correction. The user transferred newly reported UI repairs to the other writer and explicitly asked this writer to only submit the completed functional work to CI. UI repair commits db49643275e6f8605540060305c86c26a7fe45c4 and 844e6eec47ef35f651d5f111b74e6d00c078d008 are retained by three-way integration; current wallpaper management UI is not overwritten with the older PC-help draft. Wallpaper sharing uses Android's explicit image/video share target, not official WE PIN or in-app direct PC connection.
+
+No tests/local builds/device probes were run. CI trigger is not installation or behavioral validation. Separate unpublished visual drafts remain outside this delivery for the UI owner. Space's latest taste pages were read; full local Skill pull did not finish, so no complete synchronization is claimed.
