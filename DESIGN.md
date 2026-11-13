@@ -1,5 +1,47 @@
 # MangaFlow detail · 2026-11-12
 
+## SCREEN-FILL-87 / REFRESH-88 · current screenshot corrections · 2026-11-14
+
+Raw user batch (exact message IDs unavailable): “底部还是一样那个边界。。我希望的是全部都能出，以及刚点进来漫画那个没铺满上面虽然可以滑上去” with1000121631.jpg; “点击刷新后顶上不要出现那个黑色转圈了” with1000121632.jpg; then “没事了以后就默认这个什么避让关闭就行然后把这个按钮删掉” with1000121633.jpg. The last decision supersedes this batch's proposed detail-edge/hero-layout changes: the user reports disabling cutout avoidance resolves the problem and wants that fixed default. Do not move the sharp poster or change the floating detail dock in this batch.
+
+SCREEN-FILL-87: Remove the entire “避让刘海与挖孔” row and its unused component. ScreenFitStore initializes and persists FILL, including when the old stored value was AVOID_CUTOUT; remove legacy margin/corner again. Retained legacy setter normalizes every enum input to FILL so hidden/old callers cannot restore a gap. Existing per-control system-bar protection remains. This replaces SETTINGS-SIMPLE-71's optional avoidance switch, not its unrelated appearance simplification.
+
+REFRESH-88: DiscoverScreen's shared recommendation/ranking/update list disables the separate refreshing overlay in MotionRefreshBox. The actual refresh action and DiscoveryRefresh button's original-place rotation remain; dragging still has the existing progress arc, but no black busy circle appears during refreshing or automatic rebound after completion. First-empty loading, errors and bottom load-more remain. Other MotionRefreshBox callers keep their default behavior.
+
+Source changes are prepared against7d74d2c5 with the existing no-test/no-local-build/cloud-only boundary. Normal CI trigger, package success and current-device appearance are separate evidence. No global font replacement is part of these screenshot fixes; TYPE-86 below is the requested typography design proposal.
+
+
+## TYPE-86 · typography design candidates · 2026-11-14
+
+User: “关于我们漫画软件的字体系统得好好设计下才行”. Current source inspection: Theme.kt binds most roles to generic SansSerif; no bundled TTF/OTF assets exist in the inspected main tree. The shared metric style already uses Medium and tnum, so this is not a missing-number-helper diagnosis. Page overrides still introduce extra sizes; compact metrics default to10.5sp, their denominator uses .74 of the value size, and heat fits narrow space by further shrinking without a readable lower bound. These are source observations, not new-device visual acceptance.
+
+Candidate families, not approved replacements:
+- MiSans: preferred visual candidate for one coherent Chinese/Latin/numeric UI family; comparatively soft contemporary character is a design judgment to evaluate in real samples. Official https://hyperos.mi.com/font/en/ and https://hyperos.mi.com/font/download . Its own license applies; free commercial use is not equivalent to OFL. Do not add the whole Global family or redistribute a standalone font pack.
+- Noto Sans SC: neutral comparison candidate with region-specific/variable distributions; preserve Chinese locale and fallback for unsupported traditional/Japanese/rare characters. Official format guide https://github.com/notofonts/noto-cjk/blob/main/Sans/README.md . Check the exact selected file/license and actual package size before adoption.
+- Existing platform sans: lowest bundle growth alternative; shared roles still apply but cross-platform glyphs/metrics differ.
+- Inter is only an optional comparison for numeric rows, not a second default body family. Author documentation https://rsms.me/inter/ confirms tabular numbers. Do not use a monospace face for all prose or force tabular figures into editorial titles.
+
+Proposed phone baseline (fontSize/lineHeight in sp; values are this project's candidates):
+| Role | Size / line height | Weight | Scope |
+| --- | --- | --- | --- |
+| Work hero title |24 /32|600|Detail/featured work title; content wraps, never auto-shrink to fit |
+| Section/settings title |16 /24|500|Section title and settings primary text |
+| Work/chapter/control label |14 /20|500|Grid book title, chapter label, navigation and action |
+| Reading prose |16 /26|400|Comments and expanded long introduction |
+| Compact prose |14 /22|400|Short introduction and ordinary secondary content |
+| Metadata/tag/compact metric |12 /18|400 text;500 numeric|Author/update/count/tags; primary content must not be reduced to this role |
+| Expanded metric |20 /26|500|Rating detail; denominator/units remain readable and baseline-aligned |
+
+Apply one chosen family to Chinese, Latin and digits first; keep only400/500/600 weights. Same roles reuse the same definitions across recommendation/ranking/updates/library/history/detail/settings/reader. Chinese labels retain normal tracking; negative headline tracking is not copied wholesale from Latin display type. No fixed box may crop larger system text. Controls keep their safe tap area even when labels are compact.
+
+Scores/heat/pages/time/download progress share numeric shapes, decimal precision appropriate to each source and baseline alignment. Use tabular digits for changing values/aligned rows, not merely to change all chapter titles. Default compact numbers never shrink below12sp; fit by preserving the heat and disclosing overflowing source marks using the existing stack, with full values in details. The denominator and万/亿 units are supporting information, not microscopic decorative text. Keep source-native scoring scales.
+
+Artwork/glass text gets sufficient local background contrast, not Thin weight or progressively faded body text. Larger font settings cause wrapping/fewer grid columns rather than manual scale clamps. Package decision must compare actual selected font bytes, keep offline first-launch text available and system fallback, and not require Google Play Services to render text.
+
+Reference floor: the existing Michael Filipiuk fewer-sizes-and-weights principle; Noto format guide; Inter author numeral documentation; Android Compose font and paragraph docs. This section is a design proposal; no font asset/token/page replacement has been shipped or visually accepted in this batch. Font-family selection still needs comparable actual Chinese samples before migration.
+
+
+
 ## PC-WALLPAPER-40 · direct pairing correction · 2026-11-14
 
 Raw user (exact message IDs unavailable): “我们要的能直接和 wallpaper 那个配对直接拿到壁纸的功能怎么没看到？只要精态和动态的继续交互的没必要”, followed by “去做啊”. External LocalSend/share import did not satisfy direct pairing. Receive static images/dynamic videos; no interactive scene runtime.

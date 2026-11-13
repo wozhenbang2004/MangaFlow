@@ -42,6 +42,7 @@ internal fun MotionRefreshBox(
     refreshing: Boolean,
     onRefresh: () -> Unit,
     indicatorTop: Dp,
+    showRefreshingIndicator: Boolean = true,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val state = rememberPullToRefreshState()
@@ -83,12 +84,16 @@ internal fun MotionRefreshBox(
         Box(Modifier.align(Alignment.TopCenter).padding(top = indicatorTop).size(32.dp)
             .graphicsLayer {
                 val p = state.distanceFraction.coerceIn(0f, 1.2f)
-                alpha = if (refreshing) 1f else p.coerceIn(0f, 1f)
+                alpha = when {
+                    refreshing -> if (showRefreshingIndicator) 1f else 0f
+                    !showRefreshingIndicator && !pointerDown -> 0f
+                    else -> p.coerceIn(0f, 1f)
+                }
                 translationY = if (motion) 18.dp.toPx() * p else 0f
                 val scale = if (motion) .82f + .18f * p.coerceAtMost(1f) else 1f
                 scaleX = scale; scaleY = scale
             }, contentAlignment = Alignment.Center) {
-            if (refreshing) MotionBusyIndicator(Modifier.size(22.dp), color, 1.75.dp)
+            if (refreshing && showRefreshingIndicator) MotionBusyIndicator(Modifier.size(22.dp), color, 1.75.dp)
             else Canvas(Modifier.size(22.dp)) {
                 val stroke = Stroke(1.75.dp.toPx(), cap = StrokeCap.Round)
                 val origin = Offset(stroke.width / 2f, stroke.width / 2f)

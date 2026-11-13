@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.concurrent.Volatile
 
-/** Legacy enum values remain readable; new choices are FILL and AVOID_CUTOUT. */
+/** Legacy enum values remain readable; all current content uses FILL. */
 enum class ScreenFitMode { AUTO, FILL, AVOID_CUTOUT, SAFE }
 
 data class ScreenFitState(
@@ -16,25 +16,25 @@ data class ScreenFitState(
     val cornerDp: Float = 0f,
 )
 
-/** Backgrounds fill the window; users only opt into avoiding a cutout for page content. */
+/** Content fills the window; interactive controls keep their own system-bar safety. */
 class ScreenFitStore private constructor(context: PlatformContext) {
     private val prefs = context.applicationContext.getSharedPreferences("mangaflow_screen_fit", PRIVATE_STORAGE)
     private val lock = StorageLock()
-    private val _state = MutableStateFlow(ScreenFitState(
-        mode = if (prefs.getString("mode", "FILL") == ScreenFitMode.AVOID_CUTOUT.name)
-            ScreenFitMode.AVOID_CUTOUT else ScreenFitMode.FILL,
-    ))
+    private val _state = MutableStateFlow(ScreenFitState())
     val state = _state.asStateFlow()
     private val _appliedState = MutableStateFlow(_state.value)
     val appliedState = _appliedState.asStateFlow()
 
     init {
-        // Removed micro-adjustments must not leave an invisible, unchangeable screen border.
-        prefs.edit().putString("mode", _state.value.mode.name).remove("margin").remove("corner").apply()
+        // Removed viewport controls must not leave a saved cutout gap or hidden screen border.
+        prefs.edit().putString("mode", ScreenFitMode.FILL.name).remove("margin").remove("corner").apply()
     }
 
     fun setMode(mode: ScreenFitMode) = synchronized(lock) {
-        val selected = if (mode == ScreenFitMode.AVOID_CUTOUT) mode else ScreenFitMode.FILL
+        val selected = when (mode) {
+            ScreenFitMode.FILL -> mode
+            else -> ScreenFitMode.FILL
+        }
         _state.value = ScreenFitState(mode = selected)
         prefs.edit().putString("mode", selected.name).apply()
         _appliedState.value = _state.value

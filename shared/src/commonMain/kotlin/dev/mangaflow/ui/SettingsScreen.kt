@@ -366,7 +366,6 @@ fun SettingsScreen(
                     }
                 }
                 SettingsSection("外观", sourceBackdrop) {
-                    ScreenFitSettings()
                     DetailAppearanceSettings()
                     SettingsDisclosure("壁纸", when {
                         wallpaper.mediaPath == null -> "默认"

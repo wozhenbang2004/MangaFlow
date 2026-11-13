@@ -590,6 +590,7 @@ private fun DiscoveryPane(
     dev.mangaflow.ui.motion.MotionRefreshBox(
         enabled = active && !state.loading && !state.loadingMore, refreshing = state.refreshing,
         onRefresh = onRefresh, indicatorTop = topPadding + 4.dp,
+        showRefreshingIndicator = false,
     ) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val inset = MangaLayout.sidePadding(maxWidth) + if (ranking)

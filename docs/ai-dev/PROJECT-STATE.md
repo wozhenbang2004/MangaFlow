@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Current typography design and screenshot decisions · 2026-11-14
+
+Read TYPE-86 / SCREEN-FILL-87 / REFRESH-88 in DESIGN.md. Active user request: design the font system with real font candidates, roles, readable numbers and cross-platform/package tradeoffs. That proposal is now recorded; family/token/asset migration has not been approved or applied and needs comparable actual Chinese samples.
+
+Latest screenshot correction supersedes this turn's contemplated detail-edge/hero-layout changes: user switched off “避让刘海与挖孔”, said “没事了”, and wants that default plus the row removed. ScreenFitStore now always normalizes/persists FILL, migrating the previous enabled value; the UI/component is removed. Existing control safety remains. Refreshing recommendation/ranking/updates uses the existing in-place button feedback and suppresses the separate black top busy circle, including its automatic finishing rebound; drag progress, initial loading, errors and more remain.
+
+One ready source/doc batch based on7d74d2c5dd3f53ce0465d9d14de7939f119e57a6, root alone updates the branch with expected-head protection. No DetailScreen geometry edits, font replacement, tests/local builds/probes or review gate in this batch. Confirm matching normal CI triggers; package success and current-device visual acceptance remain unverified until their actual evidence. Keep main stable while publication runs.
+
+Prior baseline evidence: Android187/run43468784534 succeeded; Windows job132035102521/run43468784491 failed in native-release staging with “The jpackage application image is missing; incremental files cannot be staged”. This is a pre-existing installer-pipeline blocker, not a typography/refresh compilation result. Preserve the separate updater work and investigate in that owned slice; do not claim Windows packaging is accepted.
+
 ## Shared glass compilation repair · 2026-11-14
 
 User feedback: “ci 失败了”. Android185 (run43467441560, job132030426162) and Windows for the same9219e75 commit (run43467441540, job132030393920) both fail at LiquidGlass.kt:95: Haze's shape setter requires RoundedCornerShape, while optional surfaceShape widened the inferred value to Shape. The only custom caller uses RoundedCornerShape(topStart=20.dp, topEnd=20.dp) for the reading dock. Narrow the parameter to RoundedCornerShape and remove the unused Shape import, keeping identical geometry for optics, clipping and shadow, including the dock's full-screen bottom. The repair is based on0739661b0eecf139c0f8c7c2d86406217981b744, retaining its direct PC-wallpaper batch and all UI/updater/source changes. Submit this bounded repair once with expected-head protection and confirm the normal CI triggers. Compilation, installation, incremental-update behavior and device appearance remain unverified until their actual evidence. Cloud-only; no tests, local builds or product probes.
