@@ -112,7 +112,7 @@ internal fun ChapterDownloadSourceSheet(
                         val interaction = remember(variant.storageId) { MutableInteractionSource() }
                         Row(Modifier.fillMaxWidth().heightIn(min = 60.dp)
                             .clickable(enabled = enabled, interactionSource = interaction, indication = null,
-                                role = Role.Button, onClickLabel = "从$name下载${chapter.title}",
+                                role = Role.Button, onClickLabel = "从${name}下载${chapter.title}",
                                 onClick = {
                                     if (!submitted) {
                                         submitted = true

@@ -10,6 +10,7 @@ settings:
     CURRENT_PROJECT_VERSION: '1'
     MANGAFLOW_IOS_DISTRIBUTION_URL: ''
     ENABLE_USER_SCRIPT_SANDBOXING: NO
+    'ARCHS[sdk=iphonesimulator*]': arm64
     FRAMEWORK_SEARCH_PATHS: '$(inherited) $(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)'
     OTHER_LDFLAGS: '$(inherited) -framework MangaFlowShared -lc++'
 targets:
