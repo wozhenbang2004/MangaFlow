@@ -40,6 +40,22 @@ internal fun reviewSourceAccent(id: String, onDark: Boolean): Color = when (id) 
 /** The measured slot is identical for vectors and wordmarks, including enlarged text. */
 internal fun reviewSourceMarkWidth(size: Dp, fontScale: Float): Dp = size * (1.45f * fontScale.coerceAtLeast(1f))
 
+/** Stack layout measures the same honest wordmark that this renderer uses. */
+internal fun reviewSourceWordmark(id: String): String? = when (id) {
+    "copy", "anilist", "myanimelist", "kitsu" -> null
+    "bangumi" -> "bgm"
+    "mangaupdates" -> "MU"
+    "mangadex" -> "MD"
+    else -> ReviewProviders.find(id)?.mark ?: id.take(2).uppercase()
+}
+
+internal fun reviewSourceLabelScale(mark: String): Float {
+    val units = mark.fold(0) { count, character ->
+        count + if (character.code >= 0x2E80) 2 else 1
+    }.coerceAtLeast(1)
+    return minOf(.68f, 2.8f / units)
+}
+
 /** Original CC0 vectors and honest wordmarks share one optically balanced reference box. */
 @Composable
 internal fun ReviewSourceMark(
@@ -72,12 +88,8 @@ internal fun ReviewSourceMark(
                     modifier = Modifier.requiredSize(size * (opticalScale * fontScale)))
             }
             else -> {
-                val mark = when (id) { "bangumi" -> "bgm"; "mangaupdates" -> "MU"; "mangadex" -> "MD"
-                    else -> ReviewProviders.find(id)?.mark ?: id.take(2).uppercase() }
-                val labelUnits = mark.fold(0) { count, character ->
-                    count + if (character.code >= 0x2E80) 2 else 1
-                }.coerceAtLeast(1)
-                val labelScale = minOf(.68f, 2.8f / labelUnits)
+                val mark = reviewSourceWordmark(id).orEmpty()
+                val labelScale = reviewSourceLabelScale(mark)
                 Text(mark, color = color, style = MaterialTheme.typography.labelSmall.copy(
                     fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
                     fontSize = (size.value * labelScale).sp, lineHeight = size.value.sp, letterSpacing = 0.sp),

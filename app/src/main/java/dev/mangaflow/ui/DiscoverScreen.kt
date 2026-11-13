@@ -520,7 +520,8 @@ private fun DiscoveryPane(
             if (state.mode == DiscoveryMode.RECOMMENDED) {
                 item(span = { GridItemSpan(maxLineSpan) }, key = "hero") {
                     FeaturedCarousel(state.items.take(6), repository,
-                        active && heroVisible && canAutoAdvance && !grid.isScrollInProgress, onOpen)
+                        active && heroVisible && canAutoAdvance && !grid.isScrollInProgress,
+                        onOpen = onOpen, onRatings = onRatings)
                 }
             }
             if (!ranking) item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
@@ -543,10 +544,10 @@ private fun DiscoveryPane(
                 items(state.items, key = Manga::id) { manga ->
                     if (columns == 1) BrowseListRow(manga, repository,
                         showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
-                        onLongClick = { onManage(manga) }, onClick = { onOpen(manga) })
+                        onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
                     else CoverTile(manga, repository, dense = true, narrow = columns == 4,
                         showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
-                        onLongClick = { onManage(manga) }) { onOpen(manga) }
+                        onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
                 }
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "more") {
@@ -597,6 +598,7 @@ private fun BrowseListRow(
     showChapter: Boolean,
     placement: String,
     onLongClick: () -> Unit,
+    onRatings: () -> Unit,
     onClick: () -> Unit,
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
@@ -618,7 +620,7 @@ private fun BrowseListRow(
             if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-            MangaMetricBadges(manga, Modifier.fillMaxWidth(), showMore = false, plain = true)
+            MangaMetricBadges(manga, Modifier.fillMaxWidth(), showMore = true, plain = true, onExpand = onRatings)
         }
     }
 }
@@ -789,6 +791,7 @@ internal fun CoverTile(
     showChapter: Boolean = false,
     placement: String? = null,
     onLongClick: (() -> Unit)? = null,
+    onRatings: (() -> Unit)? = null,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -808,7 +811,7 @@ internal fun CoverTile(
                 else if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
         MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp),
-            compact = true, showMore = false, plain = true)
+            compact = true, showMore = false, plain = true, onExpand = onRatings)
         if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             minLines = 1, maxLines = 1, overflow = TextOverflow.Ellipsis)

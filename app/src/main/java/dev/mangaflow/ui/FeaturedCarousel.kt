@@ -109,7 +109,8 @@ import kotlin.math.floor
 /** Keep Material's keylines, masks and fling owner; every visual reads its live expansion. */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, visible: Boolean, onOpen: (Manga) -> Unit) {
+internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, visible: Boolean,
+    onOpen: (Manga) -> Unit, onRatings: ((Manga) -> Unit)? = null) {
     if (manga.isEmpty()) return
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val galleryWidth = maxWidth
@@ -181,7 +182,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
             Box(Modifier.fillMaxWidth()) {
                 val fontScale = density.fontScale.coerceAtLeast(1f)
                 // Text has reserved space below the fitted cover, so it never masks its title/art.
-                val captionHeight = (24f + 58f * fontScale).dp
+                val captionHeight = (24f + 64f * fontScale).dp
                 val itemHeight = (galleryWidth * .76f).coerceIn(230.dp, 250.dp) + (captionHeight - 82.dp)
                 val preferredWidth = if (manga.size == 1) galleryWidth else (galleryWidth - peekWidth - 8.dp).coerceAtLeast(180.dp)
                 val imageWidthPx = with(density) { preferredWidth.roundToPx() }.coerceAtLeast(1)
@@ -219,7 +220,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                             }.mangaCoverCard(22.dp).maskClip(RoundedCornerShape(22.dp)),
                             emphasis = { featuredExpansion(info, peekPixels) },
                             offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) * (if (rtl) -1f else 1f) else 0f },
-                            onOpen = onOpen)
+                            onOpen = onOpen, onRatings = onRatings)
                     }
                 }
             }
@@ -258,6 +259,7 @@ private fun FeaturedManga(
     emphasis: () -> Float,
     offset: () -> Float,
     onOpen: (Manga) -> Unit,
+    onRatings: ((Manga) -> Unit)?,
 ) {
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
@@ -363,7 +365,8 @@ private fun FeaturedManga(
                     shadow = Shadow(if (onDark) Color.Black.copy(alpha = .16f) else Color.White.copy(alpha = .18f),
                         Offset(0f, 1f), 3f)), fontSize = 16.sp, lineHeight = 21.sp,
                     fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true)
+                MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
+                    onExpand = if (information() >= .98f && onRatings != null) ({ onRatings(manga) }) else null)
             }
         }
     }

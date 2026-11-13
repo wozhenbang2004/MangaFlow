@@ -1,15 +1,19 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.LocalFireDepartment
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -21,18 +25,25 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -83,7 +94,9 @@ private data class MetricToken(
     val sourceId: String,
 )
 
-/** One metadata line: complete values, then one graphical stack cue for remaining ratings. */
+private data class StackedMetric(val token: MetricToken, val leftPx: Int, val widthPx: Int)
+
+/** One metadata line: width-fitting values followed by actual, unbacked source marks. */
 @Composable
 internal fun MangaMetricBadges(
     manga: Manga,
@@ -91,9 +104,10 @@ internal fun MangaMetricBadges(
     foreground: Color = MaterialTheme.colorScheme.onSurface,
     heatLabel: String = "热",
     compact: Boolean = false,
-    maxScores: Int = if (compact) 1 else 2,
+    maxScores: Int = Int.MAX_VALUE,
     showMore: Boolean = !compact,
     plain: Boolean = false,
+    onExpand: (() -> Unit)? = null,
 ) {
     val metrics = observedMangaMetrics(manga)
     val heat = if (manga.rank != null) manga.popularity
@@ -124,48 +138,96 @@ internal fun MangaMetricBadges(
     val markWidth = with(density) { markSlot.roundToPx().toFloat() }
     val heatMarkSize = (if (compact) 12.dp else 15.dp) * fontScale
     val heatMarkWidth = with(density) { heatMarkSize.roundToPx().toFloat() }
-    val stackSize = 14.dp * fontScale
-    val stackWidth = with(density) { stackSize.roundToPx().toFloat() }
+    val lineHeight = 22.dp * fontScale
+    val markStyle = MaterialTheme.typography.labelSmall.copy(
+        fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
+        lineHeight = 15.sp, letterSpacing = 0.sp)
     fun tokenWidth(token: MetricToken): Float {
         val sourceWidth = if (token.sourceId == "copy") heatMarkWidth else markWidth
         return sourceWidth + innerGap + measurer.measure(token.value, textStyle, maxLines = 1).size.width + tokenPadding * 2f
     }
     if (heatToken == null && scores.isEmpty()) return
 
+    val tokens = listOfNotNull(heatToken) + scores
+    // Long source wordmarks own their measured ink plus a transparent edge margin.
+    val stackWidths = tokens.associate { token ->
+        val label = reviewSourceWordmark(token.sourceId)
+        val labelWidth = label?.let {
+            measurer.measure(it, markStyle.copy(fontSize = (15f * reviewSourceLabelScale(it)).sp),
+                maxLines = 1).size.width
+        } ?: 0
+        token.sourceId to maxOf(with(density) { lineHeight.roundToPx() },
+            labelWidth + with(density) { (4.dp * fontScale).roundToPx() })
+    }
+    val labelOverlap = with(density) { (2.dp * fontScale).roundToPx() }
+    val iconOverlap = with(density) { (4.dp * fontScale).roundToPx() }
     val showOverflow = compact || showMore
+    val interaction = remember(manga.id) { MutableInteractionSource() }
     BoxWithConstraints(modifier) {
-        val availableWidth = with(density) { maxWidth.toPx() }
-        // Narrow covers keep useful heat rather than spending the row on cropped source letters.
-        val visibleHeat = if (compact && heatToken != null && scores.isNotEmpty() && showOverflow &&
-            tokenWidth(heatToken) + outerGap + stackWidth > availableWidth) {
-            heatToken.copy(value = metricCount(requireNotNull(heat), concise = true))
-        } else heatToken
-        val tokens = listOfNotNull(visibleHeat) + scores
-        val scoreLimit = maxScores.coerceIn(0, if (compact) 1 else 2).coerceAtMost(scores.size)
+        val availableWidth = with(density) { maxWidth.roundToPx() }
+        val scoreLimit = maxScores.coerceIn(0, scores.size)
         val widths = tokens.map(::tokenWidth)
-        fun widthFor(count: Int): Float {
-            val overflow = showOverflow && count < tokens.size
-            val groups = count + if (overflow) 1 else 0
-            return widths.take(count).sum() + (if (overflow) stackWidth else 0f) +
-                outerGap * (groups - 1).coerceAtLeast(0)
+        fun stackFor(start: Int, room: Float): List<StackedMetric> {
+            if (!showOverflow) return emptyList()
+            val items = mutableListOf<StackedMetric>()
+            var end = 0
+            for (token in tokens.drop(start).distinctBy { it.sourceId }) {
+                val overlap = if (items.isEmpty()) 0 else
+                    if (reviewSourceWordmark(token.sourceId) != null) labelOverlap else iconOverlap
+                val left = (end - overlap).coerceAtLeast(0)
+                val width = stackWidths.getValue(token.sourceId)
+                if (left + width > room) break
+                items += StackedMetric(token, left, width)
+                end = left + width
+            }
+            return items
         }
         var count = scoreLimit + if (heatToken != null) 1 else 0
-        while (count > 0 && widthFor(count) > availableWidth) count--
-        var overflow = showOverflow && count < tokens.size && stackWidth <= availableWidth
-        if (count == 0 && (heatToken != null || scoreLimit > 0) && widths.first() <= availableWidth) {
-            // A large-font/narrow row must not discard its primary value just to retain this cue.
-            count = 1
-            overflow = false
+        var stack = emptyList<StackedMetric>()
+        while (true) {
+            val fullWidth = widths.take(count).sum() + outerGap * (count - 1).coerceAtLeast(0)
+            val room = availableWidth - fullWidth - if (count > 0) outerGap else 0f
+            stack = if (count < tokens.size) stackFor(count, room) else emptyList()
+            if (fullWidth <= availableWidth && (count == tokens.size || !showOverflow || stack.isNotEmpty())) break
+            if (count == 0) break
+            count--
         }
-        Row(Modifier.fillMaxWidth().heightIn(min = with(density) { 16.sp.toDp() })
-            .clearAndSetSemantics { contentDescription = tokens.joinToString("；") { it.description } },
+        val disclose = onExpand?.takeIf { count < tokens.size }
+        if (count == 0 && stack.isEmpty()) return@BoxWithConstraints
+        Row(Modifier.fillMaxWidth().heightIn(min = lineHeight)
+            .then(if (disclose != null) Modifier.clickable(interactionSource = interaction, indication = null,
+                role = Role.Button, onClickLabel = "查看完整来源评分", onClick = disclose) else Modifier)
+            .clearAndSetSemantics {
+                contentDescription = tokens.joinToString("；") { it.description }
+                if (disclose != null) {
+                    role = Role.Button
+                    onClick("查看完整来源评分") { disclose(); true }
+                }
+            },
             horizontalArrangement = Arrangement.spacedBy(groupGap), verticalAlignment = Alignment.CenterVertically) {
             tokens.take(count).forEach {
                 MetricBadge(it, if (compact) foreground.copy(alpha = .76f) else foreground,
                     textStyle, plain, compact)
             }
-            if (overflow) Icon(Icons.Outlined.Layers, null, Modifier.size(stackSize),
-                tint = foreground.copy(alpha = .5f))
+            if (stack.isNotEmpty()) MetricSourceStack(stack, foreground, lineHeight)
+        }
+    }
+}
+
+/** Negative edge spacing only: no painted plate, border, source-coloured backing or generic icon. */
+@Composable
+private fun MetricSourceStack(items: List<StackedMetric>, foreground: Color, height: Dp) {
+    val density = LocalDensity.current
+    val width = with(density) { (items.last().leftPx + items.last().widthPx).toDp() }
+    val onDark = foreground.luminance() > .5f
+    Box(Modifier.width(width).height(height).clipToBounds()) {
+        items.indices.reversed().forEach { index ->
+            val item = items[index]
+            ReviewSourceMark(item.token.sourceId,
+                Modifier.offset { IntOffset(item.leftPx, 0) }
+                    .width(with(density) { item.widthPx.toDp() }).height(height)
+                    .graphicsLayer { alpha = 1f - .06f * index.coerceAtMost(3) },
+                size = 15.dp, onDark = onDark, heat = item.token.sourceId == "copy")
         }
     }
 }
@@ -199,10 +261,8 @@ private fun MetricBadge(
 private fun metricScore(value: Double): String =
     if (value == value.toInt().toDouble()) value.toInt().toString() else String.format(Locale.ROOT, "%.1f", value)
 
-private fun metricCount(value: Long, concise: Boolean = false): String = when {
-    value >= 100_000_000 -> String.format(Locale.ROOT,
-        if (concise && value >= 10_000_000_000L) "%.0f亿" else "%.1f亿", value / 100_000_000.0)
-    value >= 10_000 -> String.format(Locale.ROOT,
-        if (concise && value >= 1_000_000) "%.0f万" else "%.1f万", value / 10_000.0)
+private fun metricCount(value: Long): String = when {
+    value >= 100_000_000 -> String.format(Locale.ROOT, "%.1f亿", value / 100_000_000.0)
+    value >= 10_000 -> String.format(Locale.ROOT, "%.1f万", value / 10_000.0)
     else -> value.toString()
 }

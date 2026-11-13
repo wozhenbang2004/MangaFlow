@@ -115,13 +115,29 @@ internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean
 
 @Composable
 internal fun DetailRatingSheet(manga: Manga, onDismiss: () -> Unit) {
-    val metrics = observedDetailMetrics(manga)
+    val allMetrics = observedMangaMetrics(manga, requestDelay = 0L)
+    val metrics = allMetrics.filter { it.score?.let { score -> score.isFinite() && score > 0 } == true }
+        .sortedBy { ReviewProviders.order(it.sourceId) }
+    val heat = if (manga.rank != null) manga.popularity else manga.totalPopularity ?:
+        allMetrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: manga.popularity
     MotionBottomSheet(onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface, contentColor = DetailForeground) { _ ->
         Column(Modifier.fillMaxWidth().heightIn(max = 540.dp).verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("各站评分", color = DetailForeground, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Text("保留来源原始分制与统计口径，不合成为跨站总分。", color = DetailSecondary, fontSize = 12.sp)
+            heat?.let { value ->
+                Row(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
+                    contentDescription = "${if (manga.rank != null) "榜期热度" else "拷贝热度"} $value"
+                }, verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ReviewSourceMark("copy", size = 24.dp, heat = true)
+                    Text(if (manga.rank != null) "榜期热度" else "拷贝热度", Modifier.weight(1f),
+                        color = DetailForeground, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                    Text(detailMetricCount(value), color = DetailForeground,
+                        fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
             if (metrics.isEmpty()) Text("暂未取得可显示的评分", color = DetailSecondary, fontSize = 14.sp)
             metrics.forEach { metric ->
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
