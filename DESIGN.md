@@ -1,5 +1,18 @@
 # MangaFlow detail · 2026-11-12
 
+## Drawer destination handoff · 2026-11-13 (DRAWER-CONTINUITY-17; source correction, device acceptance pending)
+
+User: “现在点侧边栏切换会很卡卡一下才切换”. The current source awaited native drawer.close() before changeSection, so destination composition began only after the close had finished. This is a confirmed serial delay in the implementation, not a frame-time trace or proof that it is the only device bottleneck. This follow-up replaces DRAWER-CONTINUITY-16's close-first destination rule.
+
+- Keep one reference-keyed DrawerAction, immediate menu selection feedback, the native DrawerState/frosted sheet, actual-offset background relationship, saved root positions and existing input gates.
+- For a different root destination, commit sectionName and the drawer root-transition marker while the drawer is stationary. The destination's active AnimatedContent entry acknowledges its committed composition after the next frame. Only then begin native close. The close therefore reveals the prepared destination rather than exposing the old page and then starting the new page. Do not wait for network/data completion, preload all roots, add a fixed delay, or start a second full-page entrance.
+- Same-section taps close immediately. Reduced-motion requests snap. If detail/reader state takes over while waiting, stop waiting for a root that is no longer active; do not replay a late destination after close.
+- Only the matching active root can acknowledge a selection. New actions and normal/deep-link navigation still invalidate old work by identity. Selection commits before drawer exit, so cancelling a later close does not roll back a legitimate already-committed root. Cancellation must not replay an old destination or clear a newer request.
+- Independent read-only review found an existing restart race when motion preference changes: the cancelled actor's finally could clear the same request before its replacement starts. Cleanup now requires both matching identity and an active coroutine; the new actor can retain that same request, while native mutation cancellation and real-user gesture behavior remain subject to device acceptance.
+- Keep the existing Haze source node stable and all manual scrim/gesture/input ownership. Destination composition is separated from the moving-close phase through an actual composition/frame acknowledgement, rather than moving both jobs into the same click.
+
+Scope: MangaFlowApp routing/frame acknowledgement only, plus these existing entry documents. No alternate navigation framework, universal root-page cache, SDK change or data migration. Preserve current optional native-runtime downloads, dock/filter improvements, ranking/tab/search/heatmap work, Haze 2.1, auth/startup, signatures and manual-only full Lint. Source/diff/whitespace and independent read-only review; no local build, tests, emulator or UI/API probes. Confirm latest-main CI trigger only. Actual tap latency, first-frame cost, interruption and phone smoothness remain pending user feedback.
+
 ## Optional inference components · 2026-11-13 (OPTIONAL-RUNTIME-01–06; source implemented, CI/device acceptance pending)
 
 User: “？这个运行库一定要加吗”, then “都弄成可选下载吧现在太大了”. These follow the verified 0.1.131 package-size finding in APK-SIZE-01 and authorize moving both native inference engines out of the base APK, in addition to the already optional model weights. Preserve all detection choices and traditional offline reading. This replaces the bundled-engine/compression-only decision, rather than removing high-precision or learned-order features.

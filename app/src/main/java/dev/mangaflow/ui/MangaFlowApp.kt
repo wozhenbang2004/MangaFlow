@@ -1,5 +1,10 @@
 package dev.mangaflow.ui
 
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.first
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.geometry.Rect
@@ -128,8 +133,10 @@ private enum class Section(val title: String, val icon: ImageVector) {
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号与云端", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
 }
-/** A new reference owns one interruptible drawer action; cancelled selections cannot navigate. */
-private class DrawerAction(val target: DrawerValue, val destination: Section? = null)
+/** A new reference owns the motion; cancellation cannot replay a stale destination. */
+private class DrawerAction(val target: DrawerValue, val destination: Section? = null) {
+    var rootCommitted by mutableStateOf(false)
+}
 
 private sealed interface Frame {
     val key: String
@@ -187,16 +194,21 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     LaunchedEffect(drawerAction, motion) {
         val action = drawerAction ?: return@LaunchedEffect
         try {
+            if (action.destination != null && drawerAction === action) {
+                // Commit behind the stationary drawer, not after its close has already finished.
+                val changingRoot = sectionName != action.destination.name
+                model.cancelLibraryReading()
+                drawerRootTransition = action.destination
+                sectionName = action.destination.name
+                if (motion && changingRoot) snapshotFlow {
+                    action.rootCommitted || reading != null || detail != null
+                }.first { it }
+            }
+            if (drawerAction !== action) return@LaunchedEffect
             if (!motion) drawer.snapTo(action.target)
             else if (action.target == DrawerValue.Open) drawer.open() else drawer.close()
-            if (drawerAction === action && action.destination != null &&
-                drawer.currentValue == DrawerValue.Closed && drawer.targetValue == DrawerValue.Closed) {
-                changeSection(action.destination)
-                // The drawer already provided spatial continuity; don't start a second page animation.
-                drawerRootTransition = action.destination
-            }
         } finally {
-            if (drawerAction === action) drawerAction = null
+            if (drawerAction === action && currentCoroutineContext().isActive) drawerAction = null
         }
     }
 
@@ -398,6 +410,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 label = "page",
                 modifier = Modifier.fillMaxSize(),
             ) { current ->
+                val pendingDrawerSelection = drawerAction
+                LaunchedEffect(current.key, pendingDrawerSelection, motion) {
+                    val selection = pendingDrawerSelection ?: return@LaunchedEffect
+                    if (current is Frame.Root && current.key == frame.key &&
+                        selection.destination == current.section) {
+                        // Effects start after this root's composition commits. Close on the next
+                        // frame, so destination composition does not compete with drawer motion.
+                        if (motion) withFrameNanos { }
+                        selection.rootCommitted = true
+                    }
+                }
                 // Retain the outgoing search cover until its real route transition finishes.
                 val entry = transition
                 LaunchedEffect(current.key, entry.currentState, entry.isRunning) {
