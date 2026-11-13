@@ -45,8 +45,7 @@ actual fun openPlatformUrl(context: PlatformContext, url: String): Boolean = run
 actual fun openDownloadedInstaller(context: PlatformContext, path: String): Boolean = runCatching {
     val file = java.io.File(path)
     require(file.isFile && releaseAssetSuffixes().any { file.name.endsWith(it, ignoreCase = true) })
-    java.awt.Desktop.getDesktop().open(file)
-    true
+    dev.mangaflow.update.launchNativeInstaller(context, file.canonicalPath)
 }.getOrDefault(false)
 actual fun releaseAssetSuffixes(): List<String> = listOf("-windows-x64.msi", "-windows-x64.exe")
 actual fun platformUpdateChannel(context: PlatformContext): String? = null

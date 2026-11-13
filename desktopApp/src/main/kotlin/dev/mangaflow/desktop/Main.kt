@@ -14,6 +14,7 @@ import androidx.compose.ui.input.key.*
 import dev.mangaflow.MangaFlowHost
 import dev.mangaflow.initializeMangaFlow
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.update.DesktopUpdateExit
 import dev.mangaflow.reader.ProvideDesktopReaderKeyboard
 import dev.mangaflow.ui.MangaFlowTheme
 import androidx.compose.material3.MaterialTheme
@@ -43,7 +44,7 @@ fun main() {
             val currentReading = model?.reading?.collectAsState()?.value
             val windowState = rememberWindowState(width = 1120.dp, height = 800.dp)
             var restoredPlacement by remember { mutableStateOf(WindowPlacement.Floating) }
-            Window(onCloseRequest = {
+            val requestClose: () -> Unit = {
                 if (!closing) {
                     closing = true
                     scope.launch {
@@ -52,7 +53,12 @@ fun main() {
                         else { closing = false; model?.notifyStorageFailure() }
                     }
                 }
-            }, title = currentReading?.manga?.title?.takeIf { it.isNotBlank() }?.let { "$it · 漫流" } ?: "漫流",
+            }
+            DisposableEffect(requestClose) {
+                DesktopUpdateExit.requestExit = requestClose
+                onDispose { DesktopUpdateExit.requestExit = null }
+            }
+            Window(onCloseRequest = requestClose, title = currentReading?.manga?.title?.takeIf { it.isNotBlank() }?.let { "$it · 漫流" } ?: "漫流",
                 state = windowState,
                 onPreviewKeyEvent = { event ->
                     when {

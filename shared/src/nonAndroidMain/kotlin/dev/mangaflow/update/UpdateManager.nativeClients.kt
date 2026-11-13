@@ -17,11 +17,13 @@ actual class UpdateManager private constructor(private val context: PlatformCont
     private val client = NetworkClient(callTimeoutMillis = 20L * 60 * 1_000)
     private val prefs = preferences(context, "app_updates")
     private val root = StorageFile(cacheDirectory(context), "updates")
-    private val _state = MutableStateFlow(UpdateState(lastChecked = prefs.getLong("last_check", 0)))
+    private val _state = MutableStateFlow(UpdateState(lastChecked = prefs.getLong("last_check", 0),
+        message = previousNativeUpdateResult(context) ?: "检查漫流的新版本"))
     actual val state: StateFlow<UpdateState> = _state.asStateFlow()
     actual val automatic: Boolean get() = prefs.getBoolean("automatic", true)
     private var job: Job? = null
     private var started = false
+    private var incrementalPlan: NativeIncrementalPlan? = null
 
     actual fun start() {
         if (started) return
@@ -55,13 +57,15 @@ actual class UpdateManager private constructor(private val context: PlatformCont
         _state.value = before.copy(phase = UpdatePhase.CHECKING, message = "正在检查新版本…")
         job = scope.launch {
             try {
+                var releaseMetadata = ""
                 val release = withContext(Dispatchers.IO) {
                     val response = client.execute(Request.Builder()
                         .url("https://api.github.com/repos/$REPOSITORY/releases/latest")
                         .header("Accept", "application/vnd.github+json")
                         .header("User-Agent", "MangaFlow").build(), 512L * 1024)
                     require(response.isSuccessful) { "发布服务暂不可用（HTTP ${response.code}）" }
-                    val json = JSONObject(response.text())
+                    releaseMetadata = response.text()
+                    val json = JSONObject(releaseMetadata)
                     val version = json.optString("tag_name").removePrefix("v")
                     val code = versionOrder(version)
                     val notes = json.optString("body")
@@ -86,8 +90,15 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                 prefs.edit().putLong("last_check", now).apply()
                 _state.value = if (release.versionCode <= versionOrder(platformVersion(context))) {
                     UpdateState(UpdatePhase.CURRENT, message = "已是最新版本", lastChecked = now)
-                } else UpdateState(UpdatePhase.AVAILABLE, release, total = release.bytes,
-                    message = "发现新版本 ${release.versionName}", lastChecked = now)
+                } else {
+                    incrementalPlan = try {
+                        planNativeIncrementalUpdate(context, release, releaseMetadata)
+                    } catch (cancelled: CancellationException) { throw cancelled
+                    } catch (_: Exception) { null }
+                    val delta = incrementalPlan
+                    UpdateState(UpdatePhase.AVAILABLE, release, total = delta?.bytes ?: release.bytes,
+                        message = if (delta != null) "发现新版本 ${release.versionName} · 增量更新" else "发现新版本 ${release.versionName}", lastChecked = now)
+                }
             } catch (cancelled: CancellationException) { throw cancelled
             } catch (failure: Exception) {
                 _state.value = before.copy(phase = if (before.release != null) UpdatePhase.AVAILABLE else UpdatePhase.ERROR,
@@ -100,7 +111,32 @@ actual class UpdateManager private constructor(private val context: PlatformCont
         val release = _state.value.release ?: return
         if (job?.isActive == true) return
         if (platformKind == PlatformKind.IOS) { install(context); return }
-        _state.value = _state.value.copy(phase = UpdatePhase.DOWNLOADING, downloaded = 0, message = "正在下载安装包…")
+        val delta = incrementalPlan
+        if (delta != null) {
+            _state.value = _state.value.copy(phase = UpdatePhase.DOWNLOADING, downloaded = 0,
+                total = delta.bytes, message = "正在下载变动文件…")
+            job = scope.launch {
+                try {
+                    downloadNativeIncrementalUpdate(context, delta) { received, total ->
+                        _state.value = _state.value.copy(downloaded = received, total = total)
+                    }
+                    _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = delta.bytes,
+                        total = delta.bytes, message = "增量更新已就绪")
+                } catch (cancelled: CancellationException) {
+                    _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE, message = "下载已取消")
+                    throw cancelled
+                } catch (_: Exception) {
+                    incrementalPlan = null
+                    _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE, total = release.bytes,
+                        message = "增量更新不可用，正在改用完整安装包…")
+                    job = null
+                    download()
+                }
+            }
+            return
+        }
+        _state.value = _state.value.copy(phase = UpdatePhase.DOWNLOADING, downloaded = 0,
+            total = release.bytes, message = "正在下载安装包…")
         job = scope.launch {
             val suffix = releaseAssetSuffixes().firstOrNull { release.url.substringBefore('?').endsWith(it, true) }
                 ?: return@launch fail("安装包类型与当前系统不匹配")
@@ -147,8 +183,15 @@ actual class UpdateManager private constructor(private val context: PlatformCont
             return
         }
         if (_state.value.phase != UpdatePhase.READY || job?.isActive == true) return
+        _state.value = _state.value.copy(phase = UpdatePhase.VERIFYING, message = "正在保存并准备安装…")
         job = scope.launch {
             try {
+                val delta = incrementalPlan
+                if (delta != null) {
+                    check(installNativeIncrementalUpdate(context, delta)) { "无法启动安装辅助程序，请重新下载安装包" }
+                    _state.value = _state.value.copy(message = "正在保存并关闭应用，随后安装更新")
+                    return@launch
+                }
                 val suffix = releaseAssetSuffixes().firstOrNull { release.url.substringBefore('?').endsWith(it, true) }
                     ?: error("安装包类型不匹配")
                 val file = StorageFile(root, release.sha256 + suffix)
@@ -156,7 +199,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                     require(file.length() == release.bytes && sha256File(file.path) == release.sha256) { "安装包校验失败，请重新下载" }
                 }
                 check(openDownloadedInstaller(context, file.path)) { "无法打开系统安装程序，请前往发布页下载安装" }
-                _state.value = _state.value.copy(message = "请在系统界面完成安装")
+                _state.value = _state.value.copy(message = "正在保存并关闭应用，随后启动系统安装程序")
             } catch (failure: Exception) { fail(failure.message ?: "无法继续安装") }
         }
     }

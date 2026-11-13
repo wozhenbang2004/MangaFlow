@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+
+## One complete submission and Windows updater · 2026-11-14
+
+Latest user workflow correction: “一次性提交啊…你没完没了的提交也会让他一直部署不成功不如一次性提交”. Submit the complete remaining77 updater with the already integrated71–85 work in one final main update. Keep main stable during publication; no intermediate/doc-only pushes. Existing current-main/exact-tag/signing guards remain.
+
+DESKTOP-UPDATE-77 implementation: ADAPT update4j1.5.9 (Apache-2.0) file inventory/download/Adler checking with additional SHA-256 identity, the existing jpackage installer and normal save-and-close path. Mature alternative Velopack has binary deltas but requires a different native updater/installation bridge; this bounded choice retains existing EXE/MSI identity. A complete latest app-file manifest carries SHA/size/content-addressed asset URLs, so any supported old version can download only changed app files without replaying every release. Runtime fingerprints must match; otherwise use the verified full installer. Latest launcher cfg is included to update reported version and classpath. An external hidden helper waits for JVM exit, elevates only when installed-code permissions require it, verifies staged/installed files, backs up replacements, rolls back a failed replacement and restarts; complete MSI handoff uses msiexec with a retained log. The old181 updater needs one full manual upgrade before any of this can run.
+
+Engineering evidence at this checkpoint:13 cloud blobs integrated, version-coupled native staging/publishing connected, original Android/build/sign/release controls preserved. Android182 atd044e8b compiled and signed but declined publication when main advanced; it is not a published/visually accepted build. Actual Windows installer/UAC/delta savings/rollback remain unverified pending the current CI artifact and user feedback. No tests, local builds or device/product probes.
+
+Primary references read by the implementation owner: update4j official1.5.9 Configuration/FileMetadata/UpdateOptions/UpdateHandler sources and release, Velopack official delta/update documentation, and current jpackage/native release source. License and concise notice are included in desktop resources; this update does not add a second installer ecosystem.
+
 ## Source controls / startup feedback · 2026-11-14 (82–85)
 
 Current source-management before-state screenshots1000121617/1000121618 have no identified installed build. The user's current corrections are “还有这个弄两个加号干嘛呢” and “开关后垃圾桶还会抖。。。垃圾桶按钮别留了。。关了后自动排到最后以及已启用下面那段文字可以收起来吧。。。渐进式披露，最小信息原则”. Earlier active feedback in the same turn is “开屏进去有给个黑圈搁那转…点击图标后出来的这个不行啊用轮盘转出动画就行了搞什么白晕” and “这个没必要把高度增大吧保持原高度新信息放右边就行了啊”. Those earlier screenshots are not available in this context; their installed build is also unknown. These are implementation corrections, not acceptance of the prior orbit or list.

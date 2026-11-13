@@ -74,7 +74,10 @@ jobs:
           set -euo pipefail
           chmod +x gradlew
           ./gradlew --no-daemon --console=plain --max-workers=2 -PmangaVersionName="$MANGA_VERSION" :desktopApp:packageDistributionForCurrentOS
-          python scripts/native_release.py stage
+      - name: Stage installers and verified incremental file assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/native_release.py stage
       - name: Show Windows packaging failure details
         if: failure() && runner.os == 'Windows'
         shell: pwsh

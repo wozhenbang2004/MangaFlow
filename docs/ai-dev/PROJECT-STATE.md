@@ -4,6 +4,19 @@ Updated: 2026-11-14. Route: DELIVERY with focused research branches. Execution: 
 
 
 
+
+## Final combined updater delivery · 2026-11-14
+
+The user's latest correction is “一次性提交…没完没了的提交也会让他一直部署不成功不如一次性提交”. This supersedes the earlier intermediate-batch cadence: collect all currently finished work, update main once, confirm the matching CI trigger, and do not submit a documentation-only or intermediate follow-up while it publishes. Do not weaken require_current_main or the exact-tag/commit guard to work around this request.
+
+UI batch d044e8bc5356b2084bf0f5568932956d7e018110 compiled, packaged and signed Android182 successfully (run43465534478). Its release step was intentionally blocked after main advanced to68b621604ffcd7df584fec3845df357eb845fd16; it is not a Kotlin/build failure and not a published182 package. The concurrent68b and6395cee checkpoints retain all71–77 UI work and add78–85; this final combined checkpoint builds directly on6395cee7ac368ce338bfd42f4da263cfac5ef1e4, preserving those files.
+
+DESKTOP-UPDATE-77 is now implemented as one13-file isolated package: shared Windows/iOS bridge; update4j1.5.9 on desktop; a normal save-and-exit callback; external hidden PowerShell installer; explicit msiexec/log/status handling; install-file SHA-256 validation, backup/rollback and restart; current-file manifest comparison with only changed app files downloaded; latest cfg/version included; unchanged runtime fingerprint required, otherwise complete-installer fallback. native_release stages content-addressed files and a complete latest file manifest, carries stable prior asset URLs and uploads the manifest last, retaining Android-run version and exact source-tag ownership. Runtime includes jdk.zipfs; Apache-2.0 notice is packaged.
+
+Current181 clients require one manual full upgrade into this updater. Subsequent compatible releases can skip any number of versions and compare directly with the latest manifest; this is file-level increment, not binary-delta compression. The first update-capable release has no previous matching updated-client runtime evidence yet. No tests, local builds, UI/service probes or user computer operations were performed; actual Windows handoff/UAC/download savings/rollback and phone visuals await real user feedback.
+
+Next exact action: confirm only the normal CI runs for this final combined commit, report their actual identity, and leave main stable. Investigate concrete compilation or publication failures if requested/reported; do not churn commits merely to record status or chase an unpublished intermediate build.
+
 ## Source controls / startup correction · 2026-11-14
 
 Active raw feedback and acceptance are DESIGN.md STARTUP-82/SOURCE-ORBIT-83/SOURCE-ROW-84/SOURCE-SETTINGS-85. This batch removes the first-screen QuietLoading spinner, replaces the source popup's bright glass discs with curved wheel reveal, restores the source overview's44dp row with right-side count/status, and simplifies source settings to one add entry, fixed switches without trash/lock slots, enabled-first ordering and collapsed help. Existing records, downloads, actual imports and legacy built-in restoration stay intact.

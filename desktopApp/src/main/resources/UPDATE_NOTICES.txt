@@ -1,0 +1,7 @@
+Desktop file updates use org.update4j:update4j:1.5.9.
+Copyright 2018 Mordechai Meisels and update4j contributors.
+Apache License 2.0: licenses/Update4j-APACHE-2.0.txt
+Upstream: https://github.com/update4j/update4j
+MangaFlow builds a verified file configuration from its own GitHub release manifest.
+The application supplies Windows shutdown, privilege handoff, backup and rollback.
+No update4j source code has been copied or modified.
