@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.MutableTransitionState
@@ -36,6 +37,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.unit.dp
@@ -90,7 +92,8 @@ internal fun SegmentedGlassHeader(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
+        // The returning subbar passes behind the parent tabs instead of painting over their labels.
+        Row(Modifier.fillMaxWidth().zIndex(1f), horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.Top) {
             HeaderNavigationGlass(backdrop, navigation)
             Box(Modifier.weight(1f)) {
@@ -105,8 +108,8 @@ internal fun SegmentedGlassHeader(
 }
 
 /**
- * Adapt beUI's measured-trigger morph: one reversible progress owns surface bounds and reveal.
- * The full-size foreground keeps its typography; only its owning glass grows from the tab.
+ * Adapt beUI's measured-trigger morph and distinct exit curve. A fixed-size foreground leaves
+ * before the surface returns behind the tab; reserved list space follows the final return phase.
  */
 @Composable
 internal fun RankingsFromTab(
@@ -125,33 +128,50 @@ internal fun RankingsFromTab(
     presence.targetState = expanded && ready
     val transition = updateTransition(presence, label = "ranking-from-tab")
     val reveal = transition.animateFloat(transitionSpec = {
-        if (motion) spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness) else snap()
+        if (!motion) snap()
+        else if (targetState) spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness)
+        else tween(200, easing = MangaMotion.EnterEasing)
     }, label = "ranking-tab-surface") { if (it) 1f else 0f }
+    val foreground = transition.animateFloat(transitionSpec = {
+        if (!motion) snap()
+        else if (targetState) tween(120, delayMillis = 60, easing = MangaMotion.EnterEasing)
+        else tween(70, easing = MangaMotion.EnterEasing)
+    }, label = "ranking-tab-foreground") { if (it) 1f else 0f }
+    val reservedSpace = transition.animateFloat(transitionSpec = {
+        if (!motion) snap()
+        else if (targetState) tween(260, easing = MangaMotion.EnterEasing)
+        else tween(100, delayMillis = 100, easing = MangaMotion.EnterEasing)
+    }, label = "ranking-tab-reserved-space") { if (it) 1f else 0f }
     val progress = reveal.value.coerceIn(0f, 1f)
     val present = presence.currentState || presence.targetState || !presence.isIdle
     BoxWithConstraints(Modifier.fillMaxWidth().onGloballyPositioned { origin = it.positionInRoot() }
-        .height((contentHeight + 2.dp) * progress)) {
+        .height((contentHeight + 2.dp) * reservedSpace.value.coerceIn(0f, 1f))) {
         if (present) {
             val endLeft = 50.dp.coerceAtMost(maxWidth)
             val endWidth = (maxWidth - endLeft).coerceAtLeast(1.dp)
             val rootOrigin = origin ?: Offset.Zero
-            val startLeft = with(density) { (anchor.left - rootOrigin.x).toDp() }
-                .coerceIn(0.dp, maxWidth)
-            val startTop = with(density) { (anchor.bottom - rootOrigin.y).toDp() } - 10.dp
             val startWidth = with(density) { anchor.width.toDp() }.coerceIn(1.dp, endWidth)
+            val startLeft = with(density) { (anchor.left - rootOrigin.x).toDp() }
+                .coerceIn(0.dp, (maxWidth - startWidth).coerceAtLeast(0.dp))
+            val startTop = with(density) { (anchor.top - rootOrigin.y).toDp() }
+            val startHeight = with(density) { anchor.height.toDp() }.coerceAtLeast(1.dp)
+            val startRadius = (startHeight / 2).coerceAtMost(22.dp)
             val left = startLeft + (endLeft - startLeft) * progress
             val top = startTop + (2.dp - startTop) * progress
             val width = startWidth + (endWidth - startWidth) * progress
-            val height = 10.dp + (contentHeight - 10.dp) * progress
+            val height = startHeight + (contentHeight - startHeight) * progress
             LiquidGlassSurface(backdrop, Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).offset {
                 IntOffset(with(density) { left.roundToPx() }, with(density) { top.roundToPx() })
-            }.width(width).height(height),
-                cornerRadius = 5.dp + 17.dp * progress, role = GlassSurfaceRole.NAVIGATION,
+            }.width(width).height(height).graphicsLayer {
+                // Keep the shell readable through its return; remove only the final overlapping remnant.
+                alpha = (reveal.value / .15f).coerceIn(0f, 1f)
+            },
+                cornerRadius = startRadius + (22.dp - startRadius) * progress, role = GlassSurfaceRole.NAVIGATION,
                 trackPointer = true, materialExpansion = { progress }) {
                 Column(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).width(endWidth)
                     .onSizeChanged { contentHeight = with(density) { it.height.toDp() } }
-                    .graphicsLayer { alpha = ((progress - .28f) / .60f).coerceIn(0f, 1f) }
-                    .motionInputGate(enabled && expanded && progress >= .85f)) { content() }
+                    .graphicsLayer { alpha = foreground.value }
+                    .motionInputGate(enabled && expanded && progress >= .85f && foreground.value >= .95f)) { content() }
             }
         }
     }
