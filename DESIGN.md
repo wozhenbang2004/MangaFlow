@@ -1,8 +1,18 @@
 # MangaFlow detail · 2026-11-12
 
+## Rating overflow correction · 2026-11-13 (HOME-METRICS-03; device acceptance pending)
+
+User: “评分图标已经乱了。。” (`1000121490.jpg`). This is direct rejection of HOME-METRICS-02's overlapping source-wordmark rendering: the source bgm/MU labels occluded each other, opaque mask rectangles showed over wallpaper, and reserving the stack could remove the heat number. The single-row requirement remains.
+
+- Keep the row transparent and show only complete numeric/source tokens that fit. Use one existing outlined Layers vector as the remaining-ratings cue, with no background, wordmark overlap, +N text or second line. Full source wordmarks still accompany scores when there is enough space; do not change the shared ReviewSourceMark or its other callers.
+- Prioritize heat: use a measured 12dp square flame slot, 2dp inner gap and 4dp group gap for compact cards. If required to fit the graphical cue, a count of at least 100万/100亿 may round to whole 万/亿 for display. Accessibility and detail retain the original exact value and every native score/scale. If the primary value fits alone on a narrow or enlarged-font row, omit the cue before discarding that value.
+- Preserve subscriptions, matching, limits, caching, the latest concurrent gallery/role-based glass, independent list/column preferences and segmented header/search motion. The change is confined to MangaMetricBadges and this correction record.
+
+Source/diff and measurement-to-drawing review only; no tests, local build, API probes or UI automation. Direct latest main and confirm CI triggered. Phone legibility/appearance remains pending user feedback.
+
 ## Cover gallery and adaptive atmosphere · 2026-11-13 (CAROUSEL-GALLERY-08; device acceptance pending)
 
-User authorized the supplied design with “去实现”: “应该重新设计信息层，而不是继续给现在的黑色玻璃加特效”, “完整清晰封面 + 双层氛围背景 + 底部融合玻璃 + 视差轮播”, and “卡片、氛围、文字、指示器使用同一滑动进度”. The selected layout/material/motion is the current implementation scope. It supersedes only CAROUSEL-FADE-07's caption/artwork treatment; retain concurrent HOME-CHROME-02's three header groups and HOME-METRICS-02's measured one-line values/overlapping source marks.
+User authorized the supplied design with “去实现”: “应该重新设计信息层，而不是继续给现在的黑色玻璃加特效”, “完整清晰封面 + 双层氛围背景 + 底部融合玻璃 + 视差轮播”, and “卡片、氛围、文字、指示器使用同一滑动进度”. The selected layout/material/motion is the current implementation scope. It supersedes only CAROUSEL-FADE-07's caption/artwork treatment; retain concurrent HOME-CHROME-02's three header groups and HOME-METRICS-03's measured one-line values/graphical overflow cue.
 
 - GALLERY-ART-08: keep the installed Material3 1.3.2 Multi-browse keylines/masks and original source order, with 14% previews (40–72dp), 8dp gaps and 22dp outer corners. At normal font scale the gallery is 230–250dp according to available width. Fit the complete sharp cover into the artwork region above a reserved 82dp caption, so cover lettering/characters are neither cropped nor covered by the caption. Both the enlarged soft background and sharp artwork use one bounded Coil 3.2.0 painter/decode with the existing source headers. The local blur/gradient stays inside the artwork boundary and does not wash the grid. Below API 31, retain a quiet low-opacity artwork texture over the extracted color rather than an unblurred dominant duplicate.
 - GALLERY-COLOR-08: after successful software-bitmap decoding, sample a fixed 20×20 grid on Dispatchers.Default, weighting the real chromatic artwork above neutral margins. Cache only 96 URL-keyed Color values in memory. A newly available cached color enters over 420ms; actual item expansion directly interpolates adjacent cached colors on a reversing drag, without a second timed sliding-color animation or per-frame extraction. The image request is explicitly sized; no full-resolution readback, bitmap copy, extra network request, palette dependency or disk record is added.
