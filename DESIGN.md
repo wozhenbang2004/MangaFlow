@@ -1,5 +1,15 @@
 # MangaFlow detail · 2026-11-12
 
+## Compact header selector and stable closing · 2026-11-13 (HEADER-SELECTOR-13)
+
+User: “顶栏那个选中收起时会有个抖动而且展开时太长太占空间了吧另一个书架界面的也是一样”. Screenshot `1000121491.jpg` shows the download selector covering a wide part of the list and a duplicate trigger visible through its upper material. Scope is the existing download / library shared MorphGlassTabs; retain their filters, saved list positions, direct reading and current fixed glass-role work.
+
+- HEADER-SELECTOR-SIZE-13: measure the longest real choice using the shared 13sp/18sp label role. The collapsed width is selection-independent (96–144dp), so switching 全部/进行中/已下载 or 收藏/最近阅读 never changes the header's layout or closing endpoint. Replace the fixed 194dp menu with content-related width bounded to 128–156dp. Use 4dp outer padding, 44dp-minimum rows (grow for large text), 18dp icons and a reserved 14dp check slot. Keep full labels in accessibility and single-line ellipsis on unusually large fonts.
+- HEADER-SELECTOR-MOTION-13: retain the same-window Haze scene and beUI-derived presence/morph owner. A critically damped existing navigation spring replaces the overshooting geometry spring. Lay out menu labels at the final expanded dimensions and reveal them through the changing surface clip; shrinking must not reflow their text. The overlay's closing label and the trigger now use the same renderer, fixed width, icon/label/chevron slots, padding and font role. Remove their competing icon-swap clock. Press uses the shared quiet .985 response.
+- HEADER-SELECTOR-HANDOFF-13: hide the original trigger drawing and input while the overlay is actually present, including its outgoing phase. Presence reports are updated through the shared existing SideEffect/disposal pattern. Reveal the original only when the overlay settles at the matching 44dp capsule, preventing duplicated glass/text and a final-frame geometry change. Selection still updates the actual filter/history immediately; business changes never wait for an animation callback. Preserve backdrop/back dismissal, inactive-page cleanup and disabled-motion snapping.
+
+Source/diff review only: checked both call sites, measurement/layout constraints, endpoint identity, retained presence/disposal, input guards and the current main changes. No tests, local build, simulator, screenshots or UI automation were run. The supplied screenshot is before-state evidence; the corrected device motion/layout remains pending user feedback. Submit directly to latest main and confirm the existing release workflow trigger only.
+
 ## Rating overflow correction · 2026-11-13 (HOME-METRICS-03; device acceptance pending)
 
 User: “评分图标已经乱了。。” (`1000121490.jpg`). This is direct rejection of HOME-METRICS-02's overlapping source-wordmark rendering: the source bgm/MU labels occluded each other, opaque mask rectangles showed over wallpaper, and reserving the stack could remove the heat number. The single-row requirement remains.

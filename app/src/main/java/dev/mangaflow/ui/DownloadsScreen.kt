@@ -144,8 +144,9 @@ fun DownloadsScreen(
     var showImportSources by remember { mutableStateOf(false) }
     var showQueueActions by remember { mutableStateOf(false) }
     var filterMenuExpanded by remember { mutableStateOf(false) }
+    var filterMenuPresent by remember { mutableStateOf(false) }
     val filterChoices = remember { listOf(GlassTabChoice("全部", Icons.Outlined.Inventory2), GlassTabChoice("进行中", Icons.Outlined.Downloading), GlassTabChoice("已下载", Icons.Outlined.CheckCircleOutline)) }
-    val filterWidth = if (filter == DownloadFilter.ALL) 112.dp else 126.dp
+    val filterWidth = morphGlassTabWidth(filterChoices)
     var pendingImport by remember { mutableStateOf<PendingLocalImport?>(null) }
     var importBusy by remember { mutableStateOf(false) }
     val allScroll = rememberLazyListState()
@@ -350,7 +351,8 @@ fun DownloadsScreen(
             PageTitleHeader("下载", backdrop, navigation,
                 leading = {
                     MorphGlassTabTrigger(backdrop, filterChoices, filter.ordinal, filterWidth,
-                        expanded = filterMenuExpanded, onToggle = { filterMenuExpanded = !filterMenuExpanded; showQueueActions = false })
+                        expanded = filterMenuExpanded, covered = filterMenuExpanded || filterMenuPresent,
+                        onToggle = { filterMenuExpanded = !filterMenuExpanded; showQueueActions = false })
                 }, actions = {
                 toolbar {
                     if (managing) {
@@ -410,6 +412,7 @@ fun DownloadsScreen(
         }
         MorphGlassTabOverlay(backdrop, filterChoices, filter.ordinal, filterWidth,
             expanded = filterMenuExpanded, onDismiss = { filterMenuExpanded = false },
+            onPresenceChange = { filterMenuPresent = it },
             onSelect = { index ->
                 filterMenuExpanded = false
                 filter = DownloadFilter.entries[index]

@@ -123,9 +123,10 @@ fun LibraryScreen(
     var showCollections by rememberSaveable { mutableStateOf(false) }
     var showStats by rememberSaveable { mutableStateOf(false) }
     var shelfMenuExpanded by remember { mutableStateOf(false) }
+    var shelfMenuPresent by remember { mutableStateOf(false) }
     var libraryActionsOpen by remember { mutableStateOf(false) }
     val shelfTabs = remember { listOf(GlassTabChoice("收藏", Icons.Outlined.Bookmarks), GlassTabChoice("最近阅读", Icons.Outlined.History)) }
-    val shelfWidth = if (showHistory) 142.dp else 112.dp
+    val shelfWidth = morphGlassTabWidth(shelfTabs)
     val collections by libraryStore.pageCollections.collectAsStateWithLifecycle()
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     val readingActivity by libraryStore.readingActivity.collectAsStateWithLifecycle()
@@ -333,7 +334,7 @@ fun LibraryScreen(
             PageTitleHeader("书架", backdrop, navigation,
                 leading = {
                     MorphGlassTabTrigger(backdrop, shelfTabs, if (showHistory) 1 else 0, shelfWidth,
-                        expanded = shelfMenuExpanded, enabled = active,
+                        expanded = shelfMenuExpanded, covered = shelfMenuExpanded || shelfMenuPresent, enabled = active,
                         onToggle = { shelfMenuExpanded = !shelfMenuExpanded; libraryActionsOpen = false })
                 },
                 actions = {
@@ -358,6 +359,7 @@ fun LibraryScreen(
         }
         MorphGlassTabOverlay(backdrop, shelfTabs, if (showHistory) 1 else 0, shelfWidth,
             expanded = shelfMenuExpanded, onDismiss = { shelfMenuExpanded = false },
+            onPresenceChange = { shelfMenuPresent = it },
             onSelect = { index ->
                 shelfMenuExpanded = false
                 if (showHistory != (index == 1)) onCancelOpen()
