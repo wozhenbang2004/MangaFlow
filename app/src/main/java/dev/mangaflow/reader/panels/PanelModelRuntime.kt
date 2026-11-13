@@ -40,6 +40,7 @@ import org.tensorflow.lite.Tensor
 /** CPU-only, on-demand native runtimes. Native calls finish before their session can close. */
 class PanelModelRuntime(context: Context) {
     private val store = PanelModelStore.get(context)
+    private val runtimes = PanelRuntimeStore.get(context)
     private val mutex = Mutex()
     private val environment by lazy { OrtEnvironment.getEnvironment() }
     private var nano: Interpreter? = null
@@ -52,6 +53,7 @@ class PanelModelRuntime(context: Context) {
         require(engine == PanelEngine.NANO || engine == PanelEngine.HIGH_QUALITY)
         val id = if (engine == PanelEngine.NANO) PanelModelId.NANO else PanelModelId.HIGH_QUALITY
         val file = store.installedFile(id)
+        runtimes.ensureLoaded(if (engine == PanelEngine.NANO) PanelRuntimeId.LITERT else PanelRuntimeId.ONNX)
         return withContext(Dispatchers.Default) {
             mutex.withLock {
                 currentCoroutineContext().ensureActive()
@@ -78,6 +80,7 @@ class PanelModelRuntime(context: Context) {
         if (boxes.size < 2) return boxes
         require(boxes.size <= 100) { "分镜数量过多，请使用几何顺序" }
         val file = store.installedFile(PanelModelId.ORDER)
+        runtimes.ensureLoaded(PanelRuntimeId.ONNX)
         return withContext(Dispatchers.Default) {
             mutex.withLock {
                 currentCoroutineContext().ensureActive()

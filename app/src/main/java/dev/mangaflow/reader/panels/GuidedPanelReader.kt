@@ -89,8 +89,11 @@ internal fun GuidedPanelReader(
     val context = LocalContext.current
     val repository = remember(context) { PanelRepository(context) }
     val models = remember(context) { PanelModelStore.get(context) }
+    val runtimes = remember(context) { PanelRuntimeStore.get(context) }
     val modelStates by models.states.collectAsStateWithLifecycle()
+    val runtimeStates by runtimes.states.collectAsStateWithLifecycle()
     val installedModels = modelStates.mapValues { it.value.installed }
+    val installedRuntimes = runtimeStates.mapValues { it.value.installed }
     var pageIndex by rememberSaveable { mutableIntStateOf(initialPage.coerceIn(pages.indices)) }
     var panelIndex by rememberSaveable { mutableIntStateOf(initialPanel.coerceAtLeast(0)) }
     var overview by rememberSaveable { mutableStateOf(false) }
@@ -138,7 +141,7 @@ internal fun GuidedPanelReader(
             onTargetConsumed()
         }
     }
-    LaunchedEffect(pageIndex, reload, active, installedModels, preferences.panelLayoutKey) {
+    LaunchedEffect(pageIndex, reload, active, installedModels, installedRuntimes, preferences.panelLayoutKey) {
         if (!active) return@LaunchedEffect
         loading = true
         error = null

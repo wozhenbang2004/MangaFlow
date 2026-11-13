@@ -431,3 +431,19 @@ notice is preserved as `licenses/ONNX-Runtime-ThirdPartyNotices.txt`; its inclus
 does not imply every optional upstream component is used. CPU execution is limited
 to two inference threads; GPU, NNAPI and NPU delegates are not enabled.
 Sources: https://github.com/google-ai-edge/LiteRT and https://github.com/microsoft/onnxruntime/tree/v1.31.1
+
+
+## Optional native inference loading
+
+MangaFlow now distributes the pinned native LiteRT and ONNX Runtime libraries as optional,
+architecture-specific signed release components rather than embedding their .so files in the APK.
+The existing Apache-2.0 / MIT runtime notices above are also preserved in each component ZIP.
+The small Java interfaces remain compiled into the app. ONNX Runtime 1.31.1's Android loader
+is adapted from the actual upstream source at Git blob ccbf89b592567ce1cbbae0b984192a55876387b8:
+https://github.com/microsoft/onnxruntime/blob/v1.31.1/java/src/main/java/ai/onnxruntime/OnnxRuntime.java
+The MIT copyright header remains in app/src/main/java/ai/onnxruntime/OnnxRuntime.java.
+Its Android branch uses only the application-verified, read-only private directory and explicit
+core-before-JNI absolute loading. The original loader class is excluded from the generated API JAR;
+all other upstream API classes/native signatures remain. See third_party/onnxruntime/ADAPTATION.md.
+There is no downloaded Java/Dex code or new runtime license claim. This source adaptation and
+packaging inspection do not establish Android runtime execution or on-device verification.

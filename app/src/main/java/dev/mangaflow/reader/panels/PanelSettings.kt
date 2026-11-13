@@ -51,7 +51,9 @@ internal fun PanelSettings(
     val colors = MaterialTheme.colorScheme
     val engines = listOf(PanelEngine.CLASSIC, PanelEngine.NANO, PanelEngine.HIGH_QUALITY)
     val store = PanelModelStore.get(LocalContext.current)
+    val runtimes = PanelRuntimeStore.get(LocalContext.current)
     val models by store.states.collectAsStateWithLifecycle()
+    val components by runtimes.states.collectAsStateWithLifecycle()
     ReaderToggle("分镜阅读", preferences.panelEngine != PanelEngine.OFF,
         "按格阅读，随时查看整页") {
         update(preferences.copy(panelEngine = if (it) PanelEngine.CLASSIC else PanelEngine.OFF))
@@ -72,7 +74,14 @@ internal fun PanelSettings(
             PanelEngine.HIGH_QUALITY -> PanelModelId.HIGH_QUALITY
             else -> null
         }
-        val explanation = if (id != null && models[id]?.installed != true) {
+        val component = when (preferences.panelEngine) {
+            PanelEngine.NANO -> PanelRuntimeId.LITERT
+            PanelEngine.HIGH_QUALITY -> PanelRuntimeId.ONNX
+            else -> null
+        }
+        val explanation = if (component != null && components[component]?.installed != true) {
+            "识别组件未下载，暂用传统识别"
+        } else if (id != null && models[id]?.installed != true) {
             "模型未下载，暂用传统识别"
         } else when (preferences.panelEngine) {
             PanelEngine.NANO -> "YOLO26 Nano · 适合手机"
@@ -92,11 +101,12 @@ internal fun PanelSettings(
             selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal,
         )
         ReaderToggle("AI 阅读顺序", preferences.panelLearnedOrder,
-            if (models[PanelModelId.ORDER]?.installed == true) "Inkwell · 辅助判断复杂分格"
-            else "需下载排序模型，未下载时使用几何顺序") {
+            if (models[PanelModelId.ORDER]?.installed == true && components[PanelRuntimeId.ONNX]?.installed == true)
+                "Inkwell · 辅助判断复杂分格"
+            else "需下载排序模型和 ONNX 组件，未就绪时使用几何顺序") {
             update(preferences.copy(panelLearnedOrder = it))
         }
-        TextButton(onClick = onModels) { Text("管理分镜模型") }
+        TextButton(onClick = onModels) { Text("管理识别组件与模型") }
     }
 }
 
@@ -105,7 +115,9 @@ internal fun PanelModelsDialog(visible: Boolean, backdrop: HazeState, onDismiss:
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val store = remember(context) { PanelModelStore.get(context) }
+    val runtimes = remember(context) { PanelRuntimeStore.get(context) }
     val states by store.states.collectAsStateWithLifecycle()
+    val components by runtimes.states.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
     val maxHeight = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(160).dp
@@ -113,11 +125,49 @@ internal fun PanelModelsDialog(visible: Boolean, backdrop: HazeState, onDismiss:
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
         ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth(), backdrop) {
             Column(Modifier.heightIn(max = maxHeight).padding(horizontal = 18.dp)) {
-                ReaderPanelHeading("分镜模型", "关闭模型管理", onDismiss)
+                ReaderPanelHeading("识别组件与模型", "关闭下载管理", onDismiss)
                 Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
                     .padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                    Text("只在点击下载后联网，下载后可离线识别。原图保持不变。",
+                    Text("传统识别无需下载。AI 需下载对应组件和模型，下载后可离线使用。",
                         color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
+                    Text("运行组件", color = colors.onSurfaceVariant, fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium)
+                    PanelRuntimeId.entries.forEach { id ->
+                        val spec = runtimes.spec(id)
+                        val state = components[id] ?: PanelRuntimeState()
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(if (id == PanelRuntimeId.LITERT) "轻量识别组件" else "高精度与排序组件",
+                                        fontSize = 14.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
+                                    Text("${if (id == PanelRuntimeId.LITERT) "LiteRT" else "ONNX"} ${spec.version} · ${runtimes.abi ?: "设备暂不支持"}",
+                                        fontSize = 11.sp, color = colors.onSurfaceVariant)
+                                }
+                                TextButton(enabled = runtimes.abi != null && !state.pendingRemoval, onClick = {
+                                    when {
+                                        state.downloading -> runtimes.cancel(id)
+                                        state.installed -> scope.launch { runtimes.remove(id) }
+                                        else -> scope.launch { runtimes.download(id) }
+                                    }
+                                }) { Text(when {
+                                    state.pendingRemoval -> "重启后删除"
+                                    state.downloading -> "取消"
+                                    state.installed -> "删除"
+                                    state.error != null -> "重试"
+                                    else -> "下载"
+                                }) }
+                            }
+                            Text(if (id == PanelRuntimeId.LITERT) "供 YOLO 轻量模型使用，仅下载本机架构。"
+                                else "高精度识别与 AI 排序共用，同版本无需重复下载。",
+                                fontSize = 12.sp, lineHeight = 18.sp, color = colors.onSurfaceVariant)
+                            if (state.downloading) Text(state.progress?.let {
+                                "正在下载 ${(it * 100).roundToInt()}%"
+                            } ?: "正在核对下载信息", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                            state.error?.let { Text(it, fontSize = 11.sp, lineHeight = 16.sp, color = colors.error) }
+                        }
+                    }
+                    Text("模型", color = colors.onSurfaceVariant, fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium)
                     PanelModelId.entries.forEach { id ->
                         val spec = store.spec(id)
                         val state = states[id] ?: PanelModelState()

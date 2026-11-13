@@ -128,7 +128,15 @@ jobs:
           ./gradlew --no-daemon --console=plain --max-workers=2 \
             -PmangaVersionCode="$RELEASE_VERSION_CODE" \
             -PmangaVersionName="$RELEASE_VERSION_NAME" \
-            :app:assembleRelease
+            :app:assembleRelease :app:stageInferenceAars
+
+      - name: Package optional inference components
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        run: |
+          python3 scripts/package_runtimes.py \
+            --aar-dir app/build/outputs/inference-aars \
+            --output dist/runtime-assets \
+            --apk app/build/outputs/apk/release/app-release-unsigned.apk
 
       - name: Preserve release mapping
         if: env.RELEASE_ALREADY_PUBLISHED != 'true'
@@ -169,7 +177,8 @@ jobs:
             -passin env:MANGAFLOW_SIGNING_PASSWORD -nocerts -nodes -out "$SIGN_DIR/private.pem"
           unset MANGAFLOW_SIGNING_PASSWORD
           python3 scripts/release.py manifest \
-            --apk "dist/MangaFlow-$RELEASE_VERSION_NAME.apk" --private-key "$SIGN_DIR/private.pem"
+            --apk "dist/MangaFlow-$RELEASE_VERSION_NAME.apk" --private-key "$SIGN_DIR/private.pem" \
+            --runtime-dir dist/runtime-assets
 
       - name: Preserve release assets
         if: env.RELEASE_ALREADY_PUBLISHED != 'true'

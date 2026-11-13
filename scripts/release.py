@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from package_runtimes import require_small_apk, runtime_assets
 
 REPOSITORY = "wozhenbang2004/MangaFlow"
 API = f"https://api.github.com/repos/{REPOSITORY}"
@@ -164,12 +165,41 @@ def plan():
     print(f"Preparing {tag} ({code}) from {sha[:12]}")
 
 
-def manifest(apk, private_key):
+def signed_envelope(payload, private_key):
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    signature = subprocess.run(
+        ["openssl", "dgst", "-sha256", "-sign", str(private_key)],
+        input=encoded, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+    ).stdout
+    return {
+        "algorithm": "SHA256withRSA",
+        "payload": base64.b64encode(encoded).decode(),
+        "signature": base64.b64encode(signature).decode(),
+    }
+
+
+def runtime_payload(value, packages):
+    return {
+        "schema": 1, "packageName": "dev.mangaflow", "versionCode": value["versionCode"],
+        "versionName": value["versionName"], "sourceCommit": value["sourceCommit"],
+        "runtimes": [{**item, "archive": {
+            **item["archive"],
+            "url": f"https://github.com/{REPOSITORY}/releases/download/{value['tag']}/{item['archive']['name']}",
+        }} for item in packages],
+    }
+
+
+def manifest(apk, private_key, runtime_dir):
     value = json.loads(PLAN.read_text(encoding="utf-8"))
     DIST.mkdir(exist_ok=True)
     target = DIST / f"MangaFlow-{value['versionName']}.apk"
     if apk.resolve() != target.resolve():
         target.write_bytes(apk.read_bytes())
+    require_small_apk(target)
+    packages, runtime_paths = runtime_assets(runtime_dir)
+    catalog = DIST / "runtime-catalog.json"
+    catalog.write_text(json.dumps(signed_envelope(runtime_payload(value, packages), private_key),
+                                  separators=(",", ":")) + "\n", encoding="utf-8")
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     payload = {
         "schema": 1, "packageName": "dev.mangaflow", "versionCode": value["versionCode"],
@@ -180,23 +210,14 @@ def manifest(apk, private_key):
             "bytes": target.stat().st_size, "sha256": digest,
         },
     }
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
     # The same private key signs the APK and these exact payload bytes.
-    signature = subprocess.run(
-        ["openssl", "dgst", "-sha256", "-sign", str(private_key)],
-        input=encoded, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
-    ).stdout
-    envelope = {
-        "algorithm": "SHA256withRSA",
-        "payload": base64.b64encode(encoded).decode(),
-        "signature": base64.b64encode(signature).decode(),
-    }
+    envelope = signed_envelope(payload, private_key)
     (DIST / "latest.json").write_text(json.dumps(envelope, separators=(",", ":")) + "\n", encoding="utf-8")
     sums = []
-    for item in (target, DIST / "latest.json"):
+    for item in (target, DIST / "latest.json", catalog, *runtime_paths):
         sums.append(hashlib.sha256(item.read_bytes()).hexdigest() + "  " + item.name)
     (DIST / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
-    print(f"Prepared {target.name}, signed latest.json, and SHA256SUMS")
+    print(f"Prepared {target.name}, signed update/runtime catalogs, {len(runtime_paths)} optional components and SHA256SUMS")
 
 
 def publish():
@@ -218,6 +239,7 @@ def publish():
         f"{value['notes']}\n\n"
         f"Android 8.0+ · versionCode {value['versionCode']}\n\n"
         "下载 APK 安装；已安装漫流的用户可以在应用中检查更新并覆盖升级。\n\n"
+        "AI 识别组件在应用中按需下载，仅获取当前设备架构所需文件。\n\n"
         f"Source: `{value['sourceCommit']}`\n\n"
         "本流水线只编译、签名和发布安装包，未运行测试。"
     )
@@ -228,8 +250,16 @@ def publish():
             "name": "漫流 " + value["versionName"], "body": body,
             "draft": True, "prerelease": False,
         })
+    packages, runtime_paths = runtime_assets(DIST / "runtime-assets")
+    catalog = DIST / "runtime-catalog.json"
+    wrapper = json.loads(catalog.read_text(encoding="utf-8"))
+    if wrapper.get("algorithm") != "SHA256withRSA" or not 256 <= len(base64.b64decode(wrapper["signature"], validate=True)) <= 1024:
+        raise RuntimeError("Runtime catalog signing envelope is invalid")
+    if json.loads(base64.b64decode(wrapper["payload"], validate=True)) != runtime_payload(value, packages):
+        raise RuntimeError("Runtime catalog does not match this release's verified component assets")
     existing = {item["name"]: item for item in release.get("assets", [])}
-    files = [DIST / f"MangaFlow-{value['versionName']}.apk", DIST / "latest.json", DIST / "SHA256SUMS"]
+    files = [DIST / f"MangaFlow-{value['versionName']}.apk", DIST / "latest.json", catalog,
+             DIST / "SHA256SUMS", *runtime_paths]
     for file in files:
         data = file.read_bytes()
         expected = "sha256:" + hashlib.sha256(data).hexdigest()
@@ -269,12 +299,13 @@ def main():
     metadata = modes.add_parser("manifest")
     metadata.add_argument("--apk", type=Path, required=True)
     metadata.add_argument("--private-key", type=Path, required=True)
+    metadata.add_argument("--runtime-dir", type=Path, required=True)
     modes.add_parser("publish")
     args = parser.parse_args()
     if args.mode == "plan":
         plan()
     elif args.mode == "manifest":
-        manifest(args.apk, args.private_key)
+        manifest(args.apk, args.private_key, args.runtime_dir)
     else:
         publish()
 

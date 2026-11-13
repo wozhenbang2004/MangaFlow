@@ -67,7 +67,14 @@ jobs:
           retention-days: 14
 
       - name: Compile and package
-        run: ./gradlew --no-daemon --console=plain --max-workers=2 :app:assembleDebug :app:assembleRelease
+        run: ./gradlew --no-daemon --console=plain --max-workers=2 :app:assembleDebug :app:assembleRelease :app:stageInferenceAars
+      - name: Package optional inference components (unsigned)
+        run: |
+          python3 scripts/package_runtimes.py \
+            --aar-dir app/build/outputs/inference-aars \
+            --output app/build/outputs/inference-components \
+            --apk app/build/outputs/apk/debug/app-debug.apk \
+            --apk app/build/outputs/apk/release/app-release-unsigned.apk
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: mangaflow-build-${{ github.run_number }}
@@ -75,4 +82,5 @@ jobs:
             app/build/outputs/apk/debug/app-debug.apk
             app/build/outputs/apk/release/app-release-unsigned.apk
             app/build/outputs/mapping/release/mapping.txt
+            app/build/outputs/inference-components/
           retention-days: 7
