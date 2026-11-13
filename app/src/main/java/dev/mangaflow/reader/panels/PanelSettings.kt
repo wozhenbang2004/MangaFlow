@@ -1,5 +1,7 @@
 package dev.mangaflow.reader.panels
 
+import dev.mangaflow.ui.LocalMangaWindow
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,7 +20,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
@@ -120,9 +121,9 @@ internal fun PanelModelsDialog(visible: Boolean, backdrop: HazeState, onDismiss:
     val components by runtimes.states.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
-    val maxHeight = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(160).dp
     MotionDialog(visible = visible, onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val maxHeight = LocalMangaWindow.current.panelHeight
         ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth(), backdrop) {
             Column(Modifier.heightIn(max = maxHeight).padding(horizontal = 18.dp)) {
                 ReaderPanelHeading("识别组件与模型", "关闭下载管理", onDismiss)

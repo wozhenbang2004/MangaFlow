@@ -32,12 +32,18 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -48,6 +54,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.focus.focusProperties
@@ -63,7 +70,6 @@ import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import dev.mangaflow.data.SearchTarget
@@ -162,6 +168,7 @@ private val Frame.depth: Int get() = when (this) {
 @OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = viewModel()) {
+    val windowSize = LocalMangaWindow.current
     val wallpaperContext = LocalContext.current.applicationContext
     val wallpaperStore = remember(wallpaperContext) { WallpaperStore.get(wallpaperContext) }
     val wallpaper by wallpaperStore.state.collectAsStateWithLifecycle()
@@ -295,7 +302,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     if (tagSearchVisible) {
         CompositionLocalProvider(LocalMangaMetrics provides metricState) {
-        val panelHeight = (LocalConfiguration.current.screenHeightDp.dp * .72f - 60.dp).coerceAtLeast(120.dp)
+        val panelHeight = (windowSize.height * .72f - 60.dp).coerceAtLeast(1.dp)
         val closeTags: () -> Unit = { tagSearchVisible = false; model.clearSearch() }
         MotionBottomSheet(onDismissRequest = closeTags) { dismiss ->
             Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).navigationBarsPadding()) {
@@ -328,8 +335,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
 
     val density = LocalDensity.current
+    val drawerWidth = (296.dp + 48.dp * (windowSize.fontScale - 1f)).coerceAtMost(360.dp)
+        .coerceAtMost((windowSize.width - 24.dp).coerceAtLeast(1.dp))
     var measuredDrawerWidth by remember { mutableFloatStateOf(0f) }
-    val drawerWidthPx = measuredDrawerWidth.takeIf { it > 0f } ?: with(density) { 296.dp.toPx() }
+    val drawerWidthPx = measuredDrawerWidth.takeIf { it > 0f } ?: with(density) { drawerWidth.toPx() }
     val drawerVisible by remember(drawer, drawerWidthPx) {
         derivedStateOf {
             val offset = drawer.currentOffset
@@ -359,7 +368,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         scrimColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.14f),
         drawerContent = {
             ModalDrawerSheet(
-                modifier = Modifier.width(296.dp).onSizeChanged { measuredDrawerWidth = it.width.toFloat() }
+                modifier = Modifier.width(drawerWidth).onSizeChanged { measuredDrawerWidth = it.width.toFloat() }
                     .padding(start = 8.dp, top = 10.dp, bottom = 10.dp),
                 drawerShape = RoundedCornerShape(26.dp),
                 drawerContainerColor = Color.Transparent,
@@ -374,11 +383,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     role = GlassSurfaceRole.DRAWER,
                     trackPointer = true, elevation = 0.dp,
                 ) {}
-                Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
                     .then(if (drawerCanSelect) Modifier else Modifier.clearAndSetSemantics { }
                         .focusProperties { canFocus = false })
                     .padding(horizontal = 14.dp, vertical = 12.dp)) {
-                    Row(Modifier.padding(12.dp, 12.dp, 12.dp, 28.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.padding(12.dp, 8.dp, 12.dp, if (windowSize.shortHeight) 8.dp else 28.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(28.dp))
                         Spacer(Modifier.width(12.dp))
                         Column {
@@ -386,6 +395,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             Text("MANGAFLOW", fontSize = 10.sp, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
+                    Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
                     CompositionLocalProvider(LocalRippleConfiguration provides null) {
                     MotionNavigationColumn(
                         selected = (drawerAction?.destination ?: section).ordinal,
@@ -426,7 +436,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         )
                     }
                     }
-                    Spacer(Modifier.weight(1f))
+                    }
                     Text("MangaFlow ${BuildConfig.VERSION_NAME}", modifier = Modifier.padding(12.dp),
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -614,14 +624,21 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             searchExpanded = false
                             model.clearSearch()
                         }
-                        Box(Modifier.fillMaxSize().statusBarsPadding()) {
+                        Box(Modifier.fillMaxSize().windowInsetsPadding(
+                            WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
                         // The persistent lower source holds the real media; foreground page
                         // sources and headers sample it without owning the player lifecycle.
                         Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop, zIndex = -1f)
                             .background(MaterialTheme.colorScheme.background)) {
                             AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = rootWallpaperActive)
                         }
-                        Box(Modifier.fillMaxSize().graphicsLayer {
+                        val contentWidth = when (current.section) {
+                            Section.SETTINGS -> MangaLayout.SettingsWidth
+                            Section.ACCOUNT -> MangaLayout.AccountWidth
+                            Section.DOWNLOADS -> MangaLayout.ListWidth
+                            else -> MangaLayout.BrowseWidth
+                        }
+                        Box(Modifier.widthIn(max = contentWidth).fillMaxSize().align(Alignment.TopCenter).graphicsLayer {
                             // Only the incoming foreground settles; the real backdrop never disappears.
                             alpha = rootOpacity.value
                             translationY = ((1f - rootOpacity.value) / (1f - MangaMotion.RootEntryAlpha))

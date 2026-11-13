@@ -138,7 +138,10 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         val captionHeight = (14f + 60f * fontScale).dp
         val preferredWidth = minOf(galleryWidth, (galleryWidth * .72f).coerceAtMost(292.dp))
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
-        val artworkHeight = (preferredWidth * 1.12f).coerceIn(216.dp, 300.dp)
+        val window = LocalMangaWindow.current
+        val artworkHeight = if (window.shortHeight)
+            (preferredWidth * 1.12f).coerceAtMost((window.height * .45f).coerceAtLeast(96.dp))
+            else (preferredWidth * 1.12f).coerceIn(216.dp, 300.dp)
         val itemHeight = artworkHeight + captionHeight
         val imageWidthPx = with(density) { preferredWidth.roundToPx() }.coerceAtLeast(1)
         val imageHeightPx = with(density) { itemHeight.roundToPx() }.coerceAtLeast(1)

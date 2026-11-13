@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import androidx.compose.ui.platform.LocalDensity
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -122,11 +124,19 @@ fun AccountScreen(
     }
 
     if (profile == null) {
+        BoxWithConstraints(Modifier.fillMaxSize().navigationBarsPadding().imePadding()
+            .padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 16.dp)) {
+        val websiteVisible = !cookieMode && !state.busy && active && websiteEnabled
+        val accountHeight = maxHeight
         Column(
-            modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding()
-                .padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 16.dp),
+            modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // Keep the native website usable in landscape/with the keyboard open;
+            // supporting copy, errors and token import scroll in their own bounded region.
+            Column(Modifier.fillMaxWidth()
+                .heightIn(max = if (websiteVisible) accountHeight * .38f else accountHeight)
+                .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("匿名阅读已启用", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             Text("连接账号，同步个人收藏与阅读记录。", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
             if (cookieMode) {
@@ -142,7 +152,7 @@ fun AccountScreen(
                 )
                 Button(
                     onClick = submitCookie, enabled = !state.busy && cookie.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = colors.primary, contentColor = colors.onPrimary,
                         disabledContainerColor = colors.surfaceVariant, disabledContentColor = colors.onSurfaceVariant),
                 ) { Text("导入登录状态") }
@@ -157,6 +167,7 @@ fun AccountScreen(
                 onClick = { clearInputs(); cookieMode = !cookieMode }, enabled = !state.busy,
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
             ) { Text(if (cookieMode) "使用账号密码" else "导入 Cookie / Token", style = MaterialTheme.typography.bodySmall) }
+            }
             if (!cookieMode && !state.busy && active) {
                 if (websiteEnabled) {
                     WebsiteAccountLogin(
@@ -171,6 +182,7 @@ fun AccountScreen(
                     TextButton(onClick = { websiteEnabled = true }) { Text("重新登录") }
                 }
             }
+        }
         }
     } else {
         key(profile.username) {
@@ -220,7 +232,7 @@ fun AccountScreen(
                     MotionTabContent(if (showHistory) 1 else 0, Modifier.weight(1f).fillMaxWidth()) { tab ->
                         val historyTab = tab == 1
                         LazyVerticalGrid(
-                            columns = GridCells.Adaptive(144.dp),
+                            columns = GridCells.Adaptive(144.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
                             state = if (historyTab) historyPosition else favoritesPosition,
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),

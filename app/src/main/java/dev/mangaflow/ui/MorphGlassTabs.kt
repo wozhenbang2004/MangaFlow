@@ -8,6 +8,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.rememberTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +22,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -50,6 +54,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.zIndex
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.motion.FeelEvent
@@ -74,7 +79,8 @@ internal fun morphGlassTabWidth(choices: List<GlassTabChoice>): Dp {
     val labelWidth = remember(choices, measurer, style, density) {
         choices.maxOfOrNull { measurer.measure(it.label, style, maxLines = 1).size.width } ?: 0
     }
-    return (with(density) { labelWidth.toDp() } + 70.dp).coerceIn(96.dp, 144.dp)
+    return (with(density) { labelWidth.toDp() } + 70.dp)
+        .coerceIn(96.dp, 144.dp * density.fontScale.coerceAtLeast(1f))
 }
 
 /** The reserved header slot, compact label and menu rows share this height. */
@@ -115,6 +121,7 @@ internal fun BoxScope.MorphGlassTabSelector(
     onToggle: () -> Unit,
     onDismiss: () -> Unit,
     enabled: Boolean = true,
+    maximumHeight: Dp = Dp.Unspecified,
     onSelect: (Int) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -135,9 +142,15 @@ internal fun BoxScope.MorphGlassTabSelector(
             interactionSource = remember { MutableInteractionSource() }, indication = null,
             onClickLabel = "关闭分类", onClick = onDismiss))
     }
-    val extendedWidth = (collapsedWidth + 12.dp).coerceIn(128.dp, 156.dp)
+    val window = LocalMangaWindow.current
+    val maximumWidth = (window.width - 80.dp).coerceAtLeast(1.dp)
+    val extendedWidth = (collapsedWidth + 12.dp)
+        .coerceAtLeast(128.dp).coerceAtMost(156.dp * window.fontScale).coerceAtMost(maximumWidth)
     val rowHeight = morphGlassTabHeight()
-    val extendedHeight = rowHeight * choices.size + 4.dp
+    val availableHeight = if (maximumHeight.isSpecified) maximumHeight else window.panelHeight
+    val bottomInset = with(LocalDensity.current) { WindowInsets.safeDrawing.getBottom(this).toDp() }
+    val extendedHeight = (rowHeight * choices.size + 4.dp)
+        .coerceAtMost((availableHeight - bottomInset - 6.dp).coerceAtLeast(1.dp))
     val width = collapsedWidth + (extendedWidth - collapsedWidth) * progress
     val height = rowHeight + (extendedHeight - rowHeight) * progress
     LiquidGlassSurface(backdrop,
@@ -147,7 +160,7 @@ internal fun BoxScope.MorphGlassTabSelector(
         interactionSource = interaction, trackPointer = false, materialExpansion = { progress }) {
         // Lay out menu labels once at their final size; only the surface clips/reveals them.
         if (present) Column(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true)
-            .size(width = extendedWidth, height = extendedHeight).graphicsLayer {
+            .size(width = extendedWidth, height = extendedHeight).verticalScroll(rememberScrollState()).graphicsLayer {
             alpha = ((progress - .25f) / .65f).coerceIn(0f, 1f)
         }.then(if (enabled && expanded) Modifier else Modifier.clearAndSetSemantics { }
             .focusProperties { canFocus = false })

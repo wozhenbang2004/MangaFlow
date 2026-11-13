@@ -276,11 +276,7 @@ internal fun DetailCatalog(
                 }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val chapterWidth = (maxWidth - 32.dp).coerceAtLeast(0.dp)
-                    val chapterColumns = when {
-                        chapterWidth >= (72f * fontScale * 4f).dp + 18.dp -> 4
-                        chapterWidth >= (72f * fontScale * 3f).dp + 12.dp -> 3
-                        else -> 2
-                    }
+                    val chapterColumns = MangaLayout.columns(maxWidth, 4, 72.dp * fontScale, 6.dp, 16.dp)
                     val volumeColumns = ((chapterWidth.value + 6f) / (96f * fontScale + 6f))
                         .toInt().coerceIn(1, 4)
                     // Common slots give both explicit and title-detected volumes the same columns.

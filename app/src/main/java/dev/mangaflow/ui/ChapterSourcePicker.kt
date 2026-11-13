@@ -58,7 +58,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -189,7 +188,7 @@ internal fun ChapterSourcePicker(
     val frozen = remember(key) { chapter }
     val sourceAnchor = remember(key) { anchor }
     val motion = LocalMotionEnabled.current
-    val configuration = LocalConfiguration.current
+    val window = LocalMangaWindow.current
     val density = LocalDensity.current
     var closing by remember(key) { mutableStateOf(false) }
     LaunchedEffect(key, closeRequested) { if (closeRequested) closing = true }
@@ -200,7 +199,7 @@ internal fun ChapterSourcePicker(
     DisposableEffect(key) { onDispose { reportPresence(false) } }
     val close = { cancelSelection(); closing = true }
     val useSheet = sourceAnchor == null || density.fontScale > 1.35f ||
-        configuration.screenHeightDp < 520 || frozen.variants.size > 4
+        window.height < 520.dp || frozen.variants.size > 4
     val content: @Composable (() -> Unit) -> Unit = { dismiss ->
         ChapterSourceContent(frozen, chapters, allowCorrections, downloaded, chapterPositions, loading, error,
             onReadVariant, onSetPreferredSource, onClearChapterSource, onSplitVariant,

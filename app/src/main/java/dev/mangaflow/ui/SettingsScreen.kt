@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.layout.navigationBarsPadding
+
 import android.app.Activity
 import android.app.NotificationManager
 import android.content.Context
@@ -327,7 +329,7 @@ fun SettingsScreen(
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().background(
+        modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding().background(
             if (LocalWallpaperActive.current) Color.Transparent else colors.background),
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 32.dp),
     ) {
@@ -896,7 +898,7 @@ private fun SettingsDisclosure(
             SettingsRowIcon(icon)
             Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
                 color = colors.onSurface)
-            Text(value, Modifier.widthIn(max = 132.dp), style = MaterialTheme.typography.bodySmall,
+            Text(value, Modifier.weight(.8f, fill = false).widthIn(max = 132.dp), style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
                 Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp)
@@ -977,8 +979,10 @@ private fun SettingsLinkRow(title: String, detail: String, icon: ImageVector, ex
             if (!inlineDetail && detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant)
         }
-        if (inlineDetail && detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
-            color = colors.onSurfaceVariant)
+        if (inlineDetail && detail.isNotBlank()) Text(detail,
+            modifier = Modifier.weight(.8f, fill = false).widthIn(max = 160.dp),
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
         Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
             Icon(if (external) Icons.AutoMirrored.Outlined.OpenInNew else Icons.Outlined.ChevronRight,
                 contentDescription = null, tint = colors.onSurfaceVariant.copy(alpha = .7f), modifier = Modifier.size(18.dp))

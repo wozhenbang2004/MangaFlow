@@ -153,7 +153,7 @@ fun DownloadsScreen(
     var showQueueActions by remember { mutableStateOf(false) }
     var filterMenuExpanded by remember { mutableStateOf(false) }
     val filterChoices = remember { listOf(GlassTabChoice("全部", Icons.Outlined.Inventory2), GlassTabChoice("进行中", Icons.Outlined.Downloading), GlassTabChoice("已下载", Icons.Outlined.CheckCircleOutline)) }
-    val filterWidth = morphGlassTabWidth(filterChoices)
+    val preferredFilterWidth = morphGlassTabWidth(filterChoices)
     var pendingImport by remember { mutableStateOf<PendingLocalImport?>(null) }
     var importBusy by remember { mutableStateOf(false) }
     val allScroll = rememberLazyListState()
@@ -257,8 +257,11 @@ fun DownloadsScreen(
     }
 
     BoxWithConstraints(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
-        val downloadChapterColumns = ((maxWidth.value - 40f) /
-            (96f * LocalDensity.current.fontScale.coerceAtLeast(1f))).toInt().coerceIn(1, 4)
+        val filterWidth = preferredFilterWidth.coerceAtMost(
+            (maxWidth - if (managing) 224.dp else 180.dp).coerceAtLeast(70.dp))
+        val contentInset = MangaLayout.sidePadding(maxWidth)
+        val downloadChapterColumns = MangaLayout.columns(maxWidth, 4,
+            96.dp * LocalDensity.current.fontScale.coerceAtLeast(1f), 6.dp, contentInset + 4.dp)
         // The captured scene contains the wallpaper and scrolling list, never the header itself.
         Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
             wallpaper()
@@ -280,7 +283,7 @@ fun DownloadsScreen(
                 }
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(), state = scroll,
-                    contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = contentTopPadding, bottom = 32.dp),
+                    contentPadding = PaddingValues(start = contentInset, end = contentInset, top = contentTopPadding, bottom = 32.dp),
                 ) {
                     if (loading) {
                         item {
@@ -370,6 +373,7 @@ fun DownloadsScreen(
         Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
             .onSizeChanged { headerHeightPx = it.height }) {
             PageTitleHeader("下载", backdrop, navigation,
+                leadingWidth = filterWidth,
                 leading = {
                     Spacer(Modifier.width(filterWidth).height(morphGlassTabHeight()))
                 }, actions = {
@@ -439,6 +443,7 @@ fun DownloadsScreen(
 
         }
         MorphGlassTabSelector(backdrop, filterChoices, filter.ordinal, filterWidth,
+            maximumHeight = maxHeight,
             onToggle = { filterMenuExpanded = !filterMenuExpanded; showQueueActions = false },
             expanded = filterMenuExpanded, onDismiss = { filterMenuExpanded = false },
             onSelect = { index ->

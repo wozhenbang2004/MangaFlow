@@ -1,5 +1,10 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.windowInsetsPadding
+
 import android.graphics.Bitmap
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animate
@@ -247,8 +252,10 @@ fun DetailScreen(
     val artworkBackdrop = rememberHazeState()
     val readingBackdrop = rememberHazeState()
 
+    Box(Modifier.fillMaxSize().background(DetailBackground)) {
     BoxWithConstraints(
-        Modifier.fillMaxSize().background(DetailBackground)
+        Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize().align(Alignment.TopCenter)
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
             .navigationBarsPadding().imePadding(),
     ) {
         val density = LocalDensity.current
@@ -256,7 +263,7 @@ fun DetailScreen(
         // Retain the largest real dock clearance: condensing must not move the last chapter rows.
         val readingInset = maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
             with(density) { measuredDockHeight.toDp() }) + 16.dp
-        val statusInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        val statusInset = WindowInsets.safeDrawing.asPaddingValues().calculateTopPadding()
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
         val landscape = maxWidth > availableHeight
         val compactHero = availableHeight < 600.dp || density.fontScale >= 1.5f
@@ -483,6 +490,7 @@ fun DetailScreen(
             onHeightChanged = { measuredDockHeight = maxOf(measuredDockHeight, it) },
             onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents)
     }
+    }
     if (fullIntroduction) DetailIntroduction(current, backdrop = readingBackdrop,
         onAuthor = { fullIntroduction = false; onAuthor(current, it) },
         onTag = { fullIntroduction = false; onTag(current, it) }, onDismiss = { fullIntroduction = false })
@@ -529,7 +537,8 @@ private fun ArtworkToolbar(
         }
     }
     Row(Modifier.fillMaxWidth().drawBehind { drawRect(sceneColor.copy(alpha = sceneColor.alpha * progress)) }
-        .statusBarsPadding().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+        .heightIn(min = 56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, 1f - progress, tint, glassTone, onBack)
         Column(Modifier.weight(1f).padding(horizontal = 8.dp).graphicsLayer { alpha = progress }
             .then(if (progress > .02f) Modifier else Modifier.clearAndSetSemantics { })

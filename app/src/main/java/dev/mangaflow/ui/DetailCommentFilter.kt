@@ -56,7 +56,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -114,8 +113,8 @@ internal fun DetailCommentFilter(
             (it.status == ReviewStatus.NO_MATCH && it.candidates.isNotEmpty())
     } }
     val reviewSources = remember(sources) { sources.filter { it.hasWorkReviews }.distinctBy { it.id } }
-    val width = (LocalConfiguration.current.screenWidthDp.dp - 32.dp).coerceAtMost(300.dp)
-    val height = (LocalConfiguration.current.screenHeightDp.dp - 96.dp).coerceIn(96.dp, 328.dp)
+    val width = (LocalMangaWindow.current.width - 32.dp).coerceAtLeast(1.dp).coerceAtMost(300.dp)
+    val height = (LocalMangaWindow.current.height - 96.dp).coerceIn(1.dp, 328.dp)
     val changed = selected != null || longOnly || !hidePromotions
     Popup(alignment = Alignment.TopEnd, offset = with(density) { IntOffset(-12.dp.roundToPx(), 0) },
         onDismissRequest = { if (visible) onDismiss() }, properties = PopupProperties(focusable = visible)) {
@@ -134,8 +133,10 @@ internal fun DetailCommentFilter(
                         }.padding(horizontal = 8.dp, vertical = 8.dp))
                 }
                 BoxWithConstraints(Modifier.fillMaxWidth()) {
-                    val tileWidth = (maxWidth - 12.dp) / 3
-                    FlowRow(Modifier.fillMaxWidth().selectableGroup(), maxItemsInEachRow = 3,
+                    val columns = MangaLayout.columns(maxWidth, 3,
+                        72.dp * density.fontScale.coerceAtLeast(1f), 6.dp)
+                    val tileWidth = (maxWidth - 6.dp * (columns - 1)) / columns
+                    FlowRow(Modifier.fillMaxWidth().selectableGroup(), maxItemsInEachRow = columns,
                         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         SourceChoice(null, "全部", selected == null, Modifier.width(tileWidth)) { onSelect(null) }
                         reviewSources.forEach { source ->

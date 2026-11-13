@@ -130,7 +130,7 @@ fun LibraryScreen(
     var shelfMenuExpanded by remember { mutableStateOf(false) }
     var libraryActionsOpen by remember { mutableStateOf(false) }
     val shelfTabs = remember { listOf(GlassTabChoice("收藏", Icons.Outlined.Bookmarks), GlassTabChoice("最近阅读", Icons.Outlined.History)) }
-    val shelfWidth = morphGlassTabWidth(shelfTabs)
+    val preferredShelfWidth = morphGlassTabWidth(shelfTabs)
     val collections by libraryStore.pageCollections.collectAsStateWithLifecycle()
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     val readingActivity by libraryStore.readingActivity.collectAsStateWithLifecycle()
@@ -213,7 +213,9 @@ fun LibraryScreen(
     chapterHistoryManga?.let { manga ->
         ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
     }
-    Box(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val shelfWidth = preferredShelfWidth.coerceAtMost((maxWidth - 180.dp).coerceAtLeast(70.dp))
+    val historyInset = 16.dp + ((maxWidth - MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp)
     Box(Modifier.fillMaxSize().navigationBarsPadding().mangaHazeSource(backdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
         wallpaper()
@@ -225,7 +227,7 @@ fun LibraryScreen(
                     LazyColumn(
                         state = historyPosition,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = headerPadding + 4.dp, bottom = 24.dp),
+                        contentPadding = PaddingValues(start = historyInset, end = historyInset, top = headerPadding + 4.dp, bottom = 24.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         if (history.isEmpty()) item(key = "empty-history") {
@@ -251,8 +253,9 @@ fun LibraryScreen(
                         val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                         val available = (maxWidth - 32.dp).coerceAtLeast(1.dp)
                         val gap = 12.dp
-                        val minimumWidth = 94.dp * fontScale.coerceAtMost(1.6f)
-                        val perShelf = ((available + gap) / (minimumWidth + gap)).toInt().coerceIn(1, 3)
+                        val minimumWidth = 94.dp * fontScale
+                        val maximum = if (maxWidth >= 840.dp) 6 else if (maxWidth >= 600.dp) 4 else 3
+                        val perShelf = MangaLayout.columns(maxWidth, maximum, minimumWidth, gap, 16.dp)
                         val bookWidth = (available - gap * (perShelf - 1)) / perShelf
                         val bookHeight = bookWidth / .7f
                         LazyVerticalGrid(
@@ -343,6 +346,7 @@ fun LibraryScreen(
         Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
             .onSizeChanged { headerHeightPx = it.height }) {
             PageTitleHeader("书架", backdrop, navigation,
+                leadingWidth = shelfWidth,
                 leading = {
                     Spacer(Modifier.width(shelfWidth).height(morphGlassTabHeight()))
                 },
@@ -367,6 +371,7 @@ fun LibraryScreen(
                 })
         }
         MorphGlassTabSelector(backdrop, shelfTabs, if (showHistory) 1 else 0, shelfWidth,
+            maximumHeight = maxHeight,
             onToggle = { shelfMenuExpanded = !shelfMenuExpanded; libraryActionsOpen = false }, enabled = active,
             expanded = shelfMenuExpanded, onDismiss = { shelfMenuExpanded = false },
             onSelect = { index ->

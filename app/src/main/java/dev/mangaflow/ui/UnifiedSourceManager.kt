@@ -25,7 +25,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
@@ -81,7 +80,7 @@ internal fun UnifiedSourceManager(
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val feedback = rememberFeelFeedback()
-    val maxHeight = (LocalConfiguration.current.screenHeightDp * .78f).dp
+    val maxHeight = LocalMangaWindow.current.height * .78f
     val associated = (listOf(state.work) + state.linked).distinctBy { it.id }
     val overview = remember(state.discovery, associated, state.sources, state.scanning) {
         val rows = linkedMapOf<String, SourceOverviewEntry>()

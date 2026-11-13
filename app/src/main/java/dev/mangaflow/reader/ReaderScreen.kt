@@ -1,5 +1,13 @@
 package dev.mangaflow.reader
 
+import dev.mangaflow.ui.LocalMangaWindow
+import dev.mangaflow.ui.MangaLayout
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.captionBar
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.only
+
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -111,7 +119,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -635,7 +642,8 @@ fun ReaderScreen(
                 touchExploration = touchExploration,
                 onOpen = { showComments = true },
                 modifier = Modifier.align(Alignment.BottomStart)
-                    .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+                    .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility.union(WindowInsets.displayCutout)
+                    .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                     .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
             )
         }
@@ -652,7 +660,9 @@ fun ReaderScreen(
                 role = GlassSurfaceRole.NAVIGATION,
                 trackPointer = true,
                 softCard = true,
-                modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility)
+                modifier = Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility.union(WindowInsets.displayCutout)
+                        .union(WindowInsets.captionBar).only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             ) {
                 // Retain Surface's input shield on blank chrome without consuming child gestures.
@@ -692,7 +702,9 @@ fun ReaderScreen(
                 role = GlassSurfaceRole.NAVIGATION,
                 trackPointer = true,
                 softCard = true,
-                modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+                modifier = Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility.union(WindowInsets.displayCutout)
+                        .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                     .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 8.dp),
                 cornerRadius = 20.dp,
             ) {
@@ -847,7 +859,8 @@ fun ReaderScreen(
         if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Text(
             "$clock · ${pageIndex + 1} / ${pages.size}",
             color = preferences.theme.foreground().copy(alpha = .5f), fontSize = 11.sp,
-            modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+            modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility.union(WindowInsets.displayCutout)
+                    .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = if (atChapterEnd) 72.dp else 12.dp)
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { controlsVisible = true }
                 .padding(horizontal = 4.dp, vertical = 4.dp),
@@ -1054,6 +1067,24 @@ private fun ChapterPages(
             }
         }
         LaunchedEffect(list) {
+            var previous: Triple<Int, Int, Int>? = null
+            snapshotFlow {
+                Triple(list.layoutInfo.viewportSize.width,
+                    list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex), list.firstVisibleItemScrollOffset)
+            }.distinctUntilChanged().collect { current ->
+                val old = previous
+                previous = current
+                if (!restoring && old != null && old.first > 0 && current.first > 0 && old.first != current.first) {
+                    // A vertical page's height scales with its viewport width. Keep the same
+                    // place in the original image while rotating/resizing, without a new history format.
+                    val offset = (old.third.toDouble() * current.first / old.first).roundToInt().coerceAtLeast(0)
+                    list.stopScroll()
+                    list.scrollToItem(old.second, offset)
+                    previous = Triple(current.first, old.second, offset)
+                }
+            }
+        }
+        LaunchedEffect(list) {
             snapshotFlow { Triple(list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex),
                 if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0, restoring) }
                 .distinctUntilChanged().collect { (index, offset, restoringNow) -> if (!restoringNow) location(index, offset) }
@@ -1085,8 +1116,10 @@ private fun ChapterPages(
             val anchor = list.firstVisibleItemIndex.coerceAtMost(pages.lastIndex)
             (visible.firstOrNull()?.index ?: anchor) to (visible.lastOrNull()?.index ?: anchor)
         }
-        Box(Modifier.fillMaxSize().bottomPullLoad(pull)) {
-            LazyColumn(state = list, modifier = Modifier.fillMaxSize(),
+        Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+            .bottomPullLoad(pull)) {
+            LazyColumn(state = list, modifier = Modifier.widthIn(max = MangaLayout.ReaderPageWidth)
+                .fillMaxSize().align(Alignment.TopCenter),
                 verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
                 itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                     ReaderPage(
@@ -1110,7 +1143,8 @@ private fun ChapterPages(
                 }
             }
             if (atEnd) Box(Modifier.align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+                .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility.union(WindowInsets.displayCutout)
+                    .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(start = 72.dp, end = 16.dp, bottom = 12.dp)) { endContent(pull) }
         }
     } else {
@@ -1184,7 +1218,8 @@ private fun ChapterPages(
             val shown = groups.getOrNull(pager.currentPage)
             (shown?.first ?: pages.lastIndex) to (shown?.last ?: pages.lastIndex)
         }
-        Box(Modifier.fillMaxSize().bottomPullLoad(pull)) {
+        Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+            .bottomPullLoad(pull)) {
             HorizontalPager(
                 state = pager,
                 modifier = Modifier.fillMaxSize(),
@@ -1234,7 +1269,8 @@ private fun ChapterPages(
                 }
             }
             if (atEnd) Box(Modifier.align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
+                .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility.union(WindowInsets.displayCutout)
+                    .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(start = 72.dp, end = 16.dp, bottom = 12.dp)) { endContent(pull) }
         }
     }
@@ -1376,7 +1412,7 @@ private fun ReaderPage(
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
-    val screenHeight = LocalConfiguration.current.screenHeightDp.coerceAtLeast(320).dp
+    val screenHeight = LocalMangaWindow.current.height.coerceAtLeast(1.dp)
     val measured by rememberUpdatedState(onMeasured)
     val resolve by rememberUpdatedState(resolvePage)
     val retrySource by rememberUpdatedState(retryPage)
@@ -1594,13 +1630,13 @@ private fun ReaderPageNavigatorDialog(
     ) {
         ReaderDialogSurface(
             Modifier.padding(horizontal = 16.dp).widthIn(max = 560.dp).fillMaxWidth()
-                .heightIn(max = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(220).dp),
+                .heightIn(max = LocalMangaWindow.current.panelHeight),
             backdrop,
         ) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
                 ReaderPanelHeading("页导航", "关闭页导航", onDismiss)
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(76.dp),
+                    columns = GridCells.Adaptive(76.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
                     modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
                     contentPadding = PaddingValues(bottom = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1768,8 +1804,8 @@ private fun ReaderSpreadDialog(
     val wide = original != null && original.width > 0 && original.height > 0 &&
         original.width.toFloat() / original.height >= 1.25f
     val colors = MaterialTheme.colorScheme
-    val availableHeight = (LocalConfiguration.current.screenHeightDp - 96).coerceAtLeast(160).dp
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val availableHeight = LocalMangaWindow.current.panelHeight
         ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth(), backdrop) {
             Column(Modifier.heightIn(max = availableHeight).padding(horizontal = 18.dp)) {
                 ReaderPanelHeading("错页校正", "关闭校正", onDismiss)
@@ -1824,7 +1860,6 @@ private fun ReaderChaptersDialog(
     val group = selectedGroup.takeIf { it in groups } ?: currentGroup
     val visibleChapters = remember(chapters, group) { chapters.filter { it.group == group }.sortedBy(Chapter::index) }
     val catalogBusy = rememberDelayedBusy(visible && loading)
-    val availableHeight = (LocalConfiguration.current.screenHeightDp - 210).coerceAtLeast(112).dp
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     LaunchedEffect(visible, currentId, currentGroup) { if (visible) selectedGroup = currentGroup }
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -1835,7 +1870,8 @@ private fun ReaderChaptersDialog(
         val downloads by downloadFlow.collectAsStateWithLifecycle(initialValue = initialDownloads)
         val saved = remember(downloads) { downloads.associateBy { it.chapter.id } }
         ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth(), backdrop) {
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+            Column(Modifier.heightIn(max = LocalMangaWindow.current.panelHeight)
+                .padding(horizontal = 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
                     Text("${visibleChapters.size} 章", Modifier.weight(1f).padding(start = 8.dp),
@@ -1856,7 +1892,7 @@ private fun ReaderChaptersDialog(
                     color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 MotionTabContent(
                     selected = group,
-                    modifier = Modifier.fillMaxWidth().heightIn(max = minOf(450.dp, availableHeight)),
+                    modifier = Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 450.dp),
                     contentKey = { it }, order = { groups.indexOf(it) },
                     fillContent = false,
                 ) { targetGroup ->

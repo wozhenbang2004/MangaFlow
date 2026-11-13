@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import dev.mangaflow.ui.AppLaunchReveal
 import dev.mangaflow.ui.MangaFlowApp
 import dev.mangaflow.ui.MangaFlowTheme
+import dev.mangaflow.ui.MangaAdaptiveLayout
 import dev.mangaflow.ui.motion.MangaMotionProvider
 
 class MainActivity : ComponentActivity() {
@@ -45,8 +46,10 @@ class MainActivity : ComponentActivity() {
             MangaFlowTheme {
                 MangaMotionProvider {
                     dev.mangaflow.ui.glass.HazeProviders {
-                        AppLaunchReveal(play = animateLaunch) {
-                            MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
+                        MangaAdaptiveLayout {
+                            AppLaunchReveal(play = animateLaunch) {
+                                MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
+                            }
                         }
                     }
                 }

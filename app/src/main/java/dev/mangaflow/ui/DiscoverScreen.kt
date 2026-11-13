@@ -518,10 +518,18 @@ private fun DiscoveryPane(
         enabled = active && !state.loading && !state.loadingMore, refreshing = state.refreshing,
         onRefresh = onRefresh, indicatorTop = topPadding + 4.dp,
     ) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val inset = MangaLayout.sidePadding(maxWidth) + if (ranking)
+        ((maxWidth - MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp) else 0.dp
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val gap = if (columns == 4) 8.dp else 10.dp
+    // The saved setting is the preferred maximum; narrow windows and large type reflow.
+    val visibleColumns = if (ranking || columns == 1) 1 else MangaLayout.columns(
+        maxWidth, columns, (if (columns == 4) 68.dp else 88.dp) * fontScale, gap, inset)
     LazyVerticalGrid(
-        columns = GridCells.Fixed(if (ranking) 1 else columns), state = grid,
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = topPadding, bottom = 32.dp),
-        horizontalArrangement = Arrangement.spacedBy(if (columns == 4) 8.dp else 10.dp),
+        columns = GridCells.Fixed(visibleColumns), state = grid,
+        contentPadding = PaddingValues(start = inset, end = inset, top = topPadding, bottom = 32.dp),
+        horizontalArrangement = Arrangement.spacedBy(gap),
         verticalArrangement = Arrangement.spacedBy(if (ranking || columns == 1) 12.dp else 10.dp),
         modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
     ) {
@@ -564,7 +572,7 @@ private fun DiscoveryPane(
                     if (columns == 1) BrowseListRow(manga, repository,
                         showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
                         onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
-                    else CoverTile(manga, repository, dense = true, narrow = columns == 4,
+                    else CoverTile(manga, repository, dense = true, narrow = visibleColumns == 4,
                         showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
                         onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
                 }
@@ -584,6 +592,7 @@ private fun DiscoveryPane(
                 }
             }
         }
+    }
     }
     }
 }

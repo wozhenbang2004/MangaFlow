@@ -1,5 +1,14 @@
 package dev.mangaflow.ui.motion
 
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
+import dev.mangaflow.ui.MangaWindowSize
+import dev.mangaflow.ui.MangaLayout
+import dev.mangaflow.ui.LocalMangaWindow
+
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
@@ -344,14 +353,21 @@ internal fun MotionDialog(
                     window?.addFlags(exitingFlags)
                 }
             }
-            // Native Dialog retains focus trapping and outside/back dismissal; no full-screen blur.
-            Box(Modifier.motionInputGate(visible).graphicsLayer {
+            // Read the dialog's own constraints: split-screen and the IME can be smaller
+            // than the activity window. Existing panels retain their own scroll state.
+            BoxWithConstraints(Modifier.safeDrawingPadding().imePadding()) {
+            val panelWindow = MangaWindowSize(maxWidth, maxHeight, LocalDensity.current.fontScale.coerceAtLeast(1f))
+            CompositionLocalProvider(LocalMangaWindow provides panelWindow) {
+            Box(Modifier.widthIn(max = MangaLayout.PanelWidth).heightIn(max = maxHeight)
+                .motionInputGate(visible).graphicsLayer {
                 this.alpha = alpha.value
                 val offset = if (motion) position.value else 0f
                 translationY = 16.dp.toPx() * offset
                 scaleX = 1f - .025f * offset
                 scaleY = scaleX
             }) { content() }
+            }
+            }
         }
     }
 }
@@ -382,7 +398,10 @@ internal fun MotionBottomSheet(
             }
         }
     }
-    ModalBottomSheet(onDismissRequest = { onDismiss() }, sheetState = sheet, modifier = modifier,
+    val window = LocalMangaWindow.current
+    ModalBottomSheet(onDismissRequest = { onDismiss() }, sheetState = sheet,
+        modifier = modifier.heightIn(max = (window.height - 16.dp).coerceAtLeast(1.dp)),
+        sheetMaxWidth = MangaLayout.PanelWidth,
         containerColor = if (backdrop != null) Color.Transparent else containerColor,
         contentColor = contentColor, tonalElevation = 0.dp,
         dragHandle = {

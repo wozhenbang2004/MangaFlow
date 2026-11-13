@@ -36,7 +36,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
@@ -113,7 +112,7 @@ internal fun CompactGlassPopover(
     Popup(popupPositionProvider = position, onDismissRequest = { if (visible) onDismiss() },
         properties = PopupProperties(focusable = visible)) {
         LiquidGlassSurface(backdrop,
-            Modifier.width((LocalConfiguration.current.screenWidthDp.dp - 48.dp).coerceAtMost(maximumWidth))
+            Modifier.width((LocalMangaWindow.current.width - 48.dp).coerceAtLeast(1.dp).coerceAtMost(maximumWidth))
                 .motionInputGate(visible).graphicsLayer {
                     this.alpha = alpha.value
                     scaleX = scale.value; scaleY = scale.value
@@ -121,7 +120,7 @@ internal fun CompactGlassPopover(
                     translationY = (if (origin.pivotFractionY >= .5f) 6.dp.toPx() else -6.dp.toPx()) * (1f - alpha.value)
                 }, cornerRadius = 18.dp, role = GlassSurfaceRole.POPOVER, softCard = true,
             materialExpansion = { alpha.value }) {
-            Column(Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp - 64).coerceAtLeast(96).dp)
+            Column(Modifier.heightIn(max = (LocalMangaWindow.current.height - 64.dp).coerceAtLeast(1.dp))
                 .verticalScroll(rememberScrollState()).padding(6.dp), content = content)
         }
     }
