@@ -43,6 +43,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.CloudQueue
@@ -127,6 +129,9 @@ private enum class Section(val title: String, val icon: ImageVector) {
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号与云端", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
 }
+/** A new reference owns one interruptible drawer action; cancelled selections cannot navigate. */
+private class DrawerAction(val target: DrawerValue, val destination: Section? = null)
+
 private sealed interface Frame {
     val key: String
     data class Root(val section: Section) : Frame { override val key = "root-${section.name}" }
@@ -160,8 +165,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val update by model.updates.state.collectAsStateWithLifecycle()
     var sectionName by rememberSaveable { mutableStateOf(Section.DISCOVER.name) }
     val section = Section.valueOf(sectionName)
+    var drawerAction by remember { mutableStateOf<DrawerAction?>(null) }
+    var drawerRootTransition by remember { mutableStateOf<Section?>(null) }
     val changeSection: (Section) -> Unit = { destination ->
         model.cancelLibraryReading()
+        drawerAction = null
+        drawerRootTransition = null
         sectionName = destination.name
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
@@ -174,6 +183,23 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
     var selectedCover by remember { mutableStateOf<MangaCoverKey?>(null) }
     val keyboard = LocalSoftwareKeyboardController.current
+    val motion = LocalMotionEnabled.current
+
+    LaunchedEffect(drawerAction, motion) {
+        val action = drawerAction ?: return@LaunchedEffect
+        try {
+            if (!motion) drawer.snapTo(action.target)
+            else if (action.target == DrawerValue.Open) drawer.open() else drawer.close()
+            if (drawerAction === action && action.destination != null &&
+                drawer.currentValue == DrawerValue.Closed && drawer.targetValue == DrawerValue.Closed) {
+                changeSection(action.destination)
+                // The drawer already provided spatial continuity; don't start a second page animation.
+                drawerRootTransition = action.destination
+            }
+        } finally {
+            if (drawerAction === action) drawerAction = null
+        }
+    }
 
     LaunchedEffect(Unit) { model.events.collect { snackbar.showSnackbar(it) } }
     LaunchedEffect(openUpdatesRequest) {
@@ -183,7 +209,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             model.closeReader()
             model.closeDetail()
             changeSection(Section.SETTINGS)
-            drawer.close()
+            drawerAction = DrawerAction(DrawerValue.Closed)
         }
     }
     LaunchedEffect(openDownloadsRequest) {
@@ -193,14 +219,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             model.closeReader()
             model.closeDetail()
             changeSection(Section.DOWNLOADS)
-            drawer.close()
+            drawerAction = DrawerAction(DrawerValue.Closed)
         }
     }
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)
-    BackHandler(drawer.isOpen || libraryOpening != null) {
-        if (drawer.isOpen) scope.launch { drawer.close() }
-        else model.cancelLibraryReading()
-    }
     val focus = LocalFocusManager.current
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
     if (recentReadingOpen) {
@@ -260,7 +282,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
 
-    val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
     var measuredDrawerWidth by remember { mutableFloatStateOf(0f) }
     val drawerWidthPx = measuredDrawerWidth.takeIf { it > 0f } ?: with(density) { 296.dp.toPx() }
@@ -270,6 +291,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             drawer.isOpen || drawer.targetValue == DrawerValue.Open ||
                 (offset.isFinite() && offset > -drawerWidthPx + .5f)
         }
+    }
+    val drawerCanSelect = drawerVisible && drawer.targetValue == DrawerValue.Open &&
+        drawerAction?.target != DrawerValue.Closed
+    BackHandler(drawerVisible || libraryOpening != null) {
+        if (drawerVisible) drawerAction = DrawerAction(DrawerValue.Closed)
+        else model.cancelLibraryReading()
     }
     val routeTravel = with(density) { 24.dp.roundToPx() }
     CompositionLocalProvider(
@@ -290,14 +317,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 drawerTonalElevation = 0.dp,
                 windowInsets = WindowInsets(0, 0, 0, 0),
             ) {
-                LiquidGlassSurface(
+                Box(Modifier.fillMaxSize()) {
+                if (drawerVisible && frame is Frame.Root) LiquidGlassSurface(
                     state = drawerBackdrop,
                     modifier = Modifier.fillMaxHeight().fillMaxWidth(),
                     cornerRadius = 26.dp,
                     role = GlassSurfaceRole.DRAWER,
                     trackPointer = true, elevation = 0.dp,
-                ) {
+                ) {}
                 Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                    .then(if (drawerCanSelect) Modifier else Modifier.clearAndSetSemantics { }
+                        .focusProperties { canFocus = false })
                     .padding(horizontal = 14.dp, vertical = 12.dp)) {
                     Row(Modifier.padding(12.dp, 12.dp, 12.dp, 28.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(28.dp))
@@ -310,9 +340,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     Section.entries.forEach { destination ->
                         NavigationDrawerItem(
                             label = { Text(destination.title,
-                                fontWeight = if (section == destination) FontWeight.SemiBold else FontWeight.Normal) },
-                            selected = section == destination,
-                            onClick = { changeSection(destination); scope.launch { drawer.close() } },
+                                fontWeight = if ((drawerAction?.destination ?: section) == destination) FontWeight.SemiBold else FontWeight.Normal) },
+                            selected = (drawerAction?.destination ?: section) == destination,
+                            onClick = { if (drawerCanSelect) drawerAction = DrawerAction(DrawerValue.Closed, destination) },
                             icon = { Icon(destination.icon, null, modifier = Modifier.size(21.dp)) },
                             shape = RoundedCornerShape(14.dp),
                             colors = NavigationDrawerItemDefaults.colors(
@@ -336,8 +366,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     ) {
         Scaffold(
             modifier = Modifier
-                // Capture only while opening, visible or closing; ordinary browsing pays no drawer capture cost.
-                .then(if (frame is Frame.Root && drawerVisible) Modifier.mangaHazeSource(drawerBackdrop) else Modifier)
+                // Keep the source node stable. The visible-only drawer effect owns capture demand;
+                // Haze 2.1 releases the layer and draws directly when that demand disappears.
+                .mangaHazeSource(drawerBackdrop)
                 .graphicsLayer {
                 // Vaul's backdrop relationship follows the actual drag, without a second spring.
                 val offset = drawer.currentOffset
@@ -360,7 +391,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 targetState = frame,
                 contentKey = { it.key },
                 transitionSpec = {
-                    if (!motion) (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
+                    if (!motion || (initialState is Frame.Root && targetState is Frame.Root &&
+                        (targetState as Frame.Root).section == drawerRootTransition))
+                        (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
                     else {
                         val forward = targetState.depth >= initialState.depth
                         val direction = if (forward) 1 else -1
@@ -377,7 +410,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             ) { current ->
                 val currentBack = remember(current.key) { MotionBackState() }
                 MotionBackHandler(
-                    enabled = current.key == frame.key && !drawer.isOpen && libraryOpening == null &&
+                    enabled = current.key == frame.key && !drawerVisible && libraryOpening == null &&
                         !recentReadingOpen && authorWorks == null &&
                         (reading != null || detail != null || section != Section.DISCOVER),
                     state = currentBack,
@@ -478,7 +511,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val chromeReady by remember {
                             derivedStateOf { !searchExpanded && (searchForeground?.value ?: 0f) <= .02f }
                         }
-                        val rootActive = current.key == frame.key && !drawer.isOpen && !recentReadingOpen && authorWorks == null && !tagSearchVisible &&
+                        val rootActive = current.key == frame.key && !drawerVisible && !recentReadingOpen && authorWorks == null && !tagSearchVisible &&
                             !currentBack.gesturing && !currentBack.completed
                         val closeSearch: () -> Unit = {
                             keyboard?.hide()
@@ -494,7 +527,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
                                         closeSearch()
                                         model.cancelLibraryReading()
-                                        scope.launch { drawer.open() }
+                                        drawerAction = DrawerAction(DrawerValue.Open)
                                     }) {
                                         Icon(Icons.Outlined.Menu, if (hasUpdate) "打开导航，有新版本" else "打开导航", Modifier.size(22.dp))
                                     }
