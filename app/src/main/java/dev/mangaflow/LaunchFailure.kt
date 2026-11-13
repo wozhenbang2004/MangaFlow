@@ -21,7 +21,11 @@ internal object LaunchFailure {
         if (installed) return
         installed = true
         record = runCatching { AtomicFile(File(context.noBackupFilesDir, "last-failure.txt")) }.getOrNull()
-        recoveryReport = readSavedReport(context)
+        // Keep older reports available for export without blocking a newly installed fix.
+        recoveryReport = readSavedReport(context)?.takeIf { report ->
+            report.lineSequence().firstOrNull() ==
+                "MangaFlow ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+        }
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, failure ->
             runCatching { save(thread, failure) }
