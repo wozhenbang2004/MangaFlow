@@ -106,6 +106,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -801,7 +802,8 @@ private fun DiscoveryLayoutControl(
     presence.targetState = expanded && enabled
     val transition = rememberTransition(presence, label = "layout-choice-reveal")
     val reveal = transition.animateFloat(transitionSpec = {
-        if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
+        if (motion) tween(if (targetState) MangaMotion.SearchClip else MangaMotion.Content,
+            easing = MangaMotion.SearchEasing) else snap()
     }, label = "layout-choice-width") { if (it) 1f else 0f }
     val present = presence.currentState || presence.targetState || !presence.isIdle
     val reportPresence by rememberUpdatedState(onPresenceChange)
@@ -868,9 +870,14 @@ private fun DiscoveryLayoutControl(
                     Modifier.align(if (direction == LayoutDirection.Ltr) Alignment.CenterEnd else Alignment.CenterStart)
                         .width((panelWidth * progress).coerceAtLeast(1.dp)).height(44.dp)
                         .motionInputGate(enabled && expanded && progress >= .85f)
-                        .graphicsLayer { alpha = progress },
+                        .graphicsLayer {
+                            alpha = progress
+                            // Keep the soft shadow's outset visible throughout alpha < 1,
+                            // rather than revealing it only after offscreen clipping ends.
+                            compositingStrategy = CompositingStrategy.ModulateAlpha
+                        },
                     cornerRadius = 22.dp, role = GlassSurfaceRole.CONTROL, softCard = true,
-                    materialExpansion = { progress }) {
+                    elevation = 16.dp * progress, materialExpansion = { progress }) {
                     Row(Modifier.layout { measurable, constraints ->
                         val fullWidth = panelWidth.roundToPx()
                         val placeable = measurable.measure(constraints.copy(minWidth = fullWidth, maxWidth = fullWidth))

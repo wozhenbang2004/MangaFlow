@@ -1,5 +1,10 @@
 # MangaFlow 全系统 UIUX 扫描 · 2026-11-14
 
+## 后续用户反馈实施记录 · 2026-11-14
+
+1000121637–1000121644以及阴影/来源背景虚化的明确补充已落实为DESIGN.md100–107：正卷独立匹配、附录/特典分开；简介回右；列表真实延伸底边；分组和评论筛选原位展开；章节来源标记统一；来源选择时临时虚化后景；筛选阴影连续；来源并入导航并收紧评分间距。R01的失败空态与就地重试代码随本批完成，实际用户体验仍待新包；其余未实施条目不因此关闭。
+
+
 ## 任务、证据与范围
 
 用户本轮原话：“这个全部那三个东西选了某一个就得排在最上面”，附图1000121620；随后补充：“然后接着对整个系统的 uiux 做信息层级 格式塔 最小信息原则 渐进式披露全部扫描 review”。保留此前“渐进式披露，最小信息原则”、去掉源管理垃圾桶/重复添加入口/长说明，以及“轮盘转出、不加白晕”等有效约束。
@@ -27,11 +32,11 @@
 | 进行中 | 进行中、全部、已下载 |
 | 已下载 | 已下载、全部、进行中 |
 
-原审查完成后，用户继续提供1000121623–1000121629截图并明确授权对应修正。当前批在89之外实施统一卷缩略图和来源标记、侧边竖排来源选择、横向列数披露、详情信息主组与按需分组、搜索来源图标状态、浮动阅读坞和发现分区间距。R02、R03与R07的相关实现纳入本批，均待当前正式产物体验；其余R项仍是发现/条件风险，不能将扫描或保存报告当作全系统问题已修复。详见DESIGN.md 91–97。
+原审查完成后，用户继续提供1000121623–1000121629截图并明确授权对应修正。当前批在89之外实施统一卷缩略图和来源标记、侧边竖排来源选择、横向列数披露、详情信息主组与按需分组、搜索来源图标状态、浮动阅读坞和发现分区间距。R02、R03与R07的相关实现纳入前批，R01随100–107批补齐，均待当前正式产物体验；其余R项仍是发现/条件风险，不能将扫描或保存报告当作全系统问题已修复。详见DESIGN.md 91–97。
 
 ## 优先处理：恢复、找得到、选得对
 
-### R01 · P1 · 评论失败被当作无评论
+### R01 · P1 · 本批已实作，待实际体验 · 评论失败被当作无评论
 
 - 检查轴：信息层级、渐进披露。
 - 证据：[ui/CommunityComponents.kt:160](https://github.com/wozhenbang2004/MangaFlow/blob/0739661b0eecf139c0f8c7c2d86406217981b744/shared/src/commonMain/kotlin/dev/mangaflow/ui/CommunityComponents.kt#L160)、[ui/CommunityComponents.kt:211](https://github.com/wozhenbang2004/MangaFlow/blob/0739661b0eecf139c0f8c7c2d86406217981b744/shared/src/commonMain/kotlin/dev/mangaflow/ui/CommunityComponents.kt#L211)；[ui/DetailCommentFilter.kt:115](https://github.com/wozhenbang2004/MangaFlow/blob/0739661b0eecf139c0f8c7c2d86406217981b744/shared/src/commonMain/kotlin/dev/mangaflow/ui/DetailCommentFilter.kt#L115)、[ui/DetailCommentFilter.kt:156](https://github.com/wozhenbang2004/MangaFlow/blob/0739661b0eecf139c0f8c7c2d86406217981b744/shared/src/commonMain/kotlin/dev/mangaflow/ui/DetailCommentFilter.kt#L156)。

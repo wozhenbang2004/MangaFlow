@@ -39,6 +39,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Refresh
@@ -152,10 +153,11 @@ internal fun CommunityPanel(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     SideEffect { if (active) { onScrollTarget(listState); onFilterChanged(selectedSource != null || longOnly || !hidePromotions) } }
-    val filterObscuresContent = filterOpen || filterPresent
-    LaunchedEffect(active, filterObscuresContent) {
-        if (!active) onFilterDismiss()
-        if (!active || filterObscuresContent) listState.stopScroll()
+    LaunchedEffect(active) {
+        if (!active) {
+            onFilterDismiss()
+            listState.stopScroll()
+        }
     }
     val mixed = remember(sources, selectedSource, longOnly) {
         val rows = sources.asSequence().filter { it.status == ReviewStatus.READY && it.hasWorkReviews }
@@ -190,16 +192,27 @@ internal fun CommunityPanel(
     }
     val nextSource = loadable.minWithOrNull(compareBy<ReviewSource> { it.reviews.size }
         .thenBy { CommunityProviders.indexOf(it.id).let { n -> if (n < 0) 99 else n } })
-    LaunchedEffect(mangaId, sources, nearEnd, loading, selectedSource, longOnly, active, filterObscuresContent) {
-        if (active && !filterObscuresContent && !loading && nearEnd && sources.none { it.loadingMore } &&
+    LaunchedEffect(mangaId, sources, nearEnd, loading, selectedSource, longOnly, active) {
+        if (active && !loading && nearEnd && sources.none { it.loadingMore } &&
             (clusters.isNotEmpty() || (!longOnly && selectedSource == null))) nextSource?.let { onMore(it.id) }
     }
+    val relevantSources = sources.filter { it.hasWorkReviews && (selectedSource == null || it.id == selectedSource) }
+    val unavailableSources = relevantSources.filter {
+        it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null
+    }
+    val allUnavailable = relevantSources.isNotEmpty() && unavailableSources.size == relevantSources.size
     val resetPosition = { scope.launch { listState.scrollToItem(0) }; Unit }
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().then(if (captureBackdrop && (filterOpen || filterPresent) && active)
             Modifier.mangaHazeSource(backdrop) else Modifier)) {
-            LazyColumn(state = listState, userScrollEnabled = active && !filterObscuresContent,
-                modifier = Modifier.weight(1f).fillMaxWidth().motionInputGate(active && !filterObscuresContent),
+            DetailCommentFilter(backdrop, sources, selectedSource, longOnly, hidePromotions,
+                visible = filterOpen && active, onPresenceChange = { filterPresent = it },
+                onSelect = { selectedSource = it; resetPosition() },
+                onLongOnly = { longOnly = it; resetPosition() },
+                onHidePromotions = { hidePromotions = it; resetPosition() },
+                onRetry = onRetry, onMatch = onMatch, onDismiss = onFilterDismiss)
+            LazyColumn(state = listState, userScrollEnabled = active,
+                modifier = Modifier.weight(1f).fillMaxWidth().motionInputGate(active),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomPadding)) {
                 items(clusters, key = { it.key }) { cluster ->
                     CuratedReviewCluster(mangaId, cluster, hidePromotions, loadReplies)
@@ -209,6 +222,8 @@ internal fun CommunityPanel(
                     Column(Modifier.fillMaxWidth()) {
                         when {
                             loading || sources.any { it.loadingMore } -> SmallLoading()
+                            clusters.isEmpty() && unavailableSources.isNotEmpty() ->
+                                CommentUnavailableNotice(unavailableSources, allUnavailable, onRetry)
                             clusters.isEmpty() -> Text(if (selectedSource != null || longOnly) "暂没有符合筛选的评论" else "还没有可显示的评论",
                                 color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 18.dp))
                             nextSource == null -> Text("当前可获取的评论已加载完毕",
@@ -221,12 +236,6 @@ internal fun CommunityPanel(
                 }
             }
         }
-        DetailCommentFilter(backdrop, sources, selectedSource, longOnly, hidePromotions,
-            visible = filterOpen && active, onPresenceChange = { filterPresent = it },
-            onSelect = { selectedSource = it; resetPosition() },
-            onLongOnly = { longOnly = it; resetPosition() },
-            onHidePromotions = { hidePromotions = it; resetPosition() },
-            onRetry = onRetry, onMatch = onMatch, onDismiss = onFilterDismiss)
     }
 }
 
@@ -265,6 +274,46 @@ private fun CuratedReviewCluster(
                 if (hidePromotions && cluster.promotion) Text("折叠推广", color = CommunityMuted,
                     fontSize = 11.sp, lineHeight = 16.sp,
                     modifier = Modifier.clickable(role = Role.Button) { revealPromotion = false }.padding(vertical = 7.dp))
+            }
+        }
+    }
+}
+
+/** Failed retrieval stays distinct from an empty discussion, with details disclosed on demand. */
+@Composable
+private fun CommentUnavailableNotice(sources: List<ReviewSource>, allUnavailable: Boolean,
+    onRetry: (String) -> Unit) {
+    var expanded by rememberSaveable(sources.map { it.id }) { mutableStateOf(false) }
+    val motion = LocalMotionEnabled.current
+    val busy = sources.any { it.loadingMore }
+    val interaction = remember { MutableInteractionSource() }
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f).clip(RoundedCornerShape(8.dp))
+                .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+                    onClickLabel = if (expanded) "收起失败原因" else "查看失败原因",
+                    onClick = { expanded = !expanded })
+                .motionPress(interaction, pressedScale = .99f)
+                .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                Icon(Icons.Outlined.ErrorOutline, null, Modifier.size(15.dp), tint = CommunityMuted)
+                Text(if (allUnavailable) "评论暂时无法读取" else "部分评论来源暂不可用",
+                    color = CommunityMuted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Icon(if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
+                    null, Modifier.size(15.dp), tint = CommunityMuted)
+            }
+            MotionIconButton(onClick = { sources.forEach { onRetry(it.id) } }, enabled = !busy) {
+                Icon(Icons.Outlined.Refresh, "重试${sources.size}个不可用评论来源",
+                    Modifier.size(18.dp), tint = CommunityMuted)
+            }
+        }
+        AnimatedVisibility(expanded,
+            enter = expandVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
+            exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
+            Column(Modifier.fillMaxWidth()) {
+                sources.forEach { source -> key(source.id) { CommentLoadNotice(source, onRetry) } }
             }
         }
     }

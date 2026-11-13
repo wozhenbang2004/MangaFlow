@@ -1,37 +1,25 @@
 package dev.mangaflow.ui
 
-import dev.mangaflow.ui.platform.*
-
-import dev.mangaflow.platform.*
-
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.rememberTransition
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -41,45 +29,48 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.HelpOutline
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material.icons.outlined.VisibilityOff
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
+import dev.mangaflow.ui.motion.BackHandler
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
-import dev.mangaflow.ui.motion.MotionSwap
+import dev.mangaflow.ui.motion.MotionBusyIndicator
+import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionInputGate
+import dev.mangaflow.ui.motion.motionPress
 
-@OptIn(ExperimentalLayoutApi::class)
+/** Keep the existing filter state and callbacks, disclosing controls inside the comment layout. */
 @Composable
 internal fun DetailCommentFilter(
     backdrop: HazeState,
@@ -96,80 +87,106 @@ internal fun DetailCommentFilter(
     visible: Boolean,
     onPresenceChange: (Boolean) -> Unit,
 ) {
-    val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = visible
-    val transition = rememberTransition(presence, label = "comment-filter")
-    // One finite paint-only transition keeps labels and blur capture at their final size.
-    val reveal = transition.animateFloat(transitionSpec = {
-        if (motion) tween(if (targetState) MangaMotion.Content else MangaMotion.Quick,
-            easing = if (targetState) MangaMotion.EnterEasing else MangaMotion.ExitEasing) else snap()
-    }, label = "filter-reveal") { if (it) 1f else 0f }
     val present = presence.currentState || presence.targetState || !presence.isIdle
     val reportPresence by rememberUpdatedState(onPresenceChange)
     SideEffect { reportPresence(present) }
     DisposableEffect(Unit) { onDispose { reportPresence(false) } }
-    if (!present) return
-    var sourceSettings by remember { mutableStateOf(false) }
+    var more by remember { mutableStateOf(false) }
+    var detailsId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(visible) { if (!visible) { more = false; detailsId = null } }
+    val reviewSources = remember(sources) { sources.filter { it.hasWorkReviews }.distinctBy { it.id } }
     val pending = remember(sources) { sources.filter {
         it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null ||
             (it.status == ReviewStatus.NO_MATCH && it.candidates.isNotEmpty())
     } }
-    val reviewSources = remember(sources) { sources.filter { it.hasWorkReviews }.distinctBy { it.id } }
-    val width = (LocalMangaWindow.current.width - 32.dp).coerceAtLeast(1.dp).coerceAtMost(300.dp)
-    val height = (LocalMangaWindow.current.height - 96.dp).coerceIn(1.dp, 328.dp)
+    val details = pending.firstOrNull { it.id == detailsId }
     val changed = selected != null || longOnly || !hidePromotions
-    Popup(alignment = Alignment.TopEnd, offset = with(density) { IntOffset(-12.dp.roundToPx(), 0) },
-        onDismissRequest = { if (visible) onDismiss() }, properties = PopupProperties(focusable = visible)) {
-        LiquidGlassSurface(backdrop, Modifier.width(width).motionInputGate(visible).graphicsLayer {
-            alpha = reveal.value
-            translationY = -4.dp.toPx() * (1f - reveal.value)
-        }, cornerRadius = 24.dp, role = GlassSurfaceRole.POPOVER) {
-            Column(Modifier.heightIn(max = height).verticalScroll(rememberScrollState()).padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("评论来源", color = DetailSecondary, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
-                    Spacer(Modifier.weight(1f))
-                    Text("重置", color = if (changed) DetailForeground else DetailMuted.copy(alpha = .4f), fontSize = 11.sp, lineHeight = 16.sp,
-                        modifier = Modifier.clickable(enabled = changed, role = Role.Button) {
-                            onSelect(null); onLongOnly(false); onHidePromotions(true)
-                        }.padding(horizontal = 8.dp, vertical = 8.dp))
-                }
-                BoxWithConstraints(Modifier.fillMaxWidth()) {
-                    val columns = MangaLayout.columns(maxWidth, 3,
-                        72.dp * density.fontScale.coerceAtLeast(1f), 6.dp)
-                    val tileWidth = (maxWidth - 6.dp * (columns - 1)) / columns
-                    FlowRow(Modifier.fillMaxWidth().selectableGroup(), maxItemsInEachRow = columns,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        SourceChoice(null, "全部", selected == null, Modifier.width(tileWidth)) { onSelect(null) }
-                        reviewSources.forEach { source ->
-                            SourceChoice(source.id, source.name, selected == source.id, Modifier.width(tileWidth)) { onSelect(source.id) }
+    BackHandler(visible) {
+        if (detailsId != null) detailsId = null
+        else if (more) more = false
+        else onDismiss()
+    }
+    AnimatedVisibility(presence,
+        enter = expandVertically(tween(if (motion) MangaMotion.Enter else 0), expandFrom = Alignment.Top) +
+            fadeIn(tween(if (motion) MangaMotion.Content else 0)),
+        exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0), shrinkTowards = Alignment.Top) +
+            fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
+        Column(Modifier.fillMaxWidth().motionInputGate(visible)
+            .padding(start = 12.dp, end = 12.dp, bottom = 4.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()).selectableGroup(),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    SourceChoice(null, "全部评论来源", selected == null) {
+                        detailsId = null
+                        onSelect(null)
+                    }
+                    reviewSources.forEach { source ->
+                        androidx.compose.runtime.key(source.id) {
+                            SourceChoice(source.id, source.name, selected == source.id, source) {
+                                onSelect(source.id)
+                                detailsId = source.id.takeIf { id -> pending.any { it.id == id } }
+                            }
                         }
                     }
                 }
-                HorizontalDivider(color = DetailForeground.copy(alpha = .055f), thickness = .5.dp)
-                Column {
-                    FilterToggle(Icons.AutoMirrored.Outlined.Article, "仅看长评", longOnly) { onLongOnly(!longOnly) }
-                    FilterToggle(Icons.Outlined.VisibilityOff, "折叠推广", hidePromotions) { onHidePromotions(!hidePromotions) }
-                }
-                if (pending.isNotEmpty()) {
-                    TextButton(onClick = { sourceSettings = !sourceSettings }, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (sourceSettings) "收起来源设置" else "来源设置", color = DetailSecondary, fontSize = 12.sp)
+                MotionIconButton(onClick = { more = !more }, modifier = Modifier.size(36.dp).semantics {
+                    stateDescription = if (more) "更多筛选已展开" else "更多筛选已收起"
+                }) {
+                    Box(Modifier.size(19.dp), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.MoreHoriz, "更多评论筛选", Modifier.size(19.dp), tint = DetailSecondary)
+                        if (longOnly || !hidePromotions) Box(Modifier.align(Alignment.TopEnd).size(4.dp)
+                            .clip(RoundedCornerShape(2.dp)).background(DetailForeground))
                     }
-                    AnimatedVisibility(sourceSettings,
-                        enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) + expandVertically(tween(if (motion) MangaMotion.Content else 0)),
-                        exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) + shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
-                        Column {
-                            pending.forEach { source ->
-                                key(source.id) {
-                                    if (source.status == ReviewStatus.UNAVAILABLE || source.reviewsError != null) {
-                                        CommentLoadNotice(source, onRetry)
-                                    } else {
-                                        CommentMatchChoice(source, onMatch)
-                                    }
-                                }
+                }
+                MotionIconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Outlined.Close, "收起评论筛选", Modifier.size(17.dp), tint = DetailSecondary)
+                }
+            }
+            AnimatedVisibility(more,
+                enter = expandVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                    fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
+                exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                    fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    FilterToggle(Icons.AutoMirrored.Outlined.Article, "仅长评", longOnly) { onLongOnly(!longOnly) }
+                    FilterToggle(Icons.Outlined.VisibilityOff, "折叠推广", hidePromotions) { onHidePromotions(!hidePromotions) }
+                    if (pending.isNotEmpty()) MotionTextButton(onClick = {
+                        detailsId = if (detailsId == null) pending.first().id else null
+                    }) { Text("来源状态", color = DetailSecondary, fontSize = 11.sp) }
+                    if (changed) MotionIconButton(onClick = {
+                        onSelect(null); onLongOnly(false); onHidePromotions(true)
+                        detailsId = null
+                    }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Outlined.RestartAlt, "重置评论筛选", Modifier.size(17.dp), tint = DetailSecondary)
+                    }
+                }
+            }
+            AnimatedVisibility(details != null,
+                enter = expandVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                    fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
+                exit = shrinkVertically(tween(if (motion) MangaMotion.Content else 0)) +
+                    fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
+                Column(Modifier.fillMaxWidth().heightIn(max =
+                    (LocalMangaWindow.current.height * .28f).coerceIn(72.dp, 168.dp))
+                    .verticalScroll(rememberScrollState()).padding(horizontal = 4.dp)) {
+                    if (pending.size > 1) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        pending.forEach { source ->
+                            SourceChoice(source.id, source.name + "，来源状态", detailsId == source.id, source) {
+                                detailsId = source.id
                             }
+                        }
+                    }
+                    details?.let { source ->
+                        androidx.compose.runtime.key(source.id) {
+                            if (source.status == ReviewStatus.UNAVAILABLE || source.reviewsError != null)
+                                CommentLoadNotice(source, onRetry)
+                            else CommentMatchChoice(source, onMatch)
                         }
                     }
                 }
@@ -179,41 +196,54 @@ internal fun DetailCommentFilter(
 }
 
 @Composable
-private fun SourceChoice(id: String?, name: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    val dark = DetailForeground.luminance() > .5f
-    val accent = id?.let { reviewSourceAccent(it, dark) } ?: DetailForeground
+private fun SourceChoice(
+    id: String?,
+    name: String,
+    selected: Boolean,
+    source: ReviewSource? = null,
+    onClick: () -> Unit,
+) {
+    val accent = id?.let { reviewSourceAccent(it, DetailForeground.luminance() > .5f) } ?: DetailForeground
     val motion = LocalMotionEnabled.current
-    val background by animateColorAsState(if (selected) accent.copy(alpha = .12f) else DetailForeground.copy(alpha = .025f),
+    val interaction = remember(id) { MutableInteractionSource() }
+    val background by animateColorAsState(if (selected) accent.copy(alpha = .10f) else androidx.compose.ui.graphics.Color.Transparent,
         tween(if (motion) MangaMotion.Content else 0), label = "source-selection-color")
-    Row(modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
-        .background(background)
-        .selectable(selected, role = Role.RadioButton, onClick = onClick)
-        .semantics(mergeDescendants = true) { contentDescription = name }
-        .padding(horizontal = 6.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center) {
-        if (id == null) {
-            Icon(Icons.Outlined.Public, null, tint = accent, modifier = Modifier.size(14.dp))
-            Text(" 全部", color = accent, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
-        } else {
-            ReviewSourceMark(id, size = 18.dp)
-            val label = when (id) { "copy" -> "拷贝"; "anilist" -> "AniList"; "myanimelist" -> "MAL"; "kitsu" -> "Kitsu"; else -> null }
-            label?.let { Text(it, color = if (selected) accent else DetailSecondary, fontSize = 11.sp, lineHeight = 16.sp,
-                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 5.dp)) }
-        }
+    Box(Modifier.size(44.dp).clip(RoundedCornerShape(20.dp)).background(background)
+        .selectable(selected, interactionSource = interaction, indication = null, role = Role.RadioButton, onClick = onClick)
+        .motionPress(interaction, pressedScale = .95f)
+        .semantics(mergeDescendants = true) {
+            contentDescription = name
+            stateDescription = when {
+                source?.loadingMore == true -> "正在读取"
+                source?.status == ReviewStatus.UNAVAILABLE || source?.reviewsError != null -> "暂不可用"
+                source?.status == ReviewStatus.NO_MATCH && source?.candidates?.isNotEmpty() == true -> "需要匹配漫画"
+                selected -> "已选择"
+                else -> "未选择"
+            }
+        }, contentAlignment = Alignment.Center) {
+        if (id == null) Icon(Icons.Outlined.Public, null, tint = accent, modifier = Modifier.size(19.dp))
+        else ReviewSourceMark(id, size = 20.dp)
+        if (source?.loadingMore == true)
+            MotionBusyIndicator(Modifier.align(Alignment.BottomEnd).padding(5.dp).size(8.dp),
+                color = DetailSecondary, strokeWidth = 1.dp)
+        else if (source?.status == ReviewStatus.UNAVAILABLE || source?.reviewsError != null)
+            Icon(Icons.Outlined.ErrorOutline, null, Modifier.align(Alignment.BottomEnd).padding(5.dp).size(9.dp),
+                tint = DetailSecondary)
+        else if (source?.status == ReviewStatus.NO_MATCH && source?.candidates?.isNotEmpty() == true)
+            Icon(Icons.Outlined.HelpOutline, null, Modifier.align(Alignment.BottomEnd).padding(5.dp).size(9.dp),
+                tint = DetailSecondary)
     }
 }
 
 @Composable
 private fun FilterToggle(icon: ImageVector, label: String, checked: Boolean, onClick: () -> Unit) {
-    val accent = reviewSourceAccent("anilist", DetailForeground.luminance() > .5f)
-    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
-        .toggleable(checked, role = Role.Switch) { onClick() }.padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-        Icon(icon, null, tint = DetailSecondary, modifier = Modifier.size(16.dp))
-        Text(label, color = DetailForeground, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.weight(1f))
-        MotionSwap(checked, Modifier.size(18.dp)) { value ->
-            if (value) Icon(Icons.Outlined.Check, null, tint = accent, modifier = Modifier.size(16.dp))
-            else Text("关", color = DetailMuted.copy(alpha = .6f), fontSize = 11.sp, lineHeight = 16.sp)
-        }
+    val interaction = remember { MutableInteractionSource() }
+    Row(Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(12.dp))
+        .toggleable(checked, interactionSource = interaction, indication = null, role = Role.Switch) { onClick() }
+        .motionPress(interaction, pressedScale = .98f).padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Icon(icon, null, tint = DetailSecondary, modifier = Modifier.size(15.dp))
+        Text(label, color = if (checked) DetailForeground else DetailSecondary, fontSize = 12.sp)
+        if (checked) Icon(Icons.Outlined.Check, null, tint = DetailForeground, modifier = Modifier.size(13.dp))
     }
 }

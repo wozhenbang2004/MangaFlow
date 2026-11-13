@@ -1,5 +1,16 @@
 # MangaFlow · current work
 
+## Volume merge and screenshot correction batch · 2026-11-14
+
+Current scope/raw batch is DESIGN.md VOLUME-MERGE-100 through DETAIL-TOOLS-107, covered through1000121644 and the intervening shadow/background-blur clarifications. This continues the existing goals, rather than replacing volume matching with UI work or treating earlier review findings as all fixed.
+
+This checkpoint gives associated ordinary volumes independent3-position numbering evidence without upgrading serial confirmation; recognizes appendices/bonuses and unknown suffixes separately; filters cached projections to their native owner and preserves actual variant/storage IDs and prior source choices. UI moves synopsis back right, extends the true detail list viewport to the bottom with internal dock clearance, uses inline chapter/comment filters, shows real source marks for every chapter, applies temporary real Haze background blur during source choice, shares reveal progress with column-menu shadow, moves source management beside download, and reduces score-to-section gap to8dp.
+
+Root integrates one finished code/doc batch on latest main, with expected-head protection. Independent narrow writers return immutable blobs and do not update refs. Preserve all active font work/earlier FILL and refresh fixes, real updater, wallpaper pairing, source/account/platform behavior, original reader image data, saved histories/downloads/manual links/splits. The audit report marks R01 code addressed here; other pending/conditional findings keep their status.
+
+Execution remains cloud GitHub connector/in-memory only, with no tests/local builds/device or service probes/additional review gate. Android190/run43479877323 was observed completed/success for latest parent201bfb253df87416774055f0612b2bdeec054619. Its fixed atmosphere, one-to-one foreground and rising opaque chapter plane are retained alongside the internal bottom clearance; ReaderScreen/direct download is left intact. This does not establish the new batch or phone effects. Next exact action: submit this complete ready batch once after existing Android publication, confirm matching normal CI, keep main stable and use actual user artifact feedback or concrete compile failures. No fabricated source-service/device validation.
+
+
 ## Detail foreground scroll and reader download · 2026-11-14
 
 Active additions are DETAIL-SCROLL-98 / READER-DOWNLOAD-99 in DESIGN.md, covering user attachments1000121645/1000121646 and both current requests. Background atmosphere is fixed; foreground travel is one-to-one; the opaque chapters/comments plane rises over it at the measured hero boundary. The reader's last action directly saves the current chapter with the existing pause/completed/retry path and no normal-width two-item popup.

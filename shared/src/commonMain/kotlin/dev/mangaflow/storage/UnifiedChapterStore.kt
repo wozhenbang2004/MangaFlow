@@ -176,16 +176,38 @@ class UnifiedChapterStore(context: Context) {
         val anchors = state.logicalIds.toMutableMap()
         val priority = (state.preferredSources + workManga.sourceId + state.links.map { it.manga.sourceId }).distinct()
         val baseRef = SourceKeys.decodeManga(workManga.id)
-        val ambiguousBaseKeys = baseChapters.distinctBy { it.id }.mapNotNull { chapter ->
+        fun nativeDirectory(manga: Manga, chapters: List<Chapter>): List<Chapter> {
+            val owner = SourceKeys.decodeManga(manga.id)
+            return chapters.mapNotNull { original ->
+                val native = original.variants.firstOrNull {
+                    it.sourceId == owner.sourceId && it.mangaId == owner.mangaId
+                }
+                when {
+                    native != null -> original.copy(id = native.chapterId, title = native.title,
+                        variants = listOf(native), sourceId = native.sourceId,
+                        sourceMangaId = native.mangaId, sourceChapterId = native.chapterId)
+                    original.variants.isEmpty() -> original
+                    else -> null
+                }
+            }.distinctBy { it.id }
+        }
+        // A saved projection may already contain linked-only cells. They are not primary raw chapters.
+        val nativeBase = nativeDirectory(workManga, baseChapters)
+        val nativeCatalogs = linkedCatalogs.map { it.copy(chapters = nativeDirectory(it.manga, it.chapters)) }
+        val verifiedVolumeSources = nativeCatalogs.filter { catalog ->
+            state.links.any { it.manga.id == catalog.manga.id && it.confirmedAt > 0L } &&
+                ChapterSemantics.volumeSystemMatches(nativeBase, catalog.chapters)
+        }.map { it.manga.id }.toSet()
+        val ambiguousBaseKeys = nativeBase.mapNotNull { chapter ->
             val meaning = ChapterSemantics.parse(chapter, confirmedSerialSystem = true) ?: return@mapNotNull null
             val native = chapter.variants.firstOrNull { it.sourceId == baseRef.sourceId && it.mangaId == baseRef.mangaId }
             val edition = native?.edition ?: if (meaning.system.startsWith("volume")) "单行本" else "连载版"
             ChapterSemantics.editionFamily(edition, meaning, true) + "\u0000" + meaning.key
         }.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
-        val serialDisplayGroup = baseChapters.firstOrNull {
+        val serialDisplayGroup = nativeBase.firstOrNull {
             ChapterSemantics.parse(it, true)?.let { meaning -> meaning.system == "chapter" && meaning.branch.isBlank() } == true
         }?.group?.substringBefore('·')?.trim() ?: "连载"
-        val ambiguousLinkedKeys = linkedCatalogs.associate { catalog ->
+        val ambiguousLinkedKeys = nativeCatalogs.associate { catalog ->
             val confirmed = state.links.firstOrNull { it.manga.id == catalog.manga.id }?.sameChapterSystem == true
             val byMeaning = catalog.chapters.mapNotNull { chapter ->
                 val meaning = ChapterSemantics.parse(chapter, confirmed) ?: return@mapNotNull null
@@ -196,7 +218,15 @@ class UnifiedChapterStore(context: Context) {
                     .find(edition + " " + chapter.group)?.value.orEmpty()
                 key to volume
             }.groupBy({ it.first }, { it.second })
-            catalog.manga.id to byMeaning.filterValues { volumes -> volumes.filter(String::isNotBlank).distinct().size > 1 }.keys
+            val duplicateVolumes = catalog.chapters.mapNotNull { chapter ->
+                val meaning = ChapterSemantics.parse(chapter, confirmed) ?: return@mapNotNull null
+                if (meaning.system != "volume") return@mapNotNull null
+                val edition = chapter.variants.firstOrNull()?.edition ?: "单行本"
+                ChapterSemantics.editionFamily(edition, meaning, confirmed) + "\u0000" + meaning.key
+            }.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
+            catalog.manga.id to (byMeaning.filterValues { volumes ->
+                volumes.filter(String::isNotBlank).distinct().size > 1
+            }.keys + duplicateVolumes)
         }
 
         fun insert(manga: Manga, chapter: Chapter, link: LinkedMangaSource?, isBase: Boolean) {
@@ -206,6 +236,8 @@ class UnifiedChapterStore(context: Context) {
                 SourceKeys.decodeChapter(manga.id, chapter.id).chapterId else chapter.sourceChapterId.ifBlank { chapter.id }
             val confirmedSystem = isBase || link?.sameChapterSystem == true
             val meaning = ChapterSemantics.parse(chapter, confirmedSystem)
+            val confirmedVolume = meaning?.system == "volume" && (isBase || manga.id in verifiedVolumeSources)
+            val canMergeMeaning = confirmedSystem || confirmedVolume
             val nativeVariant = chapter.variants.firstOrNull { it.sourceId == manga.sourceId &&
                 it.mangaId == upstreamMangaId && it.chapterId == upstreamChapter }
             val fallbackEdition = if (meaning?.system?.startsWith("volume") == true) "单行本" else link?.edition ?: "连载版"
@@ -223,7 +255,7 @@ class UnifiedChapterStore(context: Context) {
                 ?: if (storageId in state.separated) ChapterSemantics.independentId(storageId)
                 else if (isBase) semanticKey?.takeUnless { ambiguous }?.let { anchors[it] }
                     ?: chapter.logicalId.ifBlank { chapter.id }
-                else if (link?.sameChapterSystem == true && semanticKey != null && !ambiguous)
+                else if (canMergeMeaning && semanticKey != null && !ambiguous)
                     meanings[semanticKey] ?: anchors[semanticKey] ?: independent
                 else independent
             val bucket = buckets.getOrPut(logicalId) {
@@ -233,21 +265,14 @@ class UnifiedChapterStore(context: Context) {
             }
             if (bucket.variants.none { it.storageId == storageId }) bucket.variants.add(variant)
             if (semanticKey != null && !ambiguous && storageId !in state.separated &&
-                (isBase || link?.sameChapterSystem == true)) {
+                canMergeMeaning) {
                 meanings.getOrPut(semanticKey) { logicalId }
                 anchors.getOrPut(semanticKey) { logicalId }
             }
         }
 
-        baseChapters.forEach { original ->
-            // A restored merged directory must not be mistaken for a new Copy raw directory.
-            val native = original.variants.firstOrNull { it.sourceId == baseRef.sourceId && it.mangaId == baseRef.mangaId }
-            if (native != null) insert(workManga, original.copy(id = native.chapterId, title = native.title,
-                sourceChapterId = native.chapterId), null, true)
-            else if (original.variants.isEmpty() || original.sourceId == baseRef.sourceId &&
-                original.sourceMangaId == baseRef.mangaId) insert(workManga, original, null, true)
-        }
-        linkedCatalogs.forEach { catalog ->
+        nativeBase.forEach { insert(workManga, it, null, true) }
+        nativeCatalogs.forEach { catalog ->
             val link = state.links.firstOrNull { it.manga.id == catalog.manga.id } ?: return@forEach
             if (link.confirmedAt <= 0L) return@forEach
             catalog.chapters.forEach { insert(catalog.manga, it, link, false) }
@@ -279,6 +304,9 @@ class UnifiedChapterStore(context: Context) {
                 priority.indexOf(it.sourceId).takeIf { rank -> rank >= 0 } ?: Int.MAX_VALUE
             }.thenBy { it.storageId })
             val preferred = state.chapterOverrides[bucket.chapter.logicalId]
+                ?: variants.firstOrNull { variant ->
+                    state.chapterOverrides[ChapterSemantics.independentId(variant.storageId)] == variant.storageId
+                }?.storageId
             val chosen = variants.firstOrNull { it.storageId == preferred } ?: variants.first()
             resolveChapter(bucket.chapter.copy(index = index, variants = variants), chosen)
         }

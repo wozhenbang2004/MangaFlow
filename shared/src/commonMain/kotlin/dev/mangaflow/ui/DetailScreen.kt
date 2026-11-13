@@ -60,6 +60,8 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -107,6 +109,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
@@ -131,6 +134,7 @@ import dev.chrisbanes.haze.blur.hazeBlur
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
@@ -147,6 +151,7 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
@@ -222,6 +227,10 @@ fun DetailScreen(
     val chapters = remember(detail, downloaded) {
         detail?.chapters ?: downloaded.values.filter { it.status == DownloadStatus.COMPLETED }
             .map(DownloadEntry::chapter).distinctBy(Chapter::id).sortedBy(Chapter::index)
+    }
+    val sourceCount = remember(chapters) {
+        chapters.asSequence().flatMap { it.variants.asSequence() }.map { it.sourceId }
+            .filter(String::isNotBlank).distinct().count()
     }
     val resume = progress?.takeIf { it.manga.id == manga.id && it.chapterId.isNotBlank() }
     var section by rememberSaveable(manga.id) { mutableIntStateOf(0) }
@@ -313,7 +322,7 @@ fun DetailScreen(
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
         val compactHero = availableHeight < 600.dp
         val collapsedHero = availableHeight < 420.dp
-        val seamHeight = if (collapsedHero) 0.dp else 8.dp
+        val seamHeight = if (collapsedHero) 0.dp else 6.dp
         // Safety belongs to the artwork's content, not a clipped viewport below the toolbar.
         val toolbarClearance = statusInset + 56.dp
         val toolbarPixels = with(density) { toolbarClearance.roundToPx() }
@@ -490,10 +499,15 @@ fun DetailScreen(
                         onToggleFilter = { commentFilterOpen = !commentFilterOpen },
                         downloadMode = chapterDownloadMode,
                         onToggleDownload = { chapterDownloadMode = !chapterDownloadMode },
+                        sourceId = current.sourceId,
+                        sourceName = current.sourceName.ifBlank { sourceDisplayName(current.sourceId) },
+                        sourceCount = sourceCount, sourceLoading = sourceLoading,
+                        sourcesChecking = sourcesChecking, pendingSourceCount = pendingSourceCount,
+                        onManageSources = onManageSources,
                     )
-                    // The dock has a stable lane, so it cannot cover the first or last row.
-                    // Keep the largest measured clearance while its visual body condenses.
-                    MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth().padding(bottom = readingInset),
+                    // Let content draw behind the floating dock to the physical bottom edge.
+                    // Reserve its stable clearance inside each list so the last item stays reachable.
+                    MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth(),
                         contentKey = { it }, order = { it }, soft = true) { targetSection ->
                         sections.SaveableStateProvider(targetSection) {
                             when (targetSection) {
@@ -509,7 +523,7 @@ fun DetailScreen(
                                         pendingDownload = chapter
                                     } },
                                     loadVolumeCover = loadVolumeCover, volumeImageHeaders = volumeImageHeaders,
-                                    bottomPadding = 16.dp,
+                                    bottomPadding = readingInset + 16.dp,
                                     downloadMode = chapterDownloadMode,
                                     backdrop = readingBackdrop,
                                     onReadVariant = onReadVariant,
@@ -517,10 +531,8 @@ fun DetailScreen(
                                     onClearChapterSource = onClearChapterSource,
                                     onSplitVariant = onSplitVariant,
                                     onRelinkVariant = onRelinkVariant,
-                                    onManageSources = onManageSources,
                                     onCancelSourceSelection = onCancelSourceSelection,
                                     sourceLoading = sourceLoading, sourceError = sourceError,
-                                    sourcesChecking = sourcesChecking, pendingSourceCount = pendingSourceCount,
                                 )
                                 else -> CommunityPanel(
                                     mangaId = current.id, sources = reviews, loading = reviewsLoading,
@@ -528,7 +540,7 @@ fun DetailScreen(
                                     onRelink = onReviewRelink, loadReplies = loadReplies,
                                     onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
                                     captureBackdrop = false,
-                                    active = active && targetSection == activeSection, bottomPadding = 16.dp,
+                                    active = active && targetSection == activeSection, bottomPadding = readingInset + 16.dp,
                                     filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
                                     onFilterChanged = { commentFilterChanged = it },
                                 )
@@ -703,7 +715,7 @@ private fun HeroBookInformation(
     )
     BoxWithConstraints(modifier.fillMaxWidth().wrapContentHeight(unbounded = true)
         .onSizeChanged { onNaturalHeight(it.height) }
-        .padding(horizontal = 20.dp).padding(top = 12.dp + artworkHeadroom, bottom = 6.dp)
+        .padding(horizontal = 20.dp).padding(top = 12.dp + artworkHeadroom, bottom = 2.dp)
         .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })) {
         val contentWidth = maxWidth
         val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .34f else .38f,
@@ -747,9 +759,9 @@ private fun HeroBookInformation(
                         ?.let { "更新 · $it" }.orEmpty()).filter(String::isNotBlank).joinToString(" · ")
                     if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .80f),
                         fontSize = 11.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    HeroSynopsis(manga, ink, infoVisible, onIntroduction)
                 }
             }
-            HeroSynopsis(manga, ink, infoVisible, onIntroduction)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag)
                 DetailRatingStrip(manga, ink.copy(alpha = .86f), enabled = infoVisible,
@@ -883,18 +895,33 @@ private fun AuthorNames(authors: List<String>, color: Color, enabled: Boolean = 
     }
 }
 
-/** One stable action slot serves the current section, without a download-only toolbar below. */
+/** One section row owns navigation and the actions relevant to the selected section. */
 @Composable
 private fun DetailSections(
     selected: Int, chapterCount: Int, commentCount: String?, onSelect: (Int) -> Unit,
     filterOpen: Boolean, filterChanged: Boolean, onToggleFilter: () -> Unit,
     downloadMode: Boolean, onToggleDownload: () -> Unit,
+    sourceId: String, sourceName: String, sourceCount: Int,
+    sourceLoading: Boolean, sourcesChecking: Boolean, pendingSourceCount: Int,
+    onManageSources: () -> Unit,
 ) {
     val labels = listOf("章节", "评论")
+    val density = LocalDensity.current
+    val measurer = rememberTextMeasurer()
+    val countStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp)
+    val sourceLabel = (if (pendingSourceCount > 0) pendingSourceCount else sourceCount).toString()
+    val sourceLabelWidth = with(density) {
+        measurer.measure(sourceLabel, countStyle, maxLines = 1).size.width.toDp()
+    }
     BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 2.dp)) {
         val availableWidth = maxWidth
-        val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-        val tabWidth = (164f * scale).dp.coerceAtMost((availableWidth - 52.dp).coerceAtLeast(0.dp))
+        val scale = density.fontScale.coerceAtLeast(1f)
+        val comments = selected == 1
+        val sourceWidth = (sourceLabelWidth + 46.dp).coerceAtLeast(48.dp)
+            .coerceAtMost((availableWidth - 120.dp).coerceAtLeast(48.dp))
+        val actionsWidth = if (comments) 44.dp else sourceWidth + 48.dp
+        val tabWidth = (164f * scale).dp
+            .coerceAtMost((availableWidth - actionsWidth - 16.dp).coerceAtLeast(0.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             MotionTabs(selected, labels, onSelect, modifier = Modifier.width(tabWidth),
@@ -915,19 +942,61 @@ private fun DetailSections(
                             maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
                 })
-            val comments = selected == 1
             Spacer(Modifier.weight(1f))
-            dev.mangaflow.ui.motion.MotionSwap(comments, Modifier.size(44.dp)) { showingComments ->
-            Box(Modifier.motionInputGate(showingComments == comments)) {
-            DetailAction(
-                icon = if (showingComments) Icons.Outlined.FilterList else if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
-                description = if (showingComments) {
-                    if (filterOpen) "收起评论筛选" else "筛选评论"
-                } else if (downloadMode) "退出连续下载" else "连续下载章节",
-                selected = if (showingComments) filterOpen || filterChanged else downloadMode,
-                onClick = if (showingComments) onToggleFilter else onToggleDownload,
-            )
+            MotionSwap(comments, Modifier.width(actionsWidth).height(44.dp)) { showingComments ->
+                Row(Modifier.fillMaxWidth().motionInputGate(showingComments == comments),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    if (!showingComments) DetailSourceAction(
+                        sourceId, sourceName, sourceCount, pendingSourceCount,
+                        sourceLoading, sourcesChecking, sourceWidth, onManageSources)
+                    DetailAction(
+                        icon = if (showingComments) Icons.Outlined.FilterList else if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
+                        description = if (showingComments) {
+                            if (filterOpen) "收起评论筛选" else "筛选评论"
+                        } else if (downloadMode) "退出连续下载" else "连续下载章节",
+                        selected = if (showingComments) filterOpen || filterChanged else downloadMode,
+                        onClick = if (showingComments) onToggleFilter else onToggleDownload,
+                    )
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun DetailSourceAction(
+    sourceId: String, sourceName: String, sourceCount: Int, pendingSourceCount: Int,
+    sourceLoading: Boolean, sourcesChecking: Boolean, width: Dp, onClick: () -> Unit,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pending = pendingSourceCount > 0
+    val color = if (pending) MaterialTheme.colorScheme.primary else DetailSecondary
+    Row(Modifier.width(width).height(44.dp).clip(RoundedCornerShape(10.dp))
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = "管理漫画来源", onClick = onClick)
+        .motionPress(interaction, pressedScale = .96f)
+        .semantics(mergeDescendants = true) {
+            contentDescription = "${sourceName}，漫画来源"
+            stateDescription = listOfNotNull(
+                "已合并 ${sourceCount} 个来源",
+                "待确认 ${pendingSourceCount} 个来源".takeIf { pending },
+                "正在准备来源".takeIf { sourceLoading },
+                "正在检查来源".takeIf { sourcesChecking },
+            ).joinToString("，")
+        }.padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        BodySourceMark(sourceId, sourceName, Modifier.size(17.dp), muted = true)
+        Text((if (pending) pendingSourceCount else sourceCount).toString(),
+            Modifier.weight(1f), color = color, fontSize = 10.sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box(Modifier.size(13.dp), contentAlignment = Alignment.Center) {
+            when {
+                pending -> Icon(Icons.Outlined.Info, null, Modifier.size(13.dp), tint = color)
+                sourceLoading || sourcesChecking -> MotionBusyIndicator(Modifier.size(11.dp),
+                    color = color, strokeWidth = 1.2.dp)
+                else -> Icon(Icons.Outlined.ExpandMore, null, Modifier.size(13.dp), tint = color)
             }
         }
     }

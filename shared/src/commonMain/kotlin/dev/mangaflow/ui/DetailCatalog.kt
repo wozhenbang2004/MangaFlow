@@ -4,6 +4,9 @@ import dev.mangaflow.ui.platform.*
 
 import dev.mangaflow.platform.*
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.expandVertically
@@ -20,6 +23,8 @@ import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -49,7 +54,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.Info
@@ -77,6 +81,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.isSpecified
@@ -93,7 +98,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Chapter
-import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.data.ChapterVariant
 import dev.chrisbanes.haze.HazeState
@@ -101,6 +105,7 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.ui.motion.BackHandler
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -146,15 +151,11 @@ internal fun DetailCatalog(
     onClearChapterSource: (Chapter) -> Unit = {},
     onSplitVariant: (Chapter, ChapterVariant) -> Unit = { _, _ -> },
     onRelinkVariant: (Chapter, ChapterVariant, Chapter) -> Unit = { _, _, _ -> },
-    onManageSources: () -> Unit = {},
     sourceLoading: Boolean = false,
     sourceError: String? = null,
-    sourcesChecking: Boolean = false,
-    pendingSourceCount: Int = 0,
     onCancelSourceSelection: () -> Unit = {},
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
-    val primarySourceId = remember(mangaId) { SourceKeys.decodeManga(mangaId).sourceId }
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
     var groupVisit by rememberSaveable(mangaId) { mutableIntStateOf(0) }
     // A temporarily empty directory must not clear a restored group or its scroll position.
@@ -168,7 +169,6 @@ internal fun DetailCatalog(
     var sourceAnchor by remember(mangaId) { mutableStateOf<Rect?>(null) }
     var sourcePresent by remember(mangaId) { mutableStateOf(false) }
     var sourceCloseRequested by remember(mangaId) { mutableStateOf(false) }
-    val sourceCount = remember(chapters) { chapters.flatMap { it.variants }.map { it.sourceId }.distinct().size.coerceAtLeast(1) }
     LaunchedEffect(active, chapters, sourceLoading) {
         val selected = sourceChapter
         val current = selected?.let { original ->
@@ -194,49 +194,23 @@ internal fun DetailCatalog(
     } else Modifier
     val showBusy = rememberDelayedBusy(loading)
     Column(Modifier.fillMaxSize()) {
-        Row(
+        if (groups.size > 1) Row(
             Modifier.fillMaxWidth().then(flow).heightIn(min = 36.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (groups.size > 1) {
-                ChapterGroups(
-                    groups = groups, total = chapters.size, selected = group, backdrop = backdrop,
-                    onSelect = {
-                        if (group != it) groupVisit++
-                        chosenGroup = it
-                    }, modifier = Modifier.weight(1f),
-                )
-            } else Spacer(Modifier.weight(1f))
-            val sourcesInteraction = remember { MutableInteractionSource() }
-            val pending = pendingSourceCount > 0
-            val sourceLabel = if (pending) "待确认 $pendingSourceCount"
-                else if (sourceCount > 1) "已合并 $sourceCount 个来源" else sourceDisplayName(primarySourceId)
-            Row(Modifier.heightIn(min = 36.dp)
-                .clickable(interactionSource = sourcesInteraction, indication = null,
-                    role = Role.Button, onClickLabel = "管理漫画来源", onClick = onManageSources)
-                .motionPress(sourcesInteraction, pressedScale = .96f)
-                .semantics(mergeDescendants = true) { contentDescription = sourceLabel }
-                .padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
-                    if (pending) Icon(Icons.Outlined.Info, null, Modifier.size(13.dp),
-                        tint = MaterialTheme.colorScheme.primary)
-                    else if (sourcesChecking || sourceLoading)
-                        MotionBusyIndicator(Modifier.size(11.dp), color = DetailMuted, strokeWidth = 1.2.dp)
-                    else BodySourceMark(primarySourceId, sourceDisplayName(primarySourceId), Modifier.size(13.dp), muted = true)
-                }
-                if (pending || sourceCount > 1) Text(if (pending) "待确认 $pendingSourceCount" else "$sourceCount 源",
-                    color = if (pending) MaterialTheme.colorScheme.primary else DetailMuted,
-                    fontSize = 10.sp, maxLines = 1)
-                Icon(Icons.Outlined.ExpandMore, null, Modifier.size(13.dp), tint = DetailSecondary)
-            }
-            if (error != null) {
-                DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { shownError = error })
-                DetailAction(Icons.Outlined.Refresh, "重新加载目录",
-                    enabled = !loading, onClick = onRetry)
-            }
+            ChapterGroups(
+                groups = groups, total = chapters.size, selected = group, active = active,
+                onSelect = {
+                    if (group != it) groupVisit++
+                    chosenGroup = it
+                }, modifier = Modifier.weight(1f),
+            )
+        }
+        if (error != null) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
+            DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { shownError = error })
+            DetailAction(Icons.Outlined.Refresh, "重新加载目录", enabled = !loading, onClick = onRetry)
         }
         Box(Modifier.fillMaxWidth().height(2.dp).padding(horizontal = 16.dp)) {
             if (showBusy) LinearProgressIndicator(
@@ -322,8 +296,6 @@ internal fun DetailCatalog(
                                     if (origin.isSpecified) downloadAnchor = Rect(origin, androidx.compose.ui.geometry.Size(
                                         coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
                                 }
-                                val showSources = chapter.variants.size > 1 ||
-                                    (chapter.variants.isNotEmpty() && chapter.sourceId != primarySourceId)
                                 if (isVolumeChapter(chapter)) {
                                     val cover = volumeCovers[chapter.id] ?: VolumeCoverState()
                                     LaunchedEffect(chapter.id, paneActive, cover.error, cover.attempt) {
@@ -377,7 +349,7 @@ internal fun DetailCatalog(
                                                 volumeCovers[chapter.id] = VolumeCoverState(attempt = cover.attempt + 1)
                                             },
                                             sourceMarks = {
-                                                if (chapter.variants.isNotEmpty()) CatalogSourceEntry(
+                                                CatalogSourceEntry(
                                                     chapter, Modifier.fillMaxWidth(),
                                                     enabled = !sourceLoading,
                                                     onOpen = { anchor ->
@@ -386,10 +358,7 @@ internal fun DetailCatalog(
                                                             sourceChapter = chapter; sourceAnchor = anchor
                                                         }
                                                     },
-                                                ) else Box(Modifier.height(20.dp), contentAlignment = Alignment.CenterStart) {
-                                                    ChapterSourceLogo(chapter.sourceId, sourceDisplayName(chapter.sourceId),
-                                                        Modifier.size(13.dp), muted = true)
-                                                }
+                                                )
                                             },
                                         )
                                     }
@@ -401,7 +370,6 @@ internal fun DetailCatalog(
                                     progressKnown = chapterPositions != null,
                                     downloadMode = downloadMode,
                                     height = tileHeight,
-                                    showSources = showSources,
                                     sourceEnabled = !sourceLoading,
                                     modifier = downloadAnchorModifier,
                                     onRead = { onRead(chapter) },
@@ -499,12 +467,13 @@ internal fun DetailCatalog(
     }
 }
 
+/** The selected group keeps its anchor while other groups reveal inside this control row. */
 @Composable
 private fun ChapterGroups(
     groups: Map<String, Int>,
     total: Int,
     selected: String?,
-    backdrop: HazeState,
+    active: Boolean,
     onSelect: (String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -512,50 +481,67 @@ private fun ChapterGroups(
         buildList<Pair<String?, Int>> {
             add(null to total)
             groups.forEach { (name, count) -> add(name to count) }
-        }.sortedBy { if (it.first == selected) 0 else 1 }
+        }.filter { it.first != selected }
     }
     var expanded by remember { mutableStateOf(false) }
+    val motion = LocalMotionEnabled.current
+    val scroll = rememberScrollState()
     val interaction = remember { MutableInteractionSource() }
     val selectedLabel = selected?.let(::chapterGroupLabel) ?: "全部"
-    Box(modifier, contentAlignment = Alignment.CenterStart) {
-        Box {
-            Row(Modifier.heightIn(min = 36.dp).widthIn(max = 176.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable(interactionSource = interaction, indication = null, role = Role.Button,
-                    onClickLabel = "选择章节分组", onClick = { expanded = !expanded })
-                .motionPress(interaction, pressedScale = .98f)
-                .semantics {
-                    contentDescription = "章节分组，当前$selectedLabel"
-                    stateDescription = if (expanded) "已展开" else "已收起"
-                }.padding(horizontal = 8.dp),
+    val turn by animateFloatAsState(if (expanded) 180f else 0f,
+        if (motion) tween(MangaMotion.Content) else snap(), label = "chapter-group-disclosure")
+    BackHandler(active && expanded) { expanded = false }
+    LaunchedEffect(active) { if (!active) expanded = false }
+    LaunchedEffect(expanded, selected) { if (!expanded) scroll.scrollTo(0) }
+    Row(modifier.fillMaxWidth().heightIn(min = 36.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.heightIn(min = 36.dp).widthIn(min = 44.dp, max = 176.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = active, interactionSource = interaction, indication = null, role = Role.Button,
+                onClickLabel = if (expanded) "收起章节分组" else "展开章节分组",
+                onClick = { expanded = !expanded })
+            .motionPress(interaction, enabled = active, pressedScale = .98f)
+            .semantics {
+                contentDescription = "章节分组，当前$selectedLabel"
+                stateDescription = if (expanded) "已展开" else "已收起"
+            }.padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(selectedLabel, color = DetailSecondary, fontSize = 12.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false))
+            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(14.dp).graphicsLayer { rotationZ = turn },
+                tint = DetailMuted)
+        }
+        AnimatedVisibility(expanded,
+            modifier = Modifier.weight(1f),
+            enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
+                expandHorizontally(tween(if (motion) MangaMotion.Content else 0,
+                    easing = MangaMotion.EnterEasing), expandFrom = Alignment.Start),
+            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                shrinkHorizontally(tween(if (motion) MangaMotion.Content else 0,
+                    easing = MangaMotion.ExitEasing), shrinkTowards = Alignment.Start)) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(scroll).padding(start = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(selectedLabel, color = DetailSecondary, fontSize = 12.sp,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false))
-                Icon(Icons.Outlined.ExpandMore, null, Modifier.size(14.dp), tint = DetailMuted)
-            }
-            CompactGlassPopover(expanded, backdrop, onDismiss = { expanded = false }, maximumWidth = 224.dp) {
+                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 choices.forEach { (name, count) ->
-                    val label = name?.let(::chapterGroupLabel) ?: "全部"
-                    val chosen = name == selected
-                    val rowInteraction = remember(name) { MutableInteractionSource() }
-                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(10.dp))
-                        .clickable(interactionSource = rowInteraction, indication = null, role = Role.Tab,
-                            onClickLabel = "显示$label", onClick = {
-                                expanded = false
-                                onSelect(name)
-                            })
-                        .motionPress(rowInteraction, pressedScale = .985f)
-                        .background(if (chosen) DetailForeground.copy(alpha = .055f) else Color.Transparent)
-                        .padding(horizontal = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(label, Modifier.weight(1f), color = DetailForeground, fontSize = 12.sp,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(count.toString(), color = DetailMuted, fontSize = 10.sp)
-                        Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
-                            if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(15.dp), tint = DetailSecondary)
+                    androidx.compose.runtime.key(name) {
+                        val label = name?.let(::chapterGroupLabel) ?: "全部"
+                        val rowInteraction = remember { MutableInteractionSource() }
+                        Row(Modifier.heightIn(min = 36.dp).clip(RoundedCornerShape(10.dp))
+                            .selectable(selected = false, enabled = active && expanded, role = Role.Tab,
+                                interactionSource = rowInteraction, indication = null, onClick = {
+                                    expanded = false
+                                    onSelect(name)
+                                })
+                            .motionPress(rowInteraction, enabled = active && expanded, pressedScale = .985f)
+                            .semantics { contentDescription = "$label，$count 章" }
+                            .padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            Text(label, color = DetailSecondary, fontSize = 12.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(count.toString(), color = DetailMuted, fontSize = 10.sp)
                         }
                     }
                 }
@@ -589,7 +575,6 @@ private fun ChapterTile(
     progressKnown: Boolean,
     downloadMode: Boolean,
     height: Dp,
-    showSources: Boolean,
     sourceEnabled: Boolean,
     modifier: Modifier = Modifier,
     onRead: () -> Unit,
@@ -638,7 +623,7 @@ private fun ChapterTile(
                 )
             }
             Row(Modifier.fillMaxWidth().height(20.dp * fontScale), verticalAlignment = Alignment.CenterVertically) {
-                if (showSources) CatalogSourceEntry(chapter,
+                CatalogSourceEntry(chapter,
                     enabled = sourceEnabled,
                     onOpen = { anchor -> if (downloadMode) onDownload() else onSources(anchor) })
                 Spacer(Modifier.weight(1f))
@@ -660,6 +645,13 @@ private fun ChapterTile(
 @Composable
 private fun CatalogSourceEntry(chapter: Chapter, modifier: Modifier = Modifier,
     enabled: Boolean = true, onOpen: (Rect?) -> Unit) {
+    if (chapter.variants.isEmpty()) {
+        Box(modifier.height(20.dp), contentAlignment = Alignment.CenterStart) {
+            ChapterSourceLogo(chapter.sourceId, sourceDisplayName(chapter.sourceId),
+                Modifier.size(13.dp), muted = true)
+        }
+        return
+    }
     var anchor by remember(chapter.logicalId, chapter.id) { mutableStateOf<Rect?>(null) }
     Box(modifier, contentAlignment = Alignment.CenterStart) {
         ReaderSourceStack(chapter, compact = true, enabled = enabled,

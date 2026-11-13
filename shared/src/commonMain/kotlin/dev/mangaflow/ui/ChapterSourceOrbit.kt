@@ -49,6 +49,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -69,6 +70,11 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.HazeSourceRetention
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.HazeColorEffect
+import dev.chrisbanes.haze.blur.hazeBlur
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -114,8 +120,25 @@ internal fun ChapterSourceOrbit(
     DisposableEffect(identity) { onDispose { reportPresence(false) } }
     LaunchedEffect(identity, closeRequested) { if (closeRequested) closing = true }
     val close = { if (!closing) { cancel(); closing = true } }
-    val progress = remember(identity, page) { Animatable(0f) }
-    LaunchedEffect(identity, page, closing, motion, origin != null) {
+    val progress = remember(identity) { Animatable(0f) }
+    val scrim = MaterialTheme.colorScheme.scrim
+    // A Popup is another window: explicit source layers carry the actual page across it.
+    // Keep the same presence through pagination so the page cannot flash sharp between groups.
+    val blurInput = remember(backdrop) {
+        HazeInput.Sources(backdrop, retention = HazeSourceRetention.KeepLastFrame)
+    }
+    val blurStyle = remember(progress, scrim) {
+        HazeBlurStyle {
+            val p = progress.value.coerceIn(0f, 1f)
+            blurRadius(18.dp * p)
+            alpha(p)
+            noiseFactor(0f)
+            backgroundColor(Color.Transparent)
+            colorEffects(listOf(HazeColorEffect.tint(scrim.copy(alpha = .045f))))
+            fallbackColorEffect(HazeColorEffect.tint(scrim.copy(alpha = .16f)))
+        }
+    }
+    LaunchedEffect(identity, closing, motion, origin != null) {
         if (origin == null) return@LaunchedEffect
         progress.animateTo(if (closing) 0f else 1f,
             if (!motion) snap()
@@ -125,85 +148,89 @@ internal fun ChapterSourceOrbit(
     }
     Popup(popupPositionProvider = SourceOrbitWindowOrigin, onDismissRequest = close,
         properties = PopupProperties(focusable = true, clippingEnabled = false)) {
-        BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding()
-            .onGloballyPositioned {
-                val position = it.localToScreen(Offset.Zero)
-                if (position.isSpecified) origin = position
-            }.semantics { dismiss { close(); true } }) {
-            val width = with(density) { maxWidth.toPx() }
-            val height = with(density) { maxHeight.toPx() }
-            val edge = with(density) { 8.dp.toPx() }
-            val availableHeight = (maxHeight - 16.dp).coerceAtLeast(1.dp)
-            val rowHeight = (44f + 28f * (density.fontScale - 1f).coerceAtLeast(0f)).dp
-            val railWidth = minOf(152.dp * density.fontScale.coerceIn(1f, 1.3f),
-                (maxWidth - 16.dp).coerceAtLeast(1.dp))
-            val railWidthPx = with(density) { railWidth.toPx() }
-            val rowHeightPx = with(density) { rowHeight.toPx() }
-            val statusRoom = with(density) { 80.dp.toPx() }
-            val capacity = ((height - edge * 2f - statusRoom) / rowHeightPx).toInt().coerceIn(2, 6)
-            val paged = count > capacity
-            val pageSize = if (paged) capacity - 1 else capacity
-            val pages = ((count + pageSize - 1) / pageSize).coerceAtLeast(1)
-            val currentPage = page.coerceIn(0, pages - 1)
-            val first = currentPage * pageSize
-            val visibleCount = (count - first).coerceIn(0, pageSize)
-            val slots = visibleCount + if (paged) 1 else 0
-            val localAnchor = sourceAnchor?.translate(-(origin ?: Offset.Zero))
-            val start = localAnchor?.center ?: Offset(width / 2f, height / 2f)
-            val anchorLeft = localAnchor?.left ?: start.x
-            val anchorRight = localAnchor?.right ?: start.x
-            val leftRoom = anchorLeft - edge * 2f
-            val rightRoom = width - anchorRight - edge * 2f
-            val preferLeft = start.x >= width / 2f
-            val placeLeft = if (preferLeft) leftRoom >= railWidthPx || leftRoom >= rightRoom
-                else !(rightRoom >= railWidthPx || rightRoom >= leftRoom)
-            val left = (if (placeLeft) anchorLeft - edge - railWidthPx else anchorRight + edge)
-                .coerceIn(edge, (width - railWidthPx - edge).coerceAtLeast(edge))
-            // Reserve the same status room before and after asynchronous failures arrive.
-            val boundsHeight = minOf(slots * rowHeightPx + statusRoom, height - edge * 2f)
-                .coerceAtLeast(1f)
-            val top = (start.y - slots * rowHeightPx / 2f)
-                .coerceIn(edge, (height - edge - boundsHeight).coerceAtLeast(edge))
+        Box(Modifier.fillMaxSize()) {
+            // This sibling owns the full-window material; the source choices stay sharp above it.
             Box(Modifier.fillMaxSize()
+                .hazeBlur(input = blurInput, style = blurStyle, expandLayerBounds = false)
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
                     onClickLabel = "收起来源", onClick = close))
-            Column(Modifier.absoluteOffset { IntOffset(left.roundToInt(), top.roundToInt()) }
-                .width(railWidth).heightIn(max = availableHeight)
-                .graphicsLayer {
-                    val p = progress.value.coerceIn(0f, 1f)
-                    transformOrigin = TransformOrigin(if (placeLeft) 1f else 0f, .5f)
-                    translationX = (if (placeLeft) edge else -edge) * (1f - p)
-                    scaleX = .9f + .1f * p
-                    alpha = if (origin == null) 0f else p
-                }.verticalScroll(rememberScrollState())) {
-                repeat(slots) { slot ->
-                    val modifier = Modifier.fillMaxWidth().height(rowHeight)
-                        .motionInputGate(!closing && progress.value >= .65f)
-                        .graphicsLayer {
-                            val delay = slot * .025f
-                            val p = ((progress.value - delay) / (1f - delay)).coerceIn(0f, 1f)
-                            translationY = -slot * rowHeightPx * (1f - p) * .16f
-                            alpha = p
-                        }
-                    if (slot < visibleCount) item(first + slot, modifier, close)
-                    else {
-                        val interaction = remember { MutableInteractionSource() }
-                        Row(modifier.clip(RoundedCornerShape(10.dp))
-                            .clickable(enabled = !closing && progress.value >= .65f,
-                                interactionSource = interaction, indication = null,
-                                role = Role.Button, onClickLabel = "下一组来源",
-                                onClick = { page = (currentPage + 1) % pages })
-                            .motionPress(interaction, enabled = !closing, pressedScale = .97f)
-                            .padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.MoreHoriz, null, Modifier.size(36.dp).padding(7.dp))
-                            Text("下一组 ${currentPage + 1}/$pages", Modifier.padding(start = 6.dp),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1)
+            BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding()
+                .onGloballyPositioned {
+                    val position = it.localToScreen(Offset.Zero)
+                    if (position.isSpecified) origin = position
+                }.semantics { dismiss { close(); true } }) {
+                val width = with(density) { maxWidth.toPx() }
+                val height = with(density) { maxHeight.toPx() }
+                val edge = with(density) { 8.dp.toPx() }
+                val availableHeight = (maxHeight - 16.dp).coerceAtLeast(1.dp)
+                val rowHeight = (44f + 28f * (density.fontScale - 1f).coerceAtLeast(0f)).dp
+                val railWidth = minOf(152.dp * density.fontScale.coerceIn(1f, 1.3f),
+                    (maxWidth - 16.dp).coerceAtLeast(1.dp))
+                val railWidthPx = with(density) { railWidth.toPx() }
+                val rowHeightPx = with(density) { rowHeight.toPx() }
+                val statusRoom = with(density) { 80.dp.toPx() }
+                val capacity = ((height - edge * 2f - statusRoom) / rowHeightPx).toInt().coerceIn(2, 6)
+                val paged = count > capacity
+                val pageSize = if (paged) capacity - 1 else capacity
+                val pages = ((count + pageSize - 1) / pageSize).coerceAtLeast(1)
+                val currentPage = page.coerceIn(0, pages - 1)
+                val first = currentPage * pageSize
+                val visibleCount = (count - first).coerceIn(0, pageSize)
+                val slots = visibleCount + if (paged) 1 else 0
+                val localAnchor = sourceAnchor?.translate(-(origin ?: Offset.Zero))
+                val start = localAnchor?.center ?: Offset(width / 2f, height / 2f)
+                val anchorLeft = localAnchor?.left ?: start.x
+                val anchorRight = localAnchor?.right ?: start.x
+                val leftRoom = anchorLeft - edge * 2f
+                val rightRoom = width - anchorRight - edge * 2f
+                val preferLeft = start.x >= width / 2f
+                val placeLeft = if (preferLeft) leftRoom >= railWidthPx || leftRoom >= rightRoom
+                    else !(rightRoom >= railWidthPx || rightRoom >= leftRoom)
+                val left = (if (placeLeft) anchorLeft - edge - railWidthPx else anchorRight + edge)
+                    .coerceIn(edge, (width - railWidthPx - edge).coerceAtLeast(edge))
+                // Reserve the same status room before and after asynchronous failures arrive.
+                val boundsHeight = minOf(slots * rowHeightPx + statusRoom, height - edge * 2f)
+                    .coerceAtLeast(1f)
+                val top = (start.y - slots * rowHeightPx / 2f)
+                    .coerceIn(edge, (height - edge - boundsHeight).coerceAtLeast(edge))
+                Column(Modifier.absoluteOffset { IntOffset(left.roundToInt(), top.roundToInt()) }
+                    .width(railWidth).heightIn(max = availableHeight)
+                    .graphicsLayer {
+                        val p = progress.value.coerceIn(0f, 1f)
+                        transformOrigin = TransformOrigin(if (placeLeft) 1f else 0f, .5f)
+                        translationX = (if (placeLeft) edge else -edge) * (1f - p)
+                        scaleX = .9f + .1f * p
+                        alpha = if (origin == null) 0f else p
+                    }.verticalScroll(rememberScrollState())) {
+                    repeat(slots) { slot ->
+                        val modifier = Modifier.fillMaxWidth().height(rowHeight)
+                            .motionInputGate(!closing && progress.value >= .65f)
+                            .graphicsLayer {
+                                val delay = slot * .025f
+                                val p = ((progress.value - delay) / (1f - delay)).coerceIn(0f, 1f)
+                                translationY = -slot * rowHeightPx * (1f - p) * .16f
+                                alpha = p
+                            }
+                        if (slot < visibleCount) item(first + slot, modifier, close)
+                        else {
+                            val interaction = remember { MutableInteractionSource() }
+                            Row(modifier.clip(RoundedCornerShape(10.dp))
+                                .clickable(enabled = !closing && progress.value >= .65f,
+                                    interactionSource = interaction, indication = null,
+                                    role = Role.Button, onClickLabel = "下一组来源",
+                                    onClick = { page = (currentPage + 1) % pages })
+                                .motionPress(interaction, enabled = !closing, pressedScale = .97f)
+                                .padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Outlined.MoreHoriz, null, Modifier.size(36.dp).padding(7.dp))
+                                Text("下一组 ${currentPage + 1}/$pages", Modifier.padding(start = 6.dp),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1)
+                            }
                         }
                     }
+                    if (hasStatus) Column(Modifier.fillMaxWidth().heightIn(max = 72.dp)
+                        .verticalScroll(rememberScrollState()).padding(horizontal = 4.dp, vertical = 4.dp)) { status() }
                 }
-                if (hasStatus) Column(Modifier.fillMaxWidth().heightIn(max = 72.dp)
-                    .verticalScroll(rememberScrollState()).padding(horizontal = 4.dp, vertical = 4.dp)) { status() }
             }
         }
     }
