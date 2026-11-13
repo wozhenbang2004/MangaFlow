@@ -1,6 +1,8 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.snap
@@ -67,6 +69,7 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 
@@ -96,13 +99,18 @@ internal fun DetailCommentFilter(
     DisposableEffect(Unit) { onDispose { reportPresence(false) } }
     var more by remember { mutableStateOf(false) }
     var detailsId by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(visible) { if (!visible) { more = false; detailsId = null } }
+    // Keep the outgoing controls intact until their parent finishes folding.
+    // Clearing them when the close is requested removes content mid-animation.
+    LaunchedEffect(present) { if (!present) { more = false; detailsId = null } }
     val reviewSources = remember(sources) { sources.filter { it.hasWorkReviews }.distinctBy { it.id } }
     val pending = remember(sources) { sources.filter {
         it.status == ReviewStatus.UNAVAILABLE || it.reviewsError != null ||
             (it.status == ReviewStatus.NO_MATCH && it.candidates.isNotEmpty())
     } }
     val details = pending.firstOrNull { it.id == detailsId }
+    var retainedDetails by remember { mutableStateOf<ReviewSource?>(null) }
+    SideEffect { if (details != null) retainedDetails = details }
+    val shownDetails = details ?: retainedDetails
     val changed = selected != null || longOnly || !hidePromotions
     BackHandler(visible) {
         if (detailsId != null) detailsId = null
@@ -173,6 +181,7 @@ internal fun DetailCommentFilter(
                     fadeOut(tween(if (motion) MangaMotion.Quick else 0))) {
                 Column(Modifier.fillMaxWidth().heightIn(max =
                     (LocalMangaWindow.current.height * .28f).coerceIn(72.dp, 168.dp))
+                    .motionInputGate(visible && details != null)
                     .verticalScroll(rememberScrollState()).padding(horizontal = 4.dp)) {
                     if (pending.size > 1) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -182,8 +191,10 @@ internal fun DetailCommentFilter(
                             }
                         }
                     }
-                    details?.let { source ->
-                        androidx.compose.runtime.key(source.id) {
+                    shownDetails?.let { current ->
+                        MotionTabContent(selected = current, contentKey = { it.id },
+                            order = { item -> pending.indexOfFirst { it.id == item.id } },
+                            fillContent = false, modifier = Modifier.fillMaxWidth()) { source ->
                             if (source.status == ReviewStatus.UNAVAILABLE || source.reviewsError != null)
                                 CommentLoadNotice(source, onRetry)
                             else CommentMatchChoice(source, onMatch)
@@ -238,12 +249,21 @@ private fun SourceChoice(
 @Composable
 private fun FilterToggle(icon: ImageVector, label: String, checked: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
+    val motion = LocalMotionEnabled.current
+    val color by animateColorAsState(if (checked) DetailForeground else DetailSecondary,
+        tween(if (motion) MangaMotion.Content else 0), label = "comment-filter-toggle")
     Row(Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(12.dp))
         .toggleable(checked, interactionSource = interaction, indication = null, role = Role.Switch) { onClick() }
         .motionPress(interaction, pressedScale = .98f).padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Icon(icon, null, tint = DetailSecondary, modifier = Modifier.size(15.dp))
-        Text(label, color = if (checked) DetailForeground else DetailSecondary, fontSize = 12.sp)
-        if (checked) Icon(Icons.Outlined.Check, null, tint = DetailForeground, modifier = Modifier.size(13.dp))
+        Icon(icon, null, tint = color, modifier = Modifier.size(15.dp))
+        Text(label, color = color, fontSize = 12.sp)
+        AnimatedVisibility(checked,
+            enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
+                expandHorizontally(tween(if (motion) MangaMotion.Content else 0), expandFrom = Alignment.Start),
+            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                shrinkHorizontally(tween(if (motion) MangaMotion.Content else 0), shrinkTowards = Alignment.Start)) {
+            Icon(Icons.Outlined.Check, null, tint = color, modifier = Modifier.size(13.dp))
+        }
     }
 }

@@ -5,6 +5,8 @@ import dev.mangaflow.ui.platform.*
 import dev.mangaflow.platform.*
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.fadeIn
@@ -477,29 +479,52 @@ private fun ChapterGroups(
     onSelect: (String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val choices = remember(groups, total, selected) {
+    val allChoices = remember(groups, total) {
         buildList<Pair<String?, Int>> {
             add(null to total)
             groups.forEach { (name, count) -> add(name to count) }
-        }.filter { it.first != selected }
+        }
     }
     var expanded by remember { mutableStateOf(false) }
+    var closeAfterChoice by remember { mutableStateOf(false) }
+    val presence = remember { MutableTransitionState(false) }
+    presence.targetState = expanded && active
+    val present = presence.currentState || presence.targetState || !presence.isIdle
+    // A selected row must survive its own exit; excluding the new selection
+    // during the fold otherwise reorders the strip underneath the user's tap.
+    var choices by remember { mutableStateOf(allChoices.filter { it.first != selected }) }
     val motion = LocalMotionEnabled.current
     val scroll = rememberScrollState()
     val interaction = remember { MutableInteractionSource() }
     val selectedLabel = selected?.let(::chapterGroupLabel) ?: "全部"
     val turn by animateFloatAsState(if (expanded) 180f else 0f,
         if (motion) tween(MangaMotion.Content) else snap(), label = "chapter-group-disclosure")
-    BackHandler(active && expanded) { expanded = false }
-    LaunchedEffect(active) { if (!active) expanded = false }
-    LaunchedEffect(expanded, selected) { if (!expanded) scroll.scrollTo(0) }
+    BackHandler(active && expanded) { closeAfterChoice = false; expanded = false }
+    LaunchedEffect(active) { if (!active) { closeAfterChoice = false; expanded = false } }
+    LaunchedEffect(present, allChoices, selected) {
+        if (!present) {
+            choices = allChoices.filter { it.first != selected }
+            scroll.scrollTo(0)
+        }
+    }
+    LaunchedEffect(closeAfterChoice, selected, motion) {
+        if (closeAfterChoice) {
+            if (motion) delay(MangaMotion.Quick.toLong())
+            expanded = false
+            closeAfterChoice = false
+        }
+    }
     Row(modifier.fillMaxWidth().heightIn(min = 36.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.heightIn(min = 36.dp).widthIn(min = 44.dp, max = 176.dp)
             .clip(RoundedCornerShape(10.dp))
             .clickable(enabled = active, interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = if (expanded) "收起章节分组" else "展开章节分组",
-                onClick = { expanded = !expanded })
+                onClick = {
+                    closeAfterChoice = false
+                    if (!expanded && !present) choices = allChoices.filter { it.first != selected }
+                    expanded = !expanded
+                })
             .motionPress(interaction, enabled = active, pressedScale = .98f)
             .semantics {
                 contentDescription = "章节分组，当前$selectedLabel"
@@ -507,13 +532,17 @@ private fun ChapterGroups(
             }.padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(selectedLabel, color = DetailSecondary, fontSize = 12.sp,
-                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false))
+            MotionTabContent(selected = selectedLabel,
+                contentKey = { it }, order = { value ->
+                    allChoices.indexOfFirst { (name, _) -> (name?.let(::chapterGroupLabel) ?: "全部") == value }
+                }, fillContent = false, modifier = Modifier.weight(1f, fill = false)) { label ->
+                Text(label, color = DetailSecondary, fontSize = 12.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
             Icon(Icons.Outlined.ExpandMore, null, Modifier.size(14.dp).graphicsLayer { rotationZ = turn },
                 tint = DetailMuted)
         }
-        AnimatedVisibility(expanded,
+        AnimatedVisibility(presence,
             modifier = Modifier.weight(1f),
             enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
                 expandHorizontally(tween(if (motion) MangaMotion.Content else 0,
@@ -528,18 +557,26 @@ private fun ChapterGroups(
                     androidx.compose.runtime.key(name) {
                         val label = name?.let(::chapterGroupLabel) ?: "全部"
                         val rowInteraction = remember { MutableInteractionSource() }
+                        val chosen = selected == name
+                        val choiceBackground by animateColorAsState(
+                            if (chosen) DetailForeground.copy(alpha = .075f) else Color.Transparent,
+                            if (motion) tween(MangaMotion.Quick) else snap(), label = "chapter-choice-background")
+                        val choiceColor by animateColorAsState(if (chosen) DetailForeground else DetailSecondary,
+                            if (motion) tween(MangaMotion.Quick) else snap(), label = "chapter-choice-label")
                         Row(Modifier.heightIn(min = 36.dp).clip(RoundedCornerShape(10.dp))
-                            .selectable(selected = false, enabled = active && expanded, role = Role.Tab,
+                            .background(choiceBackground)
+                            .selectable(selected = chosen, enabled = active && expanded, role = Role.Tab,
                                 interactionSource = rowInteraction, indication = null, onClick = {
-                                    expanded = false
                                     onSelect(name)
+                                    if (motion && !chosen) closeAfterChoice = true
+                                    else { closeAfterChoice = false; expanded = false }
                                 })
                             .motionPress(rowInteraction, enabled = active && expanded, pressedScale = .985f)
                             .semantics { contentDescription = "$label，$count 章" }
                             .padding(horizontal = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Text(label, color = DetailSecondary, fontSize = 12.sp,
+                            Text(label, color = choiceColor, fontSize = 12.sp,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(count.toString(), color = DetailMuted, fontSize = 10.sp)
                         }

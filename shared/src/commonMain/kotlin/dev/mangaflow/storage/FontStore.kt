@@ -19,6 +19,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
@@ -115,12 +116,28 @@ internal class FontStore private constructor(context: PlatformContext) {
             storageReady = true
             // Only this store owns unfinished font transfers.
             StorageFile(root, ".pending").deleteRecursively()
-            val selections = MangaFontScene.entries.associateWith { scene ->
+            val savedSelections = MangaFontScene.entries.associateWith { scene ->
                 prefs.getString(preferenceKey(scene), MangaFontCatalog.defaultId(scene))
-                    ?.takeIf { id -> MangaFontCatalog.find(id)?.scenes?.contains(scene) == true }
+                    ?: MangaFontCatalog.defaultId(scene)
+            }
+            val selections = savedSelections.mapValues { (scene, id) ->
+                id.takeIf { MangaFontCatalog.find(it)?.scenes?.contains(scene) == true }
                     ?: MangaFontCatalog.defaultId(scene)
             }
             _state.value = _state.value.copy(selections = selections)
+            val normalized = savedSelections == selections || saveSelections(selections)
+            if (!normalized) {
+                putTransfer("system", FontTransfer(
+                    error = "字体设置迁移未能保存，当前暂用系统字体，请检查存储空间。",
+                ))
+            } else {
+                // Retired choices are app-owned, reproducible optional assets, never user files.
+                MangaFontCatalog.retiredIds.forEach { id ->
+                    StorageFile(root, id).let { directory ->
+                        if (directory.exists()) runCatching { directory.deleteRecursively() }
+                    }
+                }
+            }
             for (option in MangaFontCatalog.options.filter { it.assets.isNotEmpty() }) {
                 val paths = option.assets.map { asset -> fontFile(option, asset) }
                 if (paths.none { it.exists() }) continue

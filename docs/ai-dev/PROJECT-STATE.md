@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Modern fonts, download feedback and filter finishing · 2026-11-14
+
+Active correction/raw batch: DESIGN.md FONT-CANDIDATES-108 / DOWNLOAD-FEEDBACK-109 / FILTER-SETTLE-110 / BUILD-NATIVE-111, covered through1000121653 and the preceding rejection of classic Chinese fonts. These supersede the Noto/WenKai catalog, keep independent optional scene downloads and extend the current reader/filter work.
+
+Source batch changes: modern HarmonyOS Sans UI/title/prose and title-only站酷庆科黄油体; Inter/Geist numeric roles; removed-choice normalization and obsolete owned-cache cleanup; shared compact real download progress in reader/font rows/header with finite completion; animated browse selected indicator/icon/grid-list change and reversible width/material/shadow exit; stable chapter candidates and scroll throughout exit; preserved comment outgoing details. All original histories/chapter/source/download choices, current detail scroll and other concurrent work remain.
+
+Checkpoint parentdf2cda7c669560dee0323533ad9c2f17c64aab86: Android192/run43482236028 completed/success before this batch. Native run43482235920 had concrete iOS missing common IO import and Windows missing app image after successful installer packaging; this batch fixes only those blockers while preserving signing/version/incremental publication guards.
+
+Root alone integrates immutable isolated blobs and these changes in one main commit with expected-head protection. Next exact action: confirm the matching normal Android/native CI identities once, then keep main stable for publication and use actual user artifact feedback or concrete compile failures. Normal CI trigger is not successful package/device acceptance. No tests/local builds/filesystem/browser/device/service probes or additional review gate; current touch feel, actual optional-font downloads/rendering and new three-platform packages remain unverified until observed.
+
 ## FONT-SCENES-100 · optional role-scoped fonts · 2026-11-14
 
 The user has now authorized the font system's implementation, similar alternatives in settings, optional large downloads and choices limited to the relevant scene. Read FONT-SCENES-100 in DESIGN.md; this supersedes earlier TYPE-86 proposal-only entries and premature MiSans priority.

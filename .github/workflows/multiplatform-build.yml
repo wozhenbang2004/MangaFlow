@@ -73,7 +73,8 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon --console=plain --max-workers=2 -PmangaVersionName="$MANGA_VERSION" :desktopApp:packageDistributionForCurrentOS
+          # Windows installers do not retain an app image; incremental staging requires one.
+          ./gradlew --no-daemon --console=plain --max-workers=2 -PmangaVersionName="$MANGA_VERSION" :desktopApp:createDistributable :desktopApp:packageDistributionForCurrentOS
       - name: Stage installers and verified incremental file assets
         env:
           GH_TOKEN: ${{ github.token }}

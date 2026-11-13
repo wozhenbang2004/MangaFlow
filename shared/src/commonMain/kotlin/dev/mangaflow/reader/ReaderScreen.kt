@@ -178,6 +178,7 @@ import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.Page
+import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
@@ -207,6 +208,8 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.CompactDownloadIcon
+import dev.mangaflow.ui.CompactDownloadState
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.rememberDelayedBusy
@@ -882,17 +885,17 @@ fun ReaderScreen(
                             var savingChapter by remember(chapterId) { mutableStateOf(false) }
                             val downloaded = activeDownload?.status == DownloadStatus.COMPLETED
                             val downloading = activeDownload?.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
-                            val downloadIcon = when {
-                                downloading -> Icons.Rounded.Pause
-                                downloaded -> Icons.Rounded.Check
-                                activeDownload?.status == DownloadStatus.FAILED -> Icons.Rounded.Refresh
-                                else -> Icons.Rounded.Download
-                            }
                             val downloadLabel = when {
-                                savingChapter -> "正在保存本章"
-                                downloading -> "暂停下载，本章已保存 ${activeDownload?.completedPages ?: 0} 页"
+                                savingChapter -> "正在准备本章下载"
+                                activeDownload?.status == DownloadStatus.QUEUED -> "下载排队中，点击暂停"
+                                activeDownload?.status == DownloadStatus.WAITING -> "等待恢复下载，点击暂停"
+                                downloading -> activeDownload?.let { entry ->
+                                    if (entry.totalPages > 0) "下载 ${entry.completedPages} / ${entry.totalPages} 页，点击暂停"
+                                    else "正在获取本章页数，点击暂停"
+                                } ?: "正在下载本章，点击暂停"
                                 downloaded -> "本章已下载"
                                 localImport -> "本地章节无需下载"
+                                activeDownload?.status == DownloadStatus.PAUSED -> "下载已暂停，点击继续"
                                 activeDownload?.status == DownloadStatus.FAILED -> "重试下载"
                                 else -> "保存本章"
                             }
@@ -1011,10 +1014,13 @@ fun ReaderScreen(
                                         }
                                     }
                                 }
-                                ReaderIcon(downloadIcon, downloadLabel,
+                                ReaderDownloadAction(
+                                    chapterId = chapterId, entry = activeDownload, submitting = savingChapter,
+                                    label = downloadLabel,
                                     enabled = pages.isNotEmpty() && !downloaded && !localImport && !savingChapter,
                                     interactive = controlsVisible && active && !leavingReader,
-                                    buttonSize = 44.dp, onClick = saveChapter)
+                                    onClick = saveChapter,
+                                )
                             }
                         }
                     }
@@ -2186,6 +2192,38 @@ internal fun ReaderPanelHeading(title: String, closeLabel: String, onDismiss: ()
         Text(title, color = MaterialTheme.colorScheme.onSurface, fontSize = 17.sp,
             fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
         ReaderIcon(Icons.Rounded.Close, closeLabel, onClick = onDismiss)
+    }
+}
+
+/** The reader owns the action; the shared micro icon observes the existing download entry. */
+@Composable
+private fun ReaderDownloadAction(
+    chapterId: String,
+    entry: DownloadEntry?,
+    submitting: Boolean,
+    label: String,
+    enabled: Boolean,
+    interactive: Boolean,
+    onClick: () -> Unit,
+) {
+    val state = when {
+        submitting -> CompactDownloadState.DOWNLOADING
+        entry?.status == DownloadStatus.QUEUED || entry?.status == DownloadStatus.WAITING -> CompactDownloadState.WAITING
+        entry?.status == DownloadStatus.RUNNING -> CompactDownloadState.DOWNLOADING
+        entry?.status == DownloadStatus.PAUSED -> CompactDownloadState.PAUSED
+        entry?.status == DownloadStatus.COMPLETED -> CompactDownloadState.COMPLETE
+        entry?.status == DownloadStatus.FAILED -> CompactDownloadState.ERROR
+        else -> CompactDownloadState.AVAILABLE
+    }
+    val progress = entry?.takeIf { it.totalPages > 0 }?.let {
+        it.completedPages.toFloat() / it.totalPages
+    }
+    MotionIconButton(onClick, enabled = enabled && interactive, modifier = Modifier.size(44.dp)) {
+        key(chapterId) {
+            CompactDownloadIcon(state, progress = if (submitting) null else progress,
+                contentDescription = label,
+                activeIcon = if (submitting) Icons.Rounded.Download else Icons.Rounded.Pause)
+        }
     }
 }
 

@@ -1,6 +1,9 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -10,11 +13,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -27,16 +30,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
-import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +45,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -69,8 +71,10 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
+import kotlinx.coroutines.delay
 
 /** Lives inside the existing appearance disclosure; choices affect one text role at a time. */
 @Composable
@@ -97,13 +101,21 @@ internal fun FontSettings(modifier: Modifier = Modifier) {
             val pending = pendingId?.let(MangaFontCatalog::find)
             val pendingTransfer = pendingId?.let { state.transfers[it] }
             val headerValue = when {
-                pending != null && pendingTransfer?.active == true -> "${pending.name} · 下载中"
+                pending != null && pendingTransfer?.active == true -> {
+                    val total = pendingTransfer.total.coerceAtLeast(1L)
+                    val received = pendingTransfer.received.coerceIn(0L, total)
+                    if (received >= total) "${pending.name} · 校验中"
+                    else "${pending.name} · ${received * 100L / total}%"
+                }
                 pendingTransfer?.error != null -> "$currentName · 下载失败"
                 !state.loading && MangaFontCatalog.find(currentId)?.assets?.isNotEmpty() == true &&
                     currentId !in state.installed -> "$currentName · 暂用系统"
                 else -> currentName
             }
             val interaction = remember(scene) { MutableInteractionSource() }
+            val disclosureRotation by animateFloatAsState(if (open) -180f else 0f,
+                if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap(),
+                label = "font-scene-disclosure")
             Column(Modifier.fillMaxWidth()) {
                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
                     .semantics { stateDescription = "$currentName，${if (open) "已展开" else "已收起"}" }
@@ -127,14 +139,20 @@ internal fun FontSettings(modifier: Modifier = Modifier) {
                         Modifier.weight(.8f, fill = false).widthIn(max = 136.dp),
                         color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Icon(if (open) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
-                        Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+                    if (pendingTransfer?.active == true) {
+                        CompactDownloadIcon(CompactDownloadState.DOWNLOADING,
+                            progress = (pendingTransfer.received.toDouble() / pendingTransfer.total.coerceAtLeast(1L)).toFloat(),
+                            modifier = Modifier.size(20.dp), tint = colors.onSurfaceVariant,
+                            contentDescription = "字库下载进度")
+                    }
+                    Icon(Icons.Outlined.ExpandMore, null,
+                        Modifier.size(18.dp).rotate(disclosureRotation), tint = colors.onSurfaceVariant)
                 }
                 AnimatedVisibility(open,
                     enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
                         expandVertically(tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing)),
                     exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
-                        shrinkVertically(tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing))) {
+                        shrinkVertically(tween(if (motion) MangaMotion.Enter else 0, easing = MangaMotion.EnterEasing))) {
                     Column(Modifier.fillMaxWidth().motionInputGate(open).selectableGroup().padding(bottom = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         for (option in MangaFontCatalog.forScene(scene)) {
@@ -160,11 +178,30 @@ private fun FontChoiceRow(
     onLicense: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    val motion = LocalMotionEnabled.current
     val interaction = remember(scene, option.id) { MutableInteractionSource() }
     val transfer = state.transfers[option.id]
     val downloading = transfer?.active == true
+    val transferTotal = (transfer?.total ?: option.byteCount).coerceAtLeast(1L)
+    val transferReceived = (transfer?.received ?: 0L).coerceIn(0L, transferTotal)
     val downloaded = option.id in state.installed
     val builtIn = option.assets.isEmpty()
+    var completionSeen by remember(option.id) { mutableStateOf(downloaded || state.loading) }
+    val justInstalled = downloaded && !completionSeen
+    LaunchedEffect(downloaded, state.loading) {
+        if (!state.loading) {
+            if (!downloaded) completionSeen = false
+            else if (!completionSeen) {
+                delay(800L)
+                completionSeen = true
+            }
+        }
+    }
+    val selectionTone by animateColorAsState(
+        if (selected) colors.onSurface.copy(alpha = .045f) else Color.Transparent,
+        if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
+        label = "font-choice-selection",
+    )
     val available = builtIn || downloaded
     val pending = state.pendingSelections[scene] == option.id
     val enabled = !state.loading
@@ -189,7 +226,7 @@ private fun FontChoiceRow(
 
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-            .then(if (selected) Modifier.background(colors.onSurface.copy(alpha = .045f)) else Modifier)
+            .background(selectionTone)
             .selectable(selected = selected, enabled = enabled, role = Role.RadioButton,
                 interactionSource = interaction, indication = null, onClick = requestUse)
             .semantics { contentDescription = selectionLabel }
@@ -203,8 +240,9 @@ private fun FontChoiceRow(
                     Text(option.name, Modifier.weight(1f, fill = false),
                         color = colors.onSurface, fontSize = 14.sp, lineHeight = 20.sp,
                         fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
-                    if (selected) Icon(Icons.Outlined.Check, "已选择", Modifier.size(16.dp),
-                        tint = colors.onSurface)
+                    MotionSwap(selected, Modifier.size(16.dp)) { chosen ->
+                        if (chosen) Icon(Icons.Outlined.Check, "已选择", Modifier.size(16.dp), tint = colors.onSurface)
+                    }
                 }
                 if (previewReady) {
                     Text(if (scene == MangaFontScene.NUMBERS) "8.7 / 10   12:34   299.4" else scene.sample,
@@ -218,36 +256,50 @@ private fun FontChoiceRow(
                     Text("下载后预览 · ${fontDownloadBytes(option.byteCount)}",
                         color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
                 }
-                if (option.assets.any { it.weight != null } && previewReady) {
-                    Text("常规字重", color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
+                if (option.description.isNotBlank()) {
+                    Text(option.description, color = colors.onSurfaceVariant,
+                        fontSize = 12.sp, lineHeight = 18.sp,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
                 if (downloading) {
                     val total = (transfer?.total ?: option.byteCount).coerceAtLeast(1L)
                     val received = (transfer?.received ?: 0L).coerceIn(0L, total)
-                    Text("${fontDownloadBytes(received)} / ${fontDownloadBytes(total)}${if (pending) " · 完成后使用" else ""}",
+                    Text(if (received >= total) "正在校验字库…"
+                        else "${received * 100L / total}% · ${fontDownloadBytes(received)} / ${fontDownloadBytes(total)}${if (pending) " · 完成后使用" else ""}",
                         color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
-                    LinearProgressIndicator(progress = { (received.toDouble() / total).toFloat() },
-                        modifier = Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 3.dp).height(2.dp),
-                        color = colors.onSurface, trackColor = colors.onSurface.copy(alpha = .08f))
                 }
             }
             if (!builtIn) {
-                if (downloading) {
-                    MotionIconButton(onClick = { store.cancel(option.id) }, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.Close, "取消下载${option.name}", Modifier.size(18.dp),
-                            tint = colors.onSurfaceVariant)
-                    }
-                } else if (downloaded) {
-                    MotionIconButton(onClick = { store.remove(option.id) }, enabled = enabled,
-                        modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.DeleteOutline, "删除${option.name}字库；使用它的场景将恢复默认",
+                val downloadState = when {
+                    downloading && transferReceived >= transferTotal -> CompactDownloadState.WAITING
+                    downloading -> CompactDownloadState.DOWNLOADING
+                    downloaded -> CompactDownloadState.COMPLETE
+                    transfer?.error != null -> CompactDownloadState.ERROR
+                    else -> CompactDownloadState.AVAILABLE
+                }
+                val actionLabel = when {
+                    downloading -> "取消下载${option.name}，当前${transferReceived * 100L / transferTotal}%"
+                    downloaded -> "删除${option.name}字库；使用它的场景将恢复默认"
+                    transfer?.error != null -> "重试下载并使用${option.name}"
+                    else -> "下载并使用${option.name}，${fontDownloadBytes(option.byteCount)}"
+                }
+                MotionIconButton(
+                    onClick = {
+                        when {
+                            downloading -> store.cancel(option.id)
+                            downloaded -> store.remove(option.id)
+                            else -> requestUse()
+                        }
+                    },
+                    enabled = enabled, modifier = Modifier.size(44.dp),
+                ) {
+                    MotionSwap(downloaded && !justInstalled, Modifier.size(24.dp)) { showDelete ->
+                        if (showDelete) Icon(Icons.Outlined.DeleteOutline, actionLabel,
                             Modifier.size(18.dp), tint = colors.onSurfaceVariant)
-                    }
-                } else {
-                    MotionIconButton(onClick = requestUse, enabled = enabled, modifier = Modifier.size(44.dp)) {
-                        Icon(if (transfer?.error != null) Icons.Outlined.Refresh else Icons.Outlined.Download,
-                            if (transfer?.error != null) "重试下载并使用${option.name}" else "下载并使用${option.name}，${fontDownloadBytes(option.byteCount)}",
-                            Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+                        else CompactDownloadIcon(downloadState,
+                            progress = transfer?.let { (it.received.toDouble() / it.total.coerceAtLeast(1L)).toFloat() },
+                            contentDescription = actionLabel,
+                            activeIcon = Icons.Outlined.Close, tint = colors.onSurfaceVariant)
                     }
                 }
                 MotionIconButton(onClick = onLicense, modifier = Modifier.size(44.dp)) {
@@ -261,7 +313,13 @@ private fun FontChoiceRow(
                 modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 8.dp, top = 2.dp, bottom = 6.dp)
                     .semantics { liveRegion = LiveRegionMode.Polite })
         }
-        if (licenseOpen && !builtIn) FontLicense(option)
+        AnimatedVisibility(licenseOpen && !builtIn,
+            enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
+                expandVertically(tween(if (motion) MangaMotion.Enter else 0, easing = MangaMotion.EnterEasing)),
+            exit = fadeOut(tween(if (motion) MangaMotion.Content else 0)) +
+                shrinkVertically(tween(if (motion) MangaMotion.Enter else 0, easing = MangaMotion.EnterEasing))) {
+            Box(Modifier.motionInputGate(licenseOpen)) { FontLicense(option) }
+        }
     }
 }
 

@@ -21,7 +21,6 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.outlined.ViewList
 
 import androidx.compose.foundation.layout.asPaddingValues
@@ -160,6 +159,7 @@ import dev.mangaflow.ui.motion.bottomPullLoad
 import dev.mangaflow.ui.motion.rememberBottomPullLoadState
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.HazeState
@@ -689,12 +689,19 @@ private fun DiscoveryPane(
                 }
             } else {
                 items(state.items, key = Manga::id) { manga ->
-                    if (columns == 1) BrowseListRow(manga, repository,
-                        showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
-                        onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
-                    else CoverTile(manga, repository, dense = true, narrow = visibleColumns >= 4,
-                        showChapter = state.mode == DiscoveryMode.LATEST, placement = "discovery-grid-${state.cacheKey}",
-                        onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
+                    Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
+                        placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())) {
+                        MotionTabContent(selected = columns == 1, modifier = Modifier.fillMaxWidth(),
+                            contentKey = { it }, order = { if (it) 0 else 1 }, fillContent = false) { list ->
+                            val placement = "discovery-grid-${state.cacheKey}-" + if (list) "list" else "tile"
+                            if (list) BrowseListRow(manga, repository,
+                                showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
+                                onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
+                            else CoverTile(manga, repository, dense = true, narrow = visibleColumns >= 4,
+                                showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
+                                onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
+                        }
+                    }
                 }
             }
             item(span = { GridItemSpan(maxLineSpan) }, key = "more") {
@@ -791,7 +798,8 @@ private fun DiscoveryLayoutControl(
     onPresenceChange: (Boolean) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    LaunchedEffect(enabled) { if (!enabled) expanded = false }
+    var closeAfterChoice by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(enabled) { if (!enabled) { expanded = false; closeAfterChoice = null } }
     val density = LocalDensity.current
     val direction = LocalLayoutDirection.current
     val motion = LocalMotionEnabled.current
@@ -800,12 +808,23 @@ private fun DiscoveryLayoutControl(
     val choices = remember(desktop) { if (desktop) listOf(0, 1, 2, 3, 4, 6, 8) else listOf(1, 2, 3, 4) }
     val labels = remember(choices) { choices.map { if (it == 0) "自动" else if (it == 1) "列表" else "${it}列" } }
     val selected = choices.indexOf(columns).coerceAtLeast(0)
+    var displayedChoice by remember { mutableStateOf(columns) }
+    LaunchedEffect(columns) { displayedChoice = columns }
+    LaunchedEffect(closeAfterChoice, expanded, motion) {
+        if (closeAfterChoice != null && expanded) {
+            // The real layout changes on the tap. Only the folding chrome waits
+            // one short beat, so the moving choice can arrive before it leaves.
+            if (motion) delay(MangaMotion.Quick.toLong())
+            expanded = false
+            closeAfterChoice = null
+        }
+    }
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = expanded && enabled
     val transition = rememberTransition(presence, label = "layout-choice-reveal")
     val reveal = transition.animateFloat(transitionSpec = {
-        if (motion) tween(if (targetState) MangaMotion.SearchClip else MangaMotion.Content,
-            easing = MangaMotion.SearchEasing) else snap()
+        if (motion) tween(if (targetState) MangaMotion.SearchClip else MangaMotion.Enter,
+            easing = if (targetState) MangaMotion.SearchEasing else MangaMotion.ExitEasing) else snap()
     }, label = "layout-choice-width") { if (it) 1f else 0f }
     val present = presence.currentState || presence.targetState || !presence.isIdle
     val reportPresence by rememberUpdatedState(onPresenceChange)
@@ -815,7 +834,9 @@ private fun DiscoveryLayoutControl(
     val cellWidth = 44.dp * density.fontScale.coerceIn(1f, 1.35f)
     val panelWidth = minOf(cellWidth * choices.size + 8.dp, availableWidth)
     val scroll = rememberScrollState()
-    LaunchedEffect(expanded, selected, scroll.maxValue) {
+    LaunchedEffect(expanded, scroll.maxValue) {
+        // Selection moves inside the retained strip; it must not jump its
+        // scroll origin while the new indicator is travelling or folding away.
         if (expanded) scroll.scrollTo(with(density) { (cellWidth * selected).roundToPx() }
             .coerceIn(0, scroll.maxValue))
     }
@@ -845,25 +866,30 @@ private fun DiscoveryLayoutControl(
         }
     }) {
         MotionIconButton(
-            onClick = { expanded = !expanded },
+            onClick = { closeAfterChoice = null; expanded = !expanded },
             modifier = Modifier.size(44.dp).semantics {
+                contentDescription = "浏览布局"
                 stateDescription = labels[selected] + "，当前${actualColumns}列" +
                     if (expanded) "，已展开" else "，已收起"
             },
             enabled = enabled,
         ) {
-            Box(Modifier.size(23.dp), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.ViewModule, "浏览布局：${labels[selected]}", Modifier.size(19.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(if (desktop && columns == 0) "自" else actualColumns.toString(),
-                    Modifier.align(Alignment.BottomEnd).clip(RoundedCornerShape(3.dp))
-                        .background(MaterialTheme.colorScheme.surface).padding(horizontal = 1.dp),
-                    fontSize = 9.sp, lineHeight = 10.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            MotionTabContent(selected = columns to actualColumns, modifier = Modifier.size(23.dp),
+                contentKey = { it }, order = { it.first }, fillContent = false) { (preferred, actual) ->
+                Box(Modifier.size(23.dp).clearAndSetSemantics {}, contentAlignment = Alignment.Center) {
+                    Icon(if (preferred == 1) Icons.Outlined.ViewList else Icons.Outlined.ViewModule,
+                        null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (desktop && preferred == 0) "自" else actual.toString(),
+                        Modifier.align(Alignment.BottomEnd).clip(RoundedCornerShape(3.dp))
+                            .background(MaterialTheme.colorScheme.surface).padding(horizontal = 1.dp),
+                        fontSize = 9.sp, lineHeight = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
         if (present && panelWidth > 0.dp) Popup(popupPositionProvider = position,
-            onDismissRequest = { expanded = false }, properties = PopupProperties(focusable = expanded && enabled)) {
+            onDismissRequest = { closeAfterChoice = null; expanded = false },
+            properties = PopupProperties(focusable = expanded && enabled)) {
             // Popup geometry stays final-sized throughout; animated optical width
             // never re-enters the position provider or moves the trigger.
             Box(Modifier.width(panelWidth).height(44.dp)) {
@@ -888,22 +914,24 @@ private fun DiscoveryLayoutControl(
                         }
                     }.width(panelWidth).height(44.dp).horizontalScroll(scroll).padding(horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        choices.forEachIndexed { index, choice ->
-                            val chosen = choice == columns
-                            val interaction = remember(choice) { MutableInteractionSource() }
-                            val color = if (chosen) MaterialTheme.colorScheme.onSurface
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                            Box(Modifier.width(cellWidth).height(44.dp)
-                                .selectable(selected = chosen, enabled = enabled && expanded,
-                                    interactionSource = interaction, indication = null, role = Role.RadioButton,
-                                    onClick = { if (!chosen) onChange(choice); expanded = false })
-                                .motionPress(interaction, enabled && expanded, pressedScale = .96f)
-                                .semantics { contentDescription = labels[index] },
-                                contentAlignment = Alignment.Center) {
-                                Box(Modifier.fillMaxSize().padding(vertical = 5.dp, horizontal = 2.dp)
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(if (chosen) MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)
-                                        else Color.Transparent))
+                        MotionTabs(
+                            selected = choices.indexOf(displayedChoice).coerceAtLeast(0),
+                            labels = labels, role = Role.RadioButton,
+                            modifier = Modifier.width(cellWidth * choices.size),
+                            controlHeight = 44.dp, treatment = MotionTabTreatment.Soft,
+                            fullWidthIndicator = true, indicatorHeight = 34.dp, indicatorCornerRadius = 17.dp,
+                            indicator = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f),
+                            onSelect = { index ->
+                                val choice = choices[index]
+                                displayedChoice = choice
+                                if (choice != columns) onChange(choice)
+                                if (!motion || choice == columns) {
+                                    closeAfterChoice = null
+                                    expanded = false
+                                } else closeAfterChoice = choice
+                            },
+                            itemContent = { index, _, color ->
+                                val choice = choices[index]
                                 Row(verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                                     modifier = Modifier.clearAndSetSemantics {}) {
@@ -912,8 +940,8 @@ private fun DiscoveryLayoutControl(
                                     if (choice != 1) Text(if (choice == 0) "自" else choice.toString(),
                                         color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                                 }
-                            }
-                        }
+                            })
+
                     }
                 }
             }
