@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "dev.mangaflow"
     compileSdk = 37
+    compileSdkMinor = 0
     buildToolsVersion = "36.0.0"
     defaultConfig {
         applicationId = "dev.mangaflow"

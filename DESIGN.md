@@ -1,5 +1,11 @@
 # MangaFlow detail · 2026-11-12
 
+## Haze 2.1 CI SDK package correction · 2026-11-13 (HAZE-21-CI-02)
+
+User reported “ci 失败” after the full runtime migration. Release 0.1.114 / run 43357217170 / job 131662009689 stopped in `Install Android build tools`, before Gradle or Kotlin compilation: `Failed to find package 'platforms;android-37'`. The official Google SDK repository (`https://dl.google.com/android/repository/repository2-3.xml`) publishes stable API 37.0 as `platforms;android-37.0` (revision 2, channel-0); no integer-only package is present. Both workflows now install the exact 37.0 package. The app uses AGP's documented `compileSdkMinor = 0` alongside `compileSdk = 37`, aligning compilation with the installed SDK. Build Tools/signing paths remain 36.0.0; the six official Haze 2.1.0 modules, AGP/Kotlin/Gradle/Compose pins, fixed materials and current page/gesture behavior remain unchanged.
+
+Evidence is the failed job log, official SDK repository metadata, AGP 9.5 CommonExtension API reference and source/diff review. No tests, local build, emulator or UI automation. Submit to current main without force, confirm the replacement CI trigger and leave its build result and device acceptance pending; triggering CI is not successful compilation.
+
 ## Full Haze 2.1 runtime migration · 2026-11-13 (HAZE-21-01, implemented; CI/device acceptance pending)
 
 User correction, recorded before implementation: “完整引入最新 2.1 的全部能力啊你在搞什么？”. This supersedes GLASS-PIPELINE-07's decision to retain Haze 1.6 and copy selected shader formulas. The goal is the complete official 2.1.0 core, Blur, Glass, Material3 and material-preset runtime, including native container fields/member transitions, semantic and progressive blur, full optical/detail/rim stages, interaction responses, typed inputs/retention, source sharing, accessibility, performance profiles and the eligible native Android backdrop backend. Do not describe a source subset or merely adding unused dependencies as completion.
