@@ -349,7 +349,7 @@ fun DownloadsScreen(
             .onSizeChanged { headerHeightPx = it.height }) {
             PageTitleHeader("下载", backdrop, navigation,
                 leading = {
-                    Spacer(Modifier.width(filterWidth).height(44.dp))
+                    Spacer(Modifier.width(filterWidth).height(morphGlassTabHeight()))
                 }, actions = {
                 toolbar {
                     if (managing) {

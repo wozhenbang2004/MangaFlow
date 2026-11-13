@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## Selector label alignment · 2026-11-13 (HEADER-SELECTOR-15; implemented, device acceptance pending)
+
+User: “展开之后收原本的那个位置有偏移就这个收藏其他的可能也有”. Screenshots: `1000121495.jpg` / `1000121496.jpg`. Source review identifies two different label layouts inside the existing persistent selector: compact uses 11dp leading padding, a 19dp icon and 7dp gaps; expanded used 4dp outer plus 10dp row padding, an 18dp icon and 8dp gaps. Its top 4dp padding also shifted the first option baseline. These source differences are not screenshot-derived unit measurements.
+
+- Both compact and expanded choices now use the same GlassTabLabel renderer, including 11/10dp horizontal insets, 19dp leading icon, 7dp gaps, fixed 16dp trailing slot and identical label style. The chevron/check changes inside that slot. Remove menu content's leading/top padding; the selected background alone has a 4dp inset. Keep the menu's final-size content layout and normal-width limits.
+- Share morphGlassTabHeight across the compact glass, each menu row, both label states and the library/download reserved header slots. Normal font scale stays 44dp; enlarged fonts cannot give the compact and expanded states different vertical centres. The menu retains 4dp bottom clearance. Root 62dp/2dp positioning was checked against the actual 8dp outer inset, 44dp navigation and 10dp PageTitleHeader gap and was retained.
+- Move menu press deformation onto the highlight drawing only, before its clip/background; remove compact-label press scaling. Icons/text stay anchored through press, release and crossfade. Keep glass interaction feedback, the critically damped morph, chevron rotation, reduced-motion behavior, haptics, immediate selection and close/reopen input gates.
+- This extends HEADER-SELECTOR-14's permanently mounted surface instead of restoring a trigger/overlay handoff. Preserve fixed optical reference/capture padding, per-surface shader ownership, current fixed materials, newest detail/gallery and score-stack changes. The shared component serves both 收藏/最近阅读 and 全部/进行中/已下载; no filter/history/download data or saved list-position change is introduced.
+
+Source/call-site/diff review only; no tests, local build, API probes, emulator or UI automation. Publish directly to current main and confirm the existing release CI triggered. Compilation and actual phone alignment/hand feel remain unverified until their respective evidence is available.
+
 ## Reading-first manga details · 2026-11-13 (DETAIL-ENTRY-09)
 
 User authorized the full six-point correction with “去解决啊”: “封面、信息、章节和悬浮操作之间的视觉层级没有建立好”, “不要再叠一整块半透明白色背景”, “高度 40–44dp 的微型章节单元”, and “它首先是一个阅读入口，同时也应该有海报的沉浸氛围”. This supersedes DETAIL-HERO/MATRIX/SEAM/DOCK-08 where it conflicts. The linked image was opened and is raw cover artwork with dense printed lettering, not an after-state screenshot of the app.

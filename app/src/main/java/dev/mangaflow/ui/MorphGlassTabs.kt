@@ -77,17 +77,27 @@ internal fun morphGlassTabWidth(choices: List<GlassTabChoice>): Dp {
     return (with(density) { labelWidth.toDp() } + 70.dp).coerceIn(96.dp, 144.dp)
 }
 
-/** Identical icon, text, chevron and padding at both ends of the overlay handoff. */
+/** The reserved header slot, compact label and menu rows share this height. */
 @Composable
-private fun GlassTabLabel(choice: GlassTabChoice, modifier: Modifier = Modifier, expansion: () -> Float = { 0f }) {
-    Row(modifier.height(44.dp).padding(start = 11.dp, end = 10.dp),
+internal fun morphGlassTabHeight(): Dp =
+    (18f * LocalDensity.current.fontScale + 12f).dp.coerceAtLeast(44.dp)
+
+/** One label geometry for both states; the selection background never supplies content padding. */
+@Composable
+private fun GlassTabLabel(choice: GlassTabChoice, modifier: Modifier = Modifier,
+    menuSelection: Boolean? = null, expansion: () -> Float = { 0f }) {
+    Row(modifier.height(morphGlassTabHeight()).padding(start = 11.dp, end = 10.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
         Icon(choice.icon, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurface)
         Text(choice.label, Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1, overflow = TextOverflow.Ellipsis, style = glassTabLabelStyle())
-        Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp).graphicsLayer {
-            rotationZ = expansion() * 180f
-        }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+            if (menuSelection == null) Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp).graphicsLayer {
+                rotationZ = expansion() * 180f
+            }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            else if (menuSelection) Icon(Icons.Outlined.Check, null, Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurface)
+        }
     }
 }
 
@@ -126,10 +136,10 @@ internal fun BoxScope.MorphGlassTabSelector(
             onClickLabel = "关闭分类", onClick = onDismiss))
     }
     val extendedWidth = (collapsedWidth + 12.dp).coerceIn(128.dp, 156.dp)
-    val rowHeight = (18f * LocalDensity.current.fontScale + 12f).dp.coerceAtLeast(44.dp)
-    val extendedHeight = rowHeight * choices.size + 8.dp
+    val rowHeight = morphGlassTabHeight()
+    val extendedHeight = rowHeight * choices.size + 4.dp
     val width = collapsedWidth + (extendedWidth - collapsedWidth) * progress
-    val height = 44.dp + (extendedHeight - 44.dp) * progress
+    val height = rowHeight + (extendedHeight - rowHeight) * progress
     LiquidGlassSurface(backdrop,
         modifier = Modifier.align(Alignment.TopStart).zIndex(41f)
             .padding(start = 62.dp, top = 2.dp).width(width).height(height),
@@ -140,33 +150,24 @@ internal fun BoxScope.MorphGlassTabSelector(
             .size(width = extendedWidth, height = extendedHeight).graphicsLayer {
             alpha = ((progress - .25f) / .65f).coerceIn(0f, 1f)
         }.motionInputGate(enabled && expanded && progress >= .7f)
-            .padding(4.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
+            .padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
             choices.forEachIndexed { index, choice ->
                 val interaction = remember(index) { MutableInteractionSource() }
                 val active = selected == index
                 val selectionTint = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f)
-                Row(Modifier.fillMaxWidth().height(rowHeight).clip(RoundedCornerShape(12.dp))
-                    .background(if (active) selectionTint else Color.Transparent)
+                Box(Modifier.fillMaxWidth().height(rowHeight)
                     .clickable(enabled = enabled && expanded && progress >= .7f,
                         interactionSource = interaction, indication = null,
                         role = Role.Tab, onClickLabel = "显示" + choice.label,
                         onClick = {
                             if (index != selected) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             onSelect(index)
-                        })
-                    .motionPress(interaction, enabled && expanded, .985f)
-                    .padding(horizontal = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(choice.icon, null, Modifier.size(18.dp),
-                        tint = if (active) MaterialTheme.colorScheme.onSurface
-                            else MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(choice.label, Modifier.weight(1f), style = glassTabLabelStyle(),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface)
-                    Box(Modifier.size(14.dp)) {
-                        if (active) Icon(Icons.Outlined.Check, null, Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.onSurface)
-                    }
+                        })) {
+                    Box(Modifier.matchParentSize().padding(4.dp)
+                        .motionPress(interaction, enabled && expanded, .985f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (active) selectionTint else Color.Transparent))
+                    GlassTabLabel(choice, Modifier.fillMaxWidth(), menuSelection = active)
                 }
             }
         }
@@ -180,7 +181,6 @@ internal fun BoxScope.MorphGlassTabSelector(
             .semantics {
                 contentDescription = "切换分类，当前" + choices[selected].label
                 stateDescription = "已收起"
-            } else Modifier.clearAndSetSemantics { })
-            .motionPress(interaction, labelInteractive, .985f), expansion = { progress })
+            } else Modifier.clearAndSetSemantics { }), expansion = { progress })
     }
 }

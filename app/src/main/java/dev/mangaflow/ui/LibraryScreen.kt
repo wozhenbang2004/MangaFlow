@@ -335,7 +335,7 @@ fun LibraryScreen(
             .onSizeChanged { headerHeightPx = it.height }) {
             PageTitleHeader("书架", backdrop, navigation,
                 leading = {
-                    Spacer(Modifier.width(shelfWidth).height(44.dp))
+                    Spacer(Modifier.width(shelfWidth).height(morphGlassTabHeight()))
                 },
                 actions = {
                     toolbar {
