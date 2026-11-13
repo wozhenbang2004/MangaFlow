@@ -183,9 +183,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val changeSection: (Section) -> Unit = { destination ->
         model.cancelLibraryReading()
-        drawerAction = null
-        drawerRootTransition = null
-        sectionName = destination.name
+        // Root pages share one shell, so every entry must use its interruptible handoff.
+        drawerAction = DrawerAction(DrawerValue.Closed, destination)
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val drawerBackdrop = rememberHazeState()
@@ -248,7 +247,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             model.closeReader()
             model.closeDetail()
             changeSection(Section.SETTINGS)
-            drawerAction = DrawerAction(DrawerValue.Closed)
         }
     }
     LaunchedEffect(openDownloadsRequest) {
@@ -258,7 +256,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             model.closeReader()
             model.closeDetail()
             changeSection(Section.DOWNLOADS)
-            drawerAction = DrawerAction(DrawerValue.Closed)
         }
     }
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)

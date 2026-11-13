@@ -2,6 +2,7 @@ package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -27,6 +28,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -44,6 +46,9 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.FeelEvent
+import dev.mangaflow.ui.motion.motionPress
+import dev.mangaflow.ui.motion.rememberFeelFeedback
 import kotlinx.coroutines.launch
 
 /** Same retained sheet, quiet rows and input composition as the existing author/tag workflows. */
@@ -67,6 +72,7 @@ internal fun UnifiedSourceManager(
     val focus = LocalFocusManager.current
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val feedback = rememberFeelFeedback()
     val maxHeight = (LocalConfiguration.current.screenHeightDp * .78f).dp
     val search: () -> Unit = {
         if (source.isNotBlank() && query.isNotBlank() && !state.connecting) {
@@ -175,12 +181,16 @@ internal fun UnifiedSourceManager(
                     state.linked.none { it.id == result.id }
                 }, key = { "candidate:" + it.id }) { manga ->
                     val selected = candidate?.id == manga.id
+                    val interaction = remember(manga.id) { MutableInteractionSource() }
                     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                         .background(if (selected) colors.surfaceVariant.copy(alpha = .45f) else colors.surface.copy(alpha = 0f))
-                        .clickable(enabled = !state.connecting) {
+                        .clickable(enabled = !state.connecting, interactionSource = interaction,
+                            indication = null, role = Role.Button, onClickLabel = "选择这个版本") {
+                            if (!selected) feedback.perform(FeelEvent.Selection)
                             keyboard?.hide(); focus.clearFocus(); candidate = manga
                             scope.launch { list.scrollToItem(0) }
                         }
+                        .motionPress(interaction, enabled = !state.connecting)
                         .padding(horizontal = 8.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         AsyncImage(manga.coverUrl, null, Modifier.size(width = 36.dp, height = 48.dp)
