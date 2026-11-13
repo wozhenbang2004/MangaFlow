@@ -39,6 +39,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -321,11 +326,15 @@ internal fun MotionBottomSheet(
         }
     }
     val window = LocalMangaWindow.current
+    val sheetInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Bottom)
     ModalBottomSheet(onDismissRequest = { onDismiss() }, sheetState = sheet,
         modifier = modifier.heightIn(max = (window.height - 16.dp).coerceAtLeast(1.dp)),
         sheetMaxWidth = MangaLayout.PanelWidth,
         containerColor = if (backdrop != null) Color.Transparent else containerColor,
         contentColor = contentColor, tonalElevation = 0.dp,
+        // Insets outside a transparent Surface leave an unpainted strip below the frosting.
+        // Let the frosted body paint this area, then inset its foreground exactly once.
+        contentWindowInsets = { if (backdrop != null) WindowInsets(0, 0, 0, 0) else sheetInsets },
         dragHandle = {
             if (backdrop == null) MotionSheetHandle(contentColor)
         },
@@ -333,7 +342,7 @@ internal fun MotionBottomSheet(
         if (backdrop != null) LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(),
             cornerRadius = 0.dp, role = GlassSurfaceRole.PANEL, surfaceColor = containerColor,
             elevation = 0.dp, softCard = true) {
-            Column(Modifier.fillMaxWidth().motionInputGate(!closing)) {
+            Column(Modifier.fillMaxWidth().windowInsetsPadding(sheetInsets).motionInputGate(!closing)) {
                 MotionSheetHandle(contentColor)
                 content(dismiss)
             }

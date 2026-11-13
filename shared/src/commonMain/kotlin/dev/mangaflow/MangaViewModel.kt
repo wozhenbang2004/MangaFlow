@@ -1369,9 +1369,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }
     }
 
-    fun attachBodySource(manga: Manga, sameChapterSystem: Boolean, edition: String) {
+    fun attachBodySource(workId: String, manga: Manga) {
         val state = _sourceManagement.value ?: return
-        if (state.connecting) return
+        if (state.work.id != workId || state.connecting || state.sources.none { it.first == manga.sourceId }) return
         sourceManagementJob?.cancel()
         val request = ++sourceManagementRequest
         _sourceManagement.value = state.copy(connecting = true, loading = false, error = null)
@@ -1380,7 +1380,18 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 val catalog = foregroundRequest("来源目录") { repository.detailSource(manga.sourceId, manga.id) }
                 if (request != sourceManagementRequest) return@launch
                 require(catalog.chapters.isNotEmpty()) { "这个版本暂时没有可读章节。" }
+                val baseline = _detail.value?.takeIf { it.manga.id == workId }?.detail
+                    ?: _reading.value?.takeIf { it.manga.id == workId }?.let { MangaDetail(it.manga, it.chapters) }
                 withContext(Dispatchers.IO) {
+                    // Choosing the row confirms the work, not its chapter numbering or edition.
+                    val sameChapterSystem = dev.mangaflow.data.SourceDiscoveryIdentity.chapterSystemMatches(baseline, catalog)
+                    val nativeEditions = catalog.chapters.flatMap { it.variants }.map { it.edition }
+                        .filter(String::isNotBlank).distinct()
+                    val volumeOnly = catalog.chapters.all {
+                        dev.mangaflow.data.ChapterSemantics.parse(it)?.system?.startsWith("volume") == true
+                    }
+                    val edition = if (nativeEditions.size == 1) nativeEditions.single()
+                        else if (volumeOnly) "单行本" else "连载版"
                     unifiedChapters.attach(state.work.id, catalog.manga,
                         language = repository.sources.firstOrNull { it.id == manga.sourceId }?.language.orEmpty(),
                         edition = edition, sameChapterSystem = sameChapterSystem)

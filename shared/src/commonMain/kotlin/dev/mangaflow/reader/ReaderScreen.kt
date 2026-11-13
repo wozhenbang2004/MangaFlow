@@ -226,7 +226,6 @@ fun ReaderScreen(
     active: Boolean = true,
     startAtBeginning: Boolean = false,
     onReadVariant: (Chapter, ChapterVariant, Int) -> Unit = { _, _, _ -> },
-    onDownloadVariant: ((Chapter, ChapterVariant) -> Unit)? = null,
     onSetPreferredSource: (String) -> Unit = {},
     onClearChapterSource: (Chapter) -> Unit = {},
     onCancelSourceSelection: () -> Unit = {},
@@ -1000,7 +999,6 @@ fun ReaderScreen(
             }
         },
         onSetPreferredSource = onSetPreferredSource,
-        onDownloadVariant = onDownloadVariant,
         onClearChapterSource = onClearChapterSource,
         chapters = chapters,
         allowCorrections = false,

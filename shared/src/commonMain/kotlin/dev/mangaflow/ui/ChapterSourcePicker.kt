@@ -31,7 +31,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -206,7 +205,6 @@ internal fun ChapterSourcePicker(
     loading: Boolean = false,
     error: String? = null,
     onPresenceChange: (Boolean) -> Unit = {},
-    onDownloadVariant: ((Chapter, ChapterVariant) -> Unit)? = null,
 ) {
     if (chapter == null) return
     val key = chapter.logicalId.ifBlank { chapter.id }
@@ -226,7 +224,7 @@ internal fun ChapterSourcePicker(
     val useSheet = sourceAnchor == null || density.fontScale > 1.35f ||
         window.height < 520.dp
     val content: @Composable (() -> Unit) -> Unit = { dismiss ->
-        ChapterSourceContent(frozen, downloaded, chapterPositions, loading, error, onReadVariant, dismiss, onDownloadVariant)
+        ChapterSourceContent(frozen, downloaded, chapterPositions, loading, error, onReadVariant, dismiss)
     }
     if (useSheet) {
         MotionBottomSheet(onDismissRequest = { if (!closeRequested) cancelSelection(); onClosed() }, backdrop = backdrop,
@@ -255,7 +253,7 @@ internal fun ChapterSourcePicker(
             val offset = it.localToScreen(Offset.Zero)
             if (offset.isSpecified) origin = offset
         }.semantics { dismiss { close(); true } }) {
-            val panelWidth = minOf(maxWidth - 24.dp, 308.dp).coerceAtLeast(1.dp)
+            val panelWidth = minOf(maxWidth - 24.dp, 260.dp).coerceAtLeast(1.dp)
             val windowWidth = with(density) { maxWidth.toPx() }
             val windowHeight = with(density) { maxHeight.toPx() }
             val inset = with(density) { 12.dp.toPx() }
@@ -271,7 +269,7 @@ internal fun ChapterSourcePicker(
                     onClickLabel = "收起章节来源", onClick = close))
             LiquidGlassSurface(backdrop,
                 Modifier.absoluteOffset { IntOffset(left.roundToInt(), top.roundToInt()) }
-                    .width(panelWidth).heightIn(max = (maxHeight - 24.dp).coerceAtLeast(48.dp))
+                    .width(panelWidth).heightIn(max = minOf(maxHeight - 24.dp, 360.dp).coerceAtLeast(48.dp))
                     .onSizeChanged { panelSize = it }
                     .motionInputGate(!closing && progress.value >= .95f)
                     .graphicsLayer {
@@ -287,7 +285,7 @@ internal fun ChapterSourcePicker(
                 materialExpansion = { progress.value }) {
                 Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
                     .graphicsLayer { alpha = ((progress.value - .35f) / .65f).coerceIn(0f, 1f) }
-                    .padding(10.dp)) { content(close) }
+                    .padding(8.dp)) { content(close) }
             }
         }
     }
@@ -302,21 +300,16 @@ private fun ChapterSourceContent(
     error: String?,
     onRead: (Chapter, ChapterVariant) -> Unit,
     dismiss: () -> Unit,
-    onDownload: ((Chapter, ChapterVariant) -> Unit)?,
 ) {
     var requestedVariant by remember(chapter.logicalId, chapter.id) { mutableStateOf<ChapterVariant?>(null) }
     val variants = remember(chapter.id, chapter.variants) {
         chapter.variants.sortedBy { if (it.storageId == chapter.id) 0 else 1 }
     }
-    val sourceCount = variants.map { it.sourceId }.distinct().size
+    val editions = variants.map { it.edition }.filter(String::isNotBlank).distinct()
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(chapter.title, color = DetailForeground, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(if (sourceCount == variants.size) "$sourceCount 个来源" else
-                    "$sourceCount 源 · ${variants.size} 个版本", color = DetailMuted, fontSize = 11.sp)
-            }
+            Text(chapter.title, color = DetailForeground, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             DetailAction(Icons.Outlined.Close, "收起章节来源", onClick = dismiss)
         }
         variants.forEach { variant ->
@@ -332,36 +325,33 @@ private fun ChapterSourceContent(
                 .motionPress(interaction, enabled = !loading, pressedScale = .99f)
                 .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(22.dp))
+                ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(20.dp))
                 Spacer(Modifier.width(9.dp))
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         Text(variant.sourceName, color = DetailForeground, fontSize = 13.sp,
                             fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false))
-                        if (selected) Icon(Icons.Outlined.Check, "当前来源", Modifier.size(12.dp), tint = DetailSecondary)
-                        if (loading && requestedVariant?.storageId == variant.storageId)
-                            MotionBusyIndicator(Modifier.size(12.dp), color = DetailSecondary, strokeWidth = 1.3.dp)
                     }
-                    val identity = listOf(variant.language, variant.edition, variant.scanlator)
-                        .filter(String::isNotBlank).joinToString(" · ")
-                    Text(identity, color = DetailMuted, fontSize = 10.sp, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis)
-                    if (variant.title != chapter.title) Text(variant.title, color = DetailSecondary,
-                        fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    val location = listOfNotNull(
+                    val sameSourceVersions = variants.count { it.sourceId == variant.sourceId } > 1
+                    val details = listOfNotNull(
+                        variant.language.takeIf(String::isNotBlank),
+                        variant.edition.takeIf { editions.size > 1 && it.isNotBlank() },
+                        variant.scanlator.takeIf { sameSourceVersions && it.isNotBlank() },
+                        variant.title.takeIf { sameSourceVersions && it != chapter.title },
                         "已下载".takeIf { entry?.status == DownloadStatus.COMPLETED },
                         saved?.let { "续读第${it.pageIndex + 1}页" },
-                    ).joinToString(" · ")
-                    if (location.isNotEmpty()) Text(location, color = DetailMuted, fontSize = 10.sp)
+                    ).distinct().joinToString(" · ")
+                    if (details.isNotBlank()) Text(details, color = DetailMuted, fontSize = 11.sp,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
-                if (onDownload != null) DetailAction(Icons.Outlined.Download, "下载${variant.sourceName}的本章",
-                    enabled = !loading && entry?.status !in setOf(DownloadStatus.COMPLETED, DownloadStatus.RUNNING,
-                        DownloadStatus.QUEUED, DownloadStatus.WAITING),
-                    onClick = { onDownload(chapter, variant) })
+                Spacer(Modifier.width(8.dp))
+                if (loading && requestedVariant?.storageId == variant.storageId)
+                    MotionBusyIndicator(Modifier.size(16.dp), color = DetailSecondary, strokeWidth = 1.4.dp)
+                else if (selected) Icon(Icons.Outlined.Check, "当前来源", Modifier.size(16.dp), tint = DetailSecondary)
             }
         }
-        if (loading) Row(Modifier.fillMaxWidth().padding(8.dp),
+        if (loading && requestedVariant == null) Row(Modifier.fillMaxWidth().padding(8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             MotionBusyIndicator(Modifier.size(14.dp), color = DetailSecondary, strokeWidth = 1.5.dp)
             Text("正在准备${requestedVariant?.sourceName.orEmpty()}本章", color = DetailSecondary, fontSize = 11.sp)

@@ -10,15 +10,14 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Check
+import dev.mangaflow.ui.motion.BackHandler
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
@@ -49,42 +48,35 @@ import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberFeelFeedback
-import kotlinx.coroutines.launch
 
-/** Same retained sheet, quiet rows and input composition as the existing author/tag workflows. */
+/** One source overview; uncertain matches open only that source's directly selectable candidates. */
 @Composable
 internal fun UnifiedSourceManager(
     state: SourceManagementState,
     backdrop: HazeState,
     onDismiss: () -> Unit,
     onSearch: (String, String) -> Unit,
-    onAttach: (Manga, Boolean, String) -> Unit,
-    onDetach: (Manga) -> Unit,
-    onPrefer: (String) -> Unit,
+    onAttach: (Manga) -> Unit,
     onRetryAll: () -> Unit = {},
     onChooseDomain: (String) -> Unit = {},
     onChooseSource: (String) -> Unit = {},
 ) {
-    var query by remember(state.work.id) { mutableStateOf(state.query) }
+    var sourcePage by remember(state.work.id) { mutableStateOf<String?>(null) }
     var source by remember(state.work.id) { mutableStateOf(state.sourceId) }
+    var query by remember(state.work.id) { mutableStateOf(state.query) }
     var manual by remember(state.work.id) { mutableStateOf(false) }
-    var expandedSource by remember(state.work.id) { mutableStateOf<String?>(null) }
     var requestedSearch by remember(state.work.id) { mutableStateOf<Pair<String, String>?>(null) }
     var domainChanged by remember(state.work.id) { mutableStateOf(false) }
-    var candidate by remember(state.work.id, state.candidates) { mutableStateOf<Manga?>(null) }
-    var sameSystem by remember(candidate?.id) { mutableStateOf(false) }
-    var edition by remember(candidate?.id) { mutableStateOf("连载版") }
+    var attaching by remember(state.work.id) { mutableStateOf<Manga?>(null) }
     val colors = MaterialTheme.colorScheme
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
-    val list = rememberLazyListState()
-    val scope = rememberCoroutineScope()
     val feedback = rememberFeelFeedback()
-    val maxHeight = LocalMangaWindow.current.height * .78f
     val associated = (listOf(state.work) + state.linked).distinctBy { it.id }
     val overview = remember(state.discovery, associated, state.sources, state.scanning) {
         val rows = linkedMapOf<String, SourceOverviewEntry>()
@@ -110,29 +102,36 @@ internal fun UnifiedSourceManager(
         selectedOverview?.candidates.orEmpty() else emptyList()).filter { result ->
         associated.none { it.id == result.id }
     }.distinctBy { it.id }
-    val manualError = if (!domainChanged) state.error?.takeIf {
-        it.isNotBlank() && (matchesQuery || candidate != null)
+    val currentError = if (!domainChanged) state.error?.takeIf {
+        it.isNotBlank() && (matchesQuery || attaching != null)
     } ?: selectedOverview?.takeIf { !searched && it.status == "FAILED" }?.message?.takeIf(String::isNotBlank)
         else null
+    val busy = state.loading || state.connecting
     val search: () -> Unit = {
-        if (source.isNotBlank() && query.isNotBlank() && !state.connecting && !state.loading) {
+        if (source.isNotBlank() && query.isNotBlank() && !busy) {
             keyboard?.hide(); focus.clearFocus()
-            candidate = null
             domainChanged = false
             requestedSearch = source to query.trim()
             onSearch(source, query)
         }
     }
-    LaunchedEffect(state.linked) {
-        if (state.linked.any { it.id == candidate?.id }) {
-            expandedSource = candidate?.sourceId
-            candidate = null
-            manual = false
+    val showOverview: () -> Unit = {
+        if (!state.connecting) {
+            keyboard?.hide(); focus.clearFocus()
+            sourcePage = null; manual = false; attaching = null
+        }
+    }
+    val openSource: (String, Boolean) -> Unit = { id, needsSearch ->
+        source = id; sourcePage = id; manual = needsSearch
+        query = state.work.title; requestedSearch = null; domainChanged = false; attaching = null
+        onChooseSource(id)
+    }
+    LaunchedEffect(state.linked, attaching?.id) {
+        if (attaching != null && state.linked.any { it.id == attaching?.id }) {
+            sourcePage = null; manual = false; attaching = null
         }
     }
     LaunchedEffect(state.sourceDomain, state.sourceId, state.query, state.loading) {
-        // The domain callback may explicitly re-run the selected source search.
-        // Accept only that matching request, never candidates from the previous line.
         if (domainChanged && state.loading && state.sourceId == source && state.query.trim() == query.trim()) {
             requestedSearch = source to query.trim()
             domainChanged = false
@@ -141,233 +140,190 @@ internal fun UnifiedSourceManager(
     DisposableEffect(Unit) { onDispose { keyboard?.hide(); focus.clearFocus() } }
     MotionBottomSheet(onDismissRequest = onDismiss, backdrop = backdrop,
         containerColor = colors.surface.copy(alpha = .97f)) { dismiss ->
-        Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).navigationBarsPadding()) {
-            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp).heightIn(min = 48.dp),
-                verticalAlignment = Alignment.CenterVertically) {
+        BackHandler(enabled = sourcePage != null && !state.connecting, onBack = showOverview)
+        Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height * .72f)) {
+            Row(Modifier.fillMaxWidth().padding(start = if (sourcePage == null) 20.dp else 4.dp, end = 8.dp)
+                .heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (sourcePage != null) MotionIconButton(enabled = !state.connecting, onClick = showOverview) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回来源列表", Modifier.size(20.dp))
+                }
                 Column(Modifier.weight(1f)) {
-                    Text("正文来源", fontSize = 17.sp, fontWeight = FontWeight.Medium)
+                    Text(if (sourcePage == null) "正文来源" else sourceDisplayName(source),
+                        fontSize = 16.sp, fontWeight = FontWeight.Medium)
                     Text(state.work.title, color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
                 }
+                if (sourcePage == null && overview.any { it.status == "FAILED" })
+                    MotionIconButton(enabled = !checking && !state.connecting, onClick = onRetryAll) {
+                        Icon(Icons.Outlined.Refresh, "重试失败的来源检查", Modifier.size(19.dp))
+                    }
                 MotionIconButton(onClick = { keyboard?.hide(); focus.clearFocus(); dismiss() }) {
                     Icon(Icons.Outlined.Close, "关闭正文来源", Modifier.size(20.dp))
                 }
             }
-            LazyColumn(Modifier.weight(1f, fill = false).fillMaxWidth(), state = list,
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                item(key = "source-overview") {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 30.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (checking) MotionBusyIndicator(Modifier.size(12.dp), strokeWidth = 1.2.dp)
-                        Text(if (checking) "正在自动检查来源" else
-                            "已关联 ${associated.map { it.sourceId }.distinct().size} 个来源",
-                            fontSize = 12.sp, color = colors.onSurfaceVariant)
-                    }
-                }
-                items(overview, key = { "source:" + it.id }) { row ->
-                    val linked = associated.filter { it.sourceId == row.id }
-                    val expanded = expandedSource == row.id && linked.isNotEmpty()
-                    val interaction = remember(row.id) { MutableInteractionSource() }
-                    Column(Modifier.fillMaxWidth()) {
-                        Row(Modifier.fillMaxWidth().heightIn(min = 58.dp).clip(RoundedCornerShape(12.dp))
-                            .background(if (expanded) colors.onSurface.copy(alpha = .04f) else colors.surface.copy(alpha = 0f))
-                            .clickable(interactionSource = interaction, indication = null,
-                                enabled = !state.connecting && row.status != "DISABLED") {
-                                if (row.id == state.work.sourceId && row.status == "FAILED") onRetryAll()
-                                else if (linked.isNotEmpty() && row.status !in setOf("FAILED", "NEEDS_CONFIRMATION"))
-                                    expandedSource = if (expanded) null else row.id
-                                else {
-                                    source = row.id; manual = true; candidate = null
-                                    requestedSearch = null; domainChanged = false
-                                    expandedSource = row.id.takeIf { linked.isNotEmpty() }
-                                    onChooseSource(row.id)
-                                    scope.launch { list.animateScrollToItem((overview.size + 1)
-                                        .coerceAtMost((list.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))) }
-                                }
-                            }.motionPress(interaction, enabled = !state.connecting && row.status != "DISABLED")
-                            .padding(horizontal = 8.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            ChapterSourceLogo(row.id, row.name, Modifier.size(21.dp))
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                    Text(row.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                                    if (state.preferredSource == row.id) Icon(Icons.Outlined.Check, "作品优先来源",
-                                        Modifier.size(12.dp), tint = colors.onSurfaceVariant)
-                                }
-                                val description = when {
-                                    row.status == "LINKED" && row.chapters > 0 -> "${row.chapters} 话"
-                                    row.status == "NEEDS_CONFIRMATION" && row.candidates.isNotEmpty() ->
-                                        "${row.candidates.size} 个候选版本"
-                                    row.message.isNotBlank() && row.message != "尚未检查" -> row.message
-                                    else -> ""
-                                }
-                                if (description.isNotBlank()) Text(description, fontSize = 11.sp,
-                                    color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            if (row.status == "SEARCHING") MotionBusyIndicator(Modifier.size(13.dp),
-                                strokeWidth = 1.3.dp, color = colors.onSurfaceVariant)
-                            else Text(if (row.message == "尚未检查") "尚未检查" else sourceStatusLabel(row.status), fontSize = 11.sp,
-                                color = when (row.status) {
-                                    "FAILED" -> colors.error
-                                    "NEEDS_CONFIRMATION" -> colors.primary
-                                    else -> colors.onSurfaceVariant
-                                })
-                        }
-                        if (expanded) Column(Modifier.fillMaxWidth().padding(start = 28.dp)) {
-                            MotionTextButton(enabled = !state.connecting && state.preferredSource != row.id,
-                                onClick = { onPrefer(row.id) }) {
-                                Text(if (state.preferredSource == row.id) "已优先使用" else "优先使用", fontSize = 12.sp)
-                            }
-                            linked.filter { it.id != state.work.id }.forEach { manga ->
-                                MotionTextButton(enabled = !state.connecting, onClick = { onDetach(manga) }) {
-                                    Text(if (linked.size > 1) "取消关联：${manga.title}" else "取消关联，保留历史和下载",
-                                        fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
+            key(state.work.id) {
+            MotionTabContent(selected = sourcePage ?: "overview",
+                contentKey = { it }, order = { if (it == "overview") 0 else 1 },
+                fillContent = false, soft = true,
+                modifier = Modifier.weight(1f, fill = false).fillMaxWidth()) { page ->
+                val pageActive = page == (sourcePage ?: "overview")
+                LazyColumn(Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    if (page == "overview") {
+                        item(key = "summary") {
+                            Row(Modifier.fillMaxWidth().heightIn(min = 28.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (checking) MotionBusyIndicator(Modifier.size(12.dp), strokeWidth = 1.2.dp)
+                                Text(if (checking) "正在检查来源" else
+                                    "已关联 ${associated.map { it.sourceId }.distinct().size} 个来源",
+                                    fontSize = 12.sp, color = colors.onSurfaceVariant)
                             }
                         }
-                    }
-                }
-                item(key = "source-overview-actions") {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        MotionTextButton(enabled = !checking && !state.connecting, onClick = onRetryAll) {
-                            Icon(Icons.Outlined.Refresh, null, Modifier.size(15.dp))
-                            Spacer(Modifier.width(5.dp))
-                            Text(if (overview.any { it.status == "FAILED" }) "重试检查" else "重新检查", fontSize = 12.sp)
-                        }
-                        Spacer(Modifier.weight(1f))
-                        MotionTextButton(enabled = state.sources.isNotEmpty() && !state.connecting,
-                            onClick = {
-                                manual = !manual; candidate = null
-                                if (manual) onChooseSource(source)
-                            }) {
-                            Icon(Icons.Outlined.Search, null, Modifier.size(15.dp))
-                            Spacer(Modifier.width(5.dp))
-                            Text(if (manual) "收起查找" else "手动查找", fontSize = 12.sp)
-                        }
-                    }
-                }
-                if (manual) {
-                item(key = "add-title") {
-                    Text("手动查找版本", fontSize = 12.sp, color = colors.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 10.dp, bottom = 4.dp))
-                    if (state.sources.size > 1) MotionTabs(selected = state.sources.indexOfFirst { it.first == source }.coerceAtLeast(0),
-                        labels = state.sources.map { it.second }, modifier = Modifier.fillMaxWidth(),
-                        controlHeight = 38.dp, fontSize = 12.sp, treatment = MotionTabTreatment.Soft,
-                        indicator = colors.onSurface.copy(alpha = .065f), onSelect = { index ->
-                            if (!state.connecting && !state.loading) {
-                                source = state.sources[index].first
-                                candidate = null
-                                requestedSearch = null
-                                domainChanged = false
-                                onChooseSource(source)
-                            }
-                        })
-                    if (source == "komiic" && state.domainOptions.size > 1) {
-                        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("线路", color = colors.onSurfaceVariant, fontSize = 11.sp,
-                                modifier = Modifier.padding(end = 8.dp))
-                            MotionTabs(selected = state.domainOptions.indexOf(state.sourceDomain).coerceAtLeast(0),
-                                labels = state.domainOptions.map { it.removePrefix("https://").trimEnd('/') },
-                                modifier = Modifier.weight(1f), controlHeight = 32.dp, fontSize = 11.sp,
-                                treatment = MotionTabTreatment.Soft,
-                                indicator = colors.onSurface.copy(alpha = .065f), onSelect = { index ->
-                                    if (!state.connecting && !state.loading) {
-                                        candidate = null; requestedSearch = null; domainChanged = true
-                                        onChooseDomain(state.domainOptions[index])
+                        items(overview, key = { "source:" + it.id }) { row ->
+                            val canChoose = row.status !in setOf("LINKED", "SEARCHING", "DISABLED") &&
+                                !state.connecting && pageActive
+                            val interaction = remember(row.id) { MutableInteractionSource() }
+                            Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).clip(RoundedCornerShape(12.dp))
+                                .clickable(interactionSource = interaction, indication = null, enabled = canChoose,
+                                    role = Role.Button, onClickLabel = if (row.status == "NEEDS_CONFIRMATION")
+                                        "查看${row.name}的待确认版本" else "查找${row.name}的版本") {
+                                    if (row.id == state.work.sourceId) onRetryAll()
+                                    else {
+                                        feedback.perform(FeelEvent.Selection)
+                                        openSource(row.id, row.status != "NEEDS_CONFIRMATION")
                                     }
+                                }.motionPress(interaction, enabled = canChoose).padding(horizontal = 6.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                ChapterSourceLogo(row.id, row.name, Modifier.size(21.dp))
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(row.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                    val description = when {
+                                        row.status == "LINKED" && row.chapters > 0 -> "${row.chapters} 话"
+                                        row.status == "NEEDS_CONFIRMATION" -> "${row.candidates.size} 个候选版本"
+                                        row.status == "FAILED" -> row.message
+                                        else -> ""
+                                    }
+                                    if (description.isNotBlank()) Text(description, fontSize = 11.sp,
+                                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                                if (row.status == "SEARCHING") MotionBusyIndicator(Modifier.size(13.dp),
+                                    strokeWidth = 1.3.dp, color = colors.onSurfaceVariant)
+                                else Text(if (row.message == "尚未检查") "尚未检查" else sourceStatusLabel(row.status),
+                                    fontSize = 11.sp, color = when (row.status) {
+                                        "FAILED" -> colors.error
+                                        "NEEDS_CONFIRMATION" -> colors.primary
+                                        else -> colors.onSurfaceVariant
+                                    })
+                            }
+                        }
+                        item(key = "manual-entry") {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                MotionTextButton(enabled = pageActive && state.sources.isNotEmpty() && !busy,
+                                    onClick = { openSource(state.sources.firstOrNull { it.first == source }?.first
+                                        ?: state.sources.first().first, true) }) {
+                                    Icon(Icons.Outlined.Search, null, Modifier.size(15.dp))
+                                    Spacer(Modifier.width(5.dp))
+                                    Text("查找其他版本", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    } else {
+                        if (manual) item(key = "search") {
+                            if (state.sources.size > 1) MotionTabs(
+                                selected = state.sources.indexOfFirst { it.first == source }.coerceAtLeast(0),
+                                labels = state.sources.map { it.second }, modifier = Modifier.fillMaxWidth(),
+                                controlHeight = 36.dp, fontSize = 12.sp, treatment = MotionTabTreatment.Soft,
+                                indicator = colors.onSurface.copy(alpha = .065f), onSelect = { index ->
+                                    if (!busy && pageActive) openSource(state.sources[index].first, true)
                                 })
+                            if (source == "komiic" && state.domainOptions.size > 1)
+                                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    Text("线路", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                                    MotionTabs(selected = state.domainOptions.indexOf(state.sourceDomain).coerceAtLeast(0),
+                                        labels = state.domainOptions.map { it.removePrefix("https://").trimEnd('/') },
+                                        modifier = Modifier.weight(1f), controlHeight = 32.dp, fontSize = 11.sp,
+                                        treatment = MotionTabTreatment.Soft,
+                                        indicator = colors.onSurface.copy(alpha = .065f), onSelect = { index ->
+                                            if (!busy && pageActive) {
+                                                requestedSearch = null; domainChanged = true; attaching = null
+                                                onChooseDomain(state.domainOptions[index])
+                                            }
+                                        })
+                                }
+                            Row(Modifier.fillMaxWidth().padding(top = 6.dp).heightIn(min = 44.dp)
+                                .clip(RoundedCornerShape(12.dp)).background(colors.onSurface.copy(alpha = .045f))
+                                .padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                BasicTextField(query, onValueChange = { query = it; attaching = null },
+                                    modifier = Modifier.weight(1f).semantics { contentDescription = "搜索所选正文来源的作品" },
+                                    enabled = pageActive && !state.connecting, singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
+                                    cursorBrush = SolidColor(colors.onSurface),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                    keyboardActions = KeyboardActions(onSearch = { if (pageActive) search() }),
+                                    decorationBox = { inner ->
+                                        Box { if (query.isBlank()) Text("作品名或别名", color = colors.onSurfaceVariant); inner() }
+                                    })
+                                MotionIconButton(enabled = pageActive && query.isNotBlank() && !busy, onClick = search) {
+                                    Icon(Icons.Outlined.Search, "搜索这个来源", Modifier.size(19.dp))
+                                }
+                            }
                         }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    // The panel already owns frosting; an inner input must not resample detail text.
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(14.dp))
-                        .background(colors.onSurface.copy(alpha = .045f)).padding(start = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        BasicTextField(query, onValueChange = { query = it; candidate = null },
-                            modifier = Modifier.weight(1f).semantics { contentDescription = "搜索所选正文来源的作品" },
-                            enabled = !state.connecting, singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
-                            cursorBrush = SolidColor(colors.onSurface),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                            keyboardActions = KeyboardActions(onSearch = { search() }),
-                            decorationBox = { inner ->
-                                Box { if (query.isBlank()) Text("作品名或别名", color = colors.onSurfaceVariant); inner() }
-                            })
-                        MotionIconButton(enabled = query.isNotBlank() && !state.loading && !state.connecting,
-                            onClick = search) { Icon(Icons.Outlined.Search, "搜索这个来源", Modifier.size(19.dp)) }
-                    }
-                }
-                if (state.loading || state.connecting) item(key = "source-busy") {
-                    Row(Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        MotionBusyIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp)
-                        Text(if (state.connecting) "正在读取并关联目录…" else "正在搜索…",
-                            color = colors.onSurfaceVariant, fontSize = 12.sp)
-                    }
-                }
-                manualError?.let { error -> item(key = "source-error") {
-                    Text(error, color = colors.error, fontSize = 12.sp, lineHeight = 18.sp,
-                        modifier = Modifier.padding(vertical = 8.dp))
-                    if (!state.connecting) MotionTextButton(onClick = search) { Text("重试搜索") }
-                } }
-                if (searched && !state.loading && !state.connecting && manualError == null && results.isEmpty())
-                    item(key = "manual-empty") {
-                        Text("这个名称未匹配到作品，可换别名再试。", color = colors.onSurfaceVariant,
-                            fontSize = 12.sp, modifier = Modifier.padding(vertical = 10.dp))
-                    }
-                items(candidate?.let { listOf(it) } ?: results, key = { "candidate:" + it.id }) { manga ->
-                    val selected = candidate?.id == manga.id
-                    val interaction = remember(manga.id) { MutableInteractionSource() }
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                        .background(if (selected) colors.surfaceVariant.copy(alpha = .45f) else colors.surface.copy(alpha = 0f))
-                        .clickable(interactionSource = interaction, indication = null,
-                            enabled = !state.connecting && !state.loading, role = Role.Button,
-                            onClickLabel = "选择这个版本") {
-                            if (!selected) feedback.perform(FeelEvent.Selection)
-                            keyboard?.hide(); focus.clearFocus(); candidate = manga
-                        }.motionPress(interaction, enabled = !state.connecting && !state.loading)
-                        .padding(horizontal = 8.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        AsyncImage(manga.coverUrl, null, Modifier.size(width = 36.dp, height = 48.dp)
-                            .clip(RoundedCornerShape(5.dp)))
-                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                            Text(manga.title, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            if (manga.authors.isNotEmpty()) Text(manga.authors.joinToString(" · "), color = colors.onSurfaceVariant,
-                                fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (state.loading && matchesQuery) item(key = "search-busy") {
+                            Row(Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.4.dp)
+                                Text("正在搜索…", fontSize = 12.sp, color = colors.onSurfaceVariant)
+                            }
                         }
-                        if (selected) Icon(Icons.Outlined.Check, "已选择", Modifier.size(18.dp))
-                    }
-                }
-                candidate?.let { chosen -> item(key = "source-confirm:" + chosen.id) {
-                    Text("确认是同一作品后关联；原有历史和下载保留。", fontSize = 12.sp,
-                        color = colors.onSurfaceVariant, modifier = Modifier.padding(top = 12.dp))
-                    Row {
-                        listOf("连载版", "单行本").forEach { value ->
-                            MotionTextButton(enabled = !state.connecting, onClick = { edition = value }) {
-                                Text(value, color = if (edition == value) colors.onSurface else colors.onSurfaceVariant)
+                        items(results, key = { "candidate:" + it.id }) { manga ->
+                            val interaction = remember(manga.id) { MutableInteractionSource() }
+                            Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).clip(RoundedCornerShape(12.dp))
+                                .clickable(interactionSource = interaction, indication = null,
+                                    enabled = pageActive && !busy, role = Role.Button, onClickLabel = "关联这个版本") {
+                                    keyboard?.hide(); focus.clearFocus()
+                                    feedback.perform(FeelEvent.Selection)
+                                    attaching = manga
+                                    onAttach(manga)
+                                }.motionPress(interaction, enabled = pageActive && !busy)
+                                .padding(horizontal = 6.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                AsyncImage(manga.coverUrl, null, Modifier.size(width = 32.dp, height = 44.dp)
+                                    .clip(RoundedCornerShape(5.dp)))
+                                Column(Modifier.weight(1f).padding(start = 12.dp, end = 8.dp)) {
+                                    Text(manga.title, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    if (manga.authors.isNotEmpty()) Text(manga.authors.joinToString(" · "),
+                                        color = colors.onSurfaceVariant, fontSize = 11.sp,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                if (state.connecting && attaching?.id == manga.id)
+                                    MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                            }
+                        }
+                        currentError?.let { error -> item(key = "error") {
+                            Text(error, color = colors.error, fontSize = 12.sp, lineHeight = 18.sp,
+                                modifier = Modifier.padding(vertical = 8.dp))
+                            if (manual && !state.connecting) MotionTextButton(enabled = pageActive && !state.loading,
+                                onClick = search) { Text("重试搜索", fontSize = 12.sp) }
+                        } }
+                        if (!busy && currentError == null && results.isEmpty()) item(key = "empty") {
+                            Text(if (searched) "未找到匹配作品，可换别名再试。" else "暂无候选，可换个名称查找。",
+                                color = colors.onSurfaceVariant, fontSize = 12.sp,
+                                modifier = Modifier.padding(vertical = 12.dp))
+                        }
+                        if (!manual) item(key = "manual-fallback") {
+                            MotionTextButton(enabled = pageActive && !busy, onClick = { manual = true }) {
+                                Icon(Icons.Outlined.Search, null, Modifier.size(15.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("换个名称查找", fontSize = 12.sp)
                             }
                         }
                     }
-                    MotionTextButton(enabled = !state.connecting, onClick = { sameSystem = !sameSystem }) {
-                        if (sameSystem) Icon(Icons.Outlined.Check, null, Modifier.size(16.dp))
-                        Text(if (sameSystem) "已确认同一章节体系：合并对应话号" else "先保留独立目录；点此确认同一章节体系",
-                            fontSize = 12.sp)
-                    }
-                    MotionTextButton(enabled = !state.connecting, onClick = { onAttach(chosen, sameSystem, edition) }) {
-                        Icon(Icons.Outlined.Link, null, Modifier.size(17.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("关联这部作品", fontWeight = FontWeight.Medium)
-                    }
-                    MotionTextButton(enabled = !state.connecting, onClick = { candidate = null }) {
-                        Text("返回搜索结果", fontSize = 12.sp, color = colors.onSurfaceVariant)
-                    }
-                } }
                 }
-                item(key = "source-bottom") { Spacer(Modifier.height(16.dp)) }
+            }
             }
         }
     }

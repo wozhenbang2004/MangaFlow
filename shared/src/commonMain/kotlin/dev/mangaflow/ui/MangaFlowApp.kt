@@ -338,8 +338,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)
     sourceManagement?.let { state ->
         UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
-            onSearch = model::searchBodySource, onAttach = model::attachBodySource,
-            onDetach = model::detachBodySource, onPrefer = model::preferBodySource,
+            onSearch = model::searchBodySource, onAttach = { candidate -> model.attachBodySource(state.work.id, candidate) },
             onRetryAll = model::retrySourceDiscovery, onChooseDomain = model::chooseSourceDomain,
             onChooseSource = model::chooseBodySource)
     }
@@ -601,10 +600,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         onRetryChapters = model::retryReadingChapters,
                         active = current.key == frame.key && sourceManagement == null && sourceResumeChoice == null,
                         onReadVariant = model::readReaderChapterVariant,
-                        onDownloadVariant = { chapter, variant ->
-                            onRequestNotifications()
-                            model.downloadChapterVariant(current.session.manga, chapter, variant)
-                        },
                         onSetPreferredSource = model::preferBodySource,
                         onClearChapterSource = model::clearChapterSource,
                         onCancelSourceSelection = model::cancelSourceSelection,
@@ -651,10 +646,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onRestart = model::restartChapter,
                                 onContinue = model::continueReading,
                                 onDownload = { onRequestNotifications(); model.downloadChapter(it) },
-                                onDownloadVariant = { chapter, variant ->
-                                    onRequestNotifications()
-                                    model.downloadChapterVariant(current.state.manga, chapter, variant)
-                                },
                                 onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                                 onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
                                 loadReplies = model::reviewReplies,
