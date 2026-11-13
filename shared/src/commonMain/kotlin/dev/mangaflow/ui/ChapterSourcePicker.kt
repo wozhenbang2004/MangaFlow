@@ -69,6 +69,8 @@ import androidx.compose.ui.window.PopupProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterVariant
+import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -191,9 +193,11 @@ internal fun ChapterSourcePicker(
     loading: Boolean = false,
     error: String? = null,
     onPresenceChange: (Boolean) -> Unit = {},
+    repository: MangaRepository? = null,
+    workMangaId: String = "",
 ) {
     if (chapter == null) return
-    val key = chapter.logicalId.ifBlank { chapter.id }
+    val key = workMangaId + ":" + chapter.logicalId.ifBlank { chapter.id }
     val frozen = remember(key) { chapter }
     var requestedVariant by remember(key) { mutableStateOf<ChapterVariant?>(null) }
     var inspected by remember(key) { mutableStateOf<String?>(null) }
@@ -216,18 +220,27 @@ internal fun ChapterSourcePicker(
         val peers = variants.filter { it.sourceId == variant.sourceId }
         val selected = variant.storageId == frozen.id
         val saved = chapterPositions?.get(variant.storageId)
+        val entry = downloaded[variant.storageId]
+        val sourceMangaId = remember(variant.sourceId, variant.mangaId) {
+            runCatching { SourceKeys.manga(variant.sourceId, variant.mangaId) }.getOrNull()
+        }
+        val resolution = rememberChapterResolution(
+            repository = repository.takeIf { sourceMangaId != null },
+            mangaId = sourceMangaId.orEmpty(), chapterId = variant.storageId,
+            entry = entry, declaredPages = variant.pageCount)
         val details = listOfNotNull(
             variant.language.takeIf(String::isNotBlank),
             variant.edition.takeIf(String::isNotBlank),
             variant.scanlator.takeIf { peers.size > 1 && it.isNotBlank() },
             variant.title.takeIf { peers.map { it.title }.distinct().size > 1 && it != frozen.title },
             saved?.takeIf { !selected }?.let { "续读第${it.pageIndex + 1}页" },
+            resolution.detail,
         ).distinct().joinToString(" · ")
         val secondary = chapterVariantDistinction(variant, peers)
         ChapterSourceDisc(variant, backdrop, modifier, selected = selected,
             busy = loading && requestedVariant?.storageId == variant.storageId,
             enabled = !loading, details = details, secondary = secondary,
-            entry = downloaded[variant.storageId],
+            entry = entry, resolution = resolution,
             actionLabel = "使用${variant.sourceName}阅读本章",
             onInspect = { inspected = listOf(variant.sourceName, secondary, details)
                 .filter(String::isNotBlank).distinct().joinToString(" · ") },

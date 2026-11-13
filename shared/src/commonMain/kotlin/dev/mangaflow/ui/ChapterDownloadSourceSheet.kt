@@ -12,18 +12,13 @@ import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterVariant
-import dev.mangaflow.data.ChapterQualityInfo
-import dev.mangaflow.data.CHAPTER_DIMENSION_SAMPLE_LIMIT
-import dev.mangaflow.data.chapterQualityInfo
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
-import dev.mangaflow.storage.DownloadStore
-import dev.mangaflow.platform.LocalMangaContext
-import dev.mangaflow.reader.ReaderDimensionCache
 
 /** The exact available variants fan out at the chapter, with one-tap queue semantics. */
 @Composable
@@ -35,9 +30,8 @@ internal fun ChapterDownloadSourceSheet(
     onSelect: (ChapterVariant) -> Unit,
     onDismiss: () -> Unit,
     anchor: Rect? = null,
+    repository: MangaRepository? = null,
 ) {
-    val context = LocalMangaContext.current
-    val downloads = remember(context) { DownloadStore.get(context) }
     val variants = remember(manga.id, manga.sourceName, chapter) { downloadSourceVariants(manga, chapter) }
     var submitted by remember(manga.id, chapter.logicalId, chapter.id) { mutableStateOf(false) }
     var inspected by remember(manga.id, chapter.logicalId, chapter.id) { mutableStateOf<String?>(null) }
@@ -52,19 +46,13 @@ internal fun ChapterDownloadSourceSheet(
         }) { index, modifier, dismiss ->
         val variant = variants[index]
         val entry = entries[variant.storageId]
-        val quality = remember(variant.storageId, variant.pageCount, entry?.id,
-            entry?.totalPages, entry?.completedPages, entry?.status) {
-            val retained = entry?.let { downloads.record(it.id) }
-                ?.takeIf { it.entry.chapter.id == variant.storageId }?.pages.orEmpty()
-            val samples = retained.take(CHAPTER_DIMENSION_SAMPLE_LIMIT).map { page ->
-                // Keep the actual in-memory sample contract; no image or file request is added.
-                ReaderDimensionCache.get(page.url)?.let { size ->
-                    page.copy(width = size.width, height = size.height)
-                } ?: page
-            }
-            chapterQualityInfo(samples, entry?.totalPages?.takeIf { it > 0 } ?: variant.pageCount)
+        val sourceMangaId = remember(variant.sourceId, variant.mangaId) {
+            runCatching { SourceKeys.manga(variant.sourceId, variant.mangaId) }.getOrNull()
         }
-        val qualityText = chapterQualityLabel(quality)
+        val resolution = rememberChapterResolution(
+            repository = repository.takeIf { sourceMangaId != null },
+            mangaId = sourceMangaId.orEmpty(), chapterId = variant.storageId,
+            entry = entry, declaredPages = variant.pageCount)
         val canStart = entry?.status !in setOf(DownloadStatus.COMPLETED,
             DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
         val enabled = canStart && !submitted
@@ -87,15 +75,15 @@ internal fun ChapterDownloadSourceSheet(
             variant.scanlator.takeIf { sameSource && it.isNotBlank() },
             variant.title.takeIf { sameSource && it.isNotBlank() && it != chapter.title },
         ).distinct().joinToString(" · ")
-        val details = listOf(edition, status, qualityText).filter(String::isNotBlank).joinToString(" · ")
+        val details = listOf(edition, status, resolution.detail).filter(String::isNotBlank).joinToString(" · ")
         val secondary = when {
             sameSource -> chapterVariantDistinction(variant, peers)
             status.isNotBlank() -> status
-            else -> quality.totalPages?.let { "$it 页" }.orEmpty()
+            else -> (entry?.totalPages?.takeIf { it > 0 } ?: variant.pageCount)?.let { "$it 页" }.orEmpty()
         }
         ChapterSourceDisc(variant.copy(sourceName = name), backdrop, modifier,
             selected = variant.storageId == chapter.id, enabled = enabled,
-            details = details, secondary = secondary, entry = entry,
+            details = details, secondary = secondary, entry = entry, resolution = resolution,
             actionLabel = "从${name}下载${chapter.title}",
             onInspect = { inspected = "$name · $details" },
             onClick = {
@@ -106,17 +94,6 @@ internal fun ChapterDownloadSourceSheet(
                 }
             })
     }
-}
-
-private fun chapterQualityLabel(info: ChapterQualityInfo): String {
-    val count = info.totalPages?.let { "$it 页 · " }.orEmpty()
-    if (info.dimensionPages == 0) return count + "尺寸未知"
-    fun range(minimum: Int?, maximum: Int?): String =
-        if (minimum == maximum) minimum.toString() else "$minimum–$maximum"
-    val dimensions = "${range(info.minWidth, info.maxWidth)} × ${range(info.minHeight, info.maxHeight)} px"
-    val coverage = info.totalPages?.let { "${info.dimensionPages}/$it 页" }
-        ?: "${info.dimensionPages} 页，整章页数未知"
-    return "样本 $dimensions · 覆盖 $coverage"
 }
 
 private fun downloadSourceVariants(manga: Manga, chapter: Chapter): List<ChapterVariant> {

@@ -9,6 +9,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -53,13 +55,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.dismiss
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -267,6 +273,7 @@ internal fun ChapterSourceDisc(
     details: String = "",
     secondary: String = "",
     entry: DownloadEntry? = null,
+    resolution: ChapterResolutionState? = null,
     actionLabel: String,
     onInspect: (() -> Unit)? = null,
     onClick: () -> Unit,
@@ -305,6 +312,55 @@ internal fun ChapterSourceDisc(
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (secondary.isNotBlank()) Text(secondary, color = colors.onSurfaceVariant,
                 fontSize = 9.sp, lineHeight = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            resolution?.let { sample ->
+                val resolutionInteraction = remember(variant.storageId) { MutableInteractionSource() }
+                val configuration = LocalViewConfiguration.current
+                val inlineTargets = remember(configuration) {
+                    object : ViewConfiguration by configuration {
+                        override val minimumTouchTargetSize = DpSize(0.dp, 0.dp)
+                    }
+                }
+                // Restrict this independent inline action to its painted line.
+                // The normal platform target must not cover the source name/logo.
+                CompositionLocalProvider(LocalViewConfiguration provides inlineTargets) {
+                    // Always consume its own tap, including while busy/unavailable;
+                    // this never delegates to source selection.
+                    Row(Modifier.fillMaxWidth().height(14.dp)
+                        .clickable(interactionSource = resolutionInteraction, indication = null,
+                            role = Role.Button,
+                            onClickLabel = if (sample.known) "重新读取尺寸样本" else "读取尺寸样本",
+                            onClick = { if (sample.canMeasure && !sample.busy) sample.measure() })
+                        .motionPress(resolutionInteraction, enabled = sample.canMeasure && !sample.busy, pressedScale = .98f)
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = variant.sourceName + "，" + sample.detail
+                            stateDescription = when {
+                                sample.busy -> "正在读取尺寸样本"
+                                sample.error != null -> "读取失败，可重试"
+                                sample.known -> "已知样本尺寸，可重新读取"
+                                sample.canMeasure -> "尚未读取尺寸样本"
+                                else -> "尺寸未知"
+                            }
+                            if (!sample.canMeasure || sample.busy) disabled()
+                        }, verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        if (sample.busy) MotionBusyIndicator(Modifier.size(9.dp),
+                            color = colors.onSurfaceVariant, strokeWidth = 1.dp)
+                        if (sample.known) {
+                            Text("样本", color = colors.onSurfaceVariant, fontSize = 12.sp,
+                                lineHeight = 14.sp, maxLines = 1)
+                            Text(sample.compactLabel, color = colors.onSurfaceVariant,
+                                style = mangaMetricValueStyle(12.sp, 14.sp),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        } else Text(when {
+                            sample.busy -> "读取中"
+                            sample.error != null && sample.canMeasure -> "重试尺寸"
+                            sample.canMeasure -> "读取尺寸"
+                            else -> "尺寸未知"
+                        }, color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 14.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
         }
     }
 }

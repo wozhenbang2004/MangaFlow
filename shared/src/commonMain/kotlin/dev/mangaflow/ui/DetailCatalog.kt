@@ -104,6 +104,7 @@ import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.data.ChapterVariant
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Page
+import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
@@ -156,6 +157,7 @@ internal fun DetailCatalog(
     sourceLoading: Boolean = false,
     sourceError: String? = null,
     onCancelSourceSelection: () -> Unit = {},
+    repository: MangaRepository? = null,
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
@@ -410,6 +412,7 @@ internal fun DetailCatalog(
     }
     ChapterSourcePicker(
         chapter = sourceChapter, backdrop = backdrop,
+        repository = repository, workMangaId = mangaId,
         onDismiss = { sourceChapter = null; sourceAnchor = null; sourceCloseRequested = false },
         onReadVariant = onReadVariant, onSetPreferredSource = onSetPreferredSource,
         onClearChapterSource = onClearChapterSource, onSplitVariant = onSplitVariant,

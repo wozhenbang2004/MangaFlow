@@ -621,6 +621,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         CompositionLocalProvider(LocalWallpaperActive provides (wallpaper.mediaPath != null)) {
                             DetailScreen(
                                 manga = current.state.manga, detail = current.state.detail,
+                                repository = model.repository,
                                 loading = current.state.loading, error = current.state.error,
                                 reviews = current.state.reviews, reviewsLoading = current.state.reviewsLoading,
                                 isFavorite = favorites.any { it.id == current.state.manga.id },

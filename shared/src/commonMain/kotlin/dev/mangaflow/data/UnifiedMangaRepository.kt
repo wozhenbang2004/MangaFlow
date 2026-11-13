@@ -703,6 +703,16 @@ class UnifiedMangaRepository(
 
     fun rebuild(workId: String): MangaDetail? = cachedDetail(workId)
 
+    override fun cachedPages(mangaId: String, chapterId: String): List<Page>? {
+        val ref = runCatching { SourceKeys.decodeChapter(mangaId, chapterId) }.getOrNull() ?: return null
+        if (ref.sourceId == "copy") return copy.cachedPages(ref.mangaId, ref.chapterId)
+        val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId)
+        return synchronized(unifiedMangaRepositoryStateLock) {
+            val now = repositoryNanoTime()
+            pageCache[key]?.takeIf { now - it.storedAtNanos in 0L until PAGE_CACHE_NANOS }?.pages
+        }
+    }
+
     override suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
         currentCoroutineContext().ensureActive()
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)

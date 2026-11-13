@@ -204,6 +204,15 @@ class CopyMangaRepository(
         uuid(data.getJSONObject("comic").requiredText("uuid"), "漫画")
     }
 
+    override fun cachedPages(mangaId: String, chapterId: String): List<Page>? {
+        val id = runCatching { uuid(chapterId, "章节") }.getOrNull() ?: return null
+        return synchronized(copyMangaRepositoryStateLock) {
+            val now = monotonicTimeMillis() * 1_000_000L
+            pageCache[PageKey(mangaId, id)]
+                ?.takeIf { now - it.fetchedAt in 0L until PAGE_CACHE_NANOS }?.pages
+        }
+    }
+
     override suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
         currentCoroutineContext().ensureActive()
         segment(mangaId)

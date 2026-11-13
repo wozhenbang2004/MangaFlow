@@ -139,6 +139,7 @@ import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.MangaReview
@@ -216,6 +217,7 @@ fun DetailScreen(
     sourceError: String? = null,
     sourcesChecking: Boolean = false,
     pendingSourceCount: Int = 0,
+    repository: MangaRepository? = null,
 ) {
     val current = detail?.manga ?: manga
     var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
@@ -515,6 +517,7 @@ fun DetailScreen(
                             when (targetSection) {
                                 0 -> DetailCatalog(
                                     mangaId = current.id, chapters = chapters, downloaded = downloaded,
+                                    repository = repository,
                                     progress = resume, chapterPositions = chapterPositions,
                                     loading = loading, error = error,
                                     active = active && targetSection == activeSection,
@@ -603,7 +606,7 @@ fun DetailScreen(
                     }
                 },
                 onDismiss = { if (pendingDownload == pending) { pendingDownload = null; pendingDownloadAnchor = null } },
-                anchor = pendingDownloadAnchor)
+                anchor = pendingDownloadAnchor, repository = repository)
         }
     }
 }

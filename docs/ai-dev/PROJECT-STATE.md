@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Visible manga resolution · 2026-11-14
+
+Current raw requirement is DESIGN.md RESOLUTION-116–118 / resumed QUALITY-42: “我之前要的漫画分辨率信息怎么还没弄出来”, repeated twice. The earlier downloaded-record/long-inspection-only field was insufficient; current scope adds actual visible reader and read/download source-row information.
+
+This source batch adds current/scrubbed original-page dimensions in the reader number slot, a reactive512-entry header cache with original-file-only publication and preview-dimension exclusion, visible per-source sample values plus an independent measure/busy/retry target, read-only actual repo cache access and one-page explicit cache-sharing sampling. Provider/edition identity, original bytes, histories/downloads, fixed compact chrome and current font/filter behavior remain. No image request occurs merely to show the picker; existing cached/native headers and metadata are bounded separately from explicit sampling.
+
+Integration rebases all relevant hunks onto0b1b1ed94a0f9096defc0dddedb633f663ecebd8, preserving the167559 foreground loading, per-key source manifest sharing, visible-first image/tile scheduling and dimension-cache fast path/locks. Source UI files were verified unchanged betweenbf2ad758 and167559 before grafting their isolated blobs; reader/dimension and unified-repository changes were rebased on current content, preserving0b1b1ed's new optional work identity metadata, source confirmation and direct-search changes. Root alone integrates one complete source/doc commit with expected-head protection.
+
+Android193/run43485113361 and194/run43486184101 were observed completed/success; parent195/run43486865632 was subsequently observed completed/success before this publication; its native run43486865595 remained in progress. Those observations do not establish this new batch or real source image sampling. Next exact action: publish the completed source batch once, confirm its matching normal Android/native CI identities, keep main stable, and use real package/user feedback or concrete compilation failures. No tests/local builds/filesystem/browser/device/service probes or extra review gate; current rendering, click isolation and original-size availability remain pending artifact feedback.
+
 ## Source-confirmation and multilingual-identity repair · 2026-11-14
 
 Active requirements are SOURCE-CONFIRM-108 / SEARCH-DIRECT-109 / WORK-IDENTITY-110 / EDITION-BOUNDARY-111 in DESIGN.md, covering1000121648–1651 and the explicit correction “连载和章节也不一定一样”. Do not restore the cancelled global group alias draft. Existing names/versions remain; real work association and verified numbering are independent.

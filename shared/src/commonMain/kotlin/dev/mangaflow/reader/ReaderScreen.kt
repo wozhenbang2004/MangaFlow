@@ -823,7 +823,7 @@ fun ReaderScreen(
                         .padding(horizontal = 10.dp, vertical = 4.dp)) {
                         if (pages.isNotEmpty()) key(chapterId) {
                             ReaderProgressSlider(
-                                pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
+                                pageIndex = pageIndex, pages = pages, pendingPage = targetPage,
                                 enabled = controlsVisible,
                                 onSeek = { destination ->
                                     if (destination != pageIndex) {
@@ -1120,6 +1120,7 @@ fun ReaderScreen(
     } else emptyMap()
     ChapterSourcePicker(
         chapter = sourceChapter, backdrop = readerBackdrop,
+        repository = repository, workMangaId = manga.id,
         onDismiss = { sourceChapter = null; sourceCloseRequested = false },
         onCancelSelection = onCancelSourceSelection,
         onReadVariant = { selected, variant ->
@@ -1599,9 +1600,8 @@ private fun AdjacentPagePrefetch(
                         catch (_: Exception) { finished += index; continue }
                         // Persistent downloads already have a file for Telephoto to read.
                         if (!resource.url.startsWith("https:")) {
-                            if (mode == ReadingMode.VERTICAL) {
-                                readerImageDimensions(imageLoader, resource)?.let { dimensionsKnown(index, it) }
-                            }
+                            readerImageDimensions(imageLoader, resource, originalPage = pages[index])
+                                ?.let { dimensionsKnown(index, it) }
                             finished += index
                             continue
                         }
@@ -1619,8 +1619,9 @@ private fun AdjacentPagePrefetch(
                         launch {
                             val result = try { request.job.await() }
                             catch (_: CancellationException) { return@launch }
-                            if (mode == ReadingMode.VERTICAL && result is SuccessResult && requests[index] === request) {
-                                val size = readerImageDimensions(imageLoader, resource, result.diskCacheKey)
+                            if (result is SuccessResult && requests[index] === request) {
+                                val size = readerImageDimensions(imageLoader, resource,
+                                    result.diskCacheKey ?: resource.url, originalPage = pages[index], refresh = true)
                                 if (size != null && requests[index] === request) dimensionsKnown(index, size)
                             }
                             if (requests[index] === request) {
@@ -1702,11 +1703,10 @@ private fun ReaderPage(
             val resource = if (reload > 0) retrySource(page) else resolve(page)
             // Start the image immediately; original-size IO can finish alongside its decode.
             resolvedPage = resource
-            if (!paged && knownDimensions == null) {
-                readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource)?.let {
-                    observedDimensions = it
-                    dimensionsMeasured(it)
-                }
+            readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
+                originalPage = page.takeIf { reload == 0 || resource.url == page.url })?.let {
+                observedDimensions = it
+                dimensionsMeasured(it)
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {
@@ -1715,8 +1715,11 @@ private fun ReaderPage(
             error = failure.message ?: "图片暂时无法读取"
         }
     }
-    LaunchedEffect(knownDimensions, observedDimensions) {
-        val size = knownDimensions ?: observedDimensions ?: return@LaunchedEffect
+    // A decoded preview may guide layout if header parsing is unavailable. It is never
+    // published as an original-file measurement or passed to the original tile decoder.
+    val layoutDimensions = knownDimensions ?: observedDimensions ?: cachedDimensions ?: loadedImage?.previewSize
+    LaunchedEffect(layoutDimensions) {
+        val size = layoutDimensions ?: return@LaunchedEffect
         val measuredAspect = size.readerAspectRatio()
         if (!paged && measuredAspect != aspect) {
             // Do not move the scroll anchor when original dimensions arrive during a drag/fling.
@@ -1724,7 +1727,6 @@ private fun ReaderPage(
         }
         aspect = measuredAspect
         hasDimensions = true
-        ReaderDimensionCache.put(page.url, size)
     }
     val delayedLoading = rememberDelayedBusy(loading)
     var prefetchError by remember(page.url) { mutableStateOf<String?>(null) }
@@ -1766,7 +1768,7 @@ private fun ReaderPage(
                     onSuccess = { _, result ->
                         val width = result.image.width
                         val height = result.image.height
-                        if (!paged && width > 0 && height > 0) {
+                        if (width > 0 && height > 0) {
                             loadedImage = LoadedReaderImage(result.diskCacheKey, IntSize(width, height))
                         }
                         loading = false
@@ -1787,16 +1789,19 @@ private fun ReaderPage(
         }
         LaunchedEffect(resource, loadedImage) {
             val image = loadedImage ?: return@LaunchedEffect
-            if (!paged && resource != null && knownDimensions == null) {
-                val size = readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource, image.diskCacheKey) ?: image.previewSize
-                observedDimensions = size
-                dimensionsMeasured(size)
+            if (resource != null) {
+                readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
+                    image.diskCacheKey ?: resource.url,
+                    originalPage = page.takeIf { reload == 0 || resource.url == page.url }, refresh = true)?.let { size ->
+                    observedDimensions = size
+                    dimensionsMeasured(size)
+                }
             }
         }
         val imageError = error ?: prefetchError.takeUnless { resource?.url?.startsWith("file:") == true }
         val naturalHeight = maxWidth / aspect
         val naturalHeightPx = with(density) { naturalHeight.roundToPx() }
-        val pendingAspect = (knownDimensions ?: observedDimensions ?: cachedDimensions)?.readerAspectRatio()
+        val pendingAspect = layoutDimensions?.readerAspectRatio()
         LaunchedEffect(paged, hasDimensions, pendingAspect, aspect, naturalHeightPx, measuredHeight) {
             if (!paged) layoutReady(hasDimensions && (pendingAspect == null || pendingAspect == aspect) &&
                 measuredHeight == naturalHeightPx && measuredHeight > 0)
@@ -1970,7 +1975,7 @@ private fun ReaderPageNavigatorDialog(
 @Composable
 private fun ReaderProgressSlider(
     pageIndex: Int,
-    pageCount: Int,
+    pages: List<Page>,
     pendingPage: Int?,
     enabled: Boolean,
     onSeek: (Int) -> Unit,
@@ -1983,8 +1988,16 @@ private fun ReaderProgressSlider(
     val dragged by interactions.collectIsDraggedAsState()
     val interactionChanged by rememberUpdatedState(onInteractionChanged)
     var preview by remember { mutableStateOf<Float?>(null) }
+    val pageCount = pages.size
     val lastPage = (pageCount - 1).coerceAtLeast(0)
     val shown = (preview ?: pendingPage?.toFloat() ?: pageIndex.toFloat()).coerceIn(0f, lastPage.toFloat())
+    val dimensionRevision by ReaderDimensionCache.revision.collectAsStateWithLifecycle()
+    val shownPage = pages.getOrNull(shown.roundToInt())
+    val originalSize = remember(shownPage?.url, dimensionRevision) {
+        shownPage?.let { ReaderDimensionCache.get(it.url) }
+    }
+    val resolutionLabel = originalSize?.let { "${it.width} × ${it.height} px" } ?: "尺寸待获取"
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
 
     LaunchedEffect(pressed, dragged, enabled) {
         interactionChanged(enabled && (pressed || dragged))
@@ -2013,13 +2026,18 @@ private fun ReaderProgressSlider(
             interactions = interactions,
             label = "阅读进度，第 ${shown.roundToInt() + 1} 页，共 $pageCount 页",
         )
-        Row(Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
+        Column(Modifier.width(112.dp * fontScale).heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
             .clickable(enabled = enabled && pageCount > 0, role = Role.Button,
                 onClickLabel = "打开页面导航", onClick = onOpenNavigator)
-            .padding(horizontal = 6.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-            Text(mangaNumberText("${shown.roundToInt() + 1}"), color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-            Text(mangaNumberText(" / $pageCount"), color = colors.onSurfaceVariant, fontSize = 12.sp)
+            .semantics { contentDescription = "第 ${shown.roundToInt() + 1} 页，共 $pageCount 页，原图$resolutionLabel" }
+            .padding(horizontal = 4.dp, vertical = 5.dp),
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                Text(mangaNumberText("${shown.roundToInt() + 1}"), color = colors.onSurface, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
+                Text(mangaNumberText(" / $pageCount"), color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 16.sp)
+            }
+            Text(mangaNumberText(resolutionLabel), color = colors.onSurfaceVariant, fontSize = 12.sp,
+                lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
