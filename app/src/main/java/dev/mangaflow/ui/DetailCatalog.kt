@@ -6,6 +6,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -92,11 +94,13 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabContent
+import dev.mangaflow.ui.motion.LocalTabVisibilityScope
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
@@ -138,24 +142,25 @@ internal fun DetailCatalog(
     val volumeCovers = remember(mangaId) { mutableStateMapOf<String, VolumeCoverState>() }
     val coverPermits = remember(mangaId) { Semaphore(2) }
 
+    val presence = LocalTabVisibilityScope.current
+    val flow = if (presence != null && LocalMotionEnabled.current) with(presence) {
+        Modifier.animateEnterExit(
+            enter = fadeIn(tween(MangaMotion.Content)) +
+                slideInVertically(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness)) { -it / 2 } +
+                expandVertically(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness),
+                    expandFrom = Alignment.Top),
+            exit = fadeOut(tween(MangaMotion.Quick)) +
+                slideOutVertically(tween(MangaMotion.Quick)) { -it / 2 } +
+                shrinkVertically(tween(MangaMotion.Quick), shrinkTowards = Alignment.Top))
+    } else Modifier
     val showBusy = rememberDelayedBusy(loading)
     val shown = remember(chapters, group) {
         if (group == null) chapters else chapters.filter { it.group == group }
     }
 
-    val parentMotion = dev.mangaflow.ui.motion.LocalTabVisibilityScope.current
-    val motion = dev.mangaflow.ui.motion.LocalMotionEnabled.current
-    val groupReveal = if (motion && parentMotion != null) with(parentMotion) {
-        Modifier.animateEnterExit(
-            enter = fadeIn(tween(MangaMotion.Content)) + expandVertically(
-                spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness), expandFrom = Alignment.Top),
-            exit = fadeOut(tween(MangaMotion.Quick)) + shrinkVertically(
-                spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness), shrinkTowards = Alignment.Top),
-        )
-    } else Modifier
     Column(Modifier.fillMaxSize()) {
         if (groups.size > 1 || error != null) Row(
-            Modifier.fillMaxWidth().then(groupReveal).heightIn(min = 44.dp).padding(horizontal = 16.dp),
+            Modifier.fillMaxWidth().then(flow).heightIn(min = 44.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (groups.size > 1) {
@@ -218,7 +223,6 @@ internal fun DetailCatalog(
             } else {
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val showGroup = targetGroup == null && groups.size > 1
-                val volumesOnly = visibleChapters.all(::isVolumeChapter)
                 val tileHeight = (42f * fontScale).dp
                 // Source groups are consecutive. Keep that exact order and give each run
                 // its own grid row so a book cover never stretches a normal chapter row.
@@ -238,16 +242,18 @@ internal fun DetailCatalog(
                         chapterWidth >= (72f * fontScale * 3f).dp + 12.dp -> 3
                         else -> 2
                     }
+                    val volumeColumns = ((chapterWidth.value + 6f) / (96f * fontScale + 6f))
+                        .toInt().coerceIn(1, 4)
+                    // Common slots give both explicit and title-detected volumes the same columns.
                     LazyVerticalGrid(
-                        columns = if (volumesOnly) GridCells.Adaptive(minSize = (96f * fontScale).dp)
-                            else GridCells.Fixed(chapterColumns),
+                        columns = GridCells.Fixed(chapterColumns * volumeColumns),
                         state = grid, userScrollEnabled = paneActive,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
-                        horizontalArrangement = Arrangement.spacedBy(if (volumesOnly) 12.dp else 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         // Each 42dp visual cell owns a separate 48dp hit row; its 3dp
                         // top/bottom insets provide the 6dp visible vertical gap.
-                        verticalArrangement = Arrangement.spacedBy(if (volumesOnly) 14.dp else 0.dp),
+                        verticalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
                         runs.forEachIndexed { runIndex, run ->
                             if (showGroup) item(key = "group:$runIndex:${run.first().group}",
@@ -258,11 +264,19 @@ internal fun DetailCatalog(
                             if (!showGroup && runIndex > 0) item(key = "run-break:$runIndex",
                                 span = { GridItemSpan(maxLineSpan) }, contentType = "run-break") { Spacer(Modifier.height(4.dp)) }
                             items(run, key = Chapter::id,
-                                span = { if (!volumesOnly && chapterColumns == 4 && isVolumeChapter(it))
-                                    GridItemSpan(2) else GridItemSpan(1) },
+                                span = { GridItemSpan(if (isVolumeChapter(it)) chapterColumns else volumeColumns) },
                                 contentType = { if (isVolumeChapter(it)) "volume" else "chapter" }) { chapter ->
                                 if (isVolumeChapter(chapter)) {
                                     val cover = volumeCovers[chapter.id] ?: VolumeCoverState()
+                                    LaunchedEffect(chapter.id, paneActive, cover.error, cover.attempt) {
+                                        if (paneActive && cover.error != null && cover.automaticRetries < 2) {
+                                            delay(900L * (cover.automaticRetries + 1))
+                                            if (volumeCovers[chapter.id] === cover)
+                                                volumeCovers[chapter.id] = VolumeCoverState(
+                                                    attempt = cover.attempt + 1,
+                                                    automaticRetries = cover.automaticRetries + 1)
+                                        }
+                                    }
                                     LaunchedEffect(chapter.id, paneActive, cover.attempt) {
                                         if (!paneActive || cover.page != null || cover.error != null) return@LaunchedEffect
                                         val pending = cover.copy(loading = true)
@@ -281,10 +295,10 @@ internal fun DetailCatalog(
                                                     error = failure.message ?: "这一卷封面暂不可用")
                                         } finally {
                                             if (volumeCovers[chapter.id] === pending)
-                                                volumeCovers[chapter.id] = VolumeCoverState(attempt = pending.attempt)
+                                                volumeCovers[chapter.id] = VolumeCoverState(attempt = pending.attempt, automaticRetries = pending.automaticRetries)
                                         }
                                     }
-                                    Box(Modifier.padding(bottom = if (volumesOnly) 0.dp else 10.dp)) {
+                                    Box(Modifier.padding(horizontal = 3.dp).padding(bottom = 10.dp)) {
                                         VolumeBookTile(
                                             mangaId = mangaId, chapter = chapter, cover = cover,
                                             imageHeaders = { volumeImageHeaders(chapter) },
@@ -559,4 +573,3 @@ internal fun chapterStatus(entry: DownloadEntry?, progress: ReadingProgress?): S
         else -> null
     },
 ).joinToString("，")
-

@@ -55,6 +55,7 @@ internal data class VolumeCoverState(
     val loading: Boolean = false,
     val error: String? = null,
     val attempt: Int = 0,
+    val automaticRetries: Int = 0,
 )
 
 /** Adapt the existing MangaCover/flat collection and ChapterTile actions to one actual volume. */
@@ -131,4 +132,3 @@ internal fun VolumeBookTile(
         ChapterReadingStatus(progress, progressKnown)
     }
 }
-

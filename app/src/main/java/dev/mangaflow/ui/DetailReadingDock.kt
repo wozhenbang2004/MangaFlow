@@ -1,7 +1,6 @@
 package dev.mangaflow.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -12,6 +11,7 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
@@ -33,6 +32,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -46,6 +47,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Chapter
@@ -53,7 +55,6 @@ import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
-import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 
@@ -66,7 +67,7 @@ internal fun DetailReadingDock(
     firstChapter: Chapter?,
     loading: Boolean,
     hidden: Boolean,
-    compact: Boolean = false,
+    collapseProgress: Float = 0f,
     active: Boolean,
     modifier: Modifier = Modifier,
     onHeightChanged: (Int) -> Unit = {},
@@ -79,12 +80,12 @@ internal fun DetailReadingDock(
     val interaction = remember { MutableInteractionSource() }
     var actions by remember(mangaId) { mutableStateOf(false) }
     val motion = LocalMotionEnabled.current
-    val fontScale = LocalDensity.current.fontScale
-    val dockWidth by animateDpAsState(
-        (if (compact) 140.dp else 220.dp) * fontScale.coerceIn(1f, 1.6f),
-        tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "reading-dock-width")
-    val minimumHeight by animateDpAsState(if (compact) 44.dp else 52.dp,
-        tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "reading-dock-height")
+    val density = LocalDensity.current
+    val fontScale = density.fontScale.coerceAtLeast(1f)
+    // The same reversible scroll progress owns size, position, content and material shape.
+    val collapse = if (motion) collapseProgress.coerceIn(0f, 1f)
+        else if (collapseProgress < .5f) 0f else 1f
+    val minimumHeight = lerp(56.dp, 36.dp, collapse)
     val visibility by animateFloatAsState(if (hidden && !actions) 0f else 1f,
         tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
         label = "reading-dock")
@@ -100,11 +101,15 @@ internal fun DetailReadingDock(
         loading -> "正在读取章节"
         else -> "暂无可读章节"
     }
-    if (visibility > .01f) LiquidGlassSurface(backdrop,
-        modifier.widthIn(max = dockWidth).fillMaxWidth().onSizeChanged { onHeightChanged(it.height) }.graphicsLayer {
-            alpha = visibility
-            translationY = (1f - visibility) * 86.dp.toPx()
-        }.motionInputGate(active && visibility > .9f)
+    if (visibility > .01f) BoxWithConstraints(modifier.fillMaxWidth()) {
+        val fullWidth = minOf(maxWidth, 336.dp * fontScale.coerceAtMost(1.4f))
+        val compactWidth = minOf(fullWidth, 104.dp * fontScale.coerceAtMost(1.6f))
+        val width = lerp(fullWidth, compactWidth, collapse)
+        Box(Modifier.align(BiasAlignment(collapse, 1f)).width(width).heightIn(min = 48.dp)
+            .onSizeChanged { onHeightChanged(it.height) }.graphicsLayer {
+                alpha = visibility
+                translationY = (1f - visibility) * 86.dp.toPx()
+            }.motionInputGate(active && visibility > .9f)
             .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
                 enabled = active && canRead,
                 onLongClickLabel = "阅读选项", onLongClick = { actions = true },
@@ -117,37 +122,45 @@ internal fun DetailReadingDock(
                         if (travel < -24.dp.toPx()) { change.consume(); actions = true }
                     })
                 }
-            }.motionPress(interaction, enabled = canRead, pressedScale = .985f),
-        cornerRadius = 22.dp, role = GlassSurfaceRole.READING_DOCK,
-        interactionSource = interaction, trackPointer = true,
-        elevation = 4.dp, softCard = true) {
-        Row(Modifier.fillMaxWidth().heightIn(min = minimumHeight).padding(horizontal = 12.dp, vertical = 4.dp)
-            .semantics(mergeDescendants = true) {
-                contentDescription = listOf(actionTitle, chapterTitle, subtitle).filter(String::isNotBlank).joinToString("，")
-            },
-            verticalAlignment = Alignment.CenterVertically) {
-            val progressColor = MaterialTheme.colorScheme.primary
-            Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-                if (fraction != null) Canvas(Modifier.matchParentSize().padding(1.dp)) {
-                    val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
-                    drawArc(progressColor.copy(alpha = .14f), -90f, 360f, false, style = stroke)
-                    // This is only the actual saved-page fraction; it never rotates like a loader.
-                    drawArc(progressColor.copy(alpha = .85f), -90f, 360f * displayedProgress, false, style = stroke)
-                }
-                Icon(Icons.Filled.PlayArrow, null, tint = progressColor, modifier = Modifier.size(18.dp))
-            }
-            Spacer(Modifier.width(7.dp))
-            MotionSwap(compact, Modifier.weight(1f, fill = false)) { condensed ->
-                if (condensed) Text(chapterTitle.ifBlank { if (loading) "正在读取章节" else "暂无可读章节" },
-                    color = DetailForeground, fontSize = 12.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                else Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(chapterTitle.ifBlank { if (loading) "正在读取章节" else "暂无可读章节" }, color = DetailForeground,
-                        fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (canRead) Text(listOf(actionTitle, percent?.let { "$it%" }).filterNotNull().joinToString(" · "),
-                        color = DetailSecondary, fontSize = 10.sp, lineHeight = 14.sp,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }.motionPress(interaction, enabled = canRead, pressedScale = .985f)) {
+            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().align(Alignment.Center),
+                cornerRadius = lerp(28.dp, 18.dp, collapse), role = GlassSurfaceRole.READING_DOCK,
+                interactionSource = interaction, trackPointer = true,
+                elevation = 4.dp, softCard = true) {
+                Row(Modifier.fillMaxWidth().heightIn(min = minimumHeight)
+                    .padding(horizontal = lerp(18.dp, 10.dp, collapse), vertical = 4.dp)
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = listOf(actionTitle, chapterTitle, subtitle)
+                            .filter(String::isNotBlank).joinToString("，")
+                    }, verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center) {
+                    val progressColor = MaterialTheme.colorScheme.primary
+                    Box(Modifier.size(lerp(28.dp, 20.dp, collapse)), contentAlignment = Alignment.Center) {
+                        if (fraction != null) Canvas(Modifier.matchParentSize().padding(1.dp)) {
+                            val stroke = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)
+                            drawArc(progressColor.copy(alpha = .14f), -90f, 360f, false, style = stroke)
+                            drawArc(progressColor.copy(alpha = .85f), -90f, 360f * displayedProgress, false, style = stroke)
+                        }
+                        Icon(Icons.Filled.PlayArrow, null, tint = progressColor,
+                            modifier = Modifier.size(lerp(20.dp, 16.dp, collapse)))
+                    }
+                    Spacer(Modifier.width(lerp(10.dp, 6.dp, collapse)))
+                    Column(Modifier.weight(1f, fill = false),
+                        verticalArrangement = Arrangement.spacedBy(2.dp * (1f - collapse))) {
+                        Text(chapterTitle.ifBlank { if (loading) "正在读取章节" else "暂无可读章节" },
+                            color = DetailForeground, fontSize = (15f - 3f * collapse).sp,
+                            lineHeight = (22f - 4f * collapse).sp, fontWeight = FontWeight.Medium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (canRead && collapse < 1f) {
+                            val lineHeight = with(density) { 16.sp.toDp() }
+                            Box(Modifier.height(lineHeight * (1f - collapse)).clipToBounds()
+                                .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) }) {
+                                Text(listOf(actionTitle, percent?.let { "$it%" }).filterNotNull().joinToString(" · "),
+                                    color = DetailSecondary, fontSize = 11.sp, lineHeight = 16.sp,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
                 }
             }
         }

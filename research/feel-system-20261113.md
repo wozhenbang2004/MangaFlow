@@ -68,3 +68,11 @@ Audit started from main `3d2ec9b3c0d04c6f36f06996c1eb4227ffbc9173`. Its release 
 - Actual acceptance path: rapid A→B→A tabs and search toggles; drawer drag/reverse; scroll then short/long/side swipe; favorite on/off during synchronization; cancel/undo deletion; fresh/refreshed/failed request and explicit retry; chapter navigation/scrub/progress restoration; system animator scale 0 and haptics off; TalkBack and large type; install and cold start the minified APK.
 
 No feature is marked device-accepted solely because it exists in source or compiles.
+
+## Concurrent main integration
+
+Before PR creation, main advanced to `9fa02c0` through `7c9cc9a` (UI-CONTINUITY-13A–G). Integrated its centered/compact reading dock, grouped score typography, centered manual gallery, bounded volume retry, flowing child controls, search route-completion cleanup and download chapter grid/menu. Conflicts preserve these newer decisions. Search uses a query-specific key and keeps its source until the actual entering transition finishes, then follows the existing clear-search behavior. The gallery is now manual, so it has no autoplay timer to cancel. Full CI must run again on the integrated head.
+
+## Delivery authorization update
+
+User follow-up in this task: “为什么不直接和到 main？” This supersedes holding the work on a branch-only PR. Finish integration and the required build/Lint gates, merge to latest main, and observe its normal signed Release result without another confirmation. Device operation remains separately unverified.

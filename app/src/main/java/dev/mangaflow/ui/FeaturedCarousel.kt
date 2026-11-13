@@ -10,9 +10,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PageSize
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,28 +26,23 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.carousel.CarouselDefaults
-import androidx.compose.material3.carousel.CarouselItemDrawInfo
-import androidx.compose.material3.carousel.HorizontalMultiBrowseCarousel
-import androidx.compose.material3.carousel.rememberCarouselState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -64,8 +61,6 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -81,9 +76,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
 import coil3.BitmapImage
 import coil3.compose.rememberAsyncImagePainter
 import coil3.network.NetworkHeaders
@@ -102,13 +94,13 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.motionPress
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.floor
 
-/** Keep Material's keylines, masks and fling owner; every visual reads its live expansion. */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+/** Foundation Pager's equal edge padding keeps first, middle and last recommendations centered. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, visible: Boolean,
     onOpen: (Manga) -> Unit, onRatings: ((Manga) -> Unit)? = null) {
@@ -116,31 +108,15 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val galleryWidth = maxWidth
         val density = LocalDensity.current
-        val peekWidth = (galleryWidth * .14f).coerceIn(40.dp, 72.dp)
-        val peekPixels = with(density) { peekWidth.toPx() }
         val motion = LocalMotionEnabled.current
-        val state = rememberCarouselState { manga.size }
-        val fling = CarouselDefaults.singleAdvanceFlingBehavior(state,
+        val state = rememberPagerState { manga.size }
+        val scope = rememberCoroutineScope()
+        val fling = PagerDefaults.flingBehavior(state,
             snapAnimationSpec = if (motion) spring(dampingRatio = MangaMotion.GestureDamping,
                 stiffness = MangaMotion.GestureStiffness) else snap())
-        val identities = manga.map { it.id }
-        val items = remember(identities) { mutableStateMapOf<Int, CarouselItemDrawInfo>() }
-        val focused by remember(items, manga.size) {
-            derivedStateOf { items.entries.filter { it.key in manga.indices }.maxByOrNull { it.value.size }?.key ?: 0 }
-        }
-        val position = remember(items, manga.size, peekPixels) {
-            derivedStateOf {
-                var total = 0f
-                var weighted = 0f
-                items.forEach { (index, info) ->
-                    if (index in manga.indices) {
-                        val weight = featuredExpansion(info, peekPixels)
-                        total += weight
-                        weighted += index * weight
-                    }
-                }
-                (if (total > 0f) weighted / total else focused.toFloat()).coerceIn(0f, manga.lastIndex.toFloat())
-            }
+        val position = remember(state, manga.size) {
+            derivedStateOf { (state.currentPage + state.currentPageOffsetFraction)
+                .coerceIn(0f, manga.lastIndex.toFloat()) }
         }
         val extracted = remember(manga.map { it.coverUrl }) { mutableStateMapOf<String, Color>() }
         val fallback = MaterialTheme.colorScheme.surfaceVariant
@@ -150,8 +126,6 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                     if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(), label = "featured-cover-color")
             }
         }
-        // Only a newly decoded palette is timed. Finger movement interpolates the cached colors
-        // directly, so a reversing drag cannot leave the atmosphere or dots behind the artwork.
         val atmosphere = remember(position, colors) {
             derivedStateOf {
                 val page = position.value
@@ -160,70 +134,39 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                 lerp(colors[from].value, colors[to].value, page - from)
             }
         }
-        var touched by remember { mutableStateOf(false) }
-        var direction by remember { mutableIntStateOf(1) }
-        val lifecycle = LocalLifecycleOwner.current.lifecycle
-        val touchExploration = dev.mangaflow.ui.motion.LocalTouchExplorationEnabled.current
-        val speed = with(density) { 900.dp.toPx() }
-        val autoAdvance = motion && visible && !touched && manga.size > 1 && !touchExploration
-        LaunchedEffect(autoAdvance, state, fling, identities, lifecycle) {
-            if (autoAdvance) lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                while (true) {
-                    delay(6_000)
-                    if (!state.isScrollInProgress) {
-                        if (focused >= manga.lastIndex) direction = -1
-                        if (focused <= 0) direction = 1
-                        state.scroll { with(fling) { performFling(speed * direction) } }
-                    }
-                }
-            }
-        }
         val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-        Column(Modifier.padding(bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.fillMaxWidth()) {
-                val fontScale = density.fontScale.coerceAtLeast(1f)
-                // Text has reserved space below the fitted cover, so it never masks its title/art.
-                val captionHeight = (24f + 64f * fontScale).dp
-                val itemHeight = (galleryWidth * .76f).coerceIn(230.dp, 250.dp) + (captionHeight - 82.dp)
-                val preferredWidth = if (manga.size == 1) galleryWidth else (galleryWidth - peekWidth - 8.dp).coerceAtLeast(180.dp)
-                val imageWidthPx = with(density) { preferredWidth.roundToPx() }.coerceAtLeast(1)
-                val imageHeightPx = with(density) { itemHeight.roundToPx() }.coerceAtLeast(1)
-                HorizontalMultiBrowseCarousel(state = state,
-                    preferredItemWidth = preferredWidth, itemSpacing = 8.dp,
-                    minSmallItemWidth = peekWidth, maxSmallItemWidth = peekWidth,
-                    contentPadding = PaddingValues(0.dp), flingBehavior = fling,
-                    modifier = Modifier.fillMaxWidth().height(itemHeight)
-                        .semantics { stateDescription = "推荐 ${focused + 1} / ${manga.size}" }
-                        .pointerInput(manga.size) {
-                            awaitEachGesture {
-                                try {
-                                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                                    touched = true
-                                    do {
-                                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                                    } while (event.changes.any { it.pressed })
-                                } finally { touched = false }
-                            }
-                        },
-                ) { index ->
-                    val info = carouselItemDrawInfo
-                    DisposableEffect(items, index, info) {
-                        items[index] = info
-                        onDispose { if (items[index] === info) items.remove(index) }
-                    }
-                    key(manga[index].id, manga[index].coverUrl) {
-                        FeaturedManga(manga[index], repository, captionHeight, imageWidthPx, imageHeightPx,
-                            color = colors[index], atmosphere = atmosphere,
-                            onColor = { extracted[manga[index].coverUrl] = it },
-                            modifier = Modifier.fillMaxWidth().height(itemHeight).graphicsLayer {
-                                val scale = if (motion) .96f + .04f * featuredExpansion(info, peekPixels) else 1f
-                                scaleX = scale; scaleY = scale
-                            }.mangaCoverCard(22.dp).maskClip(RoundedCornerShape(22.dp)),
-                            emphasis = { featuredExpansion(info, peekPixels) },
-                            offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) * (if (rtl) -1f else 1f) else 0f },
-                            onOpen = onOpen, onRatings = onRatings)
-                    }
-                }
+        val fontScale = density.fontScale.coerceAtLeast(1f)
+        val captionHeight = (14f + 60f * fontScale).dp
+        val preferredWidth = minOf(galleryWidth, (galleryWidth * .72f).coerceAtMost(292.dp))
+        val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
+        val artworkHeight = (preferredWidth * 1.12f).coerceIn(216.dp, 300.dp)
+        val itemHeight = artworkHeight + captionHeight
+        val imageWidthPx = with(density) { preferredWidth.roundToPx() }.coerceAtLeast(1)
+        val imageHeightPx = with(density) { itemHeight.roundToPx() }.coerceAtLeast(1)
+        Column(Modifier.padding(bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            HorizontalPager(state = state, pageSize = PageSize.Fixed(preferredWidth),
+                contentPadding = PaddingValues(horizontal = edgePadding), pageSpacing = 10.dp,
+                beyondViewportPageCount = 1, flingBehavior = fling, userScrollEnabled = visible,
+                key = { manga[it].id },
+                modifier = Modifier.fillMaxWidth().height(itemHeight)
+                    .semantics { stateDescription = "推荐 ${state.currentPage + 1} / ${manga.size}" }) { index ->
+                val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
+                FeaturedManga(manga[index], repository, captionHeight, imageWidthPx, imageHeightPx,
+                    color = colors[index], atmosphere = atmosphere,
+                    onColor = { extracted[manga[index].coverUrl] = it },
+                    modifier = Modifier.fillMaxWidth().height(itemHeight).graphicsLayer {
+                        val scale = if (motion) .92f + .08f * emphasis() else 1f
+                        scaleX = scale; scaleY = scale
+                        alpha = .72f + .28f * emphasis()
+                    }.mangaCoverCard(22.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(22.dp)),
+                    emphasis = emphasis,
+                    offset = { if (motion) (index - position.value).coerceIn(-1f, 1f) *
+                        (if (rtl) -1f else 1f) else 0f },
+                    onPreview = { scope.launch {
+                        if (motion) state.animateScrollToPage(index,
+                            animationSpec = spring(MangaMotion.GestureDamping, MangaMotion.GestureStiffness))
+                        else state.scrollToPage(index)
+                    } }, enabled = visible, onOpen = onOpen, onRatings = onRatings)
             }
             if (manga.size > 1) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 val color = MaterialTheme.colorScheme.onSurface
@@ -242,10 +185,6 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-private fun featuredExpansion(info: CarouselItemDrawInfo, peekPixels: Float): Float =
-    ((info.size - peekPixels) / (info.maxSize - peekPixels).coerceAtLeast(1f)).coerceIn(0f, 1f)
-
 @Composable
 private fun FeaturedManga(
     manga: Manga,
@@ -259,6 +198,8 @@ private fun FeaturedManga(
     modifier: Modifier,
     emphasis: () -> Float,
     offset: () -> Float,
+    onPreview: () -> Unit,
+    enabled: Boolean,
     onOpen: (Manga) -> Unit,
     onRatings: ((Manga) -> Unit)?,
 ) {
@@ -306,10 +247,12 @@ private fun FeaturedManga(
         val t = ((emphasis() - .55f) / .45f).coerceIn(0f, 1f)
         t * t * (3f - 2f * t)
     }
-    Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
+    Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button, enabled = enabled,
         onClickLabel = "查看${manga.title}") {
-            transition?.select?.invoke(MangaCoverKey(manga.id, "discovery-featured"))
-            onOpen(manga)
+            if (emphasis() < .98f) onPreview() else {
+                transition?.select?.invoke(MangaCoverKey(manga.id, "discovery-featured"))
+                onOpen(manga)
+            }
         }.semantics(mergeDescendants = true) { contentDescription = manga.title }
         .motionPress(interaction, pressedScale = .985f)) {
         Box(Modifier.matchParentSize().mangaHazeSource(heroBackdrop).drawBehind { drawRect(atmosphere.value) }) {
@@ -317,19 +260,23 @@ private fun FeaturedManga(
                 modifier = Modifier.matchParentSize().graphicsLayer {
                     scaleX = 1.16f; scaleY = 1.16f
                     translationX = offset() * 10.dp.toPx()
-                    alpha = if (Build.VERSION.SDK_INT >= 31) .72f else .16f
+                    alpha = if (Build.VERSION.SDK_INT >= 31) .22f else .12f
                 }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur))
             Box(Modifier.matchParentSize().drawBehind {
                 drawRect(Brush.verticalGradient(0f to atmosphere.value.copy(alpha = .05f),
                     .55f to Color.Transparent, 1f to surface.copy(alpha = .62f)))
             })
-            Box(Modifier.fillMaxSize().padding(top = 6.dp, bottom = captionHeight), contentAlignment = Alignment.Center) {
+            // Side previews show recognizable cover pixels, rather than blurred side strips.
+            Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize().graphicsLayer { alpha = 1f - emphasis() })
+            Box(Modifier.fillMaxSize().padding(top = 4.dp, bottom = captionHeight), contentAlignment = Alignment.Center) {
                 if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                     tint = ink.copy(alpha = .22f), modifier = Modifier.size(28.dp))
                 Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize().mangaSharedCover(manga.id, "discovery-featured")
                         .graphicsLayer {
                             translationX = offset() * 4.dp.toPx()
+                            alpha = emphasis()
                             compositingStrategy = CompositingStrategy.Offscreen
                         }.drawWithContent {
                             drawContent()
@@ -369,14 +316,14 @@ private fun FeaturedManga(
                         1f to Color.Black), blendMode = BlendMode.DstIn)
                 }, cornerRadius = 0.dp, role = GlassSurfaceRole.GALLERY,
                 softCard = false, surfaceColor = surface, elevation = 0.dp) {}
-            Column(Modifier.fillMaxSize().padding(horizontal = 14.dp).padding(top = 7.dp, bottom = 11.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom)) {
+            Column(Modifier.fillMaxSize().padding(horizontal = 14.dp).padding(top = 5.dp, bottom = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.Bottom)) {
                 Text(manga.title, modifier = Modifier.clearAndSetSemantics { }, color = ink, style = MaterialTheme.typography.titleSmall.copy(
                     shadow = Shadow(if (onDark) Color.Black.copy(alpha = .16f) else Color.White.copy(alpha = .18f),
-                        Offset(0f, 1f), 3f)), fontSize = 16.sp, lineHeight = 21.sp,
-                    fontWeight = FontWeight.SemiBold, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Offset(0f, 1f), 3f)), fontSize = 15.sp, lineHeight = 19.sp,
+                    fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
-                    onExpand = if (information() >= .98f && onRatings != null) ({ onRatings(manga) }) else null)
+                    onExpand = if (enabled && information() >= .98f && onRatings != null) ({ onRatings(manga) }) else null)
             }
         }
     }

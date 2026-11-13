@@ -15,6 +15,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -79,6 +80,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.glass.mangaHazeSource
@@ -247,7 +249,9 @@ fun DownloadsScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
+        val downloadChapterColumns = ((maxWidth.value - 40f) /
+            (96f * LocalDensity.current.fontScale.coerceAtLeast(1f))).toInt().coerceIn(1, 4)
         // The captured scene contains the wallpaper and scrolling list, never the header itself.
         Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).background(MaterialTheme.colorScheme.background)) {
             wallpaper()
@@ -328,18 +332,23 @@ fun DownloadsScreen(
                                     }
                                 }
                             }
-                            if (expanded) items(chapters, key = { "chapter:${it.id}" }, contentType = { "download-chapter" }) { entry ->
-                                Box(Modifier.animateItem(
-                                    fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
-                                    placementSpec = if (motion) tween(MangaMotion.Content) else null,
-                                    fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)) {
-                                    SwipeToRemove(enabled = !managing, label = "删除 ${entry.chapter.title} 下载",
-                                        onRemove = { removeWithUndo(listOf(entry)) }) {
-                                        DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
-                                            onRead = { onRead(entry) }, onSelect = { toggleSelection(listOf(entry)) },
-                                            onManage = { if (managing) toggleSelection(listOf(entry)) else { managing = true; selectedIds = setOf(entry.id) } },
-                                            onPause = { store.pause(it.id) }, onRetry = onRetry)
+                            if (expanded) items(chapters.chunked(downloadChapterColumns),
+                                key = { "chapters:" + it.first().id }, contentType = { "download-chapter-grid" }) { row ->
+                                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    row.forEach { entry ->
+                                        Box(Modifier.weight(1f)) {
+                                            SwipeToRemove(enabled = !managing, label = "删除 ${entry.chapter.title} 下载",
+                                                onRemove = { removeWithUndo(listOf(entry)) }) {
+                                                DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
+                                                    onRead = { onRead(entry) }, onSelect = { toggleSelection(listOf(entry)) },
+                                                    onManage = { if (managing) toggleSelection(listOf(entry)) else {
+                                                        managing = true; selectedIds = setOf(entry.id) } },
+                                                    onPause = { store.pause(it.id) }, onRetry = onRetry)
+                                            }
+                                        }
                                     }
+                                    repeat(downloadChapterColumns - row.size) { Spacer(Modifier.weight(1f)) }
                                 }
                             }
                             item(key = "space:$mangaId", contentType = "download-separator") {
@@ -385,12 +394,19 @@ fun DownloadsScreen(
                                 Icon(Icons.Outlined.MoreHoriz, "存储与下载管理", Modifier.size(21.dp), tint = secondary)
                             }
                             CompactGlassPopover(visible = showQueueActions, backdrop = backdrop,
-                                onDismiss = { showQueueActions = false }) {
+                                onDismiss = { showQueueActions = false },
+                                maximumWidth = 216.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.35f)) {
                                 Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text("存储空间", style = MaterialTheme.typography.bodySmall, color = secondary)
-                                    Text(downloadBytes(usedBytes), style = MaterialTheme.typography.titleMedium, color = foreground)
-                                    Text("${downloadBytes(availableBytes)} 可用", style = MaterialTheme.typography.bodySmall, color = secondary)
+                                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                        Text("已下载", fontSize = 11.sp, color = secondary)
+                                        Spacer(Modifier.weight(1f))
+                                        Text(downloadBytes(usedBytes), fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium, color = foreground)
+                                    }
+                                    Text("${downloadBytes(availableBytes)} 可用", fontSize = 11.sp, color = secondary)
                                 }
+                                HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                    color = foreground.copy(alpha = .07f))
                                 CompactMenuAction(Icons.Outlined.Inventory2, "管理下载", enabled = manageableEntries.isNotEmpty()) {
                                     showQueueActions = false; managing = true; selectedIds = emptySet()
                                 }
@@ -401,7 +417,8 @@ fun DownloadsScreen(
                                     showQueueActions = false; resumableEntries.forEach(onRetry)
                                 }
                                 if (completedEntries.isNotEmpty()) {
-                                    Spacer(Modifier.height(4.dp))
+                                    HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                        color = foreground.copy(alpha = .07f))
                                     CompactMenuAction(Icons.Outlined.DeleteOutline, "清理已下载", destructive = true) {
                                         showQueueActions = false; pendingDeletion = completedEntries
                                     }
@@ -618,4 +635,3 @@ internal fun downloadBytes(bytes: Long): String = when {
     bytes >= 1024 -> String.format(Locale.getDefault(), "%.0f KB", bytes / 1024.0)
     else -> "$bytes B"
 }
-

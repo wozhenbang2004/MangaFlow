@@ -1710,8 +1710,10 @@ private fun ReaderChaptersDialog(
     LaunchedEffect(visible, currentId, currentGroup) { if (visible) selectedGroup = currentGroup }
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         val downloadFlow = remember(downloadStore, manga.id) { downloadStore.observeManga(manga.id) }
-        val downloads by downloadFlow.collectAsStateWithLifecycle(
-            initialValue = remember { downloadStore.entries.value.filter { it.manga.id == manga.id } })
+        val initialDownloads = remember(downloadStore, manga.id) {
+            downloadStore.entries.value.filter { it.manga.id == manga.id }
+        }
+        val downloads by downloadFlow.collectAsStateWithLifecycle(initialValue = initialDownloads)
         val saved = remember(downloads) { downloads.associateBy { it.chapter.id } }
         ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth(), backdrop) {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
@@ -1814,4 +1816,3 @@ private fun ReaderIcon(icon: ImageVector, label: String, enabled: Boolean = true
 private fun ReaderTheme.background() = when (this) { ReaderTheme.INK -> Color(0xFF101012); ReaderTheme.PAPER -> Color(0xFFF7F6F2); ReaderTheme.SEPIA -> Color(0xFFECE4D5) }
 private fun ReaderTheme.foreground() = if (this == ReaderTheme.INK) Color.White else Color(0xFF242426)
 private tailrec fun Context.activity(): Activity? = when (this) { is Activity -> this; is ContextWrapper -> baseContext.activity(); else -> null }
-

@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
@@ -63,6 +64,7 @@ internal fun CompactGlassPopover(
     onDismiss: () -> Unit,
     onPresenceChange: (Boolean) -> Unit = {},
     aboveAnchor: Boolean = false,
+    maximumWidth: Dp = 264.dp,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -111,7 +113,7 @@ internal fun CompactGlassPopover(
     Popup(popupPositionProvider = position, onDismissRequest = { if (visible) onDismiss() },
         properties = PopupProperties(focusable = visible)) {
         LiquidGlassSurface(backdrop,
-            Modifier.width((LocalConfiguration.current.screenWidthDp.dp - 48.dp).coerceAtMost(264.dp))
+            Modifier.width((LocalConfiguration.current.screenWidthDp.dp - 48.dp).coerceAtMost(maximumWidth))
                 .motionInputGate(visible).graphicsLayer {
                     this.alpha = alpha.value
                     scaleX = scale.value; scaleY = scale.value
@@ -140,5 +142,3 @@ internal fun CompactMenuAction(icon: ImageVector, label: String, enabled: Boolea
         Text(label, Modifier.padding(start = 12.dp), color = color, fontSize = 13.sp, lineHeight = 19.sp)
     }
 }
-
-

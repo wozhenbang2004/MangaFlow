@@ -120,6 +120,7 @@ import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -242,7 +243,7 @@ fun DetailScreen(
         val density = LocalDensity.current
         val fontScale = density.fontScale.coerceAtLeast(1f)
         // Retain the largest real dock clearance: condensing must not move the last chapter rows.
-        val readingInset = maxOf((36f * fontScale + 8f).coerceAtLeast(52f).dp,
+        val readingInset = maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
             with(density) { measuredDockHeight.toDp() }) + 16.dp
         val statusInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
@@ -257,10 +258,18 @@ fun DetailScreen(
                 .coerceAtMost((availableHeight - 56.dp - seamHeight - 200.dp).coerceAtLeast(0.dp))
         val heroPixels = with(density) { heroHeight.toPx() }
         val header = rememberTopAppBarState(initialHeightOffsetLimit = -heroPixels)
-        val dockScrollThreshold = with(density) { 24.dp.roundToPx() }
-        val compactDock by remember(header, activeSection, compactHero, catalogGrid, dockScrollThreshold) {
-            derivedStateOf { activeSection == 0 && (compactHero || header.collapsedFraction > .4f ||
-                catalogGrid?.let { it.firstVisibleItemIndex > 0 || it.firstVisibleItemScrollOffset > dockScrollThreshold } == true) }
+        val dockScrollTravel = with(density) { 96.dp.toPx() }
+        val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel) {
+            derivedStateOf {
+                if (activeSection != 0) 0f else {
+                    val coverProgress = ((header.collapsedFraction - .12f) / .68f).coerceIn(0f, 1f)
+                    val catalogProgress = catalogGrid?.let { grid ->
+                        if (grid.firstVisibleItemIndex > 0) 1f
+                        else (grid.firstVisibleItemScrollOffset / dockScrollTravel).coerceIn(0f, 1f)
+                    } ?: 0f
+                    maxOf(coverProgress, catalogProgress)
+                }
+            }
         }
         val behavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(
             state = header, snapAnimationSpec = null, flingAnimationSpec = rememberSplineBasedDecay(),
@@ -415,7 +424,8 @@ fun DetailScreen(
                         downloadMode = chapterDownloadMode,
                         onToggleDownload = { chapterDownloadMode = !chapterDownloadMode },
                     )
-                    MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth(), soft = true) { targetSection ->
+                    MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth(),
+                        contentKey = { it }, order = { it }, soft = true) { targetSection ->
                         sections.SaveableStateProvider(targetSection) {
                             when (targetSection) {
                                 0 -> DetailCatalog(
@@ -448,8 +458,8 @@ fun DetailScreen(
         }
         DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
             resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
-            hidden = dockHidden, compact = compactDock, active = active,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(horizontal = 16.dp, vertical = 8.dp),
+            hidden = dockHidden, collapseProgress = dockCollapse, active = active,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 8.dp),
             onHeightChanged = { measuredDockHeight = maxOf(measuredDockHeight, it) },
             onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents)
     }
@@ -724,14 +734,19 @@ private fun DetailSections(
                     }
                 })
             val comments = selected == 1
+            Spacer(Modifier.weight(1f))
+            dev.mangaflow.ui.motion.MotionSwap(comments, Modifier.size(44.dp)) { showingComments ->
+            Box(Modifier.motionInputGate(showingComments == comments)) {
             DetailAction(
-                icon = if (comments) Icons.Outlined.FilterList else if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
-                description = if (comments) {
+                icon = if (showingComments) Icons.Outlined.FilterList else if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
+                description = if (showingComments) {
                     if (filterOpen) "收起评论筛选" else "筛选评论"
                 } else if (downloadMode) "退出连续下载" else "连续下载章节",
-                selected = if (comments) filterOpen || filterChanged else downloadMode,
-                onClick = if (comments) onToggleFilter else onToggleDownload,
+                selected = if (showingComments) filterOpen || filterChanged else downloadMode,
+                onClick = if (showingComments) onToggleFilter else onToggleDownload,
             )
+            }
+            }
         }
     }
 }

@@ -36,6 +36,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -157,10 +159,13 @@ internal fun DownloadChapterRow(
         onClickLabel = if (managing) "选择 ${entry.chapter.title}" else "阅读 ${entry.chapter.title}",
         onClick = if (managing) onSelect else onRead,
         onLongClickLabel = "管理这一话", onLongClick = onManage)
-        .motionPress(interaction, pressedScale = .99f).padding(start = 60.dp, top = 5.dp, bottom = 5.dp)) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+        .motionPress(interaction, pressedScale = .99f)
+        .clip(RoundedCornerShape(12.dp))
+        .background(if (selected) colors.primary.copy(alpha = .10f) else colors.onSurface.copy(alpha = .035f))
+        .padding(horizontal = 8.dp, vertical = 6.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 28.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(entry.chapter.title, style = MaterialTheme.typography.bodyMedium,
+                Text(entry.chapter.title, fontSize = 12.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
                     color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(if (entry.status == DownloadStatus.COMPLETED) "${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
                     else "${downloadStateLabel(entry)} · ${entry.completedPages}/${entry.totalPages} 页",
@@ -169,7 +174,8 @@ internal fun DownloadChapterRow(
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 DownloadProgressLine(listOf(entry))
             }
-            if (managing) DownloadSelection(selected, onSelect)
+            if (managing) Icon(if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                if (selected) "已选择" else "未选择", Modifier.size(14.dp), tint = colors.primary)
             else DownloadTransferAction(listOf(entry), refreshingIds, onPause, onRetry)
         }
         if (entry.error.isNotBlank()) Text(entry.error, color = colors.error,
@@ -248,4 +254,3 @@ private fun downloadStateLabel(entry: DownloadEntry): String = when (entry.statu
     DownloadStatus.FAILED -> "未完成"
     DownloadStatus.COMPLETED -> "已保存"
 }
-
