@@ -45,7 +45,7 @@ private data class DesktopChord(val code: Int, val ctrl: Boolean, val alt: Boole
             if (parts.size != 5 || parts[0] <= 0 || parts.drop(1).any { it !in 0..1 }) return null
             return DesktopChord(parts[0], parts[1] == 1, parts[2] == 1, parts[3] == 1, parts[4] == 1)
         }
-        fun from(event: KeyEvent) = DesktopChord(event.nativeKeyEvent.keyCode,
+        fun from(event: KeyEvent) = DesktopChord(event.key.nativeKeyCode,
             event.isCtrlPressed, event.isAltPressed, event.isShiftPressed, event.isMetaPressed)
     }
 }

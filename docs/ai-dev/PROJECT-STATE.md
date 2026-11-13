@@ -2,6 +2,12 @@
 
 Updated: 2026-11-13. Route: DELIVERY with focused research branches. Execution: cloud-only GitHub connector and in-memory edits, per the latest explicit user instruction.
 
+## CI-178 repair · 2026-11-13
+
+User reports “ci 失败了”. Android43450859018/release131972320093, Windows131972562658 and iOS131972562139 fail on f3acb8c976aecb5c56cca8637acf76b93b3cc853. Shared compilation names an unavailable AutoMirrored ChevronRight and an implicit outer BoxWithConstraints.maxWidth inside a nested Box; Windows additionally accesses keyCode on the Any-typed nativeKeyEvent. Use the existing plain outlined ChevronRight, capture viewportWidth before nested content, and read the public desktop event.key.nativeKeyCode (official JetBrains Key/KeyEvent source confirms native events are wrapped, not guaranteed AWT events). Preserve the actual UI/animation, desktop shortcuts, R8, signing and pipeline. Only these three code files change.
+
+This is a source/compiler repair; no tests, local builds or device probes. Submit to the latest main with an expected-head update and confirm replacement CI. Earlier successful175/176/177 packaging does not validate the repaired head; phone visuals remain pending user feedback.
+
 ## Current cloud integration checkpoint · 2026-11-13
 
 Active scope: DESIGN.md SEARCH-SCOPE-51 through SLIDER-60, plus original BUGFIX-45/CHAPTER-DENSITY-46/WALLPAPER-47. All requested code is integrated in this checkpoint: toolbar scope circle with drag/cancel semantics; coherent ranking exit/focus; natural larger/slower detail hero and saved local blur/strength; chapter-anchor read/download popovers and pending-source visibility; glass local import; full-window scrolling and persisted ScreenFit controls; actual-aspect volume covers; rich per-wallpaper adjustment with source-adapted MotionSlider; recent/chapters history feedback.

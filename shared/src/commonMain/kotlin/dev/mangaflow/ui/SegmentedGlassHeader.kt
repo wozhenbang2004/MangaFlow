@@ -170,8 +170,9 @@ internal fun RankingsFromTab(
     val presence = remember { MutableTransitionState(false) }
     val reportEmphasis by rememberUpdatedState(onEmphasisState)
     BoxWithConstraints(Modifier.fillMaxWidth().onGloballyPositioned { origin = it.positionInRoot() }) {
-        val endLeft = 50.dp.coerceAtMost(maxWidth)
-        val endWidth = (maxWidth - endLeft).coerceAtLeast(1.dp)
+        val viewportWidth = maxWidth
+        val endLeft = 50.dp.coerceAtMost(viewportWidth)
+        val endWidth = (viewportWidth - endLeft).coerceAtLeast(1.dp)
         val relativeAnchor = if (ready) origin?.let { point ->
             Rect(anchor.left - point.x, anchor.top - point.y,
                 anchor.right - point.x, anchor.bottom - point.y)
@@ -212,7 +213,7 @@ internal fun RankingsFromTab(
             if (expanded || present) {
                 val startWidth = with(density) { startBounds.width.toDp() }.coerceIn(1.dp, endWidth)
                 val startLeft = with(density) { startBounds.left.toDp() }
-                    .coerceIn(0.dp, (maxWidth - startWidth).coerceAtLeast(0.dp))
+                    .coerceIn(0.dp, (viewportWidth - startWidth).coerceAtLeast(0.dp))
                 val startTop = with(density) { startBounds.top.toDp() }
                 val startHeight = with(density) { startBounds.height.toDp() }.coerceAtLeast(1.dp)
                 val startRadius = (startHeight / 2).coerceAtMost(22.dp)

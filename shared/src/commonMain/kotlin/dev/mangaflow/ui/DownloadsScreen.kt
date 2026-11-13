@@ -53,7 +53,7 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.automirrored.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.CheckCircleOutline
 import androidx.compose.material.icons.outlined.Downloading
@@ -579,7 +579,7 @@ private fun LocalImportChoice(
         Icon(icon, null, Modifier.size(22.dp), tint = colors.onSurfaceVariant)
         Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
         Text(detail, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-        Icon(Icons.AutoMirrored.Outlined.ChevronRight, null, Modifier.size(16.dp),
+        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp),
             tint = colors.onSurfaceVariant.copy(alpha = .65f))
     }
 }
