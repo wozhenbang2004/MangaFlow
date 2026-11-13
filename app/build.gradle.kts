@@ -74,5 +74,8 @@ dependencies {
     implementation("dev.chrisbanes.haze:haze-glass:2.1.0")
     implementation("dev.chrisbanes.haze:haze-glass-material3:2.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Optional panel models run locally; weights are explicitly downloaded by the user.
+    implementation("com.google.ai.edge.litert:litert:1.4.2")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.1")
     implementation("org.jsoup:jsoup:1.18.3")
 }

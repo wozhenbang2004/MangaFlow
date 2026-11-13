@@ -1,5 +1,8 @@
 package dev.mangaflow.storage
 
+import dev.mangaflow.reader.panels.PanelDirection
+import dev.mangaflow.reader.panels.PanelEngine
+
 enum class ReadingMode { VERTICAL, LEFT_TO_RIGHT, RIGHT_TO_LEFT }
 
 enum class ReaderTheme { INK, PAPER, SEPIA }
@@ -15,4 +18,7 @@ data class ReaderPreferences(
     // App-wide browse presentation: 1 is a list; 2–4 are cover columns.
     val discoverColumns: Int = 3,
     val updateColumns: Int = 3,
+    val panelEngine: PanelEngine = PanelEngine.OFF,
+    val panelDirection: PanelDirection = PanelDirection.RIGHT_TO_LEFT,
+    val panelLearnedOrder: Boolean = false,
 )

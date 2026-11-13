@@ -331,3 +331,103 @@ commit `cd796c98565fc466923fc1128b962e133fa3c612`, `icons/anilist.svg`,
 text is bundled as `licenses/SimpleIcons-CC0.txt`. Other site labels use plain
 short wordmarks and are not claimed to be original brand logos.
 Source: `https://github.com/simple-icons/simple-icons/tree/cd796c98565fc466923fc1128b962e133fa3c612`.
+
+
+## Guided panel reading and optional models
+
+The traditional gutter detector in `reader/panels/ClassicPanelDetector.kt` adapts
+`jsneij/paneldet` at `f0ef27986969fce6ca2dd75e2be2962b56db376c`, `paneldet.py`.
+Copyright (c) 2026 Jorge Sneij, MIT. MangaFlow adapts its page-statistic, recursive
+X/Y gutter and coverage mechanisms to bounded Android bitmap analysis; it does not
+include the upstream connected-component, deskew or command-line implementation.
+The exact MIT text is bundled as `licenses/Paneldet-MIT.txt`.
+Source: https://github.com/jsneij/paneldet/tree/f0ef27986969fce6ca2dd75e2be2962b56db376c
+
+`reader/panels/PanelGeometry.kt` adapts the recursive reading-order and spread-seam
+mechanisms in Komai's `PanelOrdering.kt`. Nano input preparation, output-layout
+decoding, letterbox reversal and overlap suppression in `PanelModelRuntime.kt`
+adapt Komai's `MlPanelBoundaryDetector.kt` and `YoloPanelDecoder.kt` at
+`f567e2be8f30b59f04d14dd7fc589e186fb72ff8` (Apache-2.0).
+Source: https://github.com/erik-sandoval/komai/tree/f567e2be8f30b59f04d14dd7fc589e186fb72ff8/app/src/main/java/eu/kanade/tachiyomi/ui/reader/viewer/panel
+Komai is derived from Mihon/Tachiyomi (Copyright 2015 Javier Tomas and 2024 Mihon
+Open Source Project, as credited by its README). The upstream Apache-2.0 text is
+bundled as `licenses/Komai-APACHE-2.0.txt`. MangaFlow substitutes normalized local
+types, a limited CPU runtime, correctly quantized signed/unsigned input, finite
+geometry checks, conservative duplicate suppression and independently downloadable
+models. It does not import Komai's upscaler, source system or application.
+
+Model weights are not included in the APK and are never downloaded merely by
+opening a manga or selecting a mode. An explicit Download action fetches the exact
+upstream revision into app-private storage, verifies its complete SHA-256 and
+length, then atomically installs it. Partial downloads are removed on cancellation
+or failure. Unavailable models retain a visible notice and use traditional/geometry
+fallbacks. Inference does not upload manga pages. Source images remain unchanged;
+analysis uses a separate reduced bitmap and saves only normalized coordinates.
+
+Optional weight identities and terms:
+
+- **YOLO26-nano manga panel detector** by Leandro Narosky (`leoxs22`),
+  revision `40a2854663d537563cfb95c370288a84c6505b9a`,
+  `manga_panel_detector_int8.tflite`, 2,837,823 bytes,
+  SHA-256 `b1a7d8d4492e04a777ae0d3efd9dc1fbd6e8f361971eadb813279ce3dfd1b464`.
+  Source: https://huggingface.co/leoxs22/manga-panel-detector-yolo26n
+  These weights are **AGPL-3.0**, derived from Ultralytics YOLO26n (Copyright
+  Ultralytics). The author explicitly corrected the earlier Apache-2.0 label.
+  They were trained on **Manga109-s** (Aizawa et al., University of Tokyo); no
+  training images or annotations are distributed by MangaFlow. Preserve the
+  source, dataset acknowledgement and applicable model terms. The complete
+  upstream model card and AGPL text are bundled as `licenses/YOLO26-MODEL-CARD.md`
+  and `licenses/YOLO26-AGPL-3.0.txt`. A format-converted third-party copy's old
+  Apache label does not override the original author's current model license.
+
+- **Koharu Layout RF-DETR Seg 2XL 1152**, source weights by Mayo Takanashi
+  (`mayocream`) at `aed55fdb8ca953c6bec33cf6ed6dd52a9b72bfa2`,
+  exported to ONNX by `ShiniShiho` at
+  `bfbbd4e5ab34a50459865074fa044da496cebb57`, `rfdetr-seg-2xlarge.onnx`,
+  148,442,003 bytes,
+  SHA-256 `7cc10d4316371946b8441da3512261a8e148b129abcdb0ea6235ed1d1d06d351`.
+  Sources: https://huggingface.co/mayocream/koharu-layout-rfdetr-seg-2xl-1152
+  and https://huggingface.co/ShiniShiho/koharu-layout-rfdetr-seg-2xl-1152-onnx
+  Both cards designate these weights **custom / other** and retain the Manga109
+  training-data statements. RF-DETR software's Apache-2.0 license is not an
+  independent license grant for these weights or comic images. The exact original
+  terms are preserved in `licenses/Koharu1152-SOURCE-MODEL-CARD.md` and
+  `licenses/Koharu1152-ONNX-MODEL-CARD.md`. No claim of unrestricted commercial
+  permission or of extra rights to Manga109/third-party artwork is made.
+  MangaFlow consumes boxes and class logits with the documented 1152 RGB/ImageNet
+  normalization contract and does not materialize instance masks in Java.
+
+- **Inkwell panel reading-order model** by `cedarrapidsboy`, revision
+  `fa7afba52ba7dc7b0840c7702b767972b5e17a9b`, `panel-order-model.onnx`,
+  103,294 bytes,
+  SHA-256 `84eb78fc5ec31a3e986a7a16ce10f7baa657ef5c5b4a98877b40aa9354ff3464`.
+  Source: https://huggingface.co/cedarrapidsboy/inkwell-panel-models
+  The upstream card declares the **reading-order model MIT**; its distinct
+  AGPL-3.0 YOLOv8 detector is not used. `PanelModelRuntime.kt` follows the fourteen
+  geometric features and probability-sum ranking in the author's
+  `detect_and_order.py`, with bounded input, Kotlin/ORT resources and horizontal
+  coordinate mirroring for right-to-left reading. The mirroring is MangaFlow's
+  adaptation, not an upstream accuracy claim. The original card, including the
+  exact separate model-license declarations, is bundled as
+  `licenses/Inkwell-MODEL-CARD.md`; the standard MIT text is bundled as
+  `licenses/Inkwell-MIT.txt`. The card supplies no separate copyright line;
+  MangaFlow does not invent a legal name or copyright year for this author.
+
+The newer **Koharu Layout HighRes 1920** is a different 46.6M-parameter,
+186,458,372-byte SafeTensors checkpoint at
+`mayocream/koharu-layout-highres@68077eb09401a46e548190ff2786bd405113ea8b`,
+SHA-256 `03de2f77281974f5084cdd8652ace2b55dc15ac0378aed66654e62537cdda255`.
+Its current card declares Apache-2.0. It was researched but is **not integrated**:
+no compatible pre-exported ONNX/TFLite graph was established for that checkpoint.
+The selectable 1152 model is labelled precisely and does not impersonate HighRes
+1920 or inherit the newer checkpoint's license. CPU performance, model accuracy
+on the user's manga and Android device behavior remain unverified.
+Source: https://huggingface.co/mayocream/koharu-layout-highres
+
+The Android runtimes are Google AI Edge **LiteRT 1.4.2** (Apache-2.0;
+`licenses/LiteRT-APACHE-2.0.txt`) and Microsoft **ONNX Runtime Android 1.31.1**
+(MIT; `licenses/ONNX-Runtime-MIT.txt`). Upstream ONNX Runtime's complete dependency
+notice is preserved as `licenses/ONNX-Runtime-ThirdPartyNotices.txt`; its inclusion
+does not imply every optional upstream component is used. CPU execution is limited
+to two inference threads; GPU, NNAPI and NPU delegates are not enabled.
+Sources: https://github.com/google-ai-edge/LiteRT and https://github.com/microsoft/onnxruntime/tree/v1.31.1
