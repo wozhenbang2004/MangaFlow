@@ -783,19 +783,15 @@ private fun FeaturedManga(
     onOpen: (Manga) -> Unit,
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
-    val metrics = observedDetailMetrics(manga)
-    val heat = manga.totalPopularity ?: manga.popularity
     val transition = LocalMangaCoverTransition.current
-    // One local Haze source samples the actual artwork, not an invented theme accent.
     // The cached cover is also the soft chromatic halo in the portrait's side gutters.
-    val heroBackdrop = rememberHazeState()
     Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
         onClickLabel = "查看${manga.title}") {
             transition?.select?.invoke(MangaCoverKey(manga.id, "discovery-featured"))
             onOpen(manga)
         }.motionPress(interaction, pressedScale = .988f)
         .background(MaterialTheme.colorScheme.surfaceVariant)) {
-        Box(Modifier.matchParentSize().hazeSource(heroBackdrop)) {
+        Box(Modifier.matchParentSize()) {
             MangaCover(manga, repository, Modifier.matchParentSize().blur(26.dp).graphicsLayer {
                 alpha = .45f + .22f * emphasis().coerceIn(0f, 1f)
             }.clearAndSetSemantics { }, ContentScale.Crop)
@@ -803,37 +799,22 @@ private fun FeaturedManga(
                 .then(if (emphasis() >= .98f) Modifier.mangaSharedCover(manga.id, "discovery-featured") else Modifier)
                 .graphicsLayer { translationX = offset() * 4.dp.toPx() }.clearAndSetSemantics { }, ContentScale.Fit)
         }
-        // This glass remains local to the card; only the information strip is softened.
-        // The artwork itself stays sharp for reading and for the existing shared-cover flight.
-        LiquidGlassSurface(heroBackdrop,
-            modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().graphicsLayer {
-                alpha = (.5f + .5f * emphasis()).coerceIn(0f, 1f)
+        // A continuous bottom fade belongs to the artwork, without a separate panel edge.
+        Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().fillMaxHeight(.42f)
+            .background(Brush.verticalGradient(0f to Color.Transparent,
+                .5f to Color.Black.copy(alpha = .22f), 1f to Color.Black.copy(alpha = .72f))))
+        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth()
+            .graphicsLayer {
+                alpha = emphasis().coerceIn(0f, 1f)
+                translationX = offset() * 8.dp.toPx()
                 translationY = (1f - emphasis().coerceIn(0f, 1f)) * 6.dp.toPx()
-            }, cornerRadius = 18.dp, role = GlassSurfaceRole.PANEL, softCard = false,
-            surfaceColor = Color(0xFF1F2027), elevation = 0.dp) {
-            Box(Modifier.matchParentSize().background(Brush.verticalGradient(
-                0f to Color(0xFF19181C).copy(alpha = .08f),
-                1f to Color(0xFF17161C).copy(alpha = .43f))))
-            Column(Modifier.fillMaxWidth().padding(horizontal = 15.dp).padding(top = 9.dp, bottom = 13.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(manga.title, color = Color.White, style = MaterialTheme.typography.titleSmall.copy(
-                    shadow = Shadow(Color.Black.copy(alpha = .45f), Offset(0f, 1f), 4f)),
-                    fontSize = 17.sp, lineHeight = 23.sp,
-                    fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Row(horizontalArrangement = Arrangement.spacedBy(13.dp), verticalAlignment = Alignment.CenterVertically) {
-                    heat?.let { Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        ReviewSourceMark("copy", size = 16.dp, onDark = true, heat = true)
-                        Text(detailMetricCount(it), color = Color.White.copy(alpha = .88f), fontSize = 11.sp, lineHeight = 15.sp)
-                    } }
-                    metrics.firstOrNull()?.let { metric -> Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        ReviewSourceMark(metric.sourceId, size = 18.dp, onDark = true)
-                        Text(detailMetricScore(metric.score ?: 0.0) +
-                            (if (metric.scoreScale > 0 && metric.scoreScale != 10) "/${metric.scoreScale}" else ""),
-                            color = Color.White, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
-                    } }
-                }
-            }
+            }.padding(horizontal = 15.dp).padding(bottom = 13.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(manga.title, color = Color.White, style = MaterialTheme.typography.titleSmall.copy(
+                shadow = Shadow(Color.Black.copy(alpha = .45f), Offset(0f, 1f), 4f)),
+                fontSize = 17.sp, lineHeight = 23.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = Color.White, compact = true, plain = true)
         }
     }
 }
@@ -1069,4 +1050,3 @@ private val SearchPositionsSaver = listSaver<LinkedHashMap<String, LazyListState
         }
     } },
 )
-

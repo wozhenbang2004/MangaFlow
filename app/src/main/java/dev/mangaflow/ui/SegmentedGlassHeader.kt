@@ -48,27 +48,42 @@ internal fun PageTitleHeader(
     }
 }
 
-/** Discovery keeps navigation separate from its actual browse/search controls. */
+/** Discovery groups menu, browse tabs and tools into three independent glass surfaces. */
 @Composable
 internal fun SegmentedGlassHeader(
     backdrop: HazeState,
     navigation: @Composable () -> Unit,
     modifier: Modifier = Modifier,
     controlsWidth: Dp,
+    actionsWidth: Dp,
     controlsAlpha: () -> Float = { 1f },
+    actions: @Composable () -> Unit,
+    secondary: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.Top) {
-        LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
-            role = GlassSurfaceRole.NAVIGATION, trackPointer = true) { navigation() }
-        BoxWithConstraints(Modifier.weight(1f), contentAlignment = Alignment.TopEnd) {
-            LiquidGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth)).graphicsLayer {
+    Column(modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.Top) {
+            LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
+                role = GlassSurfaceRole.NAVIGATION, trackPointer = true) { navigation() }
+            BoxWithConstraints(Modifier.weight(1f), contentAlignment = Alignment.TopStart) {
+                LiquidGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth)).graphicsLayer {
+                    alpha = controlsAlpha()
+                    compositingStrategy = CompositingStrategy.ModulateAlpha
+                }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
+                    Column(Modifier.fillMaxWidth().pointerInput(Unit) {}, content = content)
+                }
+            }
+            LiquidGlassSurface(backdrop, Modifier.width(actionsWidth).graphicsLayer {
                 alpha = controlsAlpha()
                 compositingStrategy = CompositingStrategy.ModulateAlpha
             }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
-                Column(Modifier.fillMaxWidth().pointerInput(Unit) {}, content = content)
+                actions()
             }
         }
+        if (secondary != null) Box(Modifier.fillMaxWidth().graphicsLayer {
+            alpha = controlsAlpha()
+            compositingStrategy = CompositingStrategy.ModulateAlpha
+        }) { secondary() }
     }
 }

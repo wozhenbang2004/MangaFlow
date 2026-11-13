@@ -1,11 +1,16 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -19,6 +24,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -76,7 +82,7 @@ private data class MetricToken(
     val sourceId: String,
 )
 
-/** A grid has at most two information lines; a list has one width-bounded information band. */
+/** One metadata line: complete values that fit, then overlapping marks for the remaining sources. */
 @Composable
 internal fun MangaMetricBadges(
     manga: Manga,
@@ -111,53 +117,56 @@ internal fun MangaMetricBadges(
     val tokenPadding = with(density) { (if (plain) 0.dp else 2.dp).roundToPx().toFloat() }
     val innerGap = with(density) { 3.dp.roundToPx().toFloat() }
     val outerGap = with(density) { 7.dp.roundToPx().toFloat() }
-    val markWidth = with(density) { reviewSourceMarkWidth(15.dp, fontScale).roundToPx().toFloat() }
+    val markSlot = reviewSourceMarkWidth(15.dp, density.fontScale)
+    val stackStep = 8.dp * density.fontScale.coerceAtLeast(1f)
+    val markWidth = with(density) { markSlot.roundToPx().toFloat() }
     fun tokenWidth(token: MetricToken): Float {
         return markWidth + innerGap + measurer.measure(token.value, textStyle, maxLines = 1).size.width + tokenPadding * 2f
     }
     if (heatToken == null && scores.isEmpty()) return
 
-    // A source response fills this one text line without moving history/list rows.
+    val tokens = listOfNotNull(heatToken) + scores
+    val showOverflow = compact || showMore
+    val onDark = foreground.luminance() > .5f
+    val stackBacking = if (onDark) Color(0xFF29292C) else MaterialTheme.colorScheme.surface
     BoxWithConstraints(modifier) {
         val availableWidth = with(density) { maxWidth.toPx() }
         val scoreLimit = maxScores.coerceIn(0, if (compact) 1 else 2).coerceAtMost(scores.size)
-        val scoreWidths = scores.take(scoreLimit).map(::tokenWidth)
-        fun widthFor(count: Int): Float {
-            val widths = buildList {
-                if (!compact && heatToken != null) add(tokenWidth(heatToken))
-                addAll(scoreWidths.take(count))
-            }
-            return widths.sum() + outerGap * (widths.size - 1).coerceAtLeast(0)
+        val widths = tokens.map(::tokenWidth)
+        fun stackWidth(count: Int): Float = if (count == 0) 0f else with(density) {
+            (markSlot + stackStep * (count - 1)).roundToPx().toFloat()
         }
-        var count = scoreLimit
-        while (count > 0 && widthFor(count) > availableWidth) count--
-        val visible = scores.take(count)
-        val hidden = scores.drop(count)
-        // Preserve extra-source information for accessibility, without unexplained +N text.
-        val hiddenDescription = if (showMore && hidden.isNotEmpty())
-            hidden.joinToString("；") { it.description } else ""
-
-        if (compact) {
-            Column(Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                heatToken?.let { MetricBadge(it, foreground.copy(alpha = .76f), textStyle, plain) }
-                if (visible.isNotEmpty()) {
-                    Row(Modifier.then(if (hiddenDescription.isNotEmpty()) Modifier.semantics {
-                        contentDescription = hiddenDescription
-                    } else Modifier), horizontalArrangement = Arrangement.spacedBy(7.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        visible.forEach { MetricBadge(it, foreground.copy(alpha = .76f), textStyle, plain) }
-                    }
-                }
+        fun widthFor(count: Int, marks: Int): Float {
+            val groups = count + if (marks > 0) 1 else 0
+            return widths.take(count).sum() + stackWidth(marks) + outerGap * (groups - 1).coerceAtLeast(0)
+        }
+        var count = scoreLimit + if (heatToken != null) 1 else 0
+        var marks = 0
+        while (true) {
+            marks = if (showOverflow) tokens.drop(count).distinctBy { it.sourceId }.size.coerceAtMost(3) else 0
+            if (widthFor(count, marks) <= availableWidth) break
+            if (count > 0) count-- else {
+                while (marks > 0 && stackWidth(marks) > availableWidth) marks--
+                break
             }
-        } else if (heatToken != null || visible.isNotEmpty()) {
-            Row(Modifier.then(if (hiddenDescription.isNotEmpty()) Modifier.semantics {
-                contentDescription = hiddenDescription
-            } else Modifier), horizontalArrangement = Arrangement.spacedBy(7.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                heatToken?.let { MetricBadge(it, foreground, textStyle, plain,
-                    Modifier.weight(1f, fill = false)) }
-                visible.forEach { MetricBadge(it, foreground, textStyle, plain) }
+        }
+        val hidden = tokens.drop(count).distinctBy { it.sourceId }.take(marks)
+        Row(Modifier.fillMaxWidth().heightIn(min = with(density) { 16.sp.toDp() })
+            .clearAndSetSemantics { contentDescription = tokens.joinToString("；") { it.description } },
+            horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+            tokens.take(count).forEach {
+                MetricBadge(it, if (compact) foreground.copy(alpha = .76f) else foreground, textStyle, plain)
+            }
+            if (hidden.isNotEmpty()) Box(Modifier.size(
+                width = markSlot + stackStep * (hidden.size - 1),
+                height = 15.dp * density.fontScale.coerceAtLeast(1f))) {
+                // Draw the first hidden source last so its whole mark stays legible at the front.
+                hidden.indices.reversed().forEach { index ->
+                    ReviewSourceMark(hidden[index].sourceId,
+                        Modifier.offset(x = stackStep * index).then(if (index < hidden.lastIndex)
+                            Modifier.background(stackBacking, RoundedCornerShape(3.dp)) else Modifier),
+                        size = 15.dp, onDark = onDark, heat = hidden[index].sourceId == "copy")
+                }
             }
         }
     }

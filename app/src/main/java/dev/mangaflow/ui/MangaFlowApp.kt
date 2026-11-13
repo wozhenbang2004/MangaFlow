@@ -473,11 +473,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             })
                         }
                         val chromePadding = with(chromeDensity) { chromeHeightPx.toDp() } + HeaderContentGap
-                        val discoveryControlWidth = with(chromeDensity) {
+                        val discoveryTabsWidth = with(chromeDensity) {
                             val labelSlot = maxOf(52.dp, 14.sp.toDp() * 2 + 24.dp)
-                            val mainWidth = labelSlot * DiscoveryMode.entries.size +
-                                (if (history.isEmpty()) 44.dp else 88.dp) + 16.dp
-                            maxOf(mainWidth, maxOf(44.dp, 12.sp.toDp() * 2 + 16.dp) * 4 + 108.dp)
+                            labelSlot * DiscoveryMode.entries.size + 8.dp
                         }
                         var searchPresent by remember { mutableStateOf(searchExpanded) }
                         val searchVisible = searchExpanded || searchPresent
@@ -511,27 +509,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 }
                             }
                             val toolbar: @Composable (@Composable () -> Unit) -> Unit = { actions ->
-                            Row((if (current.section == Section.DISCOVER) Modifier.fillMaxWidth().padding(horizontal = 8.dp)
-                                else Modifier.padding(horizontal = 4.dp)).height(44.dp),
+                            Row(Modifier.padding(horizontal = 4.dp).height(44.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                if (current.section == Section.DISCOVER) {
-                                    Row(Modifier.weight(1f).fillMaxHeight()
-                                        .motionInputGate(rootActive && chromeReady),
-                                        verticalAlignment = Alignment.CenterVertically) {
-                                        BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label }, Modifier.weight(1f)) { index ->
-                                            closeSearch()
-                                            model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
-                                        }
-                                        if (history.isNotEmpty()) MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
-                                            closeSearch()
-                                            recentReadingOpen = true
-                                        }) {
-                                            Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
-                                        }
-                                        // The root overlay owns the button; this slot keeps all toolbar bounds fixed.
-                                        Spacer(Modifier.size(44.dp))
-                                    }
-                                }
                                 if (hasUpdate && current.section != Section.DISCOVER) {
                                     MotionIconButton(modifier = Modifier.size(44.dp), onClick = { changeSection(Section.SETTINGS) }) {
                                         Icon(Icons.Outlined.SystemUpdateAlt, "有新版本", Modifier.size(21.dp))
@@ -607,28 +586,53 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     actions = if (hasUpdate) ({ toolbar {} }) else null)
                             } else if (current.section == Section.DISCOVER) {
                                 SegmentedGlassHeader(searchBackdrop, navigation,
-                                    controlsWidth = discoveryControlWidth,
+                                    controlsWidth = discoveryTabsWidth,
+                                    actionsWidth = (if (history.isEmpty()) 44.dp else 88.dp) + 16.dp,
                                     modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
                                         .onSizeChanged { chromeHeightPx = it.height },
                                     controlsAlpha = {
                                         if (current.section != Section.DISCOVER) 1f
                                         else if (searchExpanded) 0f
                                         else 1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f)
-                                    }) {
-                                    toolbar {}
-                                    if (current.section == Section.DISCOVER) {
+                                    },
+                                    actions = {
+                                        Row(Modifier.padding(horizontal = 8.dp).height(44.dp)
+                                            .motionInputGate(rootActive && chromeReady),
+                                            verticalAlignment = Alignment.CenterVertically) {
+                                            if (history.isNotEmpty()) MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
+                                                closeSearch()
+                                                recentReadingOpen = true
+                                            }) {
+                                                Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp))
+                                            }
+                                            // Match the fixed search trigger's 8dp inset in the root overlay.
+                                            Spacer(Modifier.size(44.dp))
+                                        }
+                                    },
+                                    secondary = {
                                         AnimatedVisibility(visibleState = rankingPresence,
                                             enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) +
                                                 expandVertically(tween(if (motion) MangaMotion.Content else 0)),
                                             exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
                                                 shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
-                                            RankingControls(displayedDiscovery,
-                                                onPeriod = { model.selectDiscovery(displayedDiscovery.mode, period = it) },
-                                                onAudience = { model.selectDiscovery(displayedDiscovery.mode, audience = it) },
-                                                onRefresh = model::refresh,
-                                                modifier = Modifier.motionInputGate(rootActive && chromeReady &&
-                                                    displayedDiscovery.mode == DiscoveryMode.RANKING))
+                                            LiquidGlassSurface(searchBackdrop,
+                                                Modifier.padding(start = 50.dp, top = 2.dp).fillMaxWidth(),
+                                                cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
+                                                trackPointer = true) {
+                                                RankingControls(displayedDiscovery,
+                                                    onPeriod = { model.selectDiscovery(displayedDiscovery.mode, period = it) },
+                                                    onAudience = { model.selectDiscovery(displayedDiscovery.mode, audience = it) },
+                                                    onRefresh = model::refresh,
+                                                    modifier = Modifier.motionInputGate(rootActive && chromeReady &&
+                                                        displayedDiscovery.mode == DiscoveryMode.RANKING))
+                                            }
                                         }
+                                    }) {
+                                    BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label },
+                                        Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+                                            .motionInputGate(rootActive && chromeReady)) { index ->
+                                        closeSearch()
+                                        model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
                                     }
                                 }
                             }
@@ -677,5 +681,3 @@ internal tailrec fun Context.activityOrNull(): Activity? = when (this) {
     is ContextWrapper -> baseContext.activityOrNull()
     else -> null
 }
-
-
