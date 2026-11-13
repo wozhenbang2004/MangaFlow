@@ -116,6 +116,10 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
@@ -129,6 +133,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.imagePlatformContext
 import androidx.compose.ui.platform.LocalDensity
@@ -304,6 +309,9 @@ fun ReaderScreen(
     var showReaderActions by remember(chapterId) { mutableStateOf(false) }
     var readerActionsPresent by remember(chapterId) { mutableStateOf(false) }
     var sourceChapter by remember(manga.id) { mutableStateOf<Chapter?>(null) }
+    // The source fan leaves the actual progress-row stack (or the visible error action).
+    // ChapterSourcePicker retains this screen-coordinate origin through its closing flight.
+    var sourceTriggerAnchor by remember(chapterId) { mutableStateOf<Rect?>(null) }
     var sourceCloseRequested by remember(manga.id) { mutableStateOf(false) }
     var sourcePickerPresent by remember(manga.id) { mutableStateOf(false) }
     val sourcePickerBlocking = sourceChapter != null || sourcePickerPresent
@@ -609,7 +617,13 @@ fun ReaderScreen(
                     Text(error.orEmpty(), color = preferences.theme.foreground(), style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(16.dp))
                     TextButton(onClick = { retry++ }) { Text("重新读取", color = preferences.theme.foreground()) }
-                    if (canChooseSource) TextButton(onClick = { sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true }) {
+                    if (canChooseSource) TextButton(onClick = {
+                        sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
+                    }, modifier = Modifier.onGloballyPositioned { coordinates ->
+                        val origin = coordinates.localToScreen(Offset.Zero)
+                        if (origin.isSpecified) sourceTriggerAnchor = Rect(origin,
+                            Size(coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
+                    }) {
                         Text("其他来源", color = preferences.theme.foreground())
                     }
                 }
@@ -814,7 +828,12 @@ fun ReaderScreen(
                             onInteractionChanged = { progressInteracting = it },
                             sourceContent = {
                                 if (canChooseSource || sourceLoading) Box(
-                                    Modifier.width(48.dp).heightIn(min = 44.dp),
+                                    Modifier.width(48.dp).heightIn(min = 44.dp)
+                                        .onGloballyPositioned { coordinates ->
+                                            val origin = coordinates.localToScreen(Offset.Zero)
+                                            if (origin.isSpecified) sourceTriggerAnchor = Rect(origin,
+                                                Size(coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
+                                        },
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     if (sourceLoading) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
@@ -1071,7 +1090,7 @@ fun ReaderScreen(
         chapters = chapters,
         allowCorrections = false,
         downloaded = sourceDownloads, chapterPositions = sourcePositions,
-        closeRequested = sourceCloseRequested,
+        anchor = sourceTriggerAnchor, closeRequested = sourceCloseRequested,
         loading = sourceLoading, error = sourceError,
         onPresenceChange = { sourcePickerPresent = it },
     )
