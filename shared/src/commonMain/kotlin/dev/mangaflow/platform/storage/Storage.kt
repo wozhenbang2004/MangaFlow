@@ -6,6 +6,7 @@ import okio.SYSTEM
 import okio.Path
 import okio.Path.Companion.toPath
 import okio.buffer
+import okio.use as useOkio
 import kotlinx.atomicfu.locks.SynchronizedObject
 
 typealias StorageLock = SynchronizedObject
@@ -88,7 +89,7 @@ class StorageFile(val nativePath: Path) {
     fun readText(): String = FileSystem.SYSTEM.read(nativePath) { readUtf8() }
     fun writeBytes(bytes: ByteArray) { FileSystem.SYSTEM.write(nativePath) { write(bytes) } }
     fun writeText(text: String) { FileSystem.SYSTEM.write(nativePath) { writeUtf8(text) } }
-    fun appendText(text: String) { FileSystem.SYSTEM.appendingSink(nativePath).buffer().use { it.writeUtf8(text) } }
+    fun appendText(text: String) { FileSystem.SYSTEM.appendingSink(nativePath).buffer().useOkio { it.writeUtf8(text) } }
     fun inputStream(): StorageInput = StorageInput(FileSystem.SYSTEM.source(nativePath).buffer())
     fun outputStream(): StorageOutput = StorageOutput(FileSystem.SYSTEM.sink(nativePath).buffer())
     fun copyTo(destination: StorageFile, overwrite: Boolean = false): StorageFile {

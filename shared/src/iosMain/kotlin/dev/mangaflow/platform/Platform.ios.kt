@@ -5,7 +5,7 @@ package dev.mangaflow.platform
 
 import coil3.PlatformContext as ImagePlatformContext
 import kotlinx.cinterop.*
-import platform.CommonCrypto.*
+import platform.CoreCrypto.*
 import platform.Foundation.*
 import platform.Security.SecRandomCopyBytes
 import platform.Security.kSecRandomDefault
@@ -64,14 +64,14 @@ actual fun formatInstantMillis(value: Long, pattern: String): String = NSDateFor
     locale = NSLocale.currentLocale
     timeZone = NSTimeZone.localTimeZone
     dateFormat = pattern
-    stringFromDate(NSDate(timeIntervalSince1970 = value / 1_000.0))
+    stringFromDate(NSDate.dateWithTimeIntervalSince1970(value / 1_000.0))
 }
 actual fun formatProtocolInstantMillis(value: Long, pattern: String): String = NSDateFormatter().run {
     locale = NSLocale("en_US_POSIX")
     calendar = NSCalendar(calendarIdentifier = NSCalendarIdentifierGregorian)
     timeZone = NSTimeZone.localTimeZone
     dateFormat = pattern
-    stringFromDate(NSDate(timeIntervalSince1970 = value / 1_000.0))
+    stringFromDate(NSDate.dateWithTimeIntervalSince1970(value / 1_000.0))
 }
 actual val platformKind: PlatformKind = PlatformKind.IOS
 actual fun platformVersion(context: PlatformContext): String =

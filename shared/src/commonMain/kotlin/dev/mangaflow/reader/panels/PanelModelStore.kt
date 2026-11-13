@@ -32,6 +32,7 @@ import okio.SYSTEM
 import okio.HashingSink
 import okio.HashingSource
 import okio.buffer
+import okio.use as useOkio
 
 internal expect fun panelModelDirectory(context: PlatformContext): StorageFile
 
@@ -139,7 +140,7 @@ class PanelModelStore private constructor(context: PlatformContext) {
                 var received = 0L
                 var lastProgress = 0L
                 val hashing = HashingSink.sha256(FileSystem.SYSTEM.sink(part.nativePath))
-                val response = hashing.buffer().use { output ->
+                val response = hashing.buffer().useOkio { output ->
                     client.download(Request.Builder().url(address).build(), spec.bytes,
                         onChunk = { bytes, count -> output.write(bytes, 0, count); received += count },
                         onProgress = { bytes, _ ->
@@ -186,7 +187,7 @@ class PanelModelStore private constructor(context: PlatformContext) {
     private fun partFile(spec: PanelModelSpec) = StorageFile(directory, "${spec.fileName}.part")
     private suspend fun checksum(file: StorageFile): String {
         val hashing = HashingSource.sha256(FileSystem.SYSTEM.source(file.nativePath))
-        hashing.buffer().use { input ->
+        hashing.buffer().useOkio { input ->
             val buffer = ByteArray(64 * 1024)
             while (input.read(buffer) >= 0) currentCoroutineContext().ensureActive()
         }

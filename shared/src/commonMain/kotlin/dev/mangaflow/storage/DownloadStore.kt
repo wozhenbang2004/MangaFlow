@@ -18,6 +18,7 @@ import okio.SYSTEM
 import okio.Path.Companion.toPath
 import okio.buffer
 import okio.openZip
+import okio.use as useOkio
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
@@ -297,7 +298,7 @@ class DownloadStore private constructor(context: Context) {
             openDocument(context, uri).use { copyLimited(it, source, MAX_IMPORT_BYTES) }
             val raw = mutableListOf<RawImportedPage>()
             var totalBytes = 0L
-            FileSystem.SYSTEM.openZip(source.nativePath).use { archive ->
+            FileSystem.SYSTEM.openZip(source.nativePath).useOkio { archive ->
                 var visited = 0
                 for (path in archive.listRecursively("/".toPath())) {
                     currentCoroutineContext().ensureActive()

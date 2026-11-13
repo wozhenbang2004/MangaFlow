@@ -7,7 +7,7 @@ import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import coil3.compose.asPainter
-import coil3.imageLoader
+import coil3.SingletonImageLoader
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.CachePolicy
@@ -49,7 +49,7 @@ internal class PortablePanelRepository(private val context: PlatformContext) {
         if (!force) withContext(Dispatchers.IO) { readCache(key) }?.let { return@withLock it }
         val resource = resolvePage(page)
         val imageContext = imagePlatformContext(context)
-        val result = imageContext.imageLoader.execute(ImageRequest.Builder(imageContext).data(resource.url)
+        val result = SingletonImageLoader.get(imageContext).execute(ImageRequest.Builder(imageContext).data(resource.url)
             .httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
             .size(1536, 1536).precision(Precision.EXACT).scale(Scale.FIT)
             .memoryCachePolicy(CachePolicy.DISABLED).build())

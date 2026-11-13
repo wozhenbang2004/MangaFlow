@@ -29,7 +29,7 @@ import androidx.compose.ui.unit.IntSize
 import coil3.compose.AsyncImagePainter
 import coil3.compose.rememberAsyncImagePainter
 import coil3.disk.DiskCache
-import coil3.imageLoader
+import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
@@ -71,7 +71,7 @@ internal fun PortableReaderZoomableImage(
     alignment: Alignment, contentScale: ContentScale, gesturesEnabled: Boolean,
     onClick: ((Offset) -> Unit)?,
 ) {
-    val loader = imagePlatformContext(LocalMangaContext.current).imageLoader
+    val loader = SingletonImageLoader.get(imagePlatformContext(LocalMangaContext.current))
     val preview = rememberAsyncImagePainter(model, imageLoader = loader)
     val result by preview.state.collectAsState()
     val success = (result as? AsyncImagePainter.State.Success)?.result
@@ -202,7 +202,7 @@ internal fun PortableVerticalReaderTiles(
     displayWidth: Int, displayHeight: Int, visibleWindow: () -> VerticalPageWindow?,
     onDetailStatus: (ReaderDetailStatus?) -> Unit,
 ) {
-    val loader = imagePlatformContext(LocalMangaContext.current).imageLoader
+    val loader = SingletonImageLoader.get(imagePlatformContext(LocalMangaContext.current))
     var file by remember(page.url, diskCacheKey) { mutableStateOf<String?>(null) }
     var decoded by remember(page.url) { mutableStateOf<List<DecodedReaderTile>>(emptyList()) }
     val liveWindow by rememberUpdatedState(visibleWindow)

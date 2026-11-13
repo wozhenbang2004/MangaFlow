@@ -140,7 +140,7 @@ import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.annotation.ExperimentalCoilApi
 import coil3.decode.BlackholeDecoder
-import coil3.imageLoader
+import coil3.SingletonImageLoader
 import coil3.request.CachePolicy
 import coil3.request.Disposable
 import coil3.request.ErrorResult
@@ -1357,7 +1357,7 @@ private fun AdjacentPagePrefetch(
     visibleRange: () -> Pair<Int, Int>,
 ) {
     val context = LocalContext.current
-    val imageLoader = imagePlatformContext(context).imageLoader
+    val imageLoader = SingletonImageLoader.get(imagePlatformContext(context))
     val visible by rememberUpdatedState(visibleRange)
     val dimensionsKnown by rememberUpdatedState(onPageDimensions)
     val prefetchEnabled by rememberUpdatedState(enabled)
@@ -1501,7 +1501,7 @@ private fun ReaderPage(
         try {
             val resource = if (reload > 0) retrySource(page) else resolve(page)
             if (!paged && knownDimensions == null) {
-                readerImageDimensions(imagePlatformContext(context).imageLoader, resource)?.let {
+                readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource)?.let {
                     observedDimensions = it
                     dimensionsMeasured(it)
                 }
@@ -1587,7 +1587,7 @@ private fun ReaderPage(
         LaunchedEffect(resource, loadedImage) {
             val image = loadedImage ?: return@LaunchedEffect
             if (!paged && resource != null && knownDimensions == null) {
-                val size = readerImageDimensions(imagePlatformContext(context).imageLoader, resource, image.diskCacheKey) ?: image.previewSize
+                val size = readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource, image.diskCacheKey) ?: image.previewSize
                 observedDimensions = size
                 dimensionsMeasured(size)
             }

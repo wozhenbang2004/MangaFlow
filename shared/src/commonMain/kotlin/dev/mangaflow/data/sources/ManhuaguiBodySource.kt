@@ -11,6 +11,7 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceHttp
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.delay
@@ -127,11 +128,11 @@ class ManhuaguiBodySource : BodySource {
             throw SourceException("漫画柜图片资料暂时无法解析，请更新来源或稍后重试。", url, cause = failure)
         }
         listOf("bid", "bId").forEach { key ->
-            data.opt(key)?.takeUnless { it == org.json.JSONObject.NULL }?.let {
+            data.opt(key)?.takeUnless { it == JSONObject.NULL }?.let {
                 if (it.toString() != id) throw SourceException("漫画柜图片资料与作品不匹配。", url)
             }
         }
-        data.opt("cid")?.takeUnless { it == org.json.JSONObject.NULL }?.let {
+        data.opt("cid")?.takeUnless { it == JSONObject.NULL }?.let {
             if (it.toString() != chapter) throw SourceException("漫画柜图片资料与本章不匹配。", url)
         }
         val files = data.optJSONArray("files") ?: throw SourceException("漫画柜没有返回图片清单。", url)

@@ -137,8 +137,8 @@ class NetworkClient(
         install(ContentEncoding) { gzip(); deflate() }
         install(HttpTimeout) {
             this.connectTimeoutMillis = timeouts.first
-            socketTimeoutMillis = timeouts.second
-            requestTimeoutMillis = timeouts.third
+            this.socketTimeoutMillis = timeouts.second
+            this.requestTimeoutMillis = timeouts.third
         }
     }
     private val activeLock = SynchronizedObject()

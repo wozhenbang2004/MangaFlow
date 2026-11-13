@@ -29,9 +29,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okio.Buffer
+import okio.use as useOkio
 import okio.FileSystem
 import okio.SYSTEM
 import okio.Path.Companion.toPath
+import platform.AVFoundation.*
 import platform.AVFoundation.AVLayerVideoGravityResizeAspectFill
 import platform.AVFoundation.AVPlayer
 import platform.AVFoundation.AVPlayerItemDidPlayToEndTimeNotification
@@ -39,6 +41,7 @@ import platform.AVFoundation.AVPlayerItemFailedToPlayToEndTimeNotification
 import platform.AVFoundation.AVPlayerLayer
 import platform.CoreGraphics.CGRectZero
 import platform.CoreMedia.kCMTimeZero
+import platform.Foundation.*
 import platform.Foundation.NSDate
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSNotificationCenter
@@ -51,6 +54,7 @@ import platform.Foundation.NSFileSize
 import platform.Foundation.NSFileType
 import platform.Foundation.NSFileTypeDirectory
 import platform.Foundation.NSFileTypeSymbolicLink
+import platform.UIKit.setStatusBarStyle
 import platform.UIKit.UIApplication
 import platform.UIKit.UIApplicationOpenSettingsURLString
 import platform.UIKit.UIDocumentPickerDelegateProtocol
@@ -74,14 +78,14 @@ import platform.WebKit.WKFrameInfo
 import platform.WebKit.WKUIDelegateProtocol
 import platform.WebKit.WKNavigationAction
 import platform.WebKit.WKNavigationActionPolicy
-import platform.WebKit.WKNavigationActionPolicyAllow
-import platform.WebKit.WKNavigationActionPolicyCancel
+import platform.WebKit.WKNavigationActionPolicy.WKNavigationActionPolicyAllow
+import platform.WebKit.WKNavigationActionPolicy.WKNavigationActionPolicyCancel
 import platform.WebKit.WKNavigationDelegateProtocol
 import platform.WebKit.WKScriptMessage
 import platform.WebKit.WKScriptMessageHandlerProtocol
 import platform.WebKit.WKUserContentController
 import platform.WebKit.WKUserScript
-import platform.WebKit.WKUserScriptInjectionTimeAtDocumentStart
+import platform.WebKit.WKUserScriptInjectionTime.WKUserScriptInjectionTimeAtDocumentStart
 import platform.WebKit.WKWebView
 import platform.WebKit.WKWebViewConfiguration
 import platform.WebKit.WKWebsiteDataStore
@@ -278,7 +282,7 @@ actual suspend fun readDocumentText(context: PlatformContext, uri: String, maxBy
     try {
         val path = url.path?.toPath() ?: error("无法定位备份文件")
         val output = Buffer()
-        FileSystem.SYSTEM.source(path).use { source ->
+        FileSystem.SYSTEM.source(path).useOkio { source ->
             while (true) {
                 val count = source.read(output, minOf(16384L, maxBytes + 1L - output.size))
                 if (count < 0) break
@@ -346,7 +350,7 @@ actual fun openCommentTextTool(context: PlatformContext, text: String, tool: Com
 actual fun WallpaperVideo(path: String, playing: Boolean, modifier: Modifier, onError: (String) -> Unit) {
     val latestError = rememberUpdatedState(onError)
     val latestPlaying = rememberUpdatedState(playing)
-    val player = remember(path) { AVPlayer(uRL = NSURL.fileURLWithPath(path)).apply { muted = true; volume = 0f } }
+    val player = remember(path) { AVPlayer(uRL = NSURL.fileURLWithPath(path)).apply { setMuted(true); volume = 0f } }
     val videoLayer = remember(player) { AVPlayerLayer.playerLayerWithPlayer(player).apply { videoGravity = AVLayerVideoGravityResizeAspectFill } }
     val view = remember(videoLayer) {
         object : UIView(frame = CGRectZero.readValue()) {
@@ -467,6 +471,6 @@ private class IosWebsiteSession(
         webView.configuration.userContentController.removeAllUserScripts()
         webView.configuration.userContentController.removeScriptMessageHandlerForName("MangaFlowAccount")
         webView.loadHTMLString("", baseURL = null)
-        store.removeDataOfTypes(WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince = NSDate(timeIntervalSince1970 = 0.0)) { after?.invoke() }
+        store.removeDataOfTypes(WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince = NSDate.dateWithTimeIntervalSince1970(0.0)) { after?.invoke() }
     }
 }

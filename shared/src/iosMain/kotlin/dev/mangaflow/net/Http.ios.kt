@@ -3,7 +3,7 @@ package dev.mangaflow.net
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.engine.darwin.Darwin
-import platform.Foundation.NSHTTPCookieAcceptPolicyNever
+import platform.Foundation.NSHTTPCookieAcceptPolicy.NSHTTPCookieAcceptPolicyNever
 
 internal actual fun platformHttpClient(http1Only: Boolean, configure: HttpClientConfig<*>.() -> Unit): HttpClient = HttpClient(Darwin) {
     engine {

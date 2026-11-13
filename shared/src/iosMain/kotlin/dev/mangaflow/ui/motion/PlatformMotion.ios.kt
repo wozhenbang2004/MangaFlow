@@ -12,7 +12,7 @@ import dev.mangaflow.platform.monotonicTimeMillis
 import platform.Foundation.NSNotificationCenter
 import platform.Foundation.NSOperationQueue
 import platform.UIKit.UIAccessibilityDarkerSystemColorsStatusDidChangeNotification
-import platform.UIKit.UIAccessibilityIsDarkerSystemColorsEnabled
+import platform.UIKit.UIAccessibilityDarkerSystemColorsEnabled
 import platform.UIKit.UIAccessibilityIsReduceMotionEnabled
 import platform.UIKit.UIAccessibilityIsReduceTransparencyEnabled
 import platform.UIKit.UIAccessibilityIsVoiceOverRunning
@@ -29,7 +29,7 @@ private fun readAccessibilityPreferences() = PlatformAccessibilityPreferences(
     motionEnabled = !UIAccessibilityIsReduceMotionEnabled(),
     touchExploration = UIAccessibilityIsVoiceOverRunning(),
     reduceTransparency = UIAccessibilityIsReduceTransparencyEnabled(),
-    increaseContrast = UIAccessibilityIsDarkerSystemColorsEnabled(),
+    increaseContrast = UIAccessibilityDarkerSystemColorsEnabled(),
 )
 
 @Composable

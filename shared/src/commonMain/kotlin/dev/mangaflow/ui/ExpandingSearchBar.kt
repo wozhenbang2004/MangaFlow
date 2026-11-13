@@ -313,7 +313,7 @@ internal fun ExpandingSearchBar(
                 },
         ) {
             Box(Modifier.size(22.dp).graphicsLayer {
-                val response = sin((icon.value * backRemaining).coerceIn(0f, 1f) * Math.PI).toFloat()
+                val response = sin((icon.value * backRemaining).coerceIn(0f, 1f) * kotlin.math.PI).toFloat()
                 scaleX = 1f - .16f * response
                 scaleY = scaleX
             }) {
