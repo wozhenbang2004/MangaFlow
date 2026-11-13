@@ -51,6 +51,8 @@ internal fun ReaderSettingsDialog(
     onDimPreview: (Float) -> Unit,
     update: (ReaderPreferences) -> Unit,
     onModels: () -> Unit,
+    sourceResumePolicy: String = "ask",
+    onSourceResumePolicy: (String) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     var dimAmount by remember { mutableFloatStateOf(preferences.dimAmount) }
@@ -93,6 +95,24 @@ internal fun ReaderSettingsDialog(
                                 }
                             }
                         }
+                    }
+
+                    ReaderSettingsSection("切源续读") {
+                        val resumePolicies = listOf("ask", "source_record", "same_page")
+                        MotionTabs(
+                            selected = resumePolicies.indexOf(sourceResumePolicy).coerceAtLeast(0),
+                            labels = listOf("每次询问", "本源记录", "尝试同页"),
+                            onSelect = { onSourceResumePolicy(resumePolicies[it]) },
+                            foreground = colors.onSurface, muted = colors.onSurfaceVariant,
+                            track = colors.onSurface.copy(alpha = .04f), indicator = colors.surface,
+                            fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+                            controlHeight = 44.dp, fontSize = 12.sp, role = Role.RadioButton,
+                            selectedFontWeight = FontWeight.Medium, unselectedFontWeight = FontWeight.Normal,
+                        )
+                        if (sourceResumePolicy == "same_page") Text(
+                            "不同版本分图可能不同，页码不保证对应。",
+                            color = colors.onSurfaceVariant, fontSize = 12.sp,
+                        )
                     }
 
                     ReaderSettingsSection("分镜") {

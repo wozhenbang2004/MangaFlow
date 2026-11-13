@@ -22,19 +22,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -59,12 +57,15 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.dismiss
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
@@ -84,7 +85,6 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
-import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import kotlin.math.roundToInt
@@ -116,39 +116,83 @@ internal fun ChapterSourceLogo(sourceId: String, sourceName: String, modifier: M
     }
 }
 
-/** Spread while it fits; overflow overlaps on the same horizontal baseline. */
+/** Each visible source owns a separate hit slot; only actual overflow shares a list. */
 @Composable
 internal fun ChapterSourceBadge(
     chapter: Chapter,
     modifier: Modifier = Modifier,
     onOpen: (Rect?) -> Unit,
+    onReadVariant: (Chapter, ChapterVariant) -> Unit = { _, _ -> },
+    enabled: Boolean = true,
 ) {
     if (chapter.variants.isEmpty()) return
-    val variants = remember(chapter.id, chapter.variants) {
-        chapter.variants.sortedBy { if (it.storageId == chapter.id) 0 else 1 }.distinctBy { it.sourceId }
+    val sources = remember(chapter.id, chapter.variants) {
+        chapter.variants.sortedBy { if (it.storageId == chapter.id) 0 else 1 }
+            .groupBy { it.sourceId }.values.toList()
     }
-    var anchor by remember(chapter.logicalId, chapter.id) { mutableStateOf<Rect?>(null) }
+    val configuration = LocalViewConfiguration.current
+    val compactTargets = remember(configuration) {
+        object : ViewConfiguration by configuration {
+            override val minimumTouchTargetSize = DpSize(24.dp, 24.dp)
+        }
+    }
+    BoxWithConstraints(modifier.height(24.dp)) {
+        val capacity = (maxWidth.value / 24f).toInt().coerceAtLeast(1)
+        val directCount = if (sources.size <= capacity) sources.size else (capacity - 1).coerceAtLeast(0)
+        CompositionLocalProvider(LocalViewConfiguration provides compactTargets) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                sources.take(directCount).forEach { variants ->
+                    ChapterSourceBadgeItem(chapter, variants, overflow = false, enabled = enabled,
+                        onOpen = onOpen, onReadVariant = onReadVariant)
+                }
+                if (directCount < sources.size) {
+                    ChapterSourceBadgeItem(chapter, sources.drop(directCount).map { it.first() },
+                        overflow = true, enabled = enabled, onOpen = onOpen, onReadVariant = onReadVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChapterSourceBadgeItem(
+    chapter: Chapter,
+    variants: List<ChapterVariant>,
+    overflow: Boolean,
+    enabled: Boolean,
+    onOpen: (Rect?) -> Unit,
+    onReadVariant: (Chapter, ChapterVariant) -> Unit,
+) {
+    val first = variants.first()
+    val needsPicker = overflow || variants.size > 1
+    var anchor by remember(chapter.logicalId, first.storageId) { mutableStateOf<Rect?>(null) }
     val interaction = remember { MutableInteractionSource() }
-    BoxWithConstraints(modifier.height(22.dp).onGloballyPositioned { coordinates ->
+    val description = when {
+        overflow -> "${variants.size}个其他来源，选择来源"
+        variants.size > 1 -> "${first.sourceName}，${variants.size}个版本，选择版本"
+        else -> "使用${first.sourceName}阅读本章"
+    }
+    Box(Modifier.size(24.dp).onGloballyPositioned { coordinates ->
         val origin = coordinates.localToScreen(Offset.Zero)
         if (origin.isSpecified) anchor = Rect(origin, androidx.compose.ui.geometry.Size(
             coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
-    }.clickable(interactionSource = interaction, indication = null, role = Role.Button,
-        onClickLabel = "选择本章来源", onClick = { onOpen(anchor) })
-        .motionPress(interaction, pressedScale = .97f)
-        .semantics { contentDescription = chapter.title + "，" + variants.size + "个来源，选择来源" }) {
-        val marks = variants.take(4)
-        val mark = 13.dp
-        val flat = maxWidth >= mark * marks.size + 4.dp * (marks.size - 1).coerceAtLeast(0)
-        val spacing = if (flat) mark + 4.dp else if (marks.size > 1)
-            minOf(8.dp, ((maxWidth - mark) / (marks.size - 1)).coerceAtLeast(0.dp)) else 0.dp
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
-            marks.indices.reversed().forEach { index ->
-                val variant = marks[index]
-                ChapterSourceLogo(variant.sourceId, variant.sourceName,
-                    Modifier.absoluteOffset(x = spacing * index).size(mark), muted = true)
+    }.clickable(enabled = enabled, interactionSource = interaction, indication = null,
+        role = Role.Button, onClickLabel = description,
+        onClick = { if (needsPicker) onOpen(anchor) else onReadVariant(chapter, first) })
+        .motionPress(interaction, enabled = enabled, pressedScale = .94f)
+        .semantics { contentDescription = chapter.title + "，" + description },
+        contentAlignment = Alignment.Center) {
+        if (overflow) {
+            val marks = variants.take(3)
+            val spacing = if (marks.size > 1) 10.dp / (marks.size - 1) else 0.dp
+            Box(Modifier.size(24.dp), contentAlignment = Alignment.CenterStart) {
+                marks.indices.reversed().forEach { index ->
+                    val variant = marks[index]
+                    ChapterSourceLogo(variant.sourceId, variant.sourceName,
+                        Modifier.absoluteOffset(x = spacing * index).size(14.dp), muted = true)
+                }
             }
-        }
+        } else ChapterSourceLogo(first.sourceId, first.sourceName, Modifier.size(14.dp), muted = true)
     }
 }
 
@@ -199,11 +243,9 @@ internal fun ChapterSourcePicker(
     DisposableEffect(key) { onDispose { reportPresence(false) } }
     val close = { cancelSelection(); closing = true }
     val useSheet = sourceAnchor == null || density.fontScale > 1.35f ||
-        window.height < 520.dp || frozen.variants.size > 4
+        window.height < 520.dp
     val content: @Composable (() -> Unit) -> Unit = { dismiss ->
-        ChapterSourceContent(frozen, chapters, allowCorrections, downloaded, chapterPositions, loading, error,
-            onReadVariant, onSetPreferredSource, onClearChapterSource, onSplitVariant,
-            onRelinkVariant, dismiss)
+        ChapterSourceContent(frozen, downloaded, chapterPositions, loading, error, onReadVariant, dismiss)
     }
     if (useSheet) {
         MotionBottomSheet(onDismissRequest = { if (!closeRequested) cancelSelection(); onClosed() }, backdrop = backdrop,
@@ -273,21 +315,13 @@ internal fun ChapterSourcePicker(
 @Composable
 private fun ChapterSourceContent(
     chapter: Chapter,
-    chapters: List<Chapter>,
-    allowCorrections: Boolean,
     downloaded: Map<String, DownloadEntry>,
     positions: Map<String, ReadingProgress>?,
     loading: Boolean,
     error: String?,
     onRead: (Chapter, ChapterVariant) -> Unit,
-    onPreferred: (String) -> Unit,
-    onClear: (Chapter) -> Unit,
-    onSplit: (Chapter, ChapterVariant) -> Unit,
-    onRelink: (Chapter, ChapterVariant, Chapter) -> Unit,
     dismiss: () -> Unit,
 ) {
-    var editing by remember(chapter.logicalId, chapter.id) { mutableStateOf<ChapterVariant?>(null) }
-    var relinking by remember(chapter.logicalId, chapter.id) { mutableStateOf(false) }
     var requestedVariant by remember(chapter.logicalId, chapter.id) { mutableStateOf<ChapterVariant?>(null) }
     val variants = remember(chapter.id, chapter.variants) {
         chapter.variants.sortedBy { if (it.storageId == chapter.id) 0 else 1 }
@@ -296,93 +330,57 @@ private fun ChapterSourceContent(
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(chapter.title, color = DetailForeground, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(if (editing != null) editing!!.sourceName else if (sourceCount == variants.size)
-                    "$sourceCount 个来源" else "$sourceCount 源 · ${variants.size} 个版本",
-                    color = DetailMuted, fontSize = 11.sp)
+                Text(chapter.title, color = DetailForeground, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (sourceCount == variants.size) "$sourceCount 个来源" else
+                    "$sourceCount 源 · ${variants.size} 个版本", color = DetailMuted, fontSize = 11.sp)
             }
             DetailAction(Icons.Outlined.Close, "收起章节来源", onClick = dismiss)
         }
-        if (relinking && editing != null) {
-            Text("选择这份正文应归属的章节", color = DetailSecondary, fontSize = 12.sp,
-                modifier = Modifier.padding(6.dp))
-            LazyColumn(Modifier.fillMaxWidth().height(250.dp)) {
-                items(chapters.filter { it.logicalId.ifBlank { it.id } != chapter.logicalId.ifBlank { chapter.id } },
-                    key = { it.logicalId.ifBlank { it.id } }) { target ->
-                    MotionTextButton(onClick = { onRelink(chapter, editing!!, target); dismiss() },
-                        modifier = Modifier.fillMaxWidth(), enabled = !loading) {
-                        Text(target.title, color = DetailForeground, fontSize = 12.sp,
-                            modifier = Modifier.fillMaxWidth())
-                    }
-                }
-            }
-            SourceTextAction("返回来源", enabled = !loading) { relinking = false; editing = null }
-        } else if (editing != null) {
-            val variant = editing!!
-            SourceTextAction("设为这部作品的优先来源", enabled = !loading) {
-                onPreferred(variant.sourceId); dismiss()
-            }
-            SourceTextAction("本章跟随作品优先来源", enabled = !loading) { onClear(chapter); dismiss() }
-            if (allowCorrections && chapters.isNotEmpty()) {
-                if (variants.size > 1) SourceTextAction("拆分为独立章节", enabled = !loading) {
-                    onSplit(chapter, variant); dismiss()
-                }
-                SourceTextAction("重新关联到…", enabled = !loading) { relinking = true }
-            }
-            SourceTextAction("返回来源", enabled = !loading) { editing = null }
-        } else variants.forEach { variant ->
+        variants.forEach { variant ->
             val selected = variant.storageId == chapter.id
             val entry = downloaded[variant.storageId]
             val saved = positions?.get(variant.storageId)
             val interaction = remember(variant.storageId) { MutableInteractionSource() }
-            Row(Modifier.fillMaxWidth().heightIn(min = 58.dp).clip(RoundedCornerShape(12.dp))
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
                 .background(if (selected) DetailForeground.copy(alpha = .055f) else Color.Transparent)
                 .clickable(enabled = !loading, interactionSource = interaction, indication = null,
                     role = Role.Button, onClickLabel = "使用${variant.sourceName}阅读本章",
                     onClick = { requestedVariant = variant; onRead(chapter, variant) })
                 .motionPress(interaction, enabled = !loading, pressedScale = .99f)
-                .padding(start = 8.dp, end = 2.dp, top = 8.dp, bottom = 8.dp),
+                .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(24.dp))
-                Spacer(Modifier.width(10.dp))
+                ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(22.dp))
+                Spacer(Modifier.width(9.dp))
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text(variant.sourceName, color = DetailForeground, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                        if (selected) Icon(Icons.Outlined.Check, "本章优先来源", Modifier.size(12.dp), tint = DetailSecondary)
+                        Text(variant.sourceName, color = DetailForeground, fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false))
+                        if (selected) Icon(Icons.Outlined.Check, "当前来源", Modifier.size(12.dp), tint = DetailSecondary)
                         if (loading && requestedVariant?.storageId == variant.storageId)
                             MotionBusyIndicator(Modifier.size(12.dp), color = DetailSecondary, strokeWidth = 1.3.dp)
                     }
-                    Text(listOf(variant.language, variant.edition, variant.scanlator).filter(String::isNotBlank)
-                        .joinToString(" · "), color = DetailMuted, fontSize = 10.sp, maxLines = 2)
+                    val identity = listOf(variant.language, variant.edition, variant.scanlator)
+                        .filter(String::isNotBlank).joinToString(" · ")
+                    Text(identity, color = DetailMuted, fontSize = 10.sp, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
                     if (variant.title != chapter.title) Text(variant.title, color = DetailSecondary,
                         fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    val location = when {
-                        entry?.status == DownloadStatus.COMPLETED -> "已下载"
-                        saved != null -> "续读本来源 · 第${saved.pageIndex + 1}页"
-                        else -> "从本章开头阅读"
-                    }
-                    Text(location, color = DetailMuted, fontSize = 10.sp)
+                    val location = listOfNotNull(
+                        "已下载".takeIf { entry?.status == DownloadStatus.COMPLETED },
+                        saved?.let { "续读第${it.pageIndex + 1}页" },
+                    ).joinToString(" · ")
+                    if (location.isNotEmpty()) Text(location, color = DetailMuted, fontSize = 10.sp)
                 }
-                DetailAction(Icons.Outlined.MoreHoriz, "${variant.sourceName}的优先来源与关联操作",
-                    enabled = !loading, onClick = { editing = variant })
             }
         }
-        if (loading) Row(Modifier.fillMaxWidth().padding(10.dp),
+        if (loading) Row(Modifier.fillMaxWidth().padding(8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             MotionBusyIndicator(Modifier.size(14.dp), color = DetailSecondary, strokeWidth = 1.5.dp)
-            Text("正在准备${requestedVariant?.sourceName.orEmpty()}本章，当前阅读位置已保留",
-                color = DetailSecondary, fontSize = 11.sp)
+            Text("正在准备${requestedVariant?.sourceName.orEmpty()}本章", color = DetailSecondary, fontSize = 11.sp)
         }
         if (!error.isNullOrBlank()) Text(error, color = MaterialTheme.colorScheme.error, fontSize = 12.sp,
             modifier = Modifier.fillMaxWidth().padding(8.dp))
-    }
-}
-
-@Composable
-private fun SourceTextAction(label: String, enabled: Boolean, action: () -> Unit) {
-    MotionTextButton(onClick = action, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
-        Text(label, color = if (enabled) DetailForeground else DetailMuted, fontSize = 12.sp,
-            modifier = Modifier.fillMaxWidth())
     }
 }

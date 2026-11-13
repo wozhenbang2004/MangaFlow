@@ -19,6 +19,9 @@ data class BrowseSnapshot(
     val page: Int,
     val hasMore: Boolean,
     val updatedAt: Long,
+    val sourceMatches: Map<String, List<Manga>> = emptyMap(),
+    val sourceNextPages: Map<String, Int> = emptyMap(),
+    val sourceChoiceIds: Set<String> = emptySet(),
 )
 
 /** Disposable public lists only. Favorites, reading positions and downloads live elsewhere. */
@@ -50,17 +53,39 @@ class BrowseCache(context: Context) {
                     if (!usableTime(updatedAt) || page !in 0..MAX_PAGE || values.length() > MAX_ITEMS) return@runCatching null
                     val items = (0 until values.length()).map { index ->
                         val value = values.getJSONObject(index)
-                        readManga(value).copy(
-                            sourceUuid = value.optString("sourceUuid"),
-                            popularity = value.opt("popularity")?.toString()?.toLongOrNull()?.takeIf { it >= 0 },
-                            rank = value.opt("rank")?.toString()?.toIntOrNull()?.takeIf { it > 0 },
-                            totalPopularity = value.opt("totalPopularity")?.toString()?.toLongOrNull()?.takeIf { it >= 0 },
-                        )
+                        readCachedManga(value)
                     }
                     if (items.any { it.id.isBlank() || it.title.isBlank() } || items.distinctBy(Manga::id).size != items.size) {
                         return@runCatching null
                     }
-                    BrowseSnapshot(key, items, page, json.getBoolean("hasMore"), updatedAt)
+                    val matchesJson = json.optJSONObject("sourceMatches")
+                    if (matchesJson != null && matchesJson.length() > MAX_ITEMS) return@runCatching null
+                    var matchCount = 0
+                    val matches = matchesJson?.let { groups ->
+                        groups.keys().asSequence().associateWith { id ->
+                            require(id.isNotBlank())
+                            val values = groups.getJSONArray(id)
+                            matchCount += values.length()
+                            require(matchCount <= MAX_SOURCE_HITS)
+                            (0 until values.length()).map { index -> readCachedManga(values.getJSONObject(index)) }.also { rows ->
+                                require(rows.all { it.id.isNotBlank() && it.title.isNotBlank() })
+                            }
+                        }
+                    }.orEmpty()
+                    val nextJson = json.optJSONObject("sourceNextPages")
+                    if (nextJson != null && nextJson.length() > MAX_SOURCES) return@runCatching null
+                    val nextPages = nextJson?.let { sources ->
+                        sources.keys().asSequence().associateWith { id ->
+                            require(id.isNotBlank())
+                            sources.getInt(id).also { require(it in 0..MAX_PAGE) }
+                        }
+                    }.orEmpty()
+                    val choiceJson = json.optJSONArray("sourceChoiceIds")
+                    if (choiceJson != null && choiceJson.length() > MAX_ITEMS) return@runCatching null
+                    val choices = choiceJson?.let { array ->
+                        (0 until array.length()).map { array.getString(it).also { id -> require(id.isNotBlank()) } }.toSet()
+                    }.orEmpty()
+                    BrowseSnapshot(key, items, page, json.getBoolean("hasMore"), updatedAt, matches, nextPages, choices)
                 }.getOrNull()
                 if (snapshot == null) {
                     AtomicFile(file).delete()
@@ -75,11 +100,11 @@ class BrowseCache(context: Context) {
 
     /** Small memory updates never wait on JSON encoding or disk I/O. */
     fun remember(snapshot: BrowseSnapshot, generation: Long) {
-        if (snapshot.items.size > MAX_ITEMS) return
+        if (!withinBounds(snapshot)) return
         synchronized(memory) {
             if (generation != epoch.get()) return
             memory[snapshot.key] = snapshot
-            while (memory.size > MAX_ENTRIES || memory.values.sumOf { it.items.size } > MAX_MEMORY_ITEMS) {
+            while (memory.size > MAX_ENTRIES || memory.values.sumOf { it.items.size + it.sourceMatches.values.sumOf(List<Manga>::size) } > MAX_MEMORY_ITEMS) {
                 memory.remove(memory.keys.first())
             }
         }
@@ -87,21 +112,19 @@ class BrowseCache(context: Context) {
 
     suspend fun write(snapshot: BrowseSnapshot, generation: Long): Unit = withContext(Dispatchers.IO) {
         // Keep the last complete cached page range rather than truncating and skipping manga.
-        if (snapshot.items.size > MAX_ITEMS || generation != epoch.get()) return@withContext
+        if (!withinBounds(snapshot) || generation != epoch.get()) return@withContext
         val encoded = JSONObject().apply {
             put("version", VERSION)
             put("key", snapshot.key)
             put("updatedAt", snapshot.updatedAt)
             put("page", snapshot.page)
             put("hasMore", snapshot.hasMore)
-            put("items", JSONArray(snapshot.items.map { manga ->
-                manga.toJson().apply {
-                    put("sourceUuid", manga.sourceUuid)
-                    manga.popularity?.let { put("popularity", it) }
-                    manga.rank?.let { put("rank", it) }
-                    manga.totalPopularity?.let { put("totalPopularity", it) }
-                }
-            }))
+            put("items", JSONArray(snapshot.items.map(::writeCachedManga)))
+            if (snapshot.sourceMatches.isNotEmpty()) put("sourceMatches", JSONObject().apply {
+                snapshot.sourceMatches.forEach { (id, matches) -> put(id, JSONArray(matches.map(::writeCachedManga))) }
+            })
+            if (snapshot.sourceNextPages.isNotEmpty()) put("sourceNextPages", JSONObject(snapshot.sourceNextPages))
+            if (snapshot.sourceChoiceIds.isNotEmpty()) put("sourceChoiceIds", JSONArray(snapshot.sourceChoiceIds.toList()))
         }.toString().toByteArray(Charsets.UTF_8)
         if (encoded.size > MAX_FILE_BYTES) return@withContext
         diskLock.withLock {
@@ -159,15 +182,34 @@ class BrowseCache(context: Context) {
     private fun usableTime(updatedAt: Long): Boolean =
         System.currentTimeMillis() - updatedAt in -CLOCK_SKEW_MS..MAX_STALE_MS && updatedAt > 0
 
+    private fun withinBounds(snapshot: BrowseSnapshot): Boolean = snapshot.items.size <= MAX_ITEMS &&
+        snapshot.sourceMatches.size <= MAX_ITEMS && snapshot.sourceMatches.values.sumOf(List<Manga>::size) <= MAX_SOURCE_HITS &&
+        snapshot.sourceNextPages.size <= MAX_SOURCES && snapshot.sourceNextPages.values.all { it in 0..MAX_PAGE } &&
+        snapshot.sourceChoiceIds.size <= MAX_ITEMS
+
     private companion object {
         const val VERSION = 1
         const val MAX_ENTRIES = 24
         const val MAX_ITEMS = 600
         const val MAX_MEMORY_ITEMS = 2_400
+        const val MAX_SOURCE_HITS = 3_600
+        const val MAX_SOURCES = 64
         const val MAX_PAGE = 100_000
         const val MAX_FILE_BYTES = 1024L * 1024
         const val MAX_DISK_BYTES = 8L * 1024 * 1024
         const val CLOCK_SKEW_MS = 5L * 60_000
         const val MAX_STALE_MS = 7L * 24 * 60 * 60_000
     }
+}
+
+private fun readCachedManga(value: JSONObject): Manga = readManga(value).copy(
+    popularity = value.opt("popularity")?.toString()?.toLongOrNull()?.takeIf { it >= 0 },
+    rank = value.opt("rank")?.toString()?.toIntOrNull()?.takeIf { it > 0 },
+    totalPopularity = value.opt("totalPopularity")?.toString()?.toLongOrNull()?.takeIf { it >= 0 },
+)
+
+private fun writeCachedManga(manga: Manga): JSONObject = manga.toJson().apply {
+    manga.popularity?.let { put("popularity", it) }
+    manga.rank?.let { put("rank", it) }
+    manga.totalPopularity?.let { put("totalPopularity", it) }
 }

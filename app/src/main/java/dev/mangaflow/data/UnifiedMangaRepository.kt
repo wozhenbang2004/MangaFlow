@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 
 /**
  * A work keeps its existing storage identity. Source-qualified chapter IDs route
@@ -60,6 +61,7 @@ class UnifiedMangaRepository(
     private val discoveryGenerations = mutableMapOf<String, Long>()
     private val discoveryCompleted = mutableMapOf<String, Pair<String, Long>>()
     private val pageCacheGenerations = mutableMapOf<String, Long>()
+    private val searchTerms = LinkedHashMap<String, MutableMap<String, String>>()
 
     override suspend fun discover(page: Int): MangaPage = copy.discover(page)
     override suspend fun search(query: String, page: Int): MangaPage = copy.search(query, page)
@@ -68,6 +70,76 @@ class UnifiedMangaRepository(
 
     suspend fun searchSource(sourceId: String, query: String, page: Int = 0): MangaPage =
         if (sourceId == "copy") copy.search(query, page) else adapter(sourceId).search(query, page)
+
+    /** Each callback is an immutable cumulative snapshot of this requested batch only. */
+    suspend fun searchAll(query: String, pages: Map<String, Int>? = null,
+        onUpdate: (FederatedSearchPage) -> Unit = {}): FederatedSearchPage = withContext(Dispatchers.IO) {
+        val text = query.trim()
+        require(text.length in 1..120) { "请输入 1–120 个字的漫画标题。" }
+        val requested = pages?.toMap() ?: sources.associate { it.id to 0 }
+        val infos = sources.associateBy(BodySourceInfo::id)
+        val states = LinkedHashMap<String, FederatedSearchSource>()
+        requested.forEach { (id, _) ->
+            states[id] = FederatedSearchSource(id, infos[id]?.name ?: sourceDisplayName(id), loading = true)
+        }
+        val hits = LinkedHashMap<Pair<String, String>, Manga>()
+        val updateLock = Mutex()
+        fun snapshot() = FederatedSearchPage(hits.values.toList(), states.toMap())
+        onUpdate(snapshot())
+        // Foreground search has its own slots, independent of background catalogue discovery.
+        val searchSlots = Semaphore(2)
+        supervisorScope {
+            requested.map { (sourceId, page) -> async {
+                var found: List<Manga> = emptyList()
+                val state = try {
+                    require(sourceId in infos) { "这个正文来源尚未安装。" }
+                    require(page >= 0) { "搜索分页无效。" }
+                    val result = searchSlots.withPermit {
+                        withTimeout(15_000L) { searchSourceTerms(sourceId, text, page) }
+                    }
+                    found = result.items.distinctBy(::federatedMangaIdentity)
+                    val next = if (result.hasMore) result.nextPage ?: (page + 1) else null
+                    require(next == null || next > page) { "该来源没有返回有效的下一页。" }
+                    FederatedSearchSource(sourceId, infos.getValue(sourceId).name,
+                        hasMore = result.hasMore, nextPage = next)
+                } catch (cancel: CancellationException) {
+                    if (cancel !is kotlinx.coroutines.TimeoutCancellationException) throw cancel
+                    FederatedSearchSource(sourceId, infos[sourceId]?.name ?: sourceDisplayName(sourceId),
+                        error = "该来源搜索超时，请重试。", failedPage = page)
+                } catch (failure: Exception) {
+                    FederatedSearchSource(sourceId, infos[sourceId]?.name ?: sourceDisplayName(sourceId),
+                        error = failure.message?.take(300) ?: "该来源暂时无法搜索，请重试。", failedPage = page)
+                }
+                currentCoroutineContext().ensureActive()
+                updateLock.withLock {
+                    found.forEach { hits[federatedMangaIdentity(it)] = it }
+                    states[sourceId] = state
+                    onUpdate(snapshot())
+                }
+            } }.forEach { it.await() }
+        }
+        snapshot()
+    }
+
+    private suspend fun searchSourceTerms(sourceId: String, query: String, page: Int): MangaPage {
+        val retained = if (page > 0) synchronized(searchTerms) { searchTerms[query]?.get(sourceId) } else null
+        val terms = retained?.let(::listOf) ?: bodySourceSearchTerms(query)
+        var result = MangaPage(emptyList(), false)
+        for (term in terms) {
+            currentCoroutineContext().ensureActive()
+            result = searchSource(sourceId, term, page)
+            if (result.items.isNotEmpty()) {
+                synchronized(searchTerms) {
+                    val selected = searchTerms.remove(query) ?: mutableMapOf()
+                    selected[sourceId] = term
+                    searchTerms[query] = selected
+                    while (searchTerms.size > 32) searchTerms.remove(searchTerms.keys.first())
+                }
+                break
+            }
+        }
+        return result
+    }
 
     /** Start independent source discovery; the existing work and readable directory stay visible. */
     fun discoverSources(work: Manga, aliases: List<String> = emptyList(), force: Boolean = false) {
@@ -319,6 +391,15 @@ class UnifiedMangaRepository(
     }
 
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> {
+        if (chapterId.isBlank()) {
+            val cover = SourceKeys.decodeManga(mangaId)
+            if (cover.sourceId == "copy") return copy.imageHeaders(cover.mangaId, "")
+            return mapOf(
+                "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
+                "Referer" to adapter(cover.sourceId).info.homeUrl.trimEnd('/') + "/",
+                "Accept" to "image/avif,image/webp,image/*,*/*;q=0.8",
+            )
+        }
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         return if (ref.sourceId == "copy") copy.imageHeaders(ref.mangaId, ref.chapterId)
         else adapter(ref.sourceId).imageHeaders(SourceKeys.manga(ref.sourceId, ref.mangaId), chapterId)

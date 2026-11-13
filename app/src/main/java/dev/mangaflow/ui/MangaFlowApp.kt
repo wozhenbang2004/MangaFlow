@@ -233,6 +233,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val reading by model.reading.collectAsStateWithLifecycle()
     val sourceManagement by model.sourceManagement.collectAsStateWithLifecycle()
     val sourceOperation by model.chapterSourceOperation.collectAsStateWithLifecycle()
+    val sourceResumeChoice by model.sourceResumeChoice.collectAsStateWithLifecycle()
+    val sourceResumePolicy by model.sourceResumePolicy.collectAsStateWithLifecycle()
     val sourceCatalogErrors by model.repository.sourceErrors.collectAsStateWithLifecycle()
     val sourceDiscovery by model.repository.sourceDiscovery.collectAsStateWithLifecycle()
     val libraryOpening by model.libraryOpening.collectAsStateWithLifecycle()
@@ -339,6 +341,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             onDetach = model::detachBodySource, onPrefer = model::preferBodySource,
             onRetryAll = model::retrySourceDiscovery, onChooseDomain = model::chooseSourceDomain,
             onChooseSource = model::chooseBodySource)
+    }
+    sourceResumeChoice?.let { choice ->
+        SourceResumePrompt(choice, drawerBackdrop, onChoose = model::confirmSourceResumeChoice,
+            onDismiss = model::cancelSourceResumeChoice)
     }
     val focus = LocalFocusManager.current
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
@@ -588,6 +594,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         initialChapterId = current.session.chapterId,
                         initialCollection = current.session.collection,
                         startAtBeginning = current.session.startAtBeginning,
+                        initialPageIndex = current.session.initialPageIndex,
+                        sourceResumePolicy = sourceResumePolicy,
+                        onSourceResumePolicy = model::setSourceResumePolicy,
                         repository = model.repository, libraryStore = model.library, downloadStore = model.downloads,
                         communityRepository = model.community,
                         reviewRepository = model.reviews,
@@ -597,8 +606,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         chaptersLoading = current.session.chaptersLoading,
                         chaptersError = current.session.chaptersError,
                         onRetryChapters = model::retryReadingChapters,
-                        active = current.key == frame.key && sourceManagement == null,
-                        onReadVariant = model::readChapterVariant,
+                        active = current.key == frame.key && sourceManagement == null && sourceResumeChoice == null,
+                        onReadVariant = model::readReaderChapterVariant,
                         onSetPreferredSource = model::preferBodySource,
                         onClearChapterSource = model::clearChapterSource,
                         onCancelSourceSelection = model::cancelSourceSelection,
@@ -648,7 +657,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                                 onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
                                 loadReplies = model::reviewReplies,
-                                active = current.key == frame.key && authorWorks == null && !tagSearchVisible && sourceManagement == null,
+                                active = current.key == frame.key && authorWorks == null && !tagSearchVisible &&
+                                    sourceManagement == null && sourceResumeChoice == null,
                                 wallpaper = {
                                     if (wallpaper.mediaPath != null) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
                                         active = current.key == frame.key && authorWorks == null && !tagSearchVisible)
@@ -872,6 +882,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             DiscoverySearchResults(
                                 state = browse, expanded = searchExpanded, active = searchActive,
                                 maxHeight = maxHeight, repository = model.repository,
+                                backdrop = searchBackdrop,
                                 onRetry = model::retryBrowse, onMore = model::loadMore,
                                 onTarget = model::setSearchTarget, onTag = model::toggleSearchTag,
                                 onRetryTags = model::retrySearchTags,

@@ -271,10 +271,24 @@ internal fun DiscoverySearchResults(
     onRetryTags: () -> Unit,
     tagsOnly: Boolean = false,
     onTagQuery: ((String) -> Unit)? = null,
+    backdrop: HazeState? = null,
 ) {
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
     val search = if (expanded) state else retainedSearch
+    val federated = search.searchTarget == SearchTarget.TITLE && search.selectedTags.isEmpty() && search.query.isNotBlank()
+    var sourceChoices by remember(search.cacheKey) { mutableStateOf<List<Manga>?>(null) }
+    val transition = LocalMangaCoverTransition.current
+    LaunchedEffect(active, expanded, search.cacheKey) {
+        if (!active || !expanded) sourceChoices = null
+    }
+    val openResult: (Manga) -> Unit = { manga ->
+        val matches = search.sourceMatches[manga.id].orEmpty()
+        if (federated && manga.id in search.sourceChoiceIds && matches.size > 1) {
+            transition?.select?.invoke(null)
+            sourceChoices = matches
+        } else onOpen(manga)
+    }
     val positions = rememberSaveable(saver = SearchPositionsSaver) { LinkedHashMap<String, LazyListState>() }
     if (maxHeight <= 0.dp) return
     val retainedResults = remember(search.cacheKey) {
@@ -285,9 +299,11 @@ internal fun DiscoverySearchResults(
     }
     LaunchedEffect(active, retainedResults) { if (!active) retainedResults.stopScroll() }
     Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).padding(if (tagsOnly) 0.dp else 8.dp)
-        .motionInputGate(active)) {
+        .motionInputGate(active && sourceChoices == null)) {
         SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
             search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly, onTagQuery = onTagQuery)
+        if (federated)
+            SearchSourceSummary(search.searchSources, onRetry)
         val selectingTags = search.searchTarget == SearchTarget.TAG && search.selectedTags.isEmpty()
         val awaitingKeyword = search.query.isBlank() && search.selectedTags.isEmpty()
         if (search.isSearch && !selectingTags && !awaitingKeyword) Row(Modifier.fillMaxWidth().padding(start = if (tagsOnly) 0.dp else 6.dp,
@@ -333,7 +349,9 @@ internal fun DiscoverySearchResults(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 items(search.items, key = Manga::id) { manga ->
-                    SearchResultRow(manga, repository, "search-${search.cacheKey}", horizontalInset = if (tagsOnly) 0.dp else 6.dp) { onOpen(manga) }
+                    SearchResultRow(manga, repository, "search-${search.cacheKey}",
+                        horizontalInset = if (tagsOnly) 0.dp else 6.dp,
+                        bodySources = if (federated) search.sourceMatches[manga.id].orEmpty() else emptyList()) { openResult(manga) }
                 }
                 if (search.hasMore || search.loadingMore) {
                     item(key = "search-more") {
@@ -355,6 +373,10 @@ internal fun DiscoverySearchResults(
                 }
             }
         }
+    }
+    sourceChoices?.let { matches ->
+        FederatedSearchChoices(matches, repository, backdrop, onDismiss = { sourceChoices = null },
+            onOpen = { manga -> sourceChoices = null; onOpen(manga) })
     }
 }
 
@@ -598,7 +620,8 @@ private fun DiscoveryPane(
 }
 
 @Composable
-private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement: String, horizontalInset: Dp = 6.dp, onOpen: () -> Unit) {
+private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement: String,
+    horizontalInset: Dp = 6.dp, bodySources: List<Manga> = emptyList(), onOpen: () -> Unit) {
     val transition = LocalMangaCoverTransition.current
     val interaction = remember { MutableInteractionSource() }
     Row(
@@ -618,6 +641,7 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
             if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
+            SearchSourceMarks(bodySources, Modifier.fillMaxWidth())
             MangaMetricBadges(manga, showMore = false)
         }
     }
@@ -825,6 +849,7 @@ internal fun CoverTile(
     placement: String? = null,
     onLongClick: (() -> Unit)? = null,
     onRatings: (() -> Unit)? = null,
+    bodySources: List<Manga> = emptyList(),
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -843,6 +868,7 @@ internal fun CoverTile(
             style = if (narrow) MaterialTheme.typography.bodySmall.copy(lineHeight = 17.sp)
                 else if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        SearchSourceMarks(bodySources, Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp))
         MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 4.dp, start = 2.dp, end = 2.dp),
             compact = true, showMore = false, plain = true, onExpand = onRatings)
         if (showChapter && manga.latestChapter.isNotBlank()) Text(manga.latestChapter, modifier = Modifier.padding(top = 3.dp, start = 2.dp, end = 2.dp),

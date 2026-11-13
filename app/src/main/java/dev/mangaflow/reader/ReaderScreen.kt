@@ -178,6 +178,7 @@ import dev.mangaflow.ui.LibraryRestoreStatus
 import dev.mangaflow.ui.ChapterReadMark
 import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.ChapterSourcePicker
+import dev.mangaflow.ui.ChapterSourceBadge
 import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.rememberChapterPositions
 import dev.mangaflow.ui.GlassSurfaceRole
@@ -229,12 +230,15 @@ fun ReaderScreen(
     onRetryChapters: () -> Unit = {},
     active: Boolean = true,
     startAtBeginning: Boolean = false,
-    onReadVariant: (Chapter, ChapterVariant) -> Unit = { _, _ -> },
+    onReadVariant: (Chapter, ChapterVariant, Int) -> Unit = { _, _, _ -> },
     onSetPreferredSource: (String) -> Unit = {},
     onClearChapterSource: (Chapter) -> Unit = {},
     onCancelSourceSelection: () -> Unit = {},
     sourceLoading: Boolean = false,
     sourceError: String? = null,
+    initialPageIndex: Int? = null,
+    sourceResumePolicy: String = "ask",
+    onSourceResumePolicy: (String) -> Unit = {},
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -264,6 +268,9 @@ fun ReaderScreen(
     val readerForeground = active && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
     var restartPending by rememberSaveable(manga.id, initialChapterId, initialCollection?.key) {
         mutableStateOf(startAtBeginning && initialCollection == null)
+    }
+    var sourcePagePending by rememberSaveable(manga.id, initialChapterId, initialPageIndex, initialCollection?.key) {
+        mutableStateOf(initialPageIndex != null && initialCollection == null)
     }
     LaunchedEffect(chapterId) {
         if (initialCollection?.chapter?.id != chapterId) collectionPresentation = false
@@ -436,13 +443,13 @@ fun ReaderScreen(
         if (sourceChapter != null && sourceChapter?.id != initialChapterId) sourceCloseRequested = true
     }
     LaunchedEffect(active, leavingReader) {
-        if ((!active || leavingReader) && sourceChapter != null) {
+        if ((!active || leavingReader) && sourceChapter != null && !sourceCloseRequested) {
             onCancelSourceSelection()
             sourceChapter = null
         }
     }
 
-    LaunchedEffect(chapterId, retry, initialCollection?.key) {
+    LaunchedEffect(chapterId, retry, initialCollection?.key, initialPageIndex) {
         val requestedChapterId = chapterId
         val requestedChapter = chapter
         loading = true
@@ -459,17 +466,21 @@ fun ReaderScreen(
             currentCoroutineContext().ensureActive()
             if (chapterId != requestedChapterId) return@LaunchedEffect
             if (loaded.isEmpty()) throw IllegalStateException("这一章还没有可读取的图片")
-            val restarting = restartPending && chapterId == initialChapterId && initialCollection == null
-            val saved = if (restarting) null else libraryStore.progressFor(manga.id, requestedChapterId)
+            val sourcePage = initialPageIndex?.takeIf {
+                sourcePagePending && requestedChapterId == initialChapterId && initialCollection == null
+            }
+            val restarting = restartPending && chapterId == initialChapterId && initialCollection == null && sourcePage == null
+            val saved = if (restarting || sourcePage != null) null else libraryStore.progressFor(manga.id, requestedChapterId)
             val collection = initialCollection?.takeIf { collectionPresentation && !collectionPositionApplied && it.chapter.id == chapterId }
-            pageIndex = (collection?.firstPage ?: saved?.pageIndex ?: 0).coerceIn(0, loaded.lastIndex)
-            cursor.scrollOffset = if (collection != null) 0 else saved?.scrollOffset ?: 0
-            cursor.panelIndex = if (collection == null && saved?.panelLayout == preferences.panelLayoutKey)
+            pageIndex = (sourcePage ?: collection?.firstPage ?: saved?.pageIndex ?: 0).coerceIn(0, loaded.lastIndex)
+            cursor.scrollOffset = if (sourcePage != null || collection != null) 0 else saved?.scrollOffset ?: 0
+            cursor.panelIndex = if (sourcePage == null && collection == null && saved?.panelLayout == preferences.panelLayoutKey)
                 saved.panelIndex.coerceAtLeast(0) else 0
             if (collection != null) collectionPositionApplied = true
             libraryStore.migratePageBookmarks(manga, requestedChapter, loaded)
             downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
             pages = loaded
+            if (sourcePage != null) sourcePagePending = false
             if (restarting) libraryStore.saveProgress(manga, requestedChapter, 0, loaded.size,
                 clearLegacyLongImagePosition = true)
             restartPending = false
@@ -725,6 +736,24 @@ fun ReaderScreen(
                         )
 
                     }
+                    if (!localImport && chapter.variants.size > 1) Row(
+                        Modifier.fillMaxWidth().padding(start = 5.dp, end = 5.dp, top = 1.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ChapterSourceBadge(
+                            chapter = chapter,
+                            modifier = Modifier.weight(1f),
+                            enabled = controlsVisible && !sourceLoading && active && !leavingReader,
+                            onReadVariant = { selected, variant ->
+                                if (variant.storageId != chapter.id) onReadVariant(selected, variant, pageIndex)
+                            },
+                            onOpen = {
+                                sourceCloseRequested = false
+                                sourceChapter = chapter
+                            },
+                        )
+                        if (sourceLoading) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.2.dp)
+                    }
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
                         val actionsScroll = rememberScrollState()
                         val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
@@ -898,6 +927,7 @@ fun ReaderScreen(
     )
     ReaderSettingsDialog(visible = showSettings && !showPanelModels, preferences = preferences, backdrop = readerBackdrop,
         onModels = { showPanelModels = true },
+        sourceResumePolicy = sourceResumePolicy, onSourceResumePolicy = onSourceResumePolicy,
         onDimPreview = { dimPreview.value = it }, update = { next ->
         if (next.mode != preferences.mode || next.doublePage != preferences.doublePage || next.coverAlone != preferences.coverAlone) {
             cursor.scrollOffset = 0
@@ -954,7 +984,10 @@ fun ReaderScreen(
             if (variant.storageId == chapter.id) {
                 onCancelSourceSelection()
                 sourceCloseRequested = true
-            } else onReadVariant(selected, variant)
+            } else {
+                if (sourceResumePolicy == "ask") sourceCloseRequested = true
+                onReadVariant(selected, variant, pageIndex)
+            }
         },
         onSetPreferredSource = onSetPreferredSource,
         onClearChapterSource = onClearChapterSource,

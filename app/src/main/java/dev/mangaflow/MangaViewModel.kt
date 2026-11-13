@@ -38,6 +38,8 @@ import dev.mangaflow.data.bodySourceSearchTerms
 import dev.mangaflow.data.normalizedBodySourceTitle
 import dev.mangaflow.data.SourceDiscoveryResult
 import dev.mangaflow.data.SourceDiscoveryStatus
+import dev.mangaflow.data.FederatedSearchSource
+import dev.mangaflow.data.groupFederatedSearch
 import dev.mangaflow.data.sources.BaoziBodySource
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
@@ -95,12 +97,17 @@ data class BrowseState(
     val page: Int = 0,
     val refreshing: Boolean = false,
     val updatedAt: Long = 0,
+    val sourceMatches: Map<String, List<Manga>> = emptyMap(),
+    val sourceChoiceIds: Set<String> = emptySet(),
+    val searchSources: Map<String, FederatedSearchSource> = emptyMap(),
+    val sourceNextPages: Map<String, Int> = emptyMap(),
 ) {
     val isSearch: Boolean get() = searchTarget != SearchTarget.TITLE || query.isNotBlank() || selectedTags.isNotEmpty()
+    val isFederatedSearch: Boolean get() = searchTarget == SearchTarget.TITLE && query.isNotBlank() && selectedTags.isEmpty()
     val cacheKey: String get() = when {
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
-            "search-v3-heat:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+            "${if (isFederatedSearch) "search-v4-sources" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
         }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
@@ -117,6 +124,9 @@ data class DetailState(
 )
 
 data class ChapterSourceOperation(val loading: Boolean = false, val error: String? = null)
+
+data class SourceResumeChoice(val workId: String, val chapter: Chapter, val variant: ChapterVariant,
+    val fromPageIndex: Int)
 
 data class SourceManagementState(
     val work: Manga,
@@ -155,6 +165,7 @@ data class ReadingSession(
     val chaptersError: String? = null,
     val collection: PageCollection? = null,
     val startAtBeginning: Boolean = false,
+    val initialPageIndex: Int? = null,
 )
 
 data class LibraryOpenState(
@@ -222,6 +233,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val reading = _reading.asStateFlow()
     private val _chapterSourceOperation = MutableStateFlow(ChapterSourceOperation())
     val chapterSourceOperation = _chapterSourceOperation.asStateFlow()
+    private val _sourceResumeChoice = MutableStateFlow<SourceResumeChoice?>(null)
+    val sourceResumeChoice = _sourceResumeChoice.asStateFlow()
+    private val _sourceResumePolicy = MutableStateFlow(sourcePreferences.getString("source_resume_policy", "ask")
+        ?.takeIf { it in setOf("ask", "same_page", "source_record") } ?: "ask")
+    val sourceResumePolicy = _sourceResumePolicy.asStateFlow()
+    private var sourceResumeEpoch = 0L
+    private var sourceResumeFromReader = false
     private val _sourceManagement = MutableStateFlow<SourceManagementState?>(null)
     val sourceManagement = _sourceManagement.asStateFlow()
     private var sourceReadJob: Job? = null
@@ -447,6 +465,16 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun retryBrowse() {
         val state = _browse.value
         if (state.loading || state.refreshing || state.loadingMore) return
+        if (state.isFederatedSearch && state.searchSources.values.any { it.error != null }) {
+            val pages = state.searchSources.values.filter { it.error != null }
+                .associate { it.sourceId to (it.failedPage ?: 0) }
+            val requestId = ++browseRequestId
+            browseJob?.cancel()
+            _browse.update { it.copy(loadingMore = true) }
+            browseJob = viewModelScope.launch { loadFederatedBrowse(state, state.page, requestId,
+                browseCache.generation, pages, retain = true) }
+            return
+        }
         val page = state.failedPage ?: return
         _browse.update { it.copy(loading = page == 0 && it.items.isEmpty(),
             refreshing = page == 0 && it.items.isNotEmpty(), loadingMore = page > 0, error = null, failedPage = null) }
@@ -456,6 +484,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long) {
+        if (state.isFederatedSearch) {
+            loadFederatedBrowse(state, page, requestId, generation)
+            return
+        }
         try {
             val (result, replacement, loadedPage) = foregroundRequest("漫画列表") {
                 val query = state.query.trim()
@@ -503,7 +535,53 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private fun BrowseSnapshot.restore(selection: BrowseState) = selection.copy(
         items = items, page = page, hasMore = hasMore, updatedAt = updatedAt,
         loading = false, loadingMore = false, refreshing = false, error = null, failedPage = null,
+        sourceMatches = sourceMatches, sourceNextPages = sourceNextPages, sourceChoiceIds = sourceChoiceIds,
     )
+
+    private suspend fun loadFederatedBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long,
+        requestedPages: Map<String, Int>? = if (page == 0) null else state.sourceNextPages,
+        retain: Boolean = page > 0) {
+        val previousHits = if (retain) state.sourceMatches.values.flatten().ifEmpty { state.items } else emptyList()
+        try {
+            repository.searchAll(state.query.trim(), requestedPages) { partial ->
+                if (requestId != browseRequestId || generation != browseCache.generation) return@searchAll
+                _browse.update { current ->
+                    if (current.cacheKey != state.cacheKey || requestId != browseRequestId) current else {
+                        val hits = (previousHits + partial.hits).distinctBy(Manga::id)
+                        val groups = groupFederatedSearch(hits, current.sourceMatches)
+                        val statuses = (if (retain) state.searchSources else emptyMap()) + partial.sources
+                        val pending = statuses.values.any { it.loading }
+                        val next = statuses.values.filter { it.error == null && it.hasMore && it.nextPage != null }
+                            .associate { it.sourceId to it.nextPage!! }
+                        val failures = statuses.values.filter { it.error != null }
+                        current.copy(items = if (pending && groups.isEmpty()) current.items else groups.map { it.manga },
+                            sourceMatches = if (pending && groups.isEmpty()) current.sourceMatches
+                                else groups.associate { it.manga.id to it.matches },
+                            sourceChoiceIds = groups.filter { it.needsChoice }.map { it.manga.id }.toSet(),
+                            searchSources = statuses, sourceNextPages = next, hasMore = next.isNotEmpty(),
+                            loading = pending && groups.isEmpty() && current.items.isEmpty(),
+                            refreshing = pending && page == 0 && current.items.isNotEmpty(),
+                            loadingMore = pending && retain, page = page,
+                            error = if (!pending && groups.isEmpty() && failures.isNotEmpty())
+                                "部分来源暂时不可用，可重试；其他来源没有返回匹配作品。" else null,
+                            failedPage = if (!pending && groups.isEmpty() && failures.isNotEmpty()) page else null,
+                            updatedAt = if (!pending) System.currentTimeMillis() else current.updatedAt)
+                    }
+                }
+            }
+            if (requestId != browseRequestId || generation != browseCache.generation) return
+            val current = _browse.value
+            val snapshot = BrowseSnapshot(current.cacheKey, current.items, current.page, current.hasMore, current.updatedAt,
+                sourceMatches = current.sourceMatches, sourceNextPages = current.sourceNextPages,
+                sourceChoiceIds = current.sourceChoiceIds)
+            browseCache.remember(snapshot, generation)
+            browseCache.write(snapshot, generation)
+        } catch (cancel: CancellationException) { throw cancel
+        } catch (failure: Exception) {
+            _browse.update { if (requestId != browseRequestId) it else it.copy(loading = false,
+                refreshing = false, loadingMore = false, error = failure.message ?: "来源搜索失败，请重试。", failedPage = page) }
+        }
+    }
 
     private fun isFresh(updatedAt: Long, state: BrowseState): Boolean {
         val ttl = when {
@@ -701,6 +779,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openManga(manga: Manga, continueChapterId: String? = null, forceRefresh: Boolean = false) {
+        cancelSourceResumeChoice()
         closeAuthor()
         if (manga.sourceUrl == LOCAL_SOURCE_URL) {
             val chapters = downloadedChapters(manga.id)
@@ -808,7 +887,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 coroutineScope {
                     launch {
-                        val source = try { community.overview(manga) }
+                        val copyWork = if (manga.sourceId == "copy") manga else
+                            unifiedChapters.linkedSources(manga.id).firstOrNull { it.manga.sourceId == "copy" }?.manga
+                        if (copyWork == null) return@launch
+                        val source = try { community.overview(copyWork) }
                         catch (cancel: CancellationException) { throw cancel }
                         catch (failure: Exception) { ReviewSource("copy", "拷贝", ReviewStatus.UNAVAILABLE,
                             manga.sourceUrl, popularity = manga.popularity,
@@ -1248,6 +1330,64 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun readChapterVariant(chapter: Chapter, variant: ChapterVariant) {
+        val workId = _detail.value?.manga?.id ?: _reading.value?.manga?.id ?: return
+        requestSourceVariant(chapter, variant, library.progressFor(workId, chapter.id)?.pageIndex)
+    }
+
+    fun readReaderChapterVariant(chapter: Chapter, variant: ChapterVariant, pageIndex: Int) {
+        requestSourceVariant(chapter, variant, pageIndex.coerceAtLeast(0))
+    }
+
+    private fun requestSourceVariant(chapter: Chapter, variant: ChapterVariant, fromPageIndex: Int?) {
+        if (chapter.variants.none { it.storageId == variant.storageId }) return
+        val work = _reading.value?.manga ?: _detail.value?.manga ?: return
+        _sourceResumeChoice.value = null
+        cancelSourceSelection()
+        val page = fromPageIndex?.takeIf { it > 0 && chapter.id != variant.storageId }
+        if (page != null && _sourceResumePolicy.value == "ask") {
+            sourceResumeFromReader = _reading.value != null
+            sourceResumeEpoch = if (sourceResumeFromReader) readingRequestId else detailRequestId
+            _sourceResumeChoice.value = SourceResumeChoice(work.id, chapter, variant, page)
+        } else prepareReadChapterVariant(chapter, variant,
+            page?.takeIf { _sourceResumePolicy.value == "same_page" })
+    }
+
+    fun cancelSourceResumeChoice() {
+        _sourceResumeChoice.value = null
+        cancelSourceSelection()
+    }
+
+    fun setSourceResumePolicy(policy: String) {
+        if (policy !in setOf("ask", "same_page", "source_record")) return
+        viewModelScope.launch {
+            try { saveSourceResumePolicy(policy) }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) { messages.send(failure.message ?: "续读选择未能保存，请重试。") }
+        }
+    }
+
+    private suspend fun saveSourceResumePolicy(policy: String) = withContext(Dispatchers.IO) {
+        check(sourcePreferences.edit().putString("source_resume_policy", policy).commit()) { "续读选择未能保存，请检查存储空间。" }
+        _sourceResumePolicy.value = policy
+    }
+
+    fun confirmSourceResumeChoice(samePage: Boolean, remember: Boolean) {
+        val choice = _sourceResumeChoice.value ?: return
+        val epoch = sourceResumeEpoch
+        val reader = sourceResumeFromReader
+        _sourceResumeChoice.value = null
+        viewModelScope.launch {
+            if (remember) try { saveSourceResumePolicy(if (samePage) "same_page" else "source_record") }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) { messages.send(failure.message ?: "这次继续阅读，未能记住选择。") }
+            val valid = if (reader) readingRequestId == epoch && _reading.value?.manga?.id == choice.workId
+                else detailRequestId == epoch && _detail.value?.manga?.id == choice.workId && _reading.value == null
+            if (valid) prepareReadChapterVariant(choice.chapter, choice.variant,
+                choice.fromPageIndex.takeIf { samePage })
+        }
+    }
+
+    private fun prepareReadChapterVariant(chapter: Chapter, variant: ChapterVariant, samePageIndex: Int?) {
         if (chapter.variants.none { it.storageId == variant.storageId }) return
         val session = _reading.value
         val detail = _detail.value
@@ -1273,14 +1413,20 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (request != sourceReadRequest) return@launch
                 _chapterSourceOperation.value = ChapterSourceOperation()
-                beginReading(ReadingSession(work, selectedChapters(catalog, selected), selected.id))
-                messages.send(if (library.progressFor(work.id, selected.id) != null)
+                val initialPage = samePageIndex?.coerceIn(0, pages.lastIndex)
+                beginReading(ReadingSession(work, selectedChapters(catalog, selected), selected.id,
+                    initialPageIndex = initialPage))
+                messages.send(if (initialPage != null) "已切换到 ${variant.sourceName}，尝试第${initialPage + 1}页，内容可能不对应。"
+                else if (library.progressFor(work.id, selected.id) != null)
                     "已切换到 ${variant.sourceName}，恢复该版本的位置。"
                 else "已切换到 ${variant.sourceName}，从本话开头阅读。")
             } catch (cancel: CancellationException) { throw cancel
             } catch (failure: Exception) {
-                if (request == sourceReadRequest) _chapterSourceOperation.value =
-                    ChapterSourceOperation(error = failure.message ?: "本章来源未能打开，请重试。")
+                if (request == sourceReadRequest) {
+                    val error = failure.message ?: "本章来源未能打开，请重试。"
+                    _chapterSourceOperation.value = ChapterSourceOperation(error = error)
+                    messages.send(error)
+                }
             }
         }
     }
@@ -1296,6 +1442,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeDetail() {
+        cancelSourceResumeChoice()
         cancelSourceSelection()
         closeSourceManagement()
         closeAuthor()
@@ -1610,6 +1757,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeReader() {
+        cancelSourceResumeChoice()
         cancelSourceSelection()
         cancelLibraryReading()
         readingRequestId++

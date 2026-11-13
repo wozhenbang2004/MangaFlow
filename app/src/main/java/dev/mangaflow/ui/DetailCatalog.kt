@@ -208,7 +208,7 @@ internal fun DetailCatalog(
                     color = DetailMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
             }
             TextButton(onClick = onManageSources) {
-                if (sourcesChecking) MotionBusyIndicator(Modifier.size(11.dp), color = DetailMuted, strokeWidth = 1.2.dp)
+                if (sourcesChecking || sourceLoading) MotionBusyIndicator(Modifier.size(11.dp), color = DetailMuted, strokeWidth = 1.2.dp)
                 Text(if (sourceCount > 1) "$sourceCount 源" else sourceDisplayName(primarySourceId),
                     color = DetailMuted, fontSize = 11.sp)
                 Icon(Icons.Outlined.ExpandMore, "查看自动合并的漫画来源", Modifier.size(17.dp), tint = DetailSecondary)
@@ -357,6 +357,7 @@ internal fun DetailCatalog(
                                         )
                                         if (showSources) ChapterSourceBadge(
                                             chapter, Modifier.fillMaxWidth(),
+                                            onReadVariant = onReadVariant, enabled = !sourceLoading,
                                             onOpen = { anchor ->
                                                 sourceCloseRequested = false
                                                 sourceChapter = chapter; sourceAnchor = anchor
@@ -372,6 +373,8 @@ internal fun DetailCatalog(
                                     downloadMode = downloadMode,
                                     height = tileHeight,
                                     showSources = showSources,
+                                    sourceEnabled = !sourceLoading,
+                                    onReadVariant = onReadVariant,
                                     onRead = { onRead(chapter) },
                                     onDownload = { onDownload(chapter) },
                                     onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id } },
@@ -545,6 +548,8 @@ private fun ChapterTile(
     downloadMode: Boolean,
     height: Dp,
     showSources: Boolean,
+    sourceEnabled: Boolean,
+    onReadVariant: (Chapter, ChapterVariant) -> Unit,
     onRead: () -> Unit,
     onDownload: () -> Unit,
     onActions: () -> Unit,
@@ -605,7 +610,7 @@ private fun ChapterTile(
             }
             if (showSources) ChapterSourceBadge(chapter,
                 Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(horizontal = 4.dp),
-                onOpen = onSources)
+                onOpen = onSources, onReadVariant = onReadVariant, enabled = sourceEnabled)
         }
     }
 }
