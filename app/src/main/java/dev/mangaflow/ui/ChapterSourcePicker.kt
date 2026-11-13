@@ -109,7 +109,7 @@ internal fun ChapterSourceLogo(sourceId: String, sourceName: String, modifier: M
     }
 }
 
-/** Adapt the existing depth stack: spread while it fits, recede only when space is insufficient. */
+/** Spread while it fits; overflow overlaps on the same horizontal baseline. */
 @Composable
 internal fun ChapterSourceBadge(
     chapter: Chapter,
@@ -133,18 +133,13 @@ internal fun ChapterSourceBadge(
         val marks = variants.take(4)
         val mark = 13.dp
         val flat = maxWidth >= mark * marks.size + 4.dp * (marks.size - 1).coerceAtLeast(0)
-        val spacing = if (flat) mark + 4.dp else 8.dp
+        val spacing = if (flat) mark + 4.dp else if (marks.size > 1)
+            minOf(8.dp, ((maxWidth - mark) / (marks.size - 1)).coerceAtLeast(0.dp)) else 0.dp
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
             marks.indices.reversed().forEach { index ->
                 val variant = marks[index]
                 ChapterSourceLogo(variant.sourceId, variant.sourceName,
-                    Modifier.absoluteOffset(x = spacing * index, y = if (flat) 0.dp else (-1.3f * index).dp)
-                        .size(mark).graphicsLayer {
-                            scaleX = if (flat) 1f else 1f - index * .07f
-                            scaleY = scaleX
-                            rotationZ = if (flat) 0f else index * 5f
-                            shadowElevation = if (flat || index == 0) 0f else 1.dp.toPx()
-                        })
+                    Modifier.absoluteOffset(x = spacing * index).size(mark))
             }
         }
     }

@@ -231,9 +231,9 @@ internal fun MangaMetricBadges(
             {
                 if (fan != null && stack.isNotEmpty() && stackBounds.width > 0f && stackBounds.height > 0f) {
                     fan.open(MetricSourceFanRequest(anchorKey, metrics, stackBounds,
-                        stack.mapIndexed { index, item ->
+                        stack.map { item ->
                             MetricSourceFanItem(item.token.sourceId, item.token.fullValue, item.token.description,
-                                item.leftPx, item.widthPx, item.clipStartPx, item.markSize, index)
+                                item.leftPx, item.widthPx, item.clipStartPx, item.markSize)
                         }, lineHeight, foreground, details))
                 } else details()
             }
@@ -289,14 +289,6 @@ private fun MetricSourceStack(items: List<StackedMetric>, foreground: Color, hei
             ReviewSourceMark(item.token.sourceId,
                 Modifier.offset { IntOffset(item.leftPx, 0) }
                     .width(with(density) { item.widthPx.toDp() }).height(height)
-                    .graphicsLayer {
-                        val depth = index.coerceAtMost(4)
-                        translationY = -depth * .8.dp.toPx()
-                        scaleX = 1f - depth * .045f
-                        scaleY = scaleX
-                        rotationZ = if (index == 0) 0f else -2f - depth
-                        alpha = 1f - .06f * depth
-                    }
                     .drawWithContent {
                         if (layoutDirection == LayoutDirection.Ltr) clipRect(left = item.clipStartPx.toFloat()) {
                             this@drawWithContent.drawContent()

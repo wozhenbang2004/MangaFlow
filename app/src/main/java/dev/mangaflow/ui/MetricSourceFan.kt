@@ -70,7 +70,6 @@ internal data class MetricSourceFanItem(
     val widthPx: Int,
     val clipStartPx: Int,
     val markSize: Dp,
-    val depth: Int,
 )
 
 internal class MetricSourceFanRequest(
@@ -204,11 +203,10 @@ internal fun MetricSourceFan(state: MetricSourceFanState) {
                 val targetX = centerX + spread * cellWidth
                 val normalized = if (rowCount <= 1) 0f else spread * 2f / (rowCount - 1)
                 val targetY = top + row * rowHeight + arch * normalized * normalized + rowHeight * .25f
-                val depth = item.depth.coerceAtMost(4)
                 val sourceLeft = if (layoutDirection == LayoutDirection.Ltr)
                     anchor.left + item.leftPx else anchor.right - item.leftPx - item.widthPx
                 val startX = sourceLeft + item.widthPx / 2f
-                val startY = anchor.center.y - with(density) { .8.dp.toPx() } * depth
+                val startY = anchor.center.y
                 val lineHeightPx = with(density) { request.lineHeight.toPx() }
                 fun flight(): Float = ((progress.value - index * .018f) / (1f - index * .018f)).coerceIn(0f, 1f)
                 ReviewSourceMark(item.sourceId,
@@ -220,10 +218,8 @@ internal fun MetricSourceFan(state: MetricSourceFanState) {
                     }.width(with(density) { item.widthPx.toDp() }).height(request.lineHeight)
                         .graphicsLayer {
                             val p = flight()
-                            scaleX = (1f - depth * .045f) + (.8f + depth * .045f) * p
+                            scaleX = 1f + .8f * p
                             scaleY = scaleX
-                            rotationZ = (if (index == 0) 0f else -2f - depth) * (1f - p)
-                            alpha = (1f - .06f * depth) + .06f * depth * p
                         }.drawWithContent {
                             val cut = item.clipStartPx * (1f - flight())
                             if (layoutDirection == LayoutDirection.Ltr) clipRect(left = cut) {

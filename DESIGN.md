@@ -205,6 +205,8 @@ Changes are limited to the shared heat renderer and its three callers, the narro
 
 ## Discovery source fan · 2026-11-13 (HOME-METRICS-06; source implemented, device acceptance pending)
 
+X-STACK-01 supersedes the earlier Z-depth geometry here and UNIFIED-CHAPTERS-03. User correction: “堆叠是 x 轴堆叠吗我希望我们的堆叠都改成 x 轴堆叠才对”. Rating/source overflow marks and chapter-source badges use horizontal X overlap on one baseline, at equal scale and without per-depth Y displacement or rotation. Keep fitting items spread, the foremost/current source visible, actual unbacked marks, existing bounds and disclosure ownership. The rating disclosure starts/returns at the same horizontal stack geometry; its expanded content and Morph panels remain bounded. Source review only; phone appearance remains pending feedback.
+
 Takeover of “优化发现页界面”, whose latest instruction is “继续”. Retrieved continuation evidence at 2026-11-13 03:15 UTC calls for Z-axis front/middle/rear source marks, complete values wherever they fit, overflow-only stacking, outward fan disclosure and return along the same path, with no icon backing cards. This supersedes METRICS-HEAT-05's mandatory narrow-card score folding and HOME-METRICS-04's sheet-only tap behavior for discovery/updates/gallery. Preserve the mandatory real flame/count, native scales and the rest of the accepted discovery/detail layout.
 
 - Remove the under-120dp forced zero-score ceiling. The same actual token widths and remaining room determine complete scores on every card; the narrow size only adjusts overflow mark density. Heat remains first and outside the foldable score list.
