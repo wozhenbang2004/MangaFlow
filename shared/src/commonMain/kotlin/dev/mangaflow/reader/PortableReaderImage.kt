@@ -47,6 +47,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import me.saket.telephoto.zoomable.ZoomableContentLocation
+import me.saket.telephoto.zoomable.ZoomableContent
+import me.saket.telephoto.zoomable.Viewport
 import me.saket.telephoto.zoomable.spatial.CoordinateSpace
 import me.saket.telephoto.zoomable.spatial.SpatialOffset
 import me.saket.telephoto.zoomable.zoomable

@@ -41,7 +41,7 @@ class ManhuaguiBodySource : BodySource {
         val rows = document.select("ul#contList > li")
         if (rows.isEmpty()) throw SourceException("漫画柜目录页面结构已变化，请稍后重试。", HOME)
         val more = document.selectFirst("span.current + a") != null
-        MangaPage(rows.map { mangaFromCard(it, document.location(), false) }.distinctBy(Manga::id),
+        MangaPage(rows.map { mangaFromCard(it, document.location().orEmpty().ifBlank { HOME }, false) }.distinctBy(Manga::id),
             more, if (more) page + 1 else null)
     }
 
@@ -58,7 +58,7 @@ class ManhuaguiBodySource : BodySource {
             throw SourceException("漫画柜搜索没有返回可识别的作品列表，可能需要网站验证。", url.toString())
         }
         val more = document.selectFirst("span.current + a") != null
-        MangaPage(rows.map { mangaFromCard(it, document.location(), true) }.distinctBy(Manga::id),
+        MangaPage(rows.map { mangaFromCard(it, document.location().orEmpty().ifBlank { url.toString() }, true) }.distinctBy(Manga::id),
             more, if (more) page + 1 else null)
     }
 

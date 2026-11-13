@@ -627,6 +627,7 @@ private fun LocalImportDetailsDialog(
 }
 
 
+@Composable
 private fun DownloadTextAction(
     onClick: () -> Unit,
     enabled: Boolean = true,

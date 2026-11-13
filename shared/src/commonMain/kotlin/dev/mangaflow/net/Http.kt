@@ -136,7 +136,7 @@ class NetworkClient(
         followRedirects = false
         install(ContentEncoding) { gzip(); deflate() }
         install(HttpTimeout) {
-            connectTimeoutMillis = timeouts.first
+            this.connectTimeoutMillis = timeouts.first
             socketTimeoutMillis = timeouts.second
             requestTimeoutMillis = timeouts.third
         }

@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package dev.mangaflow.reader
 
 import androidx.compose.foundation.layout.WindowInsets

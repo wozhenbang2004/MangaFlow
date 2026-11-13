@@ -70,14 +70,15 @@ class MangaBzBodySource : BodySource {
     }
 
     private fun parseMangas(document: Document, page: Int): MangaPage {
+        val documentUrl = document.location().orEmpty().ifBlank { "$HOME/" }
         val container = document.selectFirst(".mh-list") ?: run {
             if (Regex("没有找到|沒有找到|未找到|没有相关|沒有相關").containsMatchIn(document.text()))
                 return MangaPage(emptyList(), false)
-            throw SourceException("MangaBZ 搜索页面暂不能解析，可能需要原站验证。", document.location())
+            throw SourceException("MangaBZ 搜索页面暂不能解析，可能需要原站验证。", documentUrl)
         }
         val mangas = container.children().mapNotNull { row ->
             val anchor = row.selectFirst("a[href]") ?: return@mapNotNull null
-            val id = mangaIdFromUrl(document.location().toHttpUrl().resolve(anchor.attr("href"))
+            val id = mangaIdFromUrl(documentUrl.toHttpUrl().resolve(anchor.attr("href"))
                 ?: throw SourceException("MangaBZ 返回无效作品链接。", HOME))
             val title = row.selectFirst("h2")?.text()?.trim().orEmpty()
             if (title.isBlank()) throw SourceException("MangaBZ 搜索结果缺少书名。", HOME)
@@ -110,7 +111,7 @@ class MangaBzBodySource : BodySource {
             authors = authors, description = document.selectFirst(".detail-info-content")?.text().orEmpty(),
             status = status, tags = tags, sourceUrl = mangaUrl(id), sourceId = info.id, sourceMangaId = id)
         val chapters = chapterList.select("a[href]").reversed().distinctBy { it.attr("href") }.mapIndexed { index, row ->
-            val url = document.location().toHttpUrl().resolve(row.attr("href"))
+            val url = document.location().orEmpty().ifBlank { mangaUrl(id) }.toHttpUrl().resolve(row.attr("href"))
                 ?: throw SourceException("MangaBZ 章节地址无效。", mangaUrl(id))
             checkedHost(url)
             val chapterId = CHAPTER_PATH.matchEntire(url.encodedPath)?.groupValues?.get(1)
@@ -221,7 +222,7 @@ class MangaBzBodySource : BodySource {
         }
 
     private fun imageUrl(document: Document, raw: String): String = if (raw.isBlank()) "" else
-        checkedImage(document.location().toHttpUrl().resolve(raw)?.toString()
+        checkedImage(document.location().orEmpty().ifBlank { "$HOME/" }.toHttpUrl().resolve(raw)?.toString()
             ?: throw SourceException("MangaBZ 封面地址无效。", HOME))
 
     private fun checkedImage(value: String): String {

@@ -175,10 +175,11 @@ class BaoziBodySource : BodySource {
     }
 
     private fun cards(doc: Document): List<Manga> {
+        val documentUrl = doc.location().orEmpty().ifBlank { "$SITE/" }
         val elements = doc.select("div.comics-card")
         if (elements.isEmpty()) {
             if (NO_RESULTS.containsMatchIn(doc.text())) return emptyList()
-            throw SourceException("包子搜索或分类页面暂不兼容，未把缺失结构当成无结果。", doc.location())
+            throw SourceException("包子搜索或分类页面暂不兼容，未把缺失结构当成无结果。", documentUrl)
         }
         val result = elements.mapNotNull { card ->
             val title = card.selectFirst(".comics-card__title")?.text()?.trim()
@@ -189,12 +190,12 @@ class BaoziBodySource : BodySource {
                 ?: return@mapNotNull null
             val image = card.selectFirst("amp-img, img")
             val cover = image?.let { it.attr("data-src").ifBlank { it.attr("src") } }
-                ?.takeIf(String::isNotBlank)?.let { coverUrl(it, doc.location().toHttpUrl()) }.orEmpty()
+                ?.takeIf(String::isNotBlank)?.let { coverUrl(it, documentUrl.toHttpUrl()) }.orEmpty()
             Manga(SourceKeys.manga(info.id, nativeId), title, cover,
                 sourceUrl = "$SITE/comic/".toHttpUrl().newBuilder().addPathSegment(nativeId).build().toString(),
                 sourceId = info.id, sourceMangaId = nativeId)
         }.distinctBy(Manga::id)
-        if (result.isEmpty()) throw SourceException("包子列表只有客户端模板或失效链接，请更新来源后重试。", doc.location())
+        if (result.isEmpty()) throw SourceException("包子列表只有客户端模板或失效链接，请更新来源后重试。", documentUrl)
         return result
     }
 

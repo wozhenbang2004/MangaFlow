@@ -3,7 +3,6 @@
 
 package dev.mangaflow.ui.motion
 
-import androidx.compose.ui.backhandler.BackEventCompat
 import androidx.compose.ui.backhandler.BackHandler as ComposeBackHandler
 import androidx.compose.ui.backhandler.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
@@ -25,6 +24,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
 import kotlin.math.abs
+
+// The public event protocol uses 0/1; its Android companion is an internal typealias.
+private const val LEFT_BACK_EDGE = 0
 
 /** The platform dispatcher owns native Android/iOS gestures and desktop Escape. */
 @Composable
@@ -73,7 +75,7 @@ internal fun MotionBackHandler(
                 hasProgress = true
                 state.gesturing = true
                 val p = event.progress.coerceIn(0f, 1f)
-                val signed = origin * (1f - p) + p * if (event.swipeEdge == BackEventCompat.EDGE_LEFT) 1f else -1f
+                val signed = origin * (1f - p) + p * if (event.swipeEdge == LEFT_BACK_EDGE) 1f else -1f
                 state.fromLeft = signed >= 0f
                 state.progress.snapTo(abs(signed))
             }
