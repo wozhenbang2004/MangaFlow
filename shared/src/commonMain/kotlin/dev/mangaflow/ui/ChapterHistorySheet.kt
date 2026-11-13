@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import kotlinx.coroutines.IO
 
 import dev.mangaflow.ui.platform.*
@@ -98,7 +100,7 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("章节记录", fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
-                Text(manga.title, fontSize = 12.sp, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 12.sp, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             records?.let { Text(it.size.toString(), color = secondary, fontSize = 12.sp) }
         }
@@ -124,7 +126,7 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(progress.chapterTitle.ifBlank { "已保存的章节" }, fontSize = 14.sp, lineHeight = 20.sp,
                             fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${progress.pageIndex + 1}/${progress.pageCount} 页 · ${historyTime(progress.updatedAt)}",
+                        Text(mangaNumberText("${progress.pageIndex + 1}/${progress.pageCount} 页 · ${historyTime(progress.updatedAt)}"),
                             fontSize = 12.sp, lineHeight = 16.sp, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Spacer(Modifier.width(12.dp))

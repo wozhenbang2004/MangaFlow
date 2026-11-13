@@ -1,5 +1,8 @@
 package dev.mangaflow.reader
 
+import dev.mangaflow.typography.MangaFontScene
+import dev.mangaflow.ui.mangaFontFamily
+
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -288,8 +291,8 @@ private fun FloatingCommentBubble(
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     CommentSourceBadge(comment.sourceId)
                 }
-                Text(comment.text, color = foreground.copy(alpha = .9f), fontSize = 12.sp,
-                    lineHeight = 16.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                Text(comment.text, fontFamily = mangaFontFamily(MangaFontScene.READING), color = foreground.copy(alpha = .9f),
+                    fontSize = 14.sp, lineHeight = 22.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
             }
         }
     }

@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## FONT-SCENES-100 · optional role-scoped fonts · 2026-11-14
+
+The user has now authorized the font system's implementation, similar alternatives in settings, optional large downloads and choices limited to the relevant scene. Read FONT-SCENES-100 in DESIGN.md; this supersedes earlier TYPE-86 proposal-only entries and premature MiSans priority.
+
+Source batch: four independent system-default scenes (UI/work title/prose/numbers), optional complete library fonts (Noto Sans SC/Noto Serif SC/LXGW WenKai/Inter/Geist), persistent per-role choice, real streamed verified downloads/progress/cancel/retry/delete and actual on-disk family preview. Existing PANEL/SettingsDisclosure/press feedback owns the UI. Main common theme keeps the UI family; actual leaf scopes wire work titles, prose and numeric runs. Full OFL notices are readable offline. No bundled TTF or separate font runtime/dependency.
+
+Basec63485b391ad7efa12b5356e252ec1f39577c9d4 includes current fixed detail atmosphere/rising chapter plane and reader direct chapter download. Font edits were applied by unique original context on that latest source, preserving all98/99,91–97, FILL, refresh and updater/source/account/platform work. Independent implementations supplied isolated Git blobs; root alone integrates a single complete main commit with an expected-head lease. Do not make intermediate/doc-only pushes.
+
+Next exact action: finish the single source batch after the previous Android publication, confirm matching normal Android/native CI identities, then keep main stable. Compiler/package evidence, real optional-font downloads/three-platform rendering and actual user visual acceptance remain separate and unverified until their corresponding evidence. No tests/local builds/browser/device/product probes or extra review gate.
+
 ## Volume merge and screenshot correction batch · 2026-11-14
 
 Current scope/raw batch is DESIGN.md VOLUME-MERGE-100 through DETAIL-TOOLS-107, covered through1000121644 and the intervening shadow/background-blur clarifications. This continues the existing goals, rather than replacing volume matching with UI work or treating earlier review findings as all fixed.

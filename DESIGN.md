@@ -1,5 +1,31 @@
 # MangaFlow detail · 2026-11-12
 
+## FONT-SCENES-100 · role-scoped optional fonts · 2026-11-14
+
+Raw user (exact message IDs unavailable): “去吧交给你了设计好直接去落地如果是同类的可以做在设置里切换？但字体一般比较大吧如果比较大就弄成可选下载注意像你说的有些场景用什么字体所以这个配置不是全部替换只替换某个场景的”. This authorizes implementation and supersedes TYPE-86's proposal-only state. The user also asked why the already-approved font collection was not used; the actual current typography Page page_e4d707779d6081919403cd3031586676 was read, including its18-family/32-face/250-preview-character limits.
+
+Product/UI decision: one existing “字体” inline SettingsDisclosure under appearance, followed by four independent role rows. Only one role's candidates expand at a time; no new modal/window, global-font replacement, font-size control suite or nested settings card. Every role defaults independently to system; “跟随界面” is an explicit additional choice for non-interface roles. Changing a work-title/reading/number choice never writes another role. Keep real typography scaling and existing compact UI; original manga image pixels are outside the font system.
+
+| Role | Scope | Available choices |
+| --- | --- | --- |
+| Interface | Navigation, controls, chapter labels and settings | System / Noto Sans SC |
+| Work title | Actual book names in discovery/search/carousel/library/history/download/source candidates/detail/reader | System / follow interface / Noto Sans SC / Noto Serif SC / LXGW WenKai |
+| Reading prose | Short/full introductions, comments/replies and reading comment previews | System / follow interface / Noto Sans SC / Noto Serif SC / LXGW WenKai |
+| Numbers | Native scores/heat, ranks, reading duration, page indicators and download/progress labels | System / follow interface / Inter / Geist |
+
+Latin numeric families are not claimed to contain Chinese. Mixed labels retain UI words and units while explicit numeric runs get the chosen numeric face/tnum. Source pictograms and artwork stay intact. Actual title text measurement uses its chosen family; prose and numeric leaf nodes opt into their own roles rather than replacing MaterialTheme's whole typography with a reading or display face.
+
+Resource decision: every custom font is optional, including the small Latin choices, so no TTF/OTF is bundled in APK/EXE/iOS. Fresh/offline launch has system text without a download. Full upstream TTFs are fixed by commit, exact byte count and Git blob SHA1; never deploy the old250-character specimens. Noto Sans SC17,772,300B, Noto Serif SC25,125,512B, WenKai Regular25,928,940B, Inter876,576B, Geist169,056B. WenKai is the single true400 face, not a pretend variable family. MiSans remains an external comparison candidate, without an unverified download entry.
+
+Settings show per-resource size before download, actual progress/cancel, retryable error, downloaded real-family samples, and deletion. “下载并使用” applies only after verified publication and only to still-pending requested roles. Deletion resets only roles referencing that resource. Installed-file loss/parse failure falls back to system with an explicit status. Full per-family OFL/copyright text is embedded and readable offline in the inline permission disclosure; source links are user-operated.
+
+Implementation: existing NetworkClient/StorageFile/Preferences plus one IO command owner in FontStore; streamed bounded HTTPS from pinned raw files with a jsDelivr mirror for supported-size files, no cookies/Play Services/system-font installation. An attempt owns staging files; byte length, sfnt header, Git blob prefix digest and platform font parsing precede installed/application state. Download cancellation/removal/new scene choices cannot let stale completion overwrite them. Android preloads nativeTypeface objects; nonAndroid shares Skia byte-array fonts and explicit variable weight axes400/500/600/700. Desktop outer theme now receives its actual context before font settings are read.
+
+Type baseline: common roles converge to12/14/16/20/24sp and400/500/600 weights, normal Chinese tracking; dense prose14/22, comfortable/full prose16/26, work hero20/28 in short viewports or24/32 normally. Main metric values and denominator stay at least12sp. Narrow heat labels may drop a fractional万/亿 suffix for compact display; full native values remain in semantics/source details. Overflow sources retain the existing stack. Preserve current detail scroll plane/reader direct-download changes98/99 and screenshot91–97.
+
+Validation boundary: source authoring/consistency and the existing normal CI only. No tests, local builds, product/browser/device probes or extra review gate. Font assets are verified upstream metadata; this is not a claim that downloads, rendering, cancellation, memory use or glyph coverage have been experienced on a device. Keep package compilation, actual native behavior and user visual acceptance separate. First device path: Settings → Appearance → Fonts, download/use a role candidate, return to the matching actual page, change another role, cancel/remove and restart offline. See third_party/fonts/ADAPTATION.md for fixed source/loader API evidence.
+
+
 ## Volume identity / inline filters / true edge corrections · 2026-11-14 (100–107)
 
 Raw user batch (exact message IDs unavailable): “为什么没合并呢奇怪？第一卷” (1000121637); “这两个popover…不喜欢…简介放回清晰图右边” (1639/1640); “底部…要和顶部一样都是无限区域” (1641); “为什么有些有漫画图标有些又没有” (1642); “列表filter…阴影很不自然…慢慢铺开”; “我意思就是点击来源图标出现的那几个让背景直接虚化” (1643); “下载图标下面那个来源直接占一行…评分图标和章节…间隔这么大” (1644). Screenshot installed versions are not identified.

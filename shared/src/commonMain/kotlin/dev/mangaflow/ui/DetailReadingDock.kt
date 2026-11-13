@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import dev.mangaflow.ui.platform.*
 
 import dev.mangaflow.platform.*
@@ -170,7 +172,7 @@ internal fun DetailReadingDock(
                         Box(Modifier.width(42.dp * fontScale * (1f - collapse)).clipToBounds()
                             .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) },
                             contentAlignment = Alignment.CenterEnd) {
-                            Text("$percent%", color = DetailSecondary, fontSize = 13.sp,
+                            Text("$percent%", fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), color = DetailSecondary, fontSize = 14.sp,
                                 fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
                         }
                     }

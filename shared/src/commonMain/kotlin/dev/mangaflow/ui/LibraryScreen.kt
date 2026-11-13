@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import androidx.compose.foundation.layout.WindowInsetsSides
 
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -339,7 +341,7 @@ fun LibraryScreen(
                                                 onLongClick = { onCancelOpen(); managedId = manga.id },
                                                 onClick = { onOpen(manga) })
                                             .padding(horizontal = 2.dp)) {
-                                            Text(manga.title, modifier = Modifier.padding(top = 4.dp),
+                                            Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), modifier = Modifier.padding(top = 4.dp),
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.Medium,
                                                 maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -347,7 +349,7 @@ fun LibraryScreen(
                                                 it.chapterTitle.ifBlank { "继续阅读" } +
                                                     if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
                                             } ?: "未读"
-                                            Text(progressText, modifier = Modifier.padding(top = 2.dp),
+                                            Text(mangaNumberText(progressText), modifier = Modifier.padding(top = 2.dp),
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 fontSize = 11.sp, lineHeight = 15.sp,
                                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -496,7 +498,7 @@ private fun LibraryOpeningNotice(
         shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainer,
         shadowElevation = 4.dp) {
         Column(Modifier.padding(start = 14.dp, end = 8.dp, top = 10.dp, bottom = 4.dp)) {
-            Text(state.manga.title, style = MaterialTheme.typography.labelMedium,
+            Text(state.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.labelMedium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(if (state.loading) "正在打开首章…" else state.error ?: "暂时无法打开，请重试。",
                 style = MaterialTheme.typography.bodySmall,

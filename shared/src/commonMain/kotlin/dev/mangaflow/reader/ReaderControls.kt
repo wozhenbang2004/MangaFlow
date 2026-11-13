@@ -1,5 +1,7 @@
 package dev.mangaflow.reader
 
+import dev.mangaflow.ui.mangaNumberText
+
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -138,7 +140,7 @@ internal fun ReaderSeekBar(
             tonalElevation = 0.dp,
         ) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(previewText, color = colors.onSurface.copy(alpha = .86f),
+                Text(mangaNumberText(previewText), color = colors.onSurface.copy(alpha = .86f),
                     fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1)
             }
         }

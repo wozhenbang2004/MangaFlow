@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import dev.mangaflow.ui.platform.*
 
 import androidx.compose.animation.animateContentSize
@@ -384,7 +386,7 @@ internal fun CommentMatchChoice(source: ReviewSource, onMatch: (String, String) 
                     }.padding(horizontal = 8.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(candidate.title, color = CommunityWhite, fontSize = 12.sp,
+                        Text(candidate.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = CommunityWhite, fontSize = 12.sp,
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
                         if (candidate.subtitle.isNotBlank()) Text(candidate.subtitle,
                             color = CommunityMuted, fontSize = 10.sp, lineHeight = 15.sp,
@@ -521,13 +523,13 @@ private fun CommentContent(
                 }
             } else {
                 if (reviewHeading != null) {
-                    Text(reviewHeading, color = foreground, fontSize = if (comfortable) 15.sp else 13.sp,
-                        lineHeight = if (comfortable) 23.sp else 21.sp,
+                    Text(reviewHeading, fontFamily = mangaFontFamily(MangaFontScene.READING), color = foreground,
+                        fontSize = if (comfortable) 16.sp else 14.sp, lineHeight = if (comfortable) 24.sp else 22.sp,
                         fontWeight = FontWeight.Medium, maxLines = if (expanded) Int.MAX_VALUE else 2,
                         overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(bottom = 5.dp))
                 }
-                Text(text, color = foreground.copy(alpha = .92f), fontSize = if (comfortable) 15.sp else 13.sp,
-                    lineHeight = if (comfortable) 23.sp else 19.sp,
+                Text(text, fontFamily = mangaFontFamily(MangaFontScene.READING), color = foreground.copy(alpha = .92f),
+                    fontSize = if (comfortable) 16.sp else 14.sp, lineHeight = if (comfortable) 26.sp else 22.sp,
                     maxLines = if (expanded) Int.MAX_VALUE else if (comfortable) {
                         if (review.kind == ReviewKind.REVIEW) 5 else 4
                     } else 3, overflow = TextOverflow.Ellipsis,

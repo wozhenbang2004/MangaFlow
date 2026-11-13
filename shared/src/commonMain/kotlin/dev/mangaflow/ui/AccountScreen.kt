@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import androidx.compose.ui.unit.Dp
 
 import androidx.compose.foundation.layout.asPaddingValues
@@ -352,7 +354,7 @@ fun AccountScreen(
             onDismissRequest = { removeFavorite = null },
             shape = RoundedCornerShape(24.dp), containerColor = colors.surface,
             title = { Text("移除云端收藏？", style = MaterialTheme.typography.titleLarge) },
-            text = { Text(manga.title, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant) },
+            text = { Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant) },
             confirmButton = {
                 TextButton(enabled = manga.id !in state.syncingFavorites, onClick = {
                     removeFavorite = null
@@ -433,7 +435,7 @@ private fun CloudContinueRow(entry: CloudHistoryEntry, repository: MangaReposito
         Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(if (entry.chapterId.isBlank()) "查看漫画" else "继续阅读", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(entry.manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(entry.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             MangaMetricBadges(entry.manga)
             if (entry.chapterTitle.isNotBlank()) Text(entry.chapterTitle, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)

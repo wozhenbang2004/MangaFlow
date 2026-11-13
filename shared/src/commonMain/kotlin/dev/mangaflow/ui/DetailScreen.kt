@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import dev.mangaflow.ui.platform.*
 
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -650,7 +652,7 @@ private fun ArtworkToolbar(
                 Text("评论", color = DetailForeground, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 commentCount?.let { Text(it, color = DetailSecondary, fontSize = 11.sp) }
             }
-            Text(title, color = if (comments) DetailSecondary else DetailForeground,
+            Text(title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = if (comments) DetailSecondary else DetailForeground,
                 fontSize = if (comments) 11.sp else 15.sp, lineHeight = if (comments) 15.sp else 20.sp,
                 fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.fillMaxWidth())
@@ -709,8 +711,9 @@ private fun HeroBookInformation(
     val ink = if (informationTone.luminance() > .5f) Color(0xFF242426) else Color.White
     val titleInteraction = remember(manga.id) { MutableInteractionSource() }
     val titleStyle = MaterialTheme.typography.headlineSmall.copy(
-        fontSize = if (compact) 22.sp else 24.sp,
-        lineHeight = if (compact) 29.sp else 31.sp,
+        fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+        fontSize = if (compact) 20.sp else 24.sp,
+        lineHeight = if (compact) 28.sp else 32.sp,
         fontWeight = FontWeight.SemiBold,
     )
     BoxWithConstraints(modifier.fillMaxWidth().wrapContentHeight(unbounded = true)
@@ -758,7 +761,7 @@ private fun HeroBookInformation(
                     val state = listOf(manga.status, manga.latestChapter.takeIf(String::isNotBlank)
                         ?.let { "更新 · $it" }.orEmpty()).filter(String::isNotBlank).joinToString(" · ")
                     if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .80f),
-                        fontSize = 11.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     HeroSynopsis(manga, ink, infoVisible, onIntroduction)
                 }
             }
@@ -779,8 +782,8 @@ private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduct
         onClickLabel = "展开简介与作品信息", onClick = onIntroduction)
         .motionPress(interaction, enabled = enabled, pressedScale = .985f).padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(manga.description.ifBlank { "作品信息" }, color = ink.copy(alpha = .82f),
-            fontSize = 13.sp, lineHeight = 20.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+        Text(manga.description.ifBlank { "作品信息" }, fontFamily = mangaFontFamily(MangaFontScene.READING), color = ink.copy(alpha = .82f),
+            fontSize = 14.sp, lineHeight = 22.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f))
         Icon(Icons.Outlined.ChevronRight, null, tint = ink.copy(alpha = .55f), modifier = Modifier.size(16.dp))
     }
@@ -824,13 +827,13 @@ private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: (Str
                     .padding(horizontal = 24.dp).padding(bottom = 28.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(manga.title, fontSize = 20.sp, lineHeight = 28.sp,
+                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 20.sp, lineHeight = 28.sp,
                     color = DetailForeground, fontWeight = FontWeight.SemiBold)
                 AuthorNames(manga.authors, DetailSecondary, onAuthor = onAuthor)
                 DetailTags(manga, onTag = onTag)
                 MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = DetailForeground)
                 Text(manga.description.ifBlank { "来源暂无简介" },
-                    fontSize = 14.sp, lineHeight = 23.sp, color = DetailSecondary)
+                    fontFamily = mangaFontFamily(MangaFontScene.READING), fontSize = 16.sp, lineHeight = 26.sp, color = DetailSecondary)
             }
         }
     }
@@ -855,7 +858,7 @@ private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
             contentAlignment = Alignment.Center) {
             Text(label, modifier = Modifier.clip(RoundedCornerShape(6.dp))
                 .background(accent.copy(alpha = .12f)).padding(horizontal = 6.dp, vertical = 3.dp),
-                color = accent, fontSize = 10.sp, lineHeight = 14.sp,
+                color = accent, fontSize = 12.sp, lineHeight = 18.sp,
                 maxLines = 1)
         }
         return
@@ -873,7 +876,7 @@ private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
             modifier = Modifier.clip(RoundedCornerShape(7.dp))
                 .background(accent.copy(alpha = if (onArtwork) .18f else if (onDark) .12f else .085f))
                 .padding(horizontal = 7.dp, vertical = 4.dp),
-            color = accent, fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1,
+            color = accent, fontSize = 12.sp, lineHeight = 18.sp, maxLines = 1,
         )
     }
 }

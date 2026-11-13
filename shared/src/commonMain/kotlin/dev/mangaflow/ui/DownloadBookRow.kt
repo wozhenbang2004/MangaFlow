@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.ui.platform.*
 
@@ -107,14 +109,14 @@ internal fun DownloadBookRow(
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(manga.title, fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium,
+                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium,
                     color = colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 val bytes = downloadBytes(entries.sumOf { it.downloadedBytes })
-                Text(when {
+                Text(mangaNumberText(when {
                     entries.size == 1 -> "${entries.first().chapter.title} · ${if (allSaved) pages else "$completedPages/$pages"} 页 · $bytes"
                     allSaved -> "${entries.size} 话 · $pages 页 · $bytes"
                     else -> "$saved/${entries.size} 话已保存 · $completedPages/$pages 页"
-                }, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                }), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val status = when {
                     failed > 0 -> "$failed 话未完成"
@@ -124,7 +126,7 @@ internal fun DownloadBookRow(
                     entries.any { it.status == DownloadStatus.PAUSED } -> "已暂停"
                     else -> null
                 }
-                if (status != null) Text("$status · $bytes",
+                if (status != null) Text(mangaNumberText("$status · $bytes"),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (failed > 0) colors.error else colors.onSurfaceVariant.copy(alpha = .8f),
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -174,8 +176,8 @@ internal fun DownloadChapterRow(
                     color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val source = dev.mangaflow.data.sourceDisplayName(
                     dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id).sourceId)
-                Text(source + " · " + if (entry.status == DownloadStatus.COMPLETED) "${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
-                    else "${downloadStateLabel(entry)} · ${entry.completedPages}/${entry.totalPages} 页",
+                Text(mangaNumberText(source + " · " + if (entry.status == DownloadStatus.COMPLETED) "${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
+                    else "${downloadStateLabel(entry)} · ${entry.completedPages}/${entry.totalPages} 页"),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)

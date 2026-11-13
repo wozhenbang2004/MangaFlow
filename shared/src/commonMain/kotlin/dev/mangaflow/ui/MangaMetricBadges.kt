@@ -51,6 +51,8 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
+import dev.mangaflow.typography.MangaFontScene
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
@@ -146,7 +148,8 @@ internal fun MangaMetricBadges(
                     (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "，原站满分未知") +
                     (metric.ratingCount?.let { "，$it 人评分" } ?: ""), metric.sourceId)
         }
-    val textStyle = mangaMetricValueStyle(valueSize ?: if (compact) 10.5.sp else 12.sp)
+    val textStyle = mangaMetricValueStyle(valueSize ?: 12.sp)
+    val unitFamily = mangaFontFamily(MangaFontScene.INTERFACE)
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
     val tokenPadding = with(density) { (if (plain) 0.dp else 2.dp).roundToPx().toFloat() }
@@ -161,7 +164,7 @@ internal fun MangaMetricBadges(
     val lineHeight = 22.dp * fontScale
     fun tokenWidth(token: MetricToken): Float {
         val sourceWidth = if (token.sourceId == "copy") heatMarkWidth else with(density) { requireNotNull(sourceWidths[token.sourceId]).toPx() }
-        return sourceWidth + innerGap + measurer.measure(metricValueText(token.value, textStyle.fontSize), textStyle, maxLines = 1).size.width + tokenPadding * 2f
+        return sourceWidth + innerGap + measurer.measure(metricValueText(token.value, textStyle.fontSize, unitFamily = unitFamily), textStyle, maxLines = 1).size.width + tokenPadding * 2f
     }
     if (heatToken == null && scores.isEmpty()) return
 
@@ -178,10 +181,14 @@ internal fun MangaMetricBadges(
         val scoreLimit = maxScores.coerceIn(0, scores.size)
         val fittedHeatMark = minOf(heatMarkWidth, availableWidth * .20f).coerceAtLeast(0f)
         val heatTextRoom = (availableWidth - fittedHeatMark - innerGap - tokenPadding * 2f - 1f).coerceAtLeast(1f)
-        val heatTextWidth = heatToken?.let { measurer.measure(it.value, textStyle, maxLines = 1).size.width } ?: 0
-        val heatStyle = if (heatTextWidth > heatTextRoom) textStyle.copy(
-            fontSize = textStyle.fontSize * (heatTextRoom / heatTextWidth).coerceAtMost(1f)) else textStyle
-        val heatWidth = heatToken?.let { fittedHeatMark + innerGap + tokenPadding * 2f +
+        // Compact only the displayed decimal unit; retain the full native value in semantics/details.
+        val fittedHeat = heatToken?.let { token ->
+            if (measurer.measure(token.value, textStyle, maxLines = 1).size.width > heatTextRoom)
+                token.copy(value = token.value.replace(Regex("\\.[0-9]+(?=[万亿]$)"), ""))
+            else token
+        }
+        val heatStyle = textStyle
+        val heatWidth = fittedHeat?.let { fittedHeatMark + innerGap + tokenPadding * 2f +
             measurer.measure(it.value, heatStyle, maxLines = 1).size.width } ?: 0f
         val widths = scores.map(::tokenWidth)
         val baseStackSize = if (narrow) 12.dp else 15.dp
@@ -242,7 +249,7 @@ internal fun MangaMetricBadges(
                 }
             },
             horizontalArrangement = Arrangement.spacedBy(groupGap), verticalAlignment = Alignment.CenterVertically) {
-            heatToken?.let {
+            fittedHeat?.let {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     MetricBadge(it, foreground, heatStyle, plain, compact,
                         heatIconSize = with(density) { fittedHeatMark.toDp() })
@@ -312,21 +319,27 @@ private fun MetricBadge(
             MangaHeatFlame(token.popularity ?: 0L,
                 Modifier.size(width = size, height = size * (16f / 14f)), onDark = onDark)
         } else ReviewSourceMark(token.sourceId, Modifier.width(metricSourceWidth()), size = 15.dp, onDark = onDark)
-        Text(metricValueText(token.value, textStyle.fontSize, foreground.copy(alpha = foreground.alpha * .56f)),
+        Text(metricValueText(token.value, textStyle.fontSize, foreground.copy(alpha = foreground.alpha * .56f),
+                unitFamily = mangaFontFamily(MangaFontScene.INTERFACE)),
             color = foreground.copy(alpha = foreground.alpha * .90f), style = textStyle,
             maxLines = 1, softWrap = false)
     }
 }
 
 /** Measure and render the same native value; denominators are visually secondary. */
-private fun metricValueText(value: String, size: TextUnit, denominator: Color = Color.Unspecified) =
+private fun metricValueText(value: String, size: TextUnit, denominator: Color = Color.Unspecified,
+    unitFamily: FontFamily? = null) =
     buildAnnotatedString {
         val slash = value.indexOf('/')
         if (slash < 0) append(value) else {
             append(value.substring(0, slash))
-            withStyle(SpanStyle(fontSize = size * .74f, fontWeight = FontWeight.Normal, color = denominator)) {
+            withStyle(SpanStyle(fontSize = (size.value * .74f).coerceAtLeast(12f).sp, fontWeight = FontWeight.Normal, color = denominator)) {
                 append(value.substring(slash))
             }
+        }
+        if (unitFamily != null) value.forEachIndexed { index, character ->
+            if (character == '万' || character == '亿')
+                addStyle(SpanStyle(fontFamily = unitFamily), index, index + 1)
         }
     }
 

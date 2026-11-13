@@ -14,6 +14,7 @@ import androidx.compose.ui.input.key.*
 import dev.mangaflow.MangaFlowHost
 import dev.mangaflow.initializeMangaFlow
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.update.DesktopUpdateExit
 import dev.mangaflow.reader.ProvideDesktopReaderKeyboard
 import dev.mangaflow.ui.MangaFlowTheme
@@ -85,10 +86,12 @@ fun main() {
                 },
                 icon = painterResource("mangaflow.png")) {
                 window.minimumSize = java.awt.Dimension(320, 320)
-                MangaFlowTheme {
-                    DesktopWindowChrome(window, MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.onBackground)
-                    ProvideDesktopReaderKeyboard(context) {
-                        MangaFlowHost(context, onModelReady = { model = it; lastModel = it })
+                CompositionLocalProvider(LocalMangaContext provides context) {
+                    MangaFlowTheme {
+                        DesktopWindowChrome(window, MaterialTheme.colorScheme.background, MaterialTheme.colorScheme.onBackground)
+                        ProvideDesktopReaderKeyboard(context) {
+                            MangaFlowHost(context, onModelReady = { model = it; lastModel = it })
+                        }
                     }
                 }
             }

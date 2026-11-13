@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import dev.mangaflow.platform.*
 
 import dev.mangaflow.ui.platform.*
@@ -190,19 +192,19 @@ private fun ReadingTimeSummary(millis: Long, activeDays: Int, books: Int, range:
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text("${range}阅读", color = colors.onSurfaceVariant, fontSize = 11.sp)
-            Text(readingDuration(millis), color = colors.onSurface,
-                fontSize = 25.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold)
-            if (average != null) Text("日均 " + readingDuration(average),
+            Text(mangaNumberText(readingDuration(millis)), color = colors.onSurface,
+                fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold)
+            if (average != null) Text(mangaNumberText("日均 " + readingDuration(average)),
                 color = colors.onSurfaceVariant, fontSize = 11.sp)
         }
         Column(Modifier.padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 Icon(Icons.Outlined.CalendarToday, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
-                Text("$activeDays 天", color = colors.onSurfaceVariant, fontSize = 11.sp)
+                Text(mangaNumberText("$activeDays 天"), color = colors.onSurfaceVariant, fontSize = 11.sp)
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
-                Text("$books 部", color = colors.onSurfaceVariant, fontSize = 11.sp)
+                Text(mangaNumberText("$books 部"), color = colors.onSurfaceVariant, fontSize = 11.sp)
             }
         }
     }
@@ -336,10 +338,10 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
             else -> "${selectedDay.monthNumber}月${selectedDay.dayOfMonth}日"
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(dayLabel, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
+            Text(mangaNumberText(dayLabel), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
             Text(if (selectedBooks > 0) "$selectedBooks 部作品" else "暂无记录", fontSize = 10.sp, color = colors.onSurfaceVariant)
         }
-        Text(readingDuration(selectedMillis), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
+        Text(mangaNumberText(readingDuration(selectedMillis)), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -375,17 +377,17 @@ private fun ReadingTimeRow(
         .semantics(mergeDescendants = true) { stateDescription = "占所选时段阅读时间 $shareLabel" }
         .motionPress(interactions, pressedScale = .99f).padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Text(rank.toString().padStart(2, '0'), color = colors.onSurfaceVariant.copy(alpha = .65f),
+        Text(rank.toString().padStart(2, '0'), fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), color = colors.onSurfaceVariant.copy(alpha = .65f),
             fontSize = 10.sp, modifier = Modifier.width(22.dp).clearAndSetSemantics { })
         MangaCover(entry.manga, repository, Modifier.width(32.dp).height(44.dp).mangaCoverCard(5.dp))
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Text(entry.manga.title, color = colors.onSurface, fontSize = 13.sp,
+                Text(entry.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 13.sp,
                     fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f))
-                Text(readingDuration(duration), color = colors.onSurface, fontSize = 11.sp,
+                Text(mangaNumberText(readingDuration(duration)), color = colors.onSurface, fontSize = 11.sp,
                     fontWeight = FontWeight.Medium, maxLines = 1)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp),

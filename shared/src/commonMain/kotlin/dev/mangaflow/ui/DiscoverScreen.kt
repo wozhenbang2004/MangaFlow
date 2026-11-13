@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.rememberTransition
@@ -246,7 +248,7 @@ fun DiscoverScreen(
                 Row(Modifier.padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     MangaCover(manga, repository, Modifier.width(48.dp).height(72.dp).mangaCoverCard(8.dp))
-                    Text(manga.title, style = MaterialTheme.typography.titleSmall,
+                    Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
                 MangaQuickAction(Icons.AutoMirrored.Outlined.ArrowForward, "查看详情") {
@@ -733,7 +735,7 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
     ) {
         MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).mangaSharedCover(manga.id, placement).mangaCoverCard(7.dp))
         Column(Modifier.weight(1f).padding(start = 11.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(manga.title, style = MaterialTheme.typography.titleSmall,
+            Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -766,7 +768,7 @@ private fun BrowseListRow(
         MangaCover(manga, repository, Modifier.width(64.dp).height(92.dp)
             .mangaSharedCover(manga.id, placement).mangaCoverCard(9.dp))
         Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(manga.title, style = MaterialTheme.typography.bodyMedium,
+            Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
@@ -959,7 +961,7 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
         .motionPress(interaction, pressedScale = .985f)
         .padding(vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(manga.rank?.toString()?.padStart(2, '0') ?: "—", fontSize = 18.sp,
-            style = MaterialTheme.typography.titleSmall.copy(fontFeatureSettings = "tnum"),
+            style = mangaMetricValueStyle(18.sp, 24.sp),
             fontWeight = if ((manga.rank ?: 99) <= 3) FontWeight.SemiBold else FontWeight.Normal,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = if ((manga.rank ?: 99) <= 3) .82f else .38f),
             maxLines = 1, modifier = Modifier.widthIn(min = 30.dp).padding(end = 4.dp))
@@ -968,7 +970,7 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
         Column(Modifier.weight(1f).padding(start = 10.dp).heightIn(min = 78.dp),
             verticalArrangement = Arrangement.SpaceBetween) {
             Column {
-                Text(manga.title, fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
+                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "), fontSize = 12.sp, lineHeight = 16.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = .46f), maxLines = 1,
@@ -1001,8 +1003,8 @@ internal fun ContinueRow(
         verticalAlignment = Alignment.CenterVertically) {
         MangaCover(progress.manga, repository, Modifier.width(46.dp).height(64.dp).mangaCoverCard(7.dp))
         Column(Modifier.weight(1f).padding(start = 12.dp, end = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(progress.manga.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页", style = MaterialTheme.typography.bodySmall,
+            Text(progress.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(mangaNumberText("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页"), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (progress.pageCount > 0) {
                 val fraction = ((progress.pageIndex + 1).toFloat() / progress.pageCount).coerceIn(0f, 1f)
@@ -1063,9 +1065,9 @@ internal fun RecentReadingSheet(
                                 verticalAlignment = Alignment.CenterVertically) {
                                 MangaCover(progress.manga, repository, Modifier.width(36.dp).height(50.dp).mangaCoverCard(5.dp))
                                 Column(Modifier.weight(1f).padding(start = 10.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                                    Text(progress.manga.title, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
+                                    Text(progress.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页",
+                                    Text(mangaNumberText("${progress.chapterTitle} · ${progress.pageIndex + 1}/${progress.pageCount} 页"),
                                         fontSize = 12.sp, lineHeight = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
@@ -1113,8 +1115,8 @@ internal fun CoverTile(
         .motionPress(interaction)) {
         MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(2f / 3f)
             .then(if (placement != null) Modifier.mangaSharedCover(manga.id, placement) else Modifier).mangaCoverCard(12.dp))
-        Text(manga.title, modifier = Modifier.padding(top = 7.dp, start = 2.dp, end = 2.dp),
-            style = if (narrow) MaterialTheme.typography.bodySmall.copy(lineHeight = 17.sp)
+        Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), modifier = Modifier.padding(top = 7.dp, start = 2.dp, end = 2.dp),
+            style = if (narrow) MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp, lineHeight = 20.sp)
                 else if (dense) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
         SearchSourceMarks(bodySources, Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp))

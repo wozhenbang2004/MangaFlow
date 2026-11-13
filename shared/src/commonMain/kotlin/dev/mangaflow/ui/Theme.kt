@@ -6,6 +6,8 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import dev.mangaflow.typography.MangaFontScene
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -13,10 +15,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.TextUnit
 
-/** Native score, scale and heat digits use one family, weight and tabular-number treatment. */
+/** Native score, scale and heat digits share the selected numeric scene and a readable minimum. */
+@Composable
 fun mangaMetricValueStyle(size: TextUnit = 12.sp, lineHeight: TextUnit = 16.sp): TextStyle = TextStyle(
-    fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
-    fontSize = size, lineHeight = lineHeight, letterSpacing = 0.sp, fontFeatureSettings = "tnum",
+    fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), fontWeight = FontWeight.Medium,
+    fontSize = if (size.value < 12f) 12.sp else size,
+    lineHeight = lineHeight, letterSpacing = 0.sp, fontFeatureSettings = "tnum",
 )
 
 private val LightColors = lightColorScheme(
@@ -46,21 +50,36 @@ private val DarkColors = darkColorScheme(
     surfaceContainerHigh = Color(0xFF2B2B2F),
 )
 
-private val ReaderTypography = Typography(
-    headlineLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 32.sp, lineHeight = 40.sp, letterSpacing = (-0.8).sp),
-    headlineMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 28.sp, lineHeight = 36.sp, letterSpacing = (-0.5).sp),
-    titleLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.SemiBold, fontSize = 22.sp, lineHeight = 30.sp),
-    titleMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium, fontSize = 16.sp, lineHeight = 24.sp),
-    titleSmall = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium, fontSize = 14.sp, lineHeight = 21.sp),
-    bodyLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Normal, fontSize = 16.sp, lineHeight = 27.sp),
-    bodyMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 23.sp),
-    bodySmall = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 18.sp),
-    labelLarge = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium, fontSize = 14.sp, lineHeight = 20.sp),
-    labelMedium = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium, fontSize = 12.sp, lineHeight = 18.sp),
-    labelSmall = TextStyle(fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium, fontSize = 11.sp, lineHeight = 16.sp),
-)
+/** UI chrome retains its own family; titles, prose and numeric text opt into their scene at the leaf. */
+private fun readerTypography(family: FontFamily): Typography {
+    fun text(size: Int, height: Int, weight: FontWeight) = TextStyle(
+        fontFamily = family, fontWeight = weight, fontSize = size.sp,
+        lineHeight = height.sp, letterSpacing = 0.sp)
+    return Typography(
+        displayLarge = text(24, 32, FontWeight.SemiBold),
+        displayMedium = text(24, 32, FontWeight.SemiBold),
+        displaySmall = text(20, 28, FontWeight.SemiBold),
+        headlineLarge = text(24, 32, FontWeight.SemiBold),
+        headlineMedium = text(24, 32, FontWeight.SemiBold),
+        headlineSmall = text(20, 28, FontWeight.SemiBold),
+        titleLarge = text(20, 28, FontWeight.SemiBold),
+        titleMedium = text(16, 24, FontWeight.Medium),
+        titleSmall = text(14, 20, FontWeight.Medium),
+        bodyLarge = text(16, 26, FontWeight.Normal),
+        bodyMedium = text(14, 22, FontWeight.Normal),
+        bodySmall = text(12, 18, FontWeight.Normal),
+        labelLarge = text(14, 20, FontWeight.Medium),
+        labelMedium = text(12, 18, FontWeight.Medium),
+        labelSmall = text(12, 18, FontWeight.Medium),
+    )
+}
 
 @Composable
 fun MangaFlowTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors, typography = ReaderTypography, content = content)
+    MangaFontProvider {
+        val family = mangaFontFamily(MangaFontScene.INTERFACE)
+        val typography = remember(family) { readerTypography(family) }
+        MaterialTheme(colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
+            typography = typography, content = content)
+    }
 }

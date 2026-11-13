@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import dev.mangaflow.ui.platform.*
 
 import dev.mangaflow.platform.*
@@ -174,7 +176,7 @@ internal fun UnifiedSourceManager(
                         if (canSwitchSource) Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp),
                             tint = colors.onSurfaceVariant)
                     }
-                    Text(state.work.title, color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1,
+                    Text(state.work.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
                 }
                 if (sourcePage == null && overview.any { it.status == "FAILED" })
@@ -350,7 +352,7 @@ internal fun UnifiedSourceManager(
                                 AsyncImage(manga.coverUrl, null, Modifier.size(width = 32.dp, height = 44.dp)
                                     .clip(RoundedCornerShape(5.dp)))
                                 Column(Modifier.weight(1f).padding(start = 12.dp, end = 8.dp)) {
-                                    Text(manga.title, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                                    Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 14.sp, fontWeight = FontWeight.Medium,
                                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     if (manga.authors.isNotEmpty()) Text(manga.authors.joinToString(" · "),
                                         color = colors.onSurfaceVariant, fontSize = 11.sp,

@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import dev.mangaflow.ui.platform.*
 
 import androidx.compose.foundation.background
@@ -120,12 +122,12 @@ private fun PageCollectionRow(collection: PageCollection, repository: MangaRepos
                     .background(colors.onSurface.copy(alpha = .035f)))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(collection.manga.title, color = colors.onSurface,
+                Text(collection.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface,
                     style = MaterialTheme.typography.titleSmall, fontSize = 13.sp, lineHeight = 18.sp,
                     fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(collection.chapter.title, color = colors.onSurfaceVariant,
                     fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(pages, color = colors.onSurfaceVariant,
+                Text(mangaNumberText(pages), color = colors.onSurfaceVariant,
                     fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (savedAt != null) Text(savedAt, color = colors.onSurfaceVariant.copy(alpha = .75f),
                     fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)

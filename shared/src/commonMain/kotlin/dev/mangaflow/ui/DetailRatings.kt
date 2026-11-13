@@ -75,7 +75,7 @@ internal fun DetailRatingSheet(manga: Manga, backdrop: HazeState? = null, onDism
     val density = LocalDensity.current
     val fontScale = density.fontScale.coerceAtLeast(1f)
     val markWidth = reviewSourceMarkWidth(20.dp, fontScale)
-    val denominatorStyle = mangaMetricValueStyle(11.sp, 16.sp)
+    val denominatorStyle = mangaMetricValueStyle(12.sp, 16.sp)
     val measurer = rememberTextMeasurer()
     val denominatorWidth = with(density) {
         (metrics.maxOfOrNull { metric ->

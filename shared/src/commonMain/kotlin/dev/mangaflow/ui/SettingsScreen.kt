@@ -38,6 +38,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -367,6 +368,10 @@ fun SettingsScreen(
                 }
                 SettingsSection("外观", sourceBackdrop) {
                     DetailAppearanceSettings()
+                    SettingsDisclosure("字体", "按场景设置", Icons.Outlined.TextFields,
+                        expandedSetting == "fonts", { toggleSetting("fonts") }) {
+                        FontSettings()
+                    }
                     SettingsDisclosure("壁纸", when {
                         wallpaper.mediaPath == null -> "默认"
                         wallpaper.rotationEnabled -> "${wallpaper.items.size} 张 · 每 ${wallpaper.rotationMinutes} 分钟"

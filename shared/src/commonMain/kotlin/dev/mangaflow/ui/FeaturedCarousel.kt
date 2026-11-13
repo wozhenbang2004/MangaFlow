@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.typography.MangaFontScene
+
 import dev.mangaflow.ui.platform.*
 
 import coil3.Image
@@ -359,10 +361,10 @@ private fun FeaturedManga(
                     .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
                     verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp,
                         if (inlineInformation) Alignment.CenterVertically else Alignment.Bottom)) {
-                    Text(manga.title, modifier = Modifier.clearAndSetSemantics { }, color = ink,
+                    Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), modifier = Modifier.clearAndSetSemantics { }, color = ink,
                         style = MaterialTheme.typography.titleSmall.copy(
                             shadow = Shadow(if (onDark) Color.Black.copy(alpha = .16f) else Color.White.copy(alpha = .18f),
-                                Offset(0f, 1f), 3f)), fontSize = 14.sp, lineHeight = 17.sp,
+                                Offset(0f, 1f), 3f)), fontSize = 14.sp, lineHeight = 20.sp,
                         fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
                         maxLines = if (inlineInformation) 3 else titleLines, overflow = TextOverflow.Ellipsis)
                     MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,

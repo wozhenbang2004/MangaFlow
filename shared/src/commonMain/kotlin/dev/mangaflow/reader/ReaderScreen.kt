@@ -1,5 +1,9 @@
 package dev.mangaflow.reader
 
+import dev.mangaflow.typography.MangaFontScene
+import dev.mangaflow.ui.mangaFontFamily
+import dev.mangaflow.ui.mangaNumberText
+
 import dev.mangaflow.data.chapterSourceMangaId
 
 import dev.mangaflow.ui.LocalMangaWindow
@@ -774,7 +778,7 @@ fun ReaderScreen(
                     verticalAlignment = Alignment.CenterVertically) {
                     ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回", interactive = controlsVisible, onClick = leaveReader)
                     Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)) {
-                        Text(manga.title, color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                        Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title,
                             currentSourceName.takeIf { chapter.variants.size > 1 }).joinToString(" · "),
@@ -1939,7 +1943,7 @@ private fun ReaderPageNavigatorDialog(
                             }
                             Text(
                                 "${page.index + 1}",
-                                fontSize = 10.sp,
+                                fontFamily = mangaFontFamily(MangaFontScene.NUMBERS), fontSize = 12.sp,
                                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = 3.dp),
@@ -2003,8 +2007,8 @@ private fun ReaderProgressSlider(
                 onClickLabel = "打开页面导航", onClick = onOpenNavigator)
             .padding(horizontal = 6.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-            Text("${shown.roundToInt() + 1}", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-            Text(" / $pageCount", color = colors.onSurfaceVariant, fontSize = 12.sp)
+            Text(mangaNumberText("${shown.roundToInt() + 1}"), color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text(mangaNumberText(" / $pageCount"), color = colors.onSurfaceVariant, fontSize = 12.sp)
         }
     }
 }
