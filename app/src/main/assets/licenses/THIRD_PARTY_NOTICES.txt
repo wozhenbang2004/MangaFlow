@@ -455,3 +455,8 @@ Apache License 2.0. Modified for MangaFlow source identities, semantic safeguard
 storage, reader and shared motion. Original source and modifications are recorded
 in third_party/multi-source/ADAPTATION.md in the project repository.
 MangaDex uses its public API; no third-party source script/runtime is bundled.
+Additional modified Keiyoushi Apache-2.0 integrations: Baozi/Manhuagui public
+reader protocols, bounded Packer/LZString decoding and Komiic origin routing
+(fc7a827769f612dfa6dccb51e819f5b4eecaeab5); MangaBZ reader protocol
+(535ffdbdd84eadab593d515283cb82aa9bf177f5). No remote JavaScript is executed.
+Precise source paths and modifications: third_party/multi-source/ADAPTATION.md.

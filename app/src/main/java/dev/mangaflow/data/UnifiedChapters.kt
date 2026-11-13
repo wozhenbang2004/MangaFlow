@@ -84,6 +84,8 @@ fun sourceDisplayName(sourceId: String): String = when (sourceId) {
     "baozi" -> "包子"
     "komiic" -> "Komiic"
     "mangadex" -> "MangaDex"
+    "manhuagui" -> "漫画柜"
+    "mangabz" -> "MangaBZ"
     "local" -> "本地"
     else -> sourceId
 }

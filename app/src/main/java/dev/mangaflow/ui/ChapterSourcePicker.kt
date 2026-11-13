@@ -60,7 +60,6 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.dismiss
@@ -77,7 +76,6 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import coil3.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
-import dev.mangaflow.R
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.storage.DownloadEntry
@@ -94,20 +92,22 @@ import kotlin.math.roundToInt
 
 private val failedSourceMarks = mutableStateMapOf<String, Boolean>()
 
-/** Copy uses our local paired-page marker; other providers retain their own marks/name fallback. */
+/** Copy uses our muted-blue wordmark; other providers retain their own marks/name fallback. */
 @Composable
 internal fun ChapterSourceLogo(sourceId: String, sourceName: String, modifier: Modifier = Modifier,
     muted: Boolean = false) {
     val favicon = when (sourceId) {
         "komiic" -> "https://komiic.com/favicon.ico"
         "mangadex" -> "https://mangadex.org/favicon.ico"
+        "baozi" -> "https://www.baozimh.com/favicon.ico"
+        "manhuagui" -> "https://www.manhuagui.com/favicon.ico"
+        "mangabz" -> "https://mangabz.com/favicon.ico"
         else -> null
     }
     val failed = failedSourceMarks[sourceId] == true
     val monochrome = remember { ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) }) }
     Box(modifier, contentAlignment = Alignment.Center) {
-        if (sourceId == "copy") Icon(painterResource(R.drawable.ic_source_copy), null,
-            modifier = Modifier.fillMaxSize(), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (sourceId == "copy") CopySourceWordmark(Modifier.fillMaxSize())
         else if (favicon != null && !failed) AsyncImage(
             model = favicon, contentDescription = null, contentScale = ContentScale.Fit,
             colorFilter = if (muted) monochrome else null,

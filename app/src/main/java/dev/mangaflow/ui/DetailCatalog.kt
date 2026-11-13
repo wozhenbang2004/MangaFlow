@@ -44,7 +44,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Pause
@@ -95,6 +95,7 @@ import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.MotionBottomSheet
+import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionSwap
@@ -143,6 +144,7 @@ internal fun DetailCatalog(
     onManageSources: () -> Unit = {},
     sourceLoading: Boolean = false,
     sourceError: String? = null,
+    sourcesChecking: Boolean = false,
     onCancelSourceSelection: () -> Unit = {},
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
@@ -206,9 +208,10 @@ internal fun DetailCatalog(
                     color = DetailMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
             }
             TextButton(onClick = onManageSources) {
+                if (sourcesChecking) MotionBusyIndicator(Modifier.size(11.dp), color = DetailMuted, strokeWidth = 1.2.dp)
                 Text(if (sourceCount > 1) "$sourceCount 源" else sourceDisplayName(primarySourceId),
                     color = DetailMuted, fontSize = 11.sp)
-                Icon(Icons.Outlined.Add, "添加或管理漫画来源", Modifier.size(17.dp), tint = DetailSecondary)
+                Icon(Icons.Outlined.ExpandMore, "查看自动合并的漫画来源", Modifier.size(17.dp), tint = DetailSecondary)
             }
             if (error != null) {
                 DetailAction(Icons.Outlined.Info, "目录加载提示", onClick = { shownError = error })
@@ -559,7 +562,9 @@ private fun ChapterTile(
     val markSize = 10.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
     Box(
         Modifier.fillMaxWidth().height((height + 6.dp).coerceAtLeast(
-            if (showSources) 56.dp else 48.dp))
+            // Automatic source results may arrive while reading the grid: reserve their
+            // region from the first projection instead of resizing every following row.
+            if (chapter.variants.isNotEmpty()) 56.dp else 48.dp))
             .combinedClickable(
                 interactionSource = interaction, indication = null, enabled = enabled,
                 role = Role.Button,

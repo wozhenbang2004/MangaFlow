@@ -29,6 +29,8 @@ data class LinkedMangaSource(
     val edition: String = "连载版",
     val sameChapterSystem: Boolean = true,
     val confirmedAt: Long = System.currentTimeMillis(),
+    val association: String = "manual",
+    val matchEvidence: String = "",
 )
 
 data class UnifiedWorkSettings(
@@ -41,6 +43,7 @@ data class UnifiedWorkSettings(
     val separated: Set<String> = emptySet(),
     /** Persisted anchors keep a missing chapter's logical ID when the primary source later adds it. */
     val logicalIds: Map<String, String> = emptyMap(),
+    val excludedSources: Set<String> = emptySet(),
 )
 
 /**
@@ -105,12 +108,35 @@ class UnifiedChapterStore(context: Context) {
         val ref = SourceKeys.decodeManga(manga.id)
         require(ref.sourceId == manga.sourceId) { "来源身份不一致" }
         old.copy(links = old.links.filterNot { it.manga.id == manga.id } +
-            LinkedMangaSource(manga, language.take(60), edition.take(60), sameChapterSystem))
+            LinkedMangaSource(manga, language.take(60), edition.take(60), sameChapterSystem),
+            excludedSources = old.excludedSources - manga.sourceId)
+    }
+
+    /** Called on IO only after independent title, author and chapter-system verification. */
+    fun attachAutomatically(workId: String, manga: Manga, language: String = "简中", edition: String = "连载版",
+        sameChapterSystem: Boolean = true, evidence: String = ""): Boolean = synchronized(lock) {
+        require(workId.isNotBlank() && manga.id != workId)
+        val ref = SourceKeys.decodeManga(manga.id)
+        require(ref.sourceId == manga.sourceId) { "来源身份不一致" }
+        val root = readRoot()
+        val old = root.optJSONObject(workId)?.let(::readSettings) ?: UnifiedWorkSettings()
+        if (manga.sourceId in old.excludedSources || old.links.any { it.manga.sourceId == manga.sourceId }) return@synchronized false
+        val next = old.copy(links = old.links + LinkedMangaSource(manga, language.take(60), edition.take(60),
+            sameChapterSystem, association = "automatic", matchEvidence = evidence.take(300)))
+        root.put(workId, writeSettings(next))
+        check(disk.edit().putString(KEY, root.toString()).commit()) { "自动关联未能保存，请检查存储空间。" }
+        true
     }
 
     fun detach(workId: String, linkedMangaId: String) = mutate(workId) { old ->
         // Preferences may keep a dormant exact choice. Reattaching can restore it; history is untouched.
-        old.copy(links = old.links.filterNot { it.manga.id == linkedMangaId })
+        val removed = old.links.firstOrNull { it.manga.id == linkedMangaId }
+        old.copy(links = old.links.filterNot { it.manga.id == linkedMangaId },
+            excludedSources = if (removed == null) old.excludedSources else old.excludedSources + removed.manga.sourceId)
+    }
+
+    fun excludeSource(workId: String, sourceId: String) = mutate(workId) { old ->
+        old.copy(links = old.links.filterNot { it.manga.sourceId == sourceId }, excludedSources = old.excludedSources + sourceId)
     }
 
     fun preferSource(workId: String, sourceId: String) = mutate(workId) { old ->
@@ -183,7 +209,7 @@ class UnifiedChapterStore(context: Context) {
                 upstreamChapter, chapter.title, link?.language ?: "简中", fallbackEdition)
             val edition = variant.edition
             val storageId = variant.storageId
-            // Matching requires the linked work and chapter system to have been explicitly confirmed.
+            // Matching requires verified work identity and chapter system, by the user or discovery.
             val semanticKey = meaning?.key?.let { ChapterSemantics.editionFamily(edition, meaning, confirmedSystem) + "\u0000" + it }
             val ambiguous = semanticKey != null && (semanticKey in ambiguousBaseKeys ||
                 semanticKey in ambiguousLinkedKeys[manga.id].orEmpty())
@@ -333,11 +359,11 @@ class UnifiedChapterStore(context: Context) {
                     val item = array.getJSONObject(i)
                     LinkedMangaSource(readManga(item.getJSONObject("manga")), item.optString("language", "简中"),
                         item.optString("edition", "连载版"), item.optBoolean("sameChapterSystem", false),
-                        item.optLong("confirmedAt", 0L))
+                        item.optLong("confirmedAt", 0L), item.optString("association", "manual"), item.optString("matchEvidence"))
                 }
             }.orEmpty()
             return UnifiedWorkSettings(links, strings("preferredSources"), stringMap("chapterOverrides"),
-                stringMap("manualLinks"), strings("separated").toSet(), stringMap("logicalIds"))
+                stringMap("manualLinks"), strings("separated").toSet(), stringMap("logicalIds"), strings("excludedSources").toSet())
         }
 
         private fun writeSettings(state: UnifiedWorkSettings): JSONObject = JSONObject().apply {
@@ -347,12 +373,15 @@ class UnifiedChapterStore(context: Context) {
                 put("edition", link.edition)
                 put("sameChapterSystem", link.sameChapterSystem)
                 put("confirmedAt", link.confirmedAt)
+                put("association", link.association)
+                put("matchEvidence", link.matchEvidence)
             } }))
             put("preferredSources", JSONArray(state.preferredSources))
             put("chapterOverrides", JSONObject(state.chapterOverrides))
             put("manualLinks", JSONObject(state.manualLinks))
             put("separated", JSONArray(state.separated.toList()))
             put("logicalIds", JSONObject(state.logicalIds))
+            put("excludedSources", JSONArray(state.excludedSources.toList()))
         }
     }
 }

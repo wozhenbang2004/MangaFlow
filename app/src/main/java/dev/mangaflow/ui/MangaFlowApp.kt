@@ -166,6 +166,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val sourceManagement by model.sourceManagement.collectAsStateWithLifecycle()
     val sourceOperation by model.chapterSourceOperation.collectAsStateWithLifecycle()
     val sourceCatalogErrors by model.repository.sourceErrors.collectAsStateWithLifecycle()
+    val sourceDiscovery by model.repository.sourceDiscovery.collectAsStateWithLifecycle()
     val libraryOpening by model.libraryOpening.collectAsStateWithLifecycle()
     val favorites by model.library.favorites.collectAsStateWithLifecycle()
     val history by model.library.history.collectAsStateWithLifecycle()
@@ -262,7 +263,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     sourceManagement?.let { state ->
         UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
             onSearch = model::searchBodySource, onAttach = model::attachBodySource,
-            onDetach = model::detachBodySource, onPrefer = model::preferBodySource)
+            onDetach = model::detachBodySource, onPrefer = model::preferBodySource,
+            onRetryAll = model::retrySourceDiscovery, onChooseDomain = model::chooseSourceDomain,
+            onChooseSource = model::chooseBodySource)
     }
     val focus = LocalFocusManager.current
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
@@ -524,6 +527,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onManageSources = model::manageSources,
                                 onCancelSourceSelection = model::cancelSourceSelection,
                                 sourceLoading = sourceOperation.loading,
+                                sourcesChecking = sourceDiscovery[current.state.manga.id]?.values?.any {
+                                    it.status == dev.mangaflow.data.SourceDiscoveryStatus.SEARCHING
+                                } == true,
                                 sourceError = sourceOperation.error ?: sourceCatalogErrors[current.state.manga.id]
                                     ?.values?.takeIf { it.isNotEmpty() }?.joinToString("；"),
                                 onTag = { manga, tag -> model.openTagSearch(manga, tag); tagSearchVisible = true },

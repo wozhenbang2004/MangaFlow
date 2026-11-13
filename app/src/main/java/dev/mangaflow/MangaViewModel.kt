@@ -34,6 +34,15 @@ import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.resolveChapter
 import dev.mangaflow.data.sourceDisplayName
+import dev.mangaflow.data.bodySourceSearchTerms
+import dev.mangaflow.data.normalizedBodySourceTitle
+import dev.mangaflow.data.SourceDiscoveryResult
+import dev.mangaflow.data.SourceDiscoveryStatus
+import dev.mangaflow.data.sources.BaoziBodySource
+import dev.mangaflow.data.sources.KomiicBodySource
+import dev.mangaflow.data.sources.MangaDexBodySource
+import dev.mangaflow.data.sources.ManhuaguiBodySource
+import dev.mangaflow.data.sources.MangaBzBodySource
 import dev.mangaflow.storage.UnifiedChapterStore
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
@@ -120,6 +129,10 @@ data class SourceManagementState(
     val loading: Boolean = false,
     val connecting: Boolean = false,
     val error: String? = null,
+    val discovery: List<SourceDiscoveryResult> = emptyList(),
+    val scanning: Boolean = false,
+    val domainOptions: List<String> = emptyList(),
+    val sourceDomain: String = "",
 )
 
 data class AuthorWorksState(
@@ -170,8 +183,14 @@ data class AccountUiState(
 
 class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val copyRepository = CopyMangaRepository(identityProvider = { CopyAnonymousIdentityStore.load(application) })
+    private val sourcePreferences = application.getSharedPreferences("mangaflow_library", 0)
+    private val komiicSource = KomiicBodySource {
+        sourcePreferences.getString("body_source_komiic_domain", KomiicBodySource.BASE_URLS.first())
+            ?.takeIf { it in KomiicBodySource.BASE_URLS } ?: KomiicBodySource.BASE_URLS.first()
+    }
     val unifiedChapters = UnifiedChapterStore(application)
     val repository = UnifiedMangaRepository(copyRepository, unifiedChapters,
+        bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(), komiicSource, MangaDexBodySource()),
         catalogStore = ReaderCatalogStore(application))
     val library = LibraryStore(application)
     val downloads = DownloadStore.get(application)
@@ -259,6 +278,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         restoreAccount()
         viewModelScope.launch { unifiedChapters.revision.drop(1).collect { refreshUnifiedProjection() } }
         viewModelScope.launch { repository.catalogRevision.drop(1).collect { refreshUnifiedProjection() } }
+        viewModelScope.launch { repository.sourceDiscovery.collect { refreshSourceOverview() } }
         viewModelScope.launch { unifiedChapters.persistenceError.collect { error ->
             if (error != null) messages.send(error)
         } }
@@ -713,6 +733,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _detail.value = DetailState(initialManga,
             detail = initialChapters.takeIf { it.isNotEmpty() }?.let { MangaDetail(initialManga, it) },
             loading = !reuseCatalog)
+        repository.discoverSources(initialManga, sourceAliases(initialManga))
         loadReviews(initialManga, requestId)
         if (reuseCatalog) {
             if (continueChapterId != null) {
@@ -756,6 +777,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 readerCatalogs.save(loaded)
                 if (requestId != detailRequestId) return@launch
+                repository.discoverSources(loaded.manga, sourceAliases(loaded.manga))
                 recordDetailMetrics(manga.id, requestId)
                 if (continueChapterId != null) {
                     val chapter = findSourceChapter(loaded.chapters, continueChapterId)
@@ -815,6 +837,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 _detail.update { if (it?.manga?.id == manga.id && requestId == detailRequestId)
                     it.copy(reviewsLoading = false) else it }
+                _detail.value?.takeIf { it.manga.id == manga.id && requestId == detailRequestId &&
+                    (_reading.value == null || _reading.value?.manga?.id == manga.id) }?.let {
+                    repository.discoverSources(it.manga, sourceAliases(it.manga))
+                }
             }
         }
     }
@@ -986,6 +1012,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             _detail.update { if (it?.manga?.id == catalog.manga.id) it.copy(detail = catalog) else it }
             readerCatalogs.save(catalog)
         }
+        refreshSourceOverview()
         val session = _reading.value ?: return
         val catalog = repository.cachedDetail(session.manga.id) ?: return
         val visible = visibleReading?.takeIf { it.first.id == session.manga.id }?.second
@@ -998,12 +1025,107 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val work = _detail.value?.manga ?: _reading.value?.manga ?: return
         if (work.sourceUrl == LOCAL_SOURCE_URL) return
         closeSourceManagement()
+        val available = repository.sources.filter { it.id != work.sourceId }
+        val first = available.firstOrNull()?.id.orEmpty()
         _sourceManagement.value = SourceManagementState(
             work = work,
-            sources = repository.sources.filter { it.id != work.sourceId }.map { it.id to it.name },
+            sourceId = first,
+            sources = available.map { it.id to it.name },
             linked = unifiedChapters.linkedSources(work.id).map { it.manga },
             preferredSource = unifiedChapters.settings(work.id).preferredSources.firstOrNull() ?: work.sourceId,
+            domainOptions = sourceDomainOptions(first), sourceDomain = sourceDomain(first),
         )
+        refreshSourceOverview()
+    }
+
+    private fun sourceAliases(work: Manga): List<String> =
+        (reviews.cachedSources(work) + _detail.value?.takeIf { it.manga.id == work.id }?.reviews.orEmpty())
+            .filter { it.status == ReviewStatus.READY }
+            .flatMap { it.aliases + it.matchedTitle }.filter(String::isNotBlank).distinct()
+
+    private fun sourceDomainOptions(sourceId: String): List<String> =
+        if (sourceId == "komiic") KomiicBodySource.BASE_URLS else emptyList()
+
+    private fun sourceDomain(sourceId: String): String =
+        if (sourceId == "komiic") komiicSource.info.homeUrl else ""
+
+    private fun refreshSourceOverview() {
+        val state = _sourceManagement.value ?: return
+        val work = state.work
+        val settings = unifiedChapters.settings(work.id)
+        val discovered = repository.sourceDiscovery.value[work.id].orEmpty()
+        val chapters = _detail.value?.takeIf { it.manga.id == work.id }?.detail?.chapters
+            ?: _reading.value?.takeIf { it.manga.id == work.id }?.chapters.orEmpty()
+        val results = repository.sources.map { source ->
+            val linked = source.id == work.sourceId || settings.links.any { it.manga.sourceId == source.id }
+            val existingChapters = chapters.count { chapter -> chapter.variants.any { it.sourceId == source.id } ||
+                chapter.variants.isEmpty() && chapter.sourceId == source.id }
+            val discovery = discovered[source.id]
+            val linkedFailure = settings.links.firstOrNull { it.manga.sourceId == source.id }?.let {
+                repository.sourceErrors.value[work.id]?.get(it.manga.id)
+            }
+            val primaryFailure = _detail.value?.takeIf { source.id == work.sourceId && it.manga.id == work.id }?.error
+            when {
+                source.id in settings.excludedSources -> SourceDiscoveryResult(source.id, source.name,
+                    SourceDiscoveryStatus.DISABLED, message = "已取消关联，可手动重新添加")
+                primaryFailure != null -> SourceDiscoveryResult(source.id, source.name, SourceDiscoveryStatus.FAILED,
+                    chapters = existingChapters, message = primaryFailure)
+                linkedFailure != null -> SourceDiscoveryResult(source.id, source.name, SourceDiscoveryStatus.FAILED,
+                    chapters = existingChapters, message = "$linkedFailure 已保留上次目录。")
+                discovery?.status in listOf(SourceDiscoveryStatus.SEARCHING, SourceDiscoveryStatus.FAILED) ||
+                    !linked && discovery?.status == SourceDiscoveryStatus.NEEDS_CONFIRMATION -> discovery!!.copy(chapters = existingChapters)
+                linked -> SourceDiscoveryResult(source.id, source.name, SourceDiscoveryStatus.LINKED, chapters = existingChapters)
+                else -> discovered[source.id] ?: SourceDiscoveryResult(source.id, source.name,
+                    SourceDiscoveryStatus.NO_MATCH, message = "尚未检查")
+            }
+        }
+        _sourceManagement.update { if (it?.work?.id == work.id) it.copy(
+            linked = settings.links.map { link -> link.manga },
+            preferredSource = settings.preferredSources.firstOrNull() ?: work.sourceId,
+            discovery = results, scanning = discovered.values.any { result -> result.status == SourceDiscoveryStatus.SEARCHING },
+            domainOptions = sourceDomainOptions(it.sourceId), sourceDomain = sourceDomain(it.sourceId)) else it }
+    }
+
+    fun retrySourceDiscovery() {
+        val work = _sourceManagement.value?.work ?: _detail.value?.manga ?: return
+        if (_detail.value?.takeIf { it.manga.id == work.id }?.error != null) retryDetail()
+        repository.discoverSources(work, sourceAliases(work), force = true)
+        viewModelScope.launch {
+            try { repository.refreshLinked(work.id); refreshUnifiedProjection() }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) { messages.send(failure.message ?: "来源刷新失败，已保留上次目录。") }
+        }
+    }
+
+    fun chooseBodySource(sourceId: String) {
+        val state = _sourceManagement.value ?: return
+        if (state.connecting || state.sources.none { it.first == sourceId }) return
+        sourceManagementRequest++
+        sourceManagementJob?.cancel()
+        val candidates = repository.sourceDiscovery.value[state.work.id]?.get(sourceId)?.candidates.orEmpty()
+        _sourceManagement.value = state.copy(sourceId = sourceId, candidates = candidates,
+            loading = false, error = null, domainOptions = sourceDomainOptions(sourceId), sourceDomain = sourceDomain(sourceId))
+    }
+
+    fun chooseSourceDomain(domain: String) {
+        val state = _sourceManagement.value ?: return
+        if (state.connecting || state.sourceId != "komiic" || domain !in KomiicBodySource.BASE_URLS) return
+        val request = sourceManagementRequest
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    check(sourcePreferences.edit().putString("body_source_komiic_domain", domain).commit()) {
+                        "来源线路未能保存，请检查存储空间。"
+                    }
+                }
+                repository.invalidatePageCache("komiic")
+                if (request != sourceManagementRequest || _sourceManagement.value?.work?.id != state.work.id ||
+                    _sourceManagement.value?.sourceId != "komiic") return@launch
+                refreshSourceOverview()
+                searchBodySource("komiic", state.query)
+            } catch (cancel: CancellationException) { throw cancel
+            } catch (failure: Exception) { messages.send(failure.message ?: "线路切换失败，请重试。") }
+        }
     }
 
     fun closeSourceManagement() {
@@ -1019,13 +1141,27 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         sourceManagementJob?.cancel()
         val request = ++sourceManagementRequest
         _sourceManagement.value = state.copy(sourceId = sourceId, query = query, loading = true,
-            candidates = emptyList(), error = null)
+            candidates = emptyList(), error = null, domainOptions = sourceDomainOptions(sourceId),
+            sourceDomain = sourceDomain(sourceId))
+        if (query.isBlank()) {
+            _sourceManagement.update { it?.copy(loading = false, error = "请输入作品名或别名。") }
+            return
+        }
         sourceManagementJob = viewModelScope.launch {
             try {
-                val result = foregroundRequest("来源搜索") { repository.searchSource(sourceId, query.trim()) }
+                val aliases = if (normalizedBodySourceTitle(query) == normalizedBodySourceTitle(state.work.title))
+                    sourceAliases(state.work) else emptyList()
+                val result = foregroundRequest("来源搜索") { withContext(Dispatchers.IO) {
+                    var found = dev.mangaflow.data.MangaPage(emptyList(), false)
+                    for (term in bodySourceSearchTerms(query, aliases)) {
+                        found = repository.searchSource(sourceId, term)
+                        if (found.items.isNotEmpty()) break
+                    }
+                    found
+                } }
                 if (request == sourceManagementRequest) _sourceManagement.update { it?.copy(
                     candidates = result.items, loading = false,
-                    error = if (result.items.isEmpty()) "未找到作品，可尝试其他书名或别名。" else null) }
+                    error = if (result.items.isEmpty()) "已查询书名及可用别名，未找到匹配作品。" else null) }
             } catch (cancel: CancellationException) { throw cancel
             } catch (failure: Exception) {
                 if (request == sourceManagementRequest) _sourceManagement.update { it?.copy(
@@ -1287,6 +1423,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         readingRequestId++
         visibleReading = null
         _reading.value = session
+        if (session.collection == null && session.manga.sourceUrl != LOCAL_SOURCE_URL) {
+            if (repository.cachedSourceDetail(session.manga.id) == null)
+                repository.retainWork(MangaDetail(session.manga, session.chapters))
+            repository.discoverSources(session.manga, sourceAliases(session.manga))
+        }
     }
 
     private fun openSavedChapter(
@@ -1374,6 +1515,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 val loaded = cached ?: repository.detail(session.manga.id)
                 readerCatalogs.save(loaded)
                 if (requestId != readingRequestId) return@launch
+                repository.discoverSources(loaded.manga, sourceAliases(loaded.manga))
                 _reading.update { current ->
                     if (current?.manga?.id != session.manga.id) current
                     else current.copy(

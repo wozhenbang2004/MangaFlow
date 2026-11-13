@@ -504,3 +504,9 @@ public manga/feed/chapter/At-home API; no Venera script or runtime is bundled.
 Source favicon images are requested from the corresponding official site and are
 not claimed to be MangaFlow artwork. Refer to ADAPTATION.md for the unverified
 source-access and implementation boundaries.
+
+Baozi / Manhuagui public reader adapters, Packer/LZString decoder adaptations and
+Komiic origin configuration use Keiyoushi `fc7a827769f612dfa6dccb51e819f5b4eecaeab5`;
+MangaBZ uses `535ffdbdd84eadab593d515283cb82aa9bf177f5`, all Apache-2.0.
+The exact upstream paths, modified local files and omitted runtime/account/image
+rewriting features are recorded in `third_party/multi-source/ADAPTATION.md`.

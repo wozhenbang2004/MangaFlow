@@ -7,6 +7,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Alignment
@@ -25,7 +26,7 @@ import dev.mangaflow.R
 import dev.mangaflow.data.ReviewProviders
 
 internal fun reviewSourceAccent(id: String, onDark: Boolean): Color = when (id) {
-    "copy" -> if (onDark) Color(0xFFD6D8DD) else Color(0xFF585A60)
+    "copy" -> if (onDark) Color(0xFFA8BED2) else Color(0xFF567593)
     "bangumi" -> if (onDark) Color(0xFFE9B1C8) else Color(0xFF9D5C78)
     "anilist" -> if (onDark) Color(0xFFAFCBE9) else Color(0xFF53749A)
     "mangaupdates" -> if (onDark) Color(0xFFD4BFE8) else Color(0xFF7B638F)
@@ -41,7 +42,8 @@ internal fun reviewSourceMarkWidth(size: Dp, fontScale: Float): Dp = size * (1.4
 
 /** Stack layout measures the same honest wordmark that this renderer uses. */
 internal fun reviewSourceWordmark(id: String): String? = when (id) {
-    "copy", "anilist", "myanimelist", "kitsu" -> null
+    "anilist", "myanimelist", "kitsu" -> null
+    "copy" -> "拷"
     "bangumi" -> "bgm"
     "mangaupdates" -> "MU"
     "mangadex" -> "MD"
@@ -53,6 +55,21 @@ internal fun reviewSourceLabelScale(mark: String): Float {
         count + if (character.code >= 0x2E80) 2 else 1
     }.coerceAtLeast(1)
     return minOf(.68f, 2.8f / units)
+}
+
+/** One local typographic source mark, shared by compact badges and full source rows. */
+@Composable
+internal fun CopySourceWordmark(modifier: Modifier = Modifier) {
+    val density = LocalDensity.current
+    val onDark = MaterialTheme.colorScheme.onSurface.luminance() > .5f
+    BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
+        val side = minOf(maxWidth, maxHeight)
+        Text("拷", color = reviewSourceAccent("copy", onDark),
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.SansSerif,
+                fontWeight = FontWeight.Medium, fontSize = with(density) { (side * .86f).toSp() },
+                lineHeight = with(density) { side.toSp() }, letterSpacing = 0.sp),
+            maxLines = 1, softWrap = false)
+    }
 }
 
 /** Local source markers and honest wordmarks share one optically balanced reference box. */
@@ -68,7 +85,6 @@ internal fun ReviewSourceMark(
     val color = reviewSourceAccent(id, onDark)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val resource = when (id) {
-        "copy" -> R.drawable.ic_source_copy
         "anilist" -> R.drawable.ic_source_anilist
         "myanimelist" -> R.drawable.ic_source_myanimelist
         "kitsu" -> R.drawable.ic_source_kitsu
@@ -79,10 +95,11 @@ internal fun ReviewSourceMark(
         when {
             heat -> Icon(Icons.Outlined.LocalFireDepartment, null, tint = color,
                 modifier = Modifier.size(size * (.88f * fontScale)))
+            id == "copy" -> CopySourceWordmark(Modifier.requiredSize(size * fontScale))
             resource != null -> {
                 // The original AL path fills 75% of its viewport height; MAL fills 42%.
                 // Match their visible ink instead of making every 24px viewport equally tall.
-                val opticalScale = when (id) { "copy" -> 1.05f; "anilist" -> .76f; "myanimelist" -> 1.14f; else -> .66f }
+                val opticalScale = when (id) { "anilist" -> .76f; "myanimelist" -> 1.14f; else -> .66f }
                 Icon(painterResource(resource), null, tint = color,
                     modifier = Modifier.requiredSize(size * (opticalScale * fontScale)))
             }

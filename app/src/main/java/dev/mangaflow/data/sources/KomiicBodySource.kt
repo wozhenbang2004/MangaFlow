@@ -23,8 +23,9 @@ import java.math.BigDecimal
  * Modified for MangaFlow's anonymous requests, cancellable I/O and explicit source identities.
  * No login/token refresh, private cookies or account mutations are performed here.
  */
-class KomiicBodySource : BodySource {
-    override val info = BodySourceInfo("komiic", "Komiic", "繁中", HOME, "$HOME/favicon.ico")
+class KomiicBodySource(private val selectedBaseUrl: () -> String = { BASE_URLS.first() }) : BodySource {
+    private val home: String get() = selectedBaseUrl().takeIf { it in BASE_URLS } ?: BASE_URLS.first()
+    override val info get() = BodySourceInfo("komiic", "Komiic", "繁中", home, "$home/favicon.ico")
     private val http = SourceHttp()
 
     override suspend fun discover(page: Int): MangaPage = withContext(Dispatchers.IO) {
@@ -64,7 +65,7 @@ class KomiicBodySource : BodySource {
                 val variant = ChapterVariant(
                     sourceId = info.id, sourceName = info.name, mangaId = id, chapterId = nativeChapterId,
                     title = title, language = info.language, edition = if (book) "单行本" else "连载版",
-                    url = "$HOME/comic/$id/chapter/$nativeChapterId/images/all",
+                    url = "$home/comic/$id/chapter/$nativeChapterId/images/all",
                     pageCount = row.optInt("size").takeIf { it > 0 },
                 )
                 Chapter(variant.storageId, title, index, if (book) "单行本" else "连载",
@@ -82,49 +83,57 @@ class KomiicBodySource : BodySource {
         data.getJSONArray("imagesByChapterId").bodyObjects().mapIndexed { index, image ->
             val key = image.bodyId("kid")
             require(key.length <= 1024) { "来源图片标识无效。" }
-            Page(index, "$HOME/api/image/".toHttpUrl().newBuilder().addPathSegment(key).build().toString())
-        }.also { if (it.isEmpty()) throw SourceException("Komiic 暂未提供本章图片，可能需要登录或已达访问额度。", HOME) }
+            Page(index, "$home/api/image/".toHttpUrl().newBuilder().addPathSegment(key).build().toString())
+        }.also { if (it.isEmpty()) throw SourceException("Komiic 暂未提供本章图片，可能需要登录或已达访问额度。", home) }
     }
 
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> {
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         return mapOf("User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
-            "Referer" to "$HOME/comic/${id(ref.mangaId)}/chapter/${id(ref.chapterId)}/images/all", "Accept" to "*/*")
+            "Referer" to "$home/comic/${id(ref.mangaId)}/chapter/${id(ref.chapterId)}/images/all", "Accept" to "*/*")
     }
 
     private fun manga(row: JSONObject): Manga {
         val id = id(row.bodyId("id"))
         return Manga(
             id = SourceKeys.manga(info.id, id), title = row.bodyText("title"),
-            coverUrl = row.bodyText("imageUrl").takeIf(String::isNotBlank)?.let { checkedBodyUrl(it).toString() }.orEmpty(),
+            coverUrl = row.bodyText("imageUrl").takeIf(String::isNotBlank)?.let { imageUrl(it) }.orEmpty(),
             authors = row.optJSONArray("authors")?.bodyObjects()?.map { it.bodyText("name") }?.filter(String::isNotBlank).orEmpty(),
             description = row.bodyText("description"),
             status = when (row.bodyText("status")) { "ONGOING" -> "连载"; "END" -> "完结"; else -> "" },
             tags = row.optJSONArray("categories")?.bodyObjects()?.map { it.bodyText("name") }?.filter(String::isNotBlank).orEmpty(),
-            sourceUrl = "$HOME/comic/$id", sourceId = info.id, sourceMangaId = id,
+            sourceUrl = "$home/comic/$id", sourceId = info.id, sourceMangaId = id,
         )
     }
 
     private suspend fun graphQl(operation: String, query: String, variables: JSONObject): JSONObject {
         val json = JSONObject().put("operationName", operation).put("query", query).put("variables", variables)
-        val request = Request.Builder().url("$HOME/api/query").header("Referer", "$HOME/")
+        val request = Request.Builder().url("$home/api/query").header("Referer", "$home/")
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36")
-            .header("Origin", HOME).post(json.toString().toRequestBody("application/json".toMediaType())).build()
-        val result = http.bodyJson(request, "Komiic", HOME)
+            .header("Origin", home).post(json.toString().toRequestBody("application/json".toMediaType())).build()
+        val result = http.bodyJson(request, "Komiic", home)
         result.optJSONArray("errors")?.takeIf { it.length() > 0 }?.let { errors ->
             val message = errors.optJSONObject(0)?.bodyText("message").orEmpty()
             val explanation = if (message.contains("token", true) || message.contains("login", true) || message.contains("auth", true))
                 "Komiic 要求登录后访问；当前公开来源没有附加账号。" else "Komiic 返回：${message.take(180)}"
-            throw SourceException(explanation, HOME)
+            throw SourceException(explanation, home)
         }
-        return result.optJSONObject("data") ?: throw SourceException("Komiic 返回的资料不完整。", HOME)
+        return result.optJSONObject("data") ?: throw SourceException("Komiic 返回的资料不完整。", home)
+    }
+
+    private fun imageUrl(value: String): String {
+        val url = checkedBodyUrl(value)
+        val mirror = home.toHttpUrl().host
+        return if (mirror != "komiic.com" && (url.host == "komiic.com" || url.host.endsWith(".komiic.com")))
+            url.newBuilder().host(url.host.removeSuffix("komiic.com") + mirror).build().toString()
+        else url.toString()
     }
 
     private fun nativeId(value: String): String = id(SourceKeys.decodeManga(value).mangaId)
     private fun id(value: String): String = value.also { require(it.matches(Regex("[0-9]{1,30}"))) { "Komiic 标识无效。" } }
 
     companion object {
-        private const val HOME = "https://komiic.com"
+        val BASE_URLS = listOf("https://komiic.com", "https://komiic.cc")
         private const val COMIC = "{ id title description status imageUrl authors { id name } categories { id name } warnings }"
     }
 }

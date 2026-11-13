@@ -183,6 +183,7 @@ fun DetailScreen(
     onCancelSourceSelection: () -> Unit = {},
     sourceLoading: Boolean = false,
     sourceError: String? = null,
+    sourcesChecking: Boolean = false,
 ) {
     val current = detail?.manga ?: manga
     val feedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
@@ -457,6 +458,7 @@ fun DetailScreen(
                                     onManageSources = onManageSources,
                                     onCancelSourceSelection = onCancelSourceSelection,
                                     sourceLoading = sourceLoading, sourceError = sourceError,
+                                    sourcesChecking = sourcesChecking,
                                 )
                                 else -> CommunityPanel(
                                     mangaId = current.id, sources = reviews, loading = reviewsLoading,

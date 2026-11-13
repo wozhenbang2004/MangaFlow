@@ -41,7 +41,36 @@ unavailable and zero-page records; checks chapter ownership; and requests origin
 At-home images. There is no automatic compression fallback or silent language
 switch. Anonymous login/quotas and API access policies remain source-controlled.
 
-## Verification boundary
+## Additional Chinese sources · 2026-11-13
+
+Baozi and Manhuagui protocol adaptations use Keiyoushi/extensions-source commit
+`fc7a827769f612dfa6dccb51e819f5b4eecaeab5` (Apache-2.0):
+
+- `src/zh/baozimanhua/src/eu/kanade/tachiyomi/extension/zh/baozimanhua/Baozi.kt`:
+  public app-reader HTML, card/onclick links, chapter slots and CDN routing.
+  Local file `data/sources/BaoziBodySource.kt`. Gatekeeper solving, cookies,
+  banner cropping/recompression and image-response interceptors are not copied.
+- `src/zh/manhuagui/src/eu/kanade/tachiyomi/extension/zh/manhuagui/Manhuagui.kt`
+  and `Dto.kt`, plus `lib/unpacker` (`Unpacker.kt`, `SubstringExtractor.kt`)
+  and `lib/lzstring` (`LZString.kt`): public search/catalogue/reader payloads.
+  Local files `ManhuaguiBodySource.kt`, `ManhuaguiPayload.kt` and
+  `SourcePackedScript.kt` in `data/sources`. Text decoding is bounded; scripts
+  are never executed. Hidden/adult unlock cookies and account requests are omitted.
+- `src/zh/komiic/build.gradle.kts` / `Komiic.kt`: declared .com/.cc origin choice
+  and matching subdomain routing, adapted in `KomiicBodySource.kt`.
+
+MangaBZ uses Keiyoushi commit `535ffdbdd84eadab593d515283cb82aa9bf177f5`,
+`src/zh/mangabz` (`Mangabz.kt`, build metadata) and its shared MangaBZ theme
+(`MangabzTheme.kt`, `Preferences.kt`).
+Local `data/sources/MangaBzBodySource.kt` reuses `SourcePackedScript`, validates
+chapter membership, collects the complete original-image manifest, retains signed
+parameters and has bounded caches/rate/concurrency. HTTP mirrors are omitted.
+
+These are modified MangaFlow integrations with its existing cancellable transport,
+Jsoup/JSON, stable identities and Unified Chapters, not the upstream extension runtime.
+See the complete Apache-2.0 text in `KEIYOUSHI-APACHE-2.0.txt`.
+
+## Current verification boundary
 
 The upstream sources and JSON contracts were read on 2026-11-13. No source was
 installed or run, no product API was probed, and no test or local build was run.

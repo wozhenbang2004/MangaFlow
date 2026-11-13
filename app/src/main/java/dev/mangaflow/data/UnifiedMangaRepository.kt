@@ -53,6 +53,13 @@ class UnifiedMangaRepository(
     val catalogRevision = _catalogRevision.asStateFlow()
     private val _sourceErrors = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
     val sourceErrors = _sourceErrors.asStateFlow()
+    private val _sourceDiscovery = MutableStateFlow<Map<String, Map<String, SourceDiscoveryResult>>>(emptyMap())
+    val sourceDiscovery = _sourceDiscovery.asStateFlow()
+    private data class DiscoveryRun(val signature: String, val generation: Long, val job: Deferred<Unit>)
+    private val discoveries = mutableMapOf<String, DiscoveryRun>()
+    private val discoveryGenerations = mutableMapOf<String, Long>()
+    private val discoveryCompleted = mutableMapOf<String, Pair<String, Long>>()
+    private val pageCacheGenerations = mutableMapOf<String, Long>()
 
     override suspend fun discover(page: Int): MangaPage = copy.discover(page)
     override suspend fun search(query: String, page: Int): MangaPage = copy.search(query, page)
@@ -61,6 +68,175 @@ class UnifiedMangaRepository(
 
     suspend fun searchSource(sourceId: String, query: String, page: Int = 0): MangaPage =
         if (sourceId == "copy") copy.search(query, page) else adapter(sourceId).search(query, page)
+
+    /** Start independent source discovery; the existing work and readable directory stay visible. */
+    fun discoverSources(work: Manga, aliases: List<String> = emptyList(), force: Boolean = false) {
+        if (work.sourceUrl == dev.mangaflow.storage.DownloadStore.LOCAL_SOURCE_URL || work.title.isBlank()) return
+        val baseline = cachedSourceDetail(work.id) ?: if (work.sourceId == "copy") copy.cachedDetail(work.id) else null
+        val identity = SourceDiscoveryIdentity.signature(work, aliases, baseline)
+        synchronized(discoveries) {
+            // Only the foreground work owns automatic search slots. Already loaded
+            // catalogues and explicit refresh/link jobs have independent lifetimes.
+            discoveries.filterKeys { it != work.id }.toList().forEach { (otherWorkId, run) ->
+                discoveries.remove(otherWorkId)
+                discoveryGenerations[otherWorkId] = (discoveryGenerations[otherWorkId] ?: 0L) + 1L
+                run.job.cancel()
+            }
+            val active = discoveries[work.id]
+            if (active?.job?.isActive == true && active.signature == identity && !force) return
+            val completed = discoveryCompleted[work.id]
+            val elapsed = System.nanoTime() - (completed?.second ?: 0L)
+            if (!force && active == null && completed?.first == identity && elapsed in 0L until DISCOVERY_TTL_NANOS) return
+            active?.job?.cancel()
+            val generation = (discoveryGenerations[work.id] ?: 0L) + 1L
+            discoveryGenerations[work.id] = generation
+            val job = scope.async(start = CoroutineStart.LAZY) {
+                supervisorScope {
+                    sources.filter { it.id != work.sourceId }.map { info ->
+                        async {
+                            publishDiscovery(work.id, generation,
+                                SourceDiscoveryResult(info.id, info.name, SourceDiscoveryStatus.SEARCHING))
+                            try {
+                                slots.withPermit {
+                                    withTimeout(25_000L) { discoverOneSource(work, aliases, baseline, info, generation) }
+                                }
+                            } catch (cancel: CancellationException) {
+                                if (cancel is kotlinx.coroutines.TimeoutCancellationException) {
+                                    publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name,
+                                        SourceDiscoveryStatus.FAILED, retainedSourceCount(work.id, info.id),
+                                        "该来源响应超时，已保留上次可用章节。"))
+                                } else throw cancel
+                            } catch (failure: Exception) {
+                                publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name,
+                                    SourceDiscoveryStatus.FAILED, retainedSourceCount(work.id, info.id),
+                                    failure.message ?: "该来源暂时不可用，已保留上次可用章节。"))
+                            }
+                        }
+                    }.forEach { it.await() }
+                }
+            }
+            discoveries[work.id] = DiscoveryRun(identity, generation, job)
+            job.invokeOnCompletion { failure -> synchronized(discoveries) {
+                if (discoveries[work.id]?.job === job) {
+                    discoveries.remove(work.id)
+                    if (failure == null) discoveryCompleted[work.id] = identity to System.nanoTime()
+                    while (discoveryCompleted.size > 64) discoveryCompleted.remove(discoveryCompleted.keys.first())
+                }
+            } }
+            job.start()
+        }
+    }
+
+    /** Origin/settings changes must not reuse a chapter URL from the previous source session. */
+    fun invalidatePageCache(sourceId: String) = synchronized(pageCache) {
+        pageCacheGenerations[sourceId] = (pageCacheGenerations[sourceId] ?: 0L) + 1L
+        pageCache.keys.removeAll { it.startsWith("@source/$sourceId/") }
+        Unit
+    }
+
+    private fun retainedSourceCount(workId: String, sourceId: String): Int =
+        unified.linkedSources(workId).filter { it.manga.sourceId == sourceId }.sumOf {
+            cachedSourceDetail(it.manga.id)?.chapters?.size ?: 0
+        }
+
+    private suspend fun discoverOneSource(work: Manga, aliases: List<String>, baseline: MangaDetail?,
+        info: BodySourceInfo, generation: Long) {
+        fun report(status: SourceDiscoveryStatus, message: String = "", candidates: List<Manga> = emptyList(), chapters: Int = 0) =
+            publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name, status, chapters, message, candidates))
+        val settings = unified.settings(work.id)
+        if (info.id in settings.excludedSources) {
+            report(SourceDiscoveryStatus.DISABLED, "已由你移除此来源，不会自动重新关联。")
+            return
+        }
+        val linked = settings.links.filter { it.manga.sourceId == info.id }
+        if (linked.isNotEmpty()) {
+            var count = 0
+            linked.forEach { link ->
+                if (cachedSourceDetail(link.manga.id) == null) catalogStore?.read(link.manga.id)?.let {
+                    rememberRaw(it)
+                    _catalogRevision.update { revision -> revision + 1L }
+                }
+                val loaded = detailSource(info.id, link.manga.id)
+                count += loaded.chapters.size
+                _sourceErrors.update { errors ->
+                    errors + (work.id to (errors[work.id].orEmpty() - link.manga.id))
+                }
+                _catalogRevision.update { revision -> revision + 1L }
+            }
+            if (info.id in unified.settings(work.id).excludedSources) report(SourceDiscoveryStatus.DISABLED)
+            else report(SourceDiscoveryStatus.LINKED, chapters = count)
+            return
+        }
+
+        var results: List<Manga> = emptyList()
+        for (query in bodySourceSearchTerms(work.title, aliases)) {
+            currentCoroutineContext().ensureActive()
+            results = searchSource(info.id, query).items.distinctBy(Manga::id)
+            if (results.isNotEmpty()) break
+        }
+        if (results.isEmpty()) {
+            report(SourceDiscoveryStatus.NO_MATCH, "该来源暂未找到这部作品。")
+            return
+        }
+        val exact = results.filter { SourceDiscoveryIdentity.titleMatches(work, it, aliases) }
+        if (exact.isEmpty()) {
+            report(SourceDiscoveryStatus.NEEDS_CONFIRMATION, "搜索到相近作品，完整标题尚未对应。", results.take(6))
+            return
+        }
+        if (exact.size > 4) {
+            report(SourceDiscoveryStatus.NEEDS_CONFIRMATION, "存在多个同名版本，请确认具体作品。", exact.take(6))
+            return
+        }
+        val verified = mutableListOf<MangaDetail>()
+        val candidates = mutableListOf<Manga>()
+        for (candidate in exact.sortedBy(Manga::id)) {
+            val loaded = detailSource(info.id, candidate.id)
+            candidates += loaded.manga
+            if (SourceDiscoveryIdentity.titleMatches(work, loaded.manga, aliases) &&
+                SourceDiscoveryIdentity.authorsMatch(work, loaded.manga) &&
+                SourceDiscoveryIdentity.chapterSystemMatches(baseline, loaded)) verified += loaded
+        }
+        if (verified.size != 1) {
+            report(SourceDiscoveryStatus.NEEDS_CONFIRMATION,
+                if (verified.size > 1) "同名作品存在多个可读版本，请确认来源版本。"
+                else "已找到同名条目，作者或章节体系仍需确认。", candidates.distinctBy(Manga::id).take(6))
+            return
+        }
+        currentCoroutineContext().ensureActive()
+        if (!isCurrentDiscovery(work.id, generation)) return
+        val selected = verified.single()
+        val variant = selected.chapters.firstNotNullOfOrNull { it.variants.firstOrNull() }
+        val added = unified.attachAutomatically(work.id, selected.manga,
+            language = variant?.language ?: info.language, edition = "连载版", sameChapterSystem = true,
+            evidence = "完整标题与作者一致，至少三个正常话号及串行版别对应。")
+        val fresh = unified.settings(work.id)
+        when {
+            info.id in fresh.excludedSources -> report(SourceDiscoveryStatus.DISABLED)
+            added || fresh.links.any { it.manga.sourceId == info.id } -> {
+                report(SourceDiscoveryStatus.LINKED, "已核对作品与章节并合并。",
+                    chapters = if (added) selected.chapters.size else retainedSourceCount(work.id, info.id))
+                _catalogRevision.update { it + 1L }
+            }
+            else -> report(SourceDiscoveryStatus.NEEDS_CONFIRMATION, "来源关联已更改，请重新确认。", listOf(selected.manga))
+        }
+    }
+
+    private fun isCurrentDiscovery(workId: String, generation: Long): Boolean = synchronized(discoveries) {
+        discoveryGenerations[workId] == generation
+    }
+
+    private fun publishDiscovery(workId: String, generation: Long, result: SourceDiscoveryResult) {
+        synchronized(discoveries) {
+            if (discoveryGenerations[workId] != generation) return
+            _sourceDiscovery.update { current ->
+                LinkedHashMap(current).apply {
+                    remove(workId)
+                    put(workId, current[workId].orEmpty() + (result.sourceId to result))
+                    while (size > 64) remove(keys.first())
+                }
+            }
+        }
+    }
 
     /** Native or qualified source IDs are accepted; no inferred title association occurs here. */
     suspend fun detailSource(sourceId: String, mangaId: String): MangaDetail {
@@ -117,6 +293,7 @@ class UnifiedMangaRepository(
         val lock = pageLocks[(key.hashCode() and Int.MAX_VALUE) % pageLocks.size]
         return lock.withLock {
             currentCoroutineContext().ensureActive()
+            val generation = synchronized(pageCache) { pageCacheGenerations[ref.sourceId] ?: 0L }
             if (!forceRefresh) {
                 val now = System.nanoTime()
                 synchronized(pageCache) {
@@ -133,7 +310,8 @@ class UnifiedMangaRepository(
                 val now = System.nanoTime()
                 pageCache.entries.removeAll { now - it.value.storedAtNanos !in 0L until PAGE_CACHE_NANOS }
                 pageCache.remove(key)
-                pageCache[key] = CachedChapterPages(now, loaded)
+                if ((pageCacheGenerations[ref.sourceId] ?: 0L) == generation)
+                    pageCache[key] = CachedChapterPages(now, loaded)
                 while (pageCache.size > 32) pageCache.remove(pageCache.keys.first())
             }
             loaded
@@ -233,5 +411,6 @@ class UnifiedMangaRepository(
 
     private companion object {
         const val PAGE_CACHE_NANOS = 60_000_000_000L
+        const val DISCOVERY_TTL_NANOS = 300_000_000_000L
     }
 }
