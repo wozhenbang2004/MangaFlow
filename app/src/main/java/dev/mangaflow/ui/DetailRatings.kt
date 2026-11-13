@@ -35,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Manga
+import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.MangaMetric
 import dev.mangaflow.data.ReviewProviders
 import dev.mangaflow.ui.motion.MotionBottomSheet
@@ -49,13 +50,18 @@ internal fun observedDetailMetrics(manga: Manga): List<MangaMetric> {
 
 /** One fixed-height band; native scales and algorithms remain in the disclosure. */
 @Composable
-internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean = true, onExpand: () -> Unit) {
+internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean = true, compact: Boolean = false, onExpand: () -> Unit) {
     val metrics = observedDetailMetrics(manga)
     val primary = metrics.firstOrNull { it.sourceId == "mangadex" } ?: metrics.firstOrNull()
     val ordered = listOfNotNull(primary) + metrics.filterNot { it.sourceId == primary?.sourceId }
     val heat = manga.totalPopularity ?: manga.popularity
+    if (heat == null && ordered.isEmpty()) return
+    val markSize = if (compact) 15.dp else 18.dp
+    val innerGap = if (compact) 3.dp else 4.dp
+    val groupGap = if (compact) 8.dp else 10.dp
     val valueStyle = MaterialTheme.typography.labelMedium.copy(
-        fontFamily = FontFamily.SansSerif, fontSize = 14.sp, lineHeight = 20.sp,
+        fontFamily = FontFamily.SansSerif, fontSize = if (compact) 12.sp else 14.sp,
+        lineHeight = if (compact) 18.sp else 20.sp,
         fontWeight = FontWeight.Medium, letterSpacing = 0.sp, fontFeatureSettings = "tnum")
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
@@ -63,15 +69,15 @@ internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean
         detailMetricScore(requireNotNull(metric.score)) +
             if (metric.scoreScale > 0 && metric.scoreScale != 10) "/${metric.scoreScale}" else ""
     }
-    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp)
+    Row(Modifier.fillMaxWidth().heightIn(min = if (compact) 28.dp else 40.dp)
         .clickable(enabled = enabled, role = Role.Button, onClickLabel = "查看各站评分、样本与口径", onClick = onExpand),
         verticalAlignment = Alignment.CenterVertically) {
         BoxWithConstraints(Modifier.weight(1f)) {
             val available = with(density) { maxWidth.toPx() }
             val markAndGap = with(density) {
-                (reviewSourceMarkWidth(18.dp, fontScale).roundToPx() + 4.dp.roundToPx()).toFloat()
+                (reviewSourceMarkWidth(markSize, fontScale).roundToPx() + innerGap.roundToPx()).toFloat()
             }
-            val gap = with(density) { 10.dp.roundToPx().toFloat() }
+            val gap = with(density) { groupGap.roundToPx().toFloat() }
             var used = heat?.let { markAndGap + measurer.measure(detailMetricCount(it), valueStyle,
                 maxLines = 1).size.width } ?: 0f
             var count = 0
@@ -82,25 +88,25 @@ internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean
                 used = next
                 count++
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp),
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(groupGap),
                 verticalAlignment = Alignment.CenterVertically) {
                 heat?.let {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(innerGap),
                         modifier = Modifier.weight(1f, fill = false).semantics(mergeDescendants = true) {
                             contentDescription = "热度 $it"
                         }) {
-                        ReviewSourceMark("copy", size = 18.dp, onDark = foreground.luminance() > .5f, heat = true)
+                        ReviewSourceMark("copy", size = markSize, onDark = foreground.luminance() > .5f, heat = true)
                         Text(detailMetricCount(it), color = foreground.copy(alpha = .86f), style = valueStyle,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     }
                 }
                 ordered.take(count).forEachIndexed { index, metric ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically,
+                    Row(horizontalArrangement = Arrangement.spacedBy(innerGap), verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.semantics(mergeDescendants = true) {
                             contentDescription = "${metric.name} ${detailMetricScore(requireNotNull(metric.score))}" +
                                 (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "") + "，${metric.scoreLabel}"
                         }) {
-                        ReviewSourceMark(metric.sourceId, size = 18.dp, onDark = foreground.luminance() > .5f)
+                        ReviewSourceMark(metric.sourceId, size = markSize, onDark = foreground.luminance() > .5f)
                         Text(values[index], color = foreground, style = valueStyle, maxLines = 1, softWrap = false)
                     }
                 }
@@ -114,13 +120,14 @@ internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean
 }
 
 @Composable
-internal fun DetailRatingSheet(manga: Manga, onDismiss: () -> Unit) {
+internal fun DetailRatingSheet(manga: Manga, backdrop: HazeState? = null, onDismiss: () -> Unit) {
     val allMetrics = observedMangaMetrics(manga, requestDelay = 0L)
     val metrics = allMetrics.filter { it.score?.let { score -> score.isFinite() && score > 0 } == true }
         .sortedBy { ReviewProviders.order(it.sourceId) }
     val heat = if (manga.rank != null) manga.popularity else manga.totalPopularity ?:
         allMetrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: manga.popularity
     MotionBottomSheet(onDismissRequest = onDismiss,
+        backdrop = backdrop,
         containerColor = MaterialTheme.colorScheme.surface, contentColor = DetailForeground) { _ ->
         Column(Modifier.fillMaxWidth().heightIn(max = 540.dp).verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {

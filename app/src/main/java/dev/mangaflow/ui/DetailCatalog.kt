@@ -3,7 +3,6 @@ package dev.mangaflow.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
@@ -37,7 +36,6 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.DownloadDone
 import androidx.compose.material.icons.outlined.Info
@@ -65,9 +63,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -81,6 +77,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.Chapter
+import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Page
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
@@ -123,6 +120,7 @@ internal fun DetailCatalog(
     volumeImageHeaders: (Chapter) -> Map<String, String>,
     bottomPadding: Dp = 16.dp,
     downloadMode: Boolean,
+    backdrop: HazeState,
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
     var chosenGroup by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
@@ -220,8 +218,8 @@ internal fun DetailCatalog(
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val chapterWidth = (maxWidth - 32.dp).coerceAtLeast(0.dp)
                     val chapterColumns = when {
-                        chapterWidth >= (72f * fontScale * 4f).dp + 15.dp -> 4
-                        chapterWidth >= (72f * fontScale * 3f).dp + 10.dp -> 3
+                        chapterWidth >= (72f * fontScale * 4f).dp + 18.dp -> 4
+                        chapterWidth >= (72f * fontScale * 3f).dp + 12.dp -> 3
                         else -> 2
                     }
                     LazyVerticalGrid(
@@ -230,7 +228,7 @@ internal fun DetailCatalog(
                         state = grid, userScrollEnabled = paneActive,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
-                        horizontalArrangement = Arrangement.spacedBy(if (volumesOnly) 12.dp else 5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (volumesOnly) 12.dp else 6.dp),
                         // Each 42dp visual cell owns a separate 48dp hit row; its 3dp
                         // top/bottom insets provide the 6dp visible vertical gap.
                         verticalArrangement = Arrangement.spacedBy(if (volumesOnly) 14.dp else 0.dp),
@@ -311,6 +309,7 @@ internal fun DetailCatalog(
     shownError?.let { message ->
         MotionBottomSheet(
             onDismissRequest = { shownError = null },
+            backdrop = backdrop,
             containerColor = DetailSurface, contentColor = DetailForeground,
         ) { dismiss ->
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
@@ -328,6 +327,7 @@ internal fun DetailCatalog(
         val entry = downloaded[chapter.id]
         MotionBottomSheet(
             onDismissRequest = { selectedChapterId = null; closingChapter = null },
+            backdrop = backdrop,
             containerColor = DetailSurface, contentColor = DetailForeground,
         ) { dismiss ->
             val dismissActions = {
@@ -434,14 +434,8 @@ private fun ChapterTile(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val enabled = !downloadMode || canDownload(entry)
-    val fraction = detailReadingFraction(progress)
-    val complete = fraction == 1f
-    val readingLine by animateFloatAsState(
-        targetValue = fraction?.takeIf { it < 1f } ?: 0f,
-        animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
-        label = "chapter-reading-line",
-    )
-    val readingColor = MaterialTheme.colorScheme.primary.copy(alpha = .65f)
+    val complete = detailReadingFraction(progress) == 1f
+    val readingColor = MaterialTheme.colorScheme.primary
     val hasDownloadMark = downloadMode || entry != null
     Box(
         Modifier.fillMaxWidth().height((height + 6.dp).coerceAtLeast(48.dp))
@@ -462,28 +456,22 @@ private fun ChapterTile(
         Box(Modifier.fillMaxSize().padding(vertical = 3.dp)
             .motionPress(interaction, enabled = enabled, pressedScale = .98f)
             .clip(RoundedCornerShape(10.dp))
-            .background(DetailForeground.copy(alpha = when {
-                current -> .08f
-                complete -> .018f
-                else -> .03f
-            }))) {
+            .background(if (current) readingColor.copy(alpha = .075f) else Color.Transparent)) {
             Text(
-                chapter.title, color = if (current) DetailForeground else if (enabled) DetailSecondary else DetailMuted,
+                chapter.title, color = when {
+                    current -> readingColor
+                    !enabled -> DetailMuted.copy(alpha = .45f)
+                    complete -> DetailSecondary.copy(alpha = .65f)
+                    else -> DetailForeground.copy(alpha = .82f)
+                },
                 fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
                 modifier = Modifier.align(Alignment.Center).fillMaxWidth()
                     .padding(start = 7.dp, end = 19.dp),
             )
-            Canvas(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp)
-                .padding(horizontal = 7.dp)) {
-                if (readingLine > 0f) drawLine(readingColor,
-                    Offset(0f, size.height / 2f), Offset(size.width * readingLine, size.height / 2f),
-                    strokeWidth = size.height, cap = StrokeCap.Round)
-            }
-            MotionSwap(complete, Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 4.dp).size(12.dp)) { read ->
-                if (read) Icon(Icons.Outlined.Check, null, tint = readingColor, modifier = Modifier.size(12.dp))
-            }
+            ChapterReadMark(progress, progressKnown,
+                Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 4.dp).size(12.dp))
             if (hasDownloadMark) Box(Modifier.align(Alignment.BottomEnd).padding(bottom = 4.dp, end = 4.dp)) {
                 ChapterDownloadMark(entry, downloadMode, size = 12.dp)
             }

@@ -72,6 +72,9 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.ui.GlassSurfaceRole
+import dev.mangaflow.ui.LiquidGlassSurface
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -298,6 +301,7 @@ internal fun MotionBottomSheet(
     modifier: Modifier = Modifier,
     containerColor: Color = MaterialTheme.colorScheme.surface,
     contentColor: Color = contentColorFor(containerColor),
+    backdrop: HazeState? = null,
     content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -316,16 +320,28 @@ internal fun MotionBottomSheet(
         }
     }
     ModalBottomSheet(onDismissRequest = { onDismiss() }, sheetState = sheet, modifier = modifier,
-        containerColor = containerColor, contentColor = contentColor, tonalElevation = 0.dp,
+        containerColor = if (backdrop != null) Color.Transparent else containerColor,
+        contentColor = contentColor, tonalElevation = 0.dp,
         dragHandle = {
-            Box(Modifier.fillMaxWidth().height(26.dp), contentAlignment = Alignment.Center) {
-                Box(Modifier.size(width = 32.dp, height = 4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(contentColor.copy(alpha = .42f)))
-            }
+            if (backdrop == null) MotionSheetHandle(contentColor)
         },
     ) {
-        Column(Modifier.fillMaxWidth().motionInputGate(!closing)) { content(dismiss) }
+        if (backdrop != null) LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(),
+            cornerRadius = 0.dp, role = GlassSurfaceRole.PANEL, surfaceColor = containerColor,
+            elevation = 0.dp, softCard = true) {
+            Column(Modifier.fillMaxWidth().motionInputGate(!closing)) {
+                MotionSheetHandle(contentColor)
+                content(dismiss)
+            }
+        } else Column(Modifier.fillMaxWidth().motionInputGate(!closing)) { content(dismiss) }
+    }
+}
+
+@Composable
+private fun MotionSheetHandle(color: Color) {
+    Box(Modifier.fillMaxWidth().height(26.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(width = 32.dp, height = 4.dp).clip(RoundedCornerShape(2.dp))
+            .background(color.copy(alpha = .42f)))
     }
 }
 
