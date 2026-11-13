@@ -80,7 +80,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.DownloadEntry
@@ -246,7 +246,7 @@ fun DownloadsScreen(
 
     Box(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
         // The captured scene contains the wallpaper and scrolling list, never the header itself.
-        Box(Modifier.fillMaxSize().hazeSource(backdrop).background(MaterialTheme.colorScheme.background)) {
+        Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).background(MaterialTheme.colorScheme.background)) {
             wallpaper()
             // The filter owns the transition; progress updates keep the existing list in place.
             MotionTabContent(filter.ordinal, Modifier.fillMaxSize()) { index ->

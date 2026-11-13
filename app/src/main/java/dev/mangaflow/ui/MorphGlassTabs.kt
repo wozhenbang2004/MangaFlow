@@ -144,7 +144,7 @@ internal fun BoxScope.MorphGlassTabSelector(
         modifier = Modifier.align(Alignment.TopStart).zIndex(41f)
             .padding(start = 62.dp, top = 2.dp).width(width).height(height),
         cornerRadius = 22.dp - 4.dp * progress, role = GlassSurfaceRole.NAVIGATION,
-        interactionSource = interaction, materialReferenceSize = 44.dp, trackPointer = false, materialExpansion = { progress }) {
+        interactionSource = interaction, trackPointer = false, materialExpansion = { progress }) {
         // Lay out menu labels once at their final size; only the surface clips/reveals them.
         if (present) Column(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true)
             .size(width = extendedWidth, height = extendedHeight).graphicsLayer {

@@ -94,7 +94,7 @@ import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import java.time.LocalDate
 import java.util.Locale
@@ -191,7 +191,7 @@ internal fun CommunityPanel(
     val resetPosition = { scope.launch { listState.scrollToItem(0) }; Unit }
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().then(if (captureBackdrop && (filterOpen || filterPresent) && active)
-            Modifier.hazeSource(backdrop) else Modifier)) {
+            Modifier.mangaHazeSource(backdrop) else Modifier)) {
             LazyColumn(state = listState, userScrollEnabled = active, modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomPadding)) {
                 items(clusters, key = { it.key }) { cluster ->

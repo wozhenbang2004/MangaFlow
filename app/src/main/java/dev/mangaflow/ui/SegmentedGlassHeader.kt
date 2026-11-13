@@ -26,7 +26,7 @@ internal val HeaderContentGap = 2.dp
 @Composable
 private fun HeaderNavigationGlass(backdrop: HazeState, navigation: @Composable () -> Unit) {
     LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
-        role = GlassSurfaceRole.NAVIGATION, materialReferenceSize = 44.dp,
+        role = GlassSurfaceRole.NAVIGATION,
         trackPointer = true) { navigation() }
 }
 

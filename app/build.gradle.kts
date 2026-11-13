@@ -1,12 +1,12 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "dev.mangaflow"
-    compileSdk = 35
+    compileSdk = 37
+    buildToolsVersion = "36.0.0"
     defaultConfig {
         applicationId = "dev.mangaflow"
         minSdk = 26
@@ -25,7 +25,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true; buildConfig = true }
     lint { checkReleaseBuilds = false }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
@@ -39,7 +38,7 @@ tasks.configureEach {
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2025.05.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
@@ -55,7 +54,12 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.2.0")
     implementation("me.saket.telephoto:zoomable-image-coil3:0.16.0")
     implementation("me.saket.telephoto:sub-sampling-image:0.16.0")
-    implementation("dev.chrisbanes.haze:haze:1.6.0")
+    implementation("dev.chrisbanes.haze:haze:2.1.0")
+    implementation("dev.chrisbanes.haze:haze-blur:2.1.0")
+    implementation("dev.chrisbanes.haze:haze-blur-material3:2.1.0")
+    implementation("dev.chrisbanes.haze:haze-materials:2.1.0")
+    implementation("dev.chrisbanes.haze:haze-glass:2.1.0")
+    implementation("dev.chrisbanes.haze:haze-glass-material3:2.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jsoup:jsoup:1.18.3")
 }

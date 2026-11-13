@@ -32,8 +32,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             MangaFlowTheme {
                 MangaMotionProvider {
-                    AppLaunchReveal(play = animateLaunch) {
-                        MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
+                    dev.mangaflow.ui.glass.HazeProviders {
+                        AppLaunchReveal(play = animateLaunch) {
+                            MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
+                        }
                     }
                 }
             }

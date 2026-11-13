@@ -119,7 +119,7 @@ internal fun DetailReadingDock(
             }.motionPress(interaction, enabled = canRead, pressedScale = .985f),
         cornerRadius = 24.dp, role = GlassSurfaceRole.READING_DOCK,
         interactionSource = interaction, trackPointer = true,
-        materialReferenceSize = 60.dp, elevation = 8.dp, softCard = true) {
+        elevation = 8.dp, softCard = true) {
         Row(Modifier.fillMaxWidth().heightIn(min = minimumHeight).padding(horizontal = 14.dp, vertical = 6.dp)
             .semantics(mergeDescendants = true) {
                 contentDescription = listOf(actionTitle, chapterTitle, subtitle).filter(String::isNotBlank).joinToString("，")

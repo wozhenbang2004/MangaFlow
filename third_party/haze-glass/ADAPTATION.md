@@ -1,5 +1,24 @@
 # Haze Glass optical adaptation
 
+## Current: full official 2.1.0 runtime
+
+HAZE-21-01 supersedes the copied-source implementation below. The application now
+depends on the official 2.1.0 core, Blur, Glass, Material3 adapters and material
+presets. `hazeGlass` and `hazeGlassContainer` own the complete rendering, semantic
+blur/depth, refracted detail, native member field/transitions, interaction and
+fallback runtime. Haze owns typed input selection/retention, sharing, caches and
+native-window eligibility. Source reference remains the 2.1.0 tag/commit below.
+
+The app's former HazeGlassOptics, HazeGlassShaders, GlassMaterial, GlassMemberShape
+and GlassInteractionLight source files have been removed. Role/style/layout,
+application interaction-source glue and the separately licensed Backdrop soft
+shadow remain. See DESIGN.md HAZE-21-01 for the active integration and platform
+conditions. Older code maps below are historical and must not be restored as the
+current renderer. Native Android window backdrop requires Android 37.2+; other
+supported devices use the official portable source renderer, not the old adapter.
+
+## Historical copied-source implementation (removed)
+
 Upstream: chrisbanes/haze, Haze Glass 2.1.0, fixed commit
 `ca21ff2060e52e1882afdb94f9b055f7fc834bd9`, Apache-2.0.
 

@@ -107,7 +107,7 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import coil3.request.allowHardware
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
@@ -305,7 +305,7 @@ fun DetailScreen(
             }
         }
         // Capture wallpaper, artwork and foreground as one scene for the floating dock.
-        Box(Modifier.fillMaxSize().hazeSource(readingBackdrop).background(DetailBackground)) {
+        Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(DetailBackground)) {
             wallpaper()
             // Sakurairo's fixed-background relationship: only the foreground moves.
             // Keep this image's bounds independent of heightOffset to avoid recropping each frame.
@@ -314,7 +314,7 @@ fun DetailScreen(
                     .graphicsLayer {
                         alpha = if (collapsedHero) 0f else 1f - ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
                     }
-                    .hazeSource(artworkBackdrop).background(DetailSurface),
+                    .mangaHazeSource(artworkBackdrop).background(DetailSurface),
                 contentAlignment = Alignment.TopCenter,
             ) {
                 Icon(Icons.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
@@ -534,7 +534,7 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
                     compositingStrategy = CompositingStrategy.ModulateAlpha
                 }, cornerRadius = 20.dp, elevation = 0.dp, role = GlassSurfaceRole.ARTWORK,
                 interactionSource = interaction, trackPointer = true, surfaceColor = glassTone,
-                materialReferenceSize = 40.dp, softCard = false) {}
+                softCard = false) {}
             MotionSwap(icon, Modifier.size(21.dp)) { shown ->
                 Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp))
             }

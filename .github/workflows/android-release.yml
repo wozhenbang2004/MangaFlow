@@ -84,7 +84,7 @@ jobs:
           set +o pipefail
           yes | "$SDKMANAGER" --licenses > /dev/null
           set -o pipefail
-          "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0'
+          "$SDKMANAGER" 'platforms;android-37' 'build-tools;36.0.0'
 
       - name: Assemble release APK
         if: env.RELEASE_ALREADY_PUBLISHED != 'true'
@@ -115,9 +115,9 @@ jobs:
           PY
           unset MANGAFLOW_SIGNING_KEYSTORE_B64
           mkdir -p dist
-          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -P 16 -f 4 \
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -P 16 -f 4 \
             app/build/outputs/apk/release/app-release-unsigned.apk "$SIGN_DIR/aligned.apk"
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
             --ks "$SIGN_DIR/mangaflow.p12" --ks-type PKCS12 --ks-key-alias mangaflow \
             --ks-pass env:MANGAFLOW_SIGNING_PASSWORD --key-pass env:MANGAFLOW_SIGNING_PASSWORD \
             --v4-signing-enabled false \

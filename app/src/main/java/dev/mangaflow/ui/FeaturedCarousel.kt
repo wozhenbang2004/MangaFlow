@@ -52,7 +52,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
@@ -93,8 +92,11 @@ import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
 import coil3.request.crossfade
-import dev.chrisbanes.haze.hazeSource
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import dev.chrisbanes.haze.HazeInput
+import dev.chrisbanes.haze.blur.HazeBlurStyle
+import dev.chrisbanes.haze.blur.hazeBlur
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -266,6 +268,15 @@ private fun FeaturedManga(
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
     val heroBackdrop = rememberHazeState()
+    val atmosphereBlur = remember {
+        HazeBlurStyle {
+            blurRadius(28.dp)
+            backgroundColor(Color.Transparent)
+            colorEffects(emptyList())
+            noiseFactor(0f)
+            blurredEdgeTreatment(BlurredEdgeTreatment.Unbounded)
+        }
+    }
     var decoded by remember(manga.coverUrl) { mutableStateOf<Bitmap?>(null) }
     val latestOnColor by rememberUpdatedState(onColor)
     LaunchedEffect(manga.coverUrl, decoded) {
@@ -302,13 +313,13 @@ private fun FeaturedManga(
             onOpen(manga)
         }.semantics(mergeDescendants = true) { contentDescription = manga.title }
         .motionPress(interaction, pressedScale = .985f)) {
-        Box(Modifier.matchParentSize().hazeSource(heroBackdrop).drawBehind { drawRect(atmosphere.value) }) {
+        Box(Modifier.matchParentSize().mangaHazeSource(heroBackdrop).drawBehind { drawRect(atmosphere.value) }) {
             Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize().graphicsLayer {
                     scaleX = 1.16f; scaleY = 1.16f
                     translationX = offset() * 10.dp.toPx()
                     alpha = if (Build.VERSION.SDK_INT >= 31) .72f else .16f
-                }.blur(28.dp, edgeTreatment = BlurredEdgeTreatment.Unbounded))
+                }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur))
             Box(Modifier.matchParentSize().drawBehind {
                 drawRect(Brush.verticalGradient(0f to atmosphere.value.copy(alpha = .05f),
                     .55f to Color.Transparent, 1f to surface.copy(alpha = .62f)))

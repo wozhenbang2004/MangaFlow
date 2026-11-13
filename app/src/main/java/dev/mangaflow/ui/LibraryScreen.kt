@@ -99,7 +99,7 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
+import dev.mangaflow.ui.glass.mangaHazeSource
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -205,7 +205,7 @@ fun LibraryScreen(
         ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
     }
     Box(Modifier.fillMaxSize()) {
-    Box(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(backdrop)
+    Box(Modifier.fillMaxSize().navigationBarsPadding().mangaHazeSource(backdrop)
         .background(MaterialTheme.colorScheme.background)) {
         wallpaper()
         Column(Modifier.fillMaxSize()) {

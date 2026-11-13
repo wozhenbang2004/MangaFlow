@@ -118,7 +118,7 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.update.UpdatePhase
-import dev.chrisbanes.haze.hazeSource
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.launch
 
@@ -166,7 +166,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val drawerBackdrop = rememberHazeState()
-    val glassLight = remember { dev.mangaflow.ui.glass.GlassInteractionLight() }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val savedState = rememberSaveableStateHolder()
@@ -279,7 +278,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val routeTravel = with(density) { 24.dp.roundToPx() }
     CompositionLocalProvider(
         LocalMangaMetrics provides metricState,
-        dev.mangaflow.ui.glass.LocalGlassInteractionLight provides glassLight,
         LocalWallpaperActive provides (frame is Frame.Root && wallpaper.mediaPath != null),
     ) {
     ModalNavigationDrawer(
@@ -343,7 +341,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         Scaffold(
             modifier = Modifier
                 // Capture only while opening, visible or closing; ordinary browsing pays no drawer capture cost.
-                .then(if (frame is Frame.Root && drawerVisible) Modifier.hazeSource(drawerBackdrop) else Modifier)
+                .then(if (frame is Frame.Root && drawerVisible) Modifier.mangaHazeSource(drawerBackdrop) else Modifier)
                 .graphicsLayer {
                 // Vaul's backdrop relationship follows the actual drag, without a second spring.
                 val offset = drawer.currentOffset
@@ -527,7 +525,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             }
                             val rootCapturesBackground = current.section in setOf(Section.ACCOUNT, Section.SETTINGS)
                             Box(Modifier.fillMaxSize().then(if (rootCapturesBackground)
-                                Modifier.hazeSource(searchBackdrop).background(MaterialTheme.colorScheme.background)
+                                Modifier.mangaHazeSource(searchBackdrop).background(MaterialTheme.colorScheme.background)
                                 else Modifier)) {
                                 // The full backdrop includes the pixels beneath the menu button.
                                 // Content clearance belongs to the foreground, outside this capture's bounds.

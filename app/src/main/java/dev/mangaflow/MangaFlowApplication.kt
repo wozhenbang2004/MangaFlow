@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit
 class MangaFlowApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        dev.mangaflow.ui.glass.MangaHazeRuntime.initialize(this)
         SingletonImageLoader.setSafe { context ->
             ImageLoader.Builder(context)
                 .components {

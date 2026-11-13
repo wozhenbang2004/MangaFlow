@@ -120,7 +120,7 @@ import dev.mangaflow.ui.motion.rememberBottomPullLoadState
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
-import dev.chrisbanes.haze.hazeSource
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.HazeState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -167,7 +167,7 @@ fun DiscoverScreen(
     SideEffect { if (!holdingContent) retainedBrowse = browse }
     val retainedAlpha = animateFloatAsState(if (holdingContent) .48f else 1f,
         if (motion) tween(MangaMotion.Content) else snap(), label = "browse-pending-content")
-    Box(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(searchBackdrop)
+    Box(Modifier.fillMaxSize().navigationBarsPadding().mangaHazeSource(searchBackdrop)
         .background(MaterialTheme.colorScheme.background)
         .motionInputGate(active && !searchExpanded)) {
         // Wallpaper and scroll content are one captured scene. The header remains a foreground sibling.

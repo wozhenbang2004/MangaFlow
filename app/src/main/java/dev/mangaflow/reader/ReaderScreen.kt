@@ -146,7 +146,7 @@ import coil3.request.SuccessResult
 import coil3.request.crossfade
 import coil3.size.Scale
 import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
+import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.CopyCommunityRepository
@@ -463,7 +463,7 @@ fun ReaderScreen(
 
     Box(Modifier.fillMaxSize()) {
         // Sample the existing artwork and dim layer; controls stay outside their own backdrop.
-        Box(Modifier.fillMaxSize().hazeSource(readerBackdrop).background(background)) {
+        Box(Modifier.fillMaxSize().mangaHazeSource(readerBackdrop).background(background)) {
             when {
                 loading -> if (delayedLoading) Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(Modifier.size(28.dp), color = preferences.theme.foreground(), strokeWidth = 2.dp)

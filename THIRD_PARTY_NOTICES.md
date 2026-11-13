@@ -282,33 +282,30 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Haze Glass optical material
+## Haze 2.1 runtime
 
-The shared optical material adapts Haze Glass 2.1.0, fixed commit
-`ca21ff2060e52e1882afdb94f9b055f7fc834bd9`:
-`https://github.com/chrisbanes/haze/tree/ca21ff2060e52e1882afdb94f9b055f7fc834bd9`.
+MangaFlow uses the complete official Haze 2.1.0 runtime from Maven Central:
+core, Blur, Glass, both Material3 adapters and the material-preset module.
+Upstream: `https://github.com/chrisbanes/haze/tree/2.1.0`, source commit
+`ca21ff2060e52e1882afdb94f9b055f7fc834bd9`.
 
-Copyright 2025, Christopher Banes and the Haze project contributors.
-Licensed under Apache-2.0; the complete upstream license is bundled as
+Christopher Banes and the Haze project contributors, Apache-2.0.
+The complete license remains bundled as
 `app/src/main/assets/licenses/Haze-APACHE-2.0.txt`.
 
-`ui/glass/HazeGlassShaders.kt` adapts the actual `GlassShaders.kt` edge refraction,
-SDF/surface normals, Fresnel response, gamut-bounded colour grading, localized
-interaction light and rim. `GlassMaterial.kt` adapts Regular/Clear values from
-`GlassOptics.kt`, `GlassDefaults.kt` and `GlassStyle.kt`.
-`HazeGlassOptics.kt` adapts the alpha-only sharp/blur depth composition in
-`GlassRenderEffectFactory.android.kt`; Android's native blur substitutes for
-Haze 2.1's semantic blur. The existing Haze 1.6 transport captures a padded sharp
-backdrop, with content labels/icons kept separate. Source map and exact differences:
-`third_party/haze-glass/ADAPTATION.md`.
+The official library owns source transport, typed inputs/retention/sharing,
+semantic blur and progressive effects, full Glass optics, detail/rim stages,
+container fields and member transitions, interaction, accessibility, fidelity,
+native-window eligibility and supported-platform fallback. Application wrappers
+provide role/style/layout and interaction-source policies. The copied 1.6-backed
+optical renderer and limited two-member field have been removed; the former
+adaptation record is historical at `third_party/haze-glass/ADAPTATION.md`.
+The separately attributed soft-shadow adaptation below remains.
 
-This replaces the former Backdrop edge-only optical adaptation. It is not the
-full Haze 2.1 framework or Apple's renderer. The current adaptation also takes
-the upstream merged-field smooth minimum for the discovery browse/actions pair;
-it does not include arbitrary-member registration/ghost transitions or a separate
-sharp edge-detail overlay. Rim and environment shading share one optical stage,
-with per-surface shader uniforms and finite nearby interaction light. Compilation and source reuse do not
-establish device visual equivalence, performance or user acceptance.
+This is Haze's renderer, not Apple's renderer. Native window-backdrop eligibility
+requires a supported Android 37.2+ hardware window; other supported devices use
+Haze's official source renderer. Source integration and CI are separate from
+measured device appearance/performance and user acceptance.
 
 ## Backdrop soft shadows
 

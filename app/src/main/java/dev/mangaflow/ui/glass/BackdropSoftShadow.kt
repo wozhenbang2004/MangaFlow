@@ -66,15 +66,13 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
     private var cachedFontScale = 0f
     private var cachedDirection = LayoutDirection.Ltr
     private var maskScale = 1f
-    private var cachedMembers: GlassMembers? = null
 
     override fun ContentDrawScope.draw() {
         if (size.width <= 0f || size.height <= 0f) return drawContent()
         val radius = spec.radius.toPx()
         val offsetY = spec.offsetY.toPx()
-        val members = (spec.shape as? GlassMemberShape)?.members
         if (mask == null || cachedSpec?.shape != spec.shape || cachedSpec?.radius != spec.radius ||
-            cachedSpec?.offsetY != spec.offsetY || cachedMembers != members || cachedSize != size || cachedDensity != density ||
+            cachedSpec?.offsetY != spec.offsetY || cachedSize != size || cachedDensity != density ||
             cachedFontScale != fontScale || cachedDirection != layoutDirection) {
             val fullWidth = size.width + radius * 4f
             val fullHeight = size.height + radius * 4f + offsetY
@@ -98,7 +96,6 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
             canvas.drawOutline(outline, ShadowMaskPaint)
             mask = image
             cachedSpec = spec
-            cachedMembers = members
             cachedSize = size
             cachedDensity = density
             cachedFontScale = fontScale
