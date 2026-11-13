@@ -26,6 +26,7 @@ import dev.mangaflow.ui.AppLaunchReveal
 import dev.mangaflow.ui.MangaAdaptiveLayout
 import dev.mangaflow.ui.MangaFlowApp
 import dev.mangaflow.ui.MangaFlowTheme
+import dev.mangaflow.ui.ScreenFitProvider
 import dev.mangaflow.ui.glass.HazeProviders
 import dev.mangaflow.ui.glass.MangaHazeRuntime
 import dev.mangaflow.ui.motion.MangaMotionProvider
@@ -80,8 +81,10 @@ fun MangaFlowHost(
             MangaMotionProvider {
                 HazeProviders {
                     MangaAdaptiveLayout {
-                        AppLaunchReveal(play = animateLaunch) {
-                            MangaFlowApp(openUpdatesRequest, openDownloadsRequest, onRequestNotifications, model)
+                        ScreenFitProvider {
+                            AppLaunchReveal(play = animateLaunch) {
+                                MangaFlowApp(openUpdatesRequest, openDownloadsRequest, onRequestNotifications, model)
+                            }
                         }
                     }
                 }

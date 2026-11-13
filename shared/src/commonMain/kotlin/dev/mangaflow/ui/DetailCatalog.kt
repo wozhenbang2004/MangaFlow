@@ -139,7 +139,7 @@ internal fun DetailCatalog(
     onScrollTarget: (LazyGridState) -> Unit,
     onRetry: () -> Unit,
     onRead: (Chapter) -> Unit,
-    onDownload: (Chapter) -> Unit,
+    onDownload: (Chapter, Rect?) -> Unit,
     loadVolumeCover: suspend (Chapter, Boolean) -> Page,
     volumeImageHeaders: (Chapter) -> Map<String, String>,
     bottomPadding: Dp = 16.dp,
@@ -154,6 +154,7 @@ internal fun DetailCatalog(
     sourceLoading: Boolean = false,
     sourceError: String? = null,
     sourcesChecking: Boolean = false,
+    pendingSourceCount: Int = 0,
     onCancelSourceSelection: () -> Unit = {},
 ) {
     val groups = remember(chapters) { chapters.groupingBy(Chapter::group).eachCount() }
@@ -164,6 +165,7 @@ internal fun DetailCatalog(
     val group = chosenGroup?.takeIf { groups.isEmpty() || it in groups }
     var shownError by remember { mutableStateOf<String?>(null) }
     var selectedChapterId by rememberSaveable(mangaId) { mutableStateOf<String?>(null) }
+    var selectedChapterAnchor by remember(mangaId) { mutableStateOf<Rect?>(null) }
     var closingChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
     var pendingSourceChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
     var sourceChapter by remember(mangaId) { mutableStateOf<Chapter?>(null) }
@@ -221,7 +223,11 @@ internal fun DetailCatalog(
                     MotionBusyIndicator(Modifier.size(11.dp), color = DetailMuted, strokeWidth = 1.2.dp)
                     Spacer(Modifier.width(6.dp))
                 }
-                Text(if (sourceCount > 1) "$sourceCount 源" else sourceDisplayName(primarySourceId),
+                if (pendingSourceCount > 0) {
+                    Icon(Icons.Outlined.Info, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(4.dp))
+                    Text("待确认 $pendingSourceCount", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+                } else Text(if (sourceCount > 1) "$sourceCount 源" else sourceDisplayName(primarySourceId),
                     color = DetailMuted, fontSize = 11.sp)
                 Icon(Icons.Outlined.ExpandMore, "查看自动合并的漫画来源", Modifier.size(17.dp), tint = DetailSecondary)
             }
@@ -309,6 +315,12 @@ internal fun DetailCatalog(
                                 span = { GridItemSpan(maxLineSpan) }, contentType = "run-break") { Spacer(Modifier.height(4.dp)) }
                             items(run, key = { it.logicalId.ifBlank { it.id } },
                                 contentType = { if (isVolumeChapter(it)) "volume" else "chapter" }) { chapter ->
+                                var downloadAnchor by remember(chapter.logicalId, chapter.id) { mutableStateOf<Rect?>(null) }
+                                val downloadAnchorModifier = Modifier.onGloballyPositioned { coordinates ->
+                                    val origin = coordinates.localToScreen(Offset.Zero)
+                                    if (origin.isSpecified) downloadAnchor = Rect(origin, androidx.compose.ui.geometry.Size(
+                                        coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
+                                }
                                 val showSources = chapter.variants.size > 1 ||
                                     (chapter.variants.isNotEmpty() && chapter.sourceId != primarySourceId)
                                 if (isVolumeChapter(chapter)) {
@@ -343,7 +355,7 @@ internal fun DetailCatalog(
                                                 volumeCovers[chapter.id] = VolumeCoverState(attempt = pending.attempt, automaticRetries = pending.automaticRetries)
                                         }
                                     }
-                                    Column(Modifier.padding(bottom = 6.dp)) {
+                                    Column(downloadAnchorModifier.padding(bottom = 6.dp)) {
                                         VolumeBookTile(
                                             mangaId = mangaId, chapter = chapter, cover = cover,
                                             imageHeaders = { volumeImageHeaders(chapter) },
@@ -354,8 +366,8 @@ internal fun DetailCatalog(
                                             downloadMode = downloadMode,
                                             // One offline variant cannot disable choosing another source.
                                             enabled = true,
-                                            onRead = { onRead(chapter) }, onDownload = { onDownload(chapter) },
-                                            onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id } },
+                                            onRead = { onRead(chapter) }, onDownload = { onDownload(chapter, downloadAnchor) },
+                                            onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor },
                                             onCoverError = {
                                                 if (paneActive && volumeCovers[chapter.id] === cover)
                                                     volumeCovers[chapter.id] = cover.copy(error = "封面图片暂不可用")
@@ -368,7 +380,7 @@ internal fun DetailCatalog(
                                             chapter, Modifier.fillMaxWidth(),
                                             enabled = !sourceLoading,
                                             onOpen = { anchor ->
-                                                if (downloadMode) onDownload(chapter) else {
+                                                if (downloadMode) onDownload(chapter, anchor) else {
                                                     sourceCloseRequested = false
                                                     sourceChapter = chapter; sourceAnchor = anchor
                                                 }
@@ -385,9 +397,10 @@ internal fun DetailCatalog(
                                     height = tileHeight,
                                     showSources = showSources,
                                     sourceEnabled = !sourceLoading,
+                                    modifier = downloadAnchorModifier,
                                     onRead = { onRead(chapter) },
-                                    onDownload = { onDownload(chapter) },
-                                    onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id } },
+                                    onDownload = { onDownload(chapter, downloadAnchor) },
+                                    onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor },
                                     onSources = { anchor ->
                                         sourceCloseRequested = false
                                         sourceChapter = chapter; sourceAnchor = anchor
@@ -471,7 +484,7 @@ internal fun DetailCatalog(
                 }, modifier = Modifier.fillMaxWidth()) {
                     Text("选择本章来源", color = DetailForeground)
                 }
-                TextButton(onClick = { dismissActions(); onDownload(chapter) },
+                TextButton(onClick = { dismissActions(); onDownload(chapter, selectedChapterAnchor) },
                     modifier = Modifier.fillMaxWidth()) {
                     Text("选择来源下载", color = DetailForeground)
                 }
@@ -557,6 +570,7 @@ private fun ChapterTile(
     height: Dp,
     showSources: Boolean,
     sourceEnabled: Boolean,
+    modifier: Modifier = Modifier,
     onRead: () -> Unit,
     onDownload: () -> Unit,
     onActions: () -> Unit,
@@ -569,7 +583,7 @@ private fun ChapterTile(
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val markSize = 10.dp * fontScale
     Box(
-        Modifier.fillMaxWidth().height(height.coerceAtLeast(48.dp))
+        modifier.fillMaxWidth().height(height.coerceAtLeast(48.dp))
             .combinedClickable(
                 interactionSource = interaction, indication = null,
                 role = Role.Button,

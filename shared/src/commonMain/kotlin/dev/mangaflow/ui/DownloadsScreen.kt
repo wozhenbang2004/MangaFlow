@@ -1,5 +1,13 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.layout.WindowInsetsSides
+
+import androidx.compose.foundation.layout.windowInsetsPadding
+
+import androidx.compose.foundation.layout.only
+
+import androidx.compose.foundation.layout.asPaddingValues
+
 import kotlinx.coroutines.IO
 
 import dev.mangaflow.ui.platform.*
@@ -9,6 +17,11 @@ import dev.mangaflow.ui.motion.BackHandler
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +35,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -38,6 +52,8 @@ import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Inventory2
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.automirrored.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.CheckCircleOutline
 import androidx.compose.material.icons.outlined.Downloading
@@ -49,7 +65,6 @@ import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarDuration
@@ -58,6 +73,7 @@ import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -69,16 +85,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -94,6 +114,8 @@ import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionDialog
+import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
@@ -161,13 +183,17 @@ fun DownloadsScreen(
     val preferredFilterWidth = morphGlassTabWidth(filterChoices)
     var pendingImport by remember { mutableStateOf<PendingLocalImport?>(null) }
     var importBusy by remember { mutableStateOf(false) }
+    var importError by remember { mutableStateOf<String?>(null) }
     val allScroll = rememberLazyListState()
     val activeScroll = rememberLazyListState()
     val savedScroll = rememberLazyListState()
     val showLoading = rememberDelayedBusy(loading)
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
-    var headerHeightPx by remember { mutableIntStateOf(with(density) { 44.dp.toPx().toInt() }) }
+    val contentInsets = screenFitContentInsets().asPaddingValues()
+    val topInset = contentInsets.calculateTopPadding()
+    val bottomInset = contentInsets.calculateBottomPadding()
+    var headerHeightPx by remember(density, topInset) { mutableIntStateOf(with(density) { (48.dp + topInset).roundToPx() }) }
     val contentTopPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -209,6 +235,7 @@ fun DownloadsScreen(
     fun importLocal(pending: PendingLocalImport, mangaTitle: String, chapterTitle: String) {
         if (importBusy) return
         importBusy = true
+        importError = null
         scope.launch {
             try {
                 val entry = when (val source = pending.source) {
@@ -223,7 +250,7 @@ fun DownloadsScreen(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                snackbar.showSnackbar(failure.message ?: "本地漫画导入失败")
+                importError = failure.message ?: "本地漫画导入失败"
             } finally {
                 importBusy = false
             }
@@ -289,7 +316,7 @@ fun DownloadsScreen(
                 }
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(), state = scroll,
-                    contentPadding = PaddingValues(start = contentInset, end = contentInset, top = contentTopPadding, bottom = 32.dp),
+                    contentPadding = PaddingValues(start = contentInset, end = contentInset, top = contentTopPadding, bottom = 32.dp + bottomInset),
                 ) {
                     if (loading) {
                         item {
@@ -376,8 +403,9 @@ fun DownloadsScreen(
                 }
             }
         }
-        Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
-            .onSizeChanged { headerHeightPx = it.height }) {
+        Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
+            .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
+            .padding(horizontal = 8.dp, vertical = 2.dp)) {
             PageTitleHeader("下载", backdrop, navigation,
                 leadingWidth = filterWidth,
                 leading = {
@@ -480,46 +508,55 @@ fun DownloadsScreen(
             }, dismissButton = { DownloadTextAction(onClick = { pendingDeletion = null }) { Text("取消", color = secondary) } })
     }
 
-    if (showImportSources) {
-        AlertDialog(
-            onDismissRequest = { showImportSources = false },
-            shape = RoundedCornerShape(24.dp),
-            containerColor = MaterialTheme.colorScheme.surface,
-            title = { Text("导入本地漫画", style = MaterialTheme.typography.titleLarge) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    LocalImportChoice(Icons.Outlined.Inventory2, "CBZ / ZIP", "按文件名自然排序") {
-                        showImportSources = false
-                        archivePicker.launch(arrayOf(
-                            "application/zip", "application/x-zip-compressed", "application/x-cbz",
-                            "application/vnd.comicbook+zip", "application/octet-stream",
-                        ))
-                    }
-                    LocalImportChoice(Icons.Outlined.Collections, "选择多张图片", "一次组成一个章节") {
-                        showImportSources = false
-                        imagePicker.launch(arrayOf("image/*"))
-                    }
-                    LocalImportChoice(Icons.Outlined.FolderOpen, "选择图片文件夹", "递归读取，合并为一个章节") {
-                        showImportSources = false
-                        folderPicker.launch(null)
+    MotionDialog(visible = showImportSources, onDismissRequest = { showImportSources = false }) {
+        LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 24.dp,
+            role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
+            var showFormats by remember { mutableStateOf(false) }
+            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height)
+                .verticalScroll(rememberScrollState()).padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("导入漫画", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    MotionIconButton(onClick = { showImportSources = false }, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Outlined.Close, "取消导入", Modifier.size(20.dp), tint = secondary)
                     }
                 }
-            },
-            confirmButton = {},
-            dismissButton = {
-                DownloadTextAction(onClick = { showImportSources = false }) {
-                    Text("取消", color = foreground)
+                LocalImportChoice(Icons.Outlined.Inventory2, "压缩包", "CBZ · ZIP") {
+                    showImportSources = false
+                    archivePicker.launch(arrayOf(
+                        "application/zip", "application/x-zip-compressed", "application/x-cbz",
+                        "application/vnd.comicbook+zip", "application/octet-stream",
+                    ))
                 }
-            },
-        )
+                LocalImportChoice(Icons.Outlined.Collections, "图片", "多选") {
+                    showImportSources = false
+                    imagePicker.launch(arrayOf("image/*"))
+                }
+                LocalImportChoice(Icons.Outlined.FolderOpen, "文件夹", "图片目录") {
+                    showImportSources = false
+                    folderPicker.launch(null)
+                }
+                TextButton(onClick = { showFormats = !showFormats }) {
+                    Icon(Icons.Outlined.Info, null, Modifier.size(16.dp), tint = secondary)
+                    Spacer(Modifier.width(6.dp))
+                    Text("格式说明", style = MaterialTheme.typography.labelMedium, color = secondary)
+                }
+                if (showFormats) Text(
+                    "按文件名自然排序。多张图片或文件夹会合成一个章节；导入后保留原文件。",
+                    style = MaterialTheme.typography.bodySmall, color = secondary)
+            }
+        }
     }
 
     LocalImportDetailsDialog(
         pending = pendingImport,
         busy = importBusy,
+        error = importError,
+        backdrop = backdrop,
         onDismiss = { if (!importBusy) {
             pendingImport?.source?.documents()?.let(::releasePickedDocuments)
             pendingImport = null
+            importError = null
         } },
         onConfirm = { pending, mangaTitle, chapterTitle -> importLocal(pending, mangaTitle, chapterTitle) },
     )
@@ -535,27 +572,15 @@ private fun LocalImportChoice(
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(
-            interactionSource = interaction,
-            indication = null,
-            role = Role.Button,
-            onClick = onClick,
-        ).motionPress(interaction, pressedScale = .985f).padding(vertical = 11.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier.size(38.dp).clip(RoundedCornerShape(12.dp)).background(colors.surfaceVariant),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp), tint = colors.onSurface)
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
-            Spacer(Modifier.height(2.dp))
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-        }
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+        .motionPress(interaction, pressedScale = .985f).heightIn(min = 52.dp).padding(horizontal = 6.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Icon(icon, null, Modifier.size(22.dp), tint = colors.onSurfaceVariant)
+        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
+        Text(detail, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+        Icon(Icons.AutoMirrored.Outlined.ChevronRight, null, Modifier.size(16.dp),
+            tint = colors.onSurfaceVariant.copy(alpha = .65f))
     }
 }
 
@@ -563,67 +588,111 @@ private fun LocalImportChoice(
 private fun LocalImportDetailsDialog(
     pending: PendingLocalImport?,
     busy: Boolean,
+    error: String?,
+    backdrop: HazeState,
     onDismiss: () -> Unit,
     onConfirm: (PendingLocalImport, String, String) -> Unit,
 ) {
-    if (pending == null) return
-    var mangaTitle by remember(pending.source) { mutableStateOf(pending.mangaTitle) }
-    var chapterTitle by remember(pending.source) { mutableStateOf(pending.chapterTitle) }
+    var retained by remember { mutableStateOf(pending) }
+    SideEffect { if (pending != null) retained = pending }
+    val displayed = pending ?: retained ?: return
+    var mangaTitle by remember(displayed.source) { mutableStateOf(displayed.mangaTitle) }
+    var chapterTitle by remember(displayed.source) { mutableStateOf(displayed.chapterTitle) }
+    var showStorageNote by remember(displayed.source) { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
-    val sourceLabel = when (pending.source) {
-        is LocalImportSource.Archive -> "压缩包"
-        is LocalImportSource.Images -> "${pending.source.uris.size} 张图片"
+    val focus = LocalFocusManager.current
+    val sourceIcon = when (displayed.source) {
+        is LocalImportSource.Archive -> Icons.Outlined.Inventory2
+        is LocalImportSource.Images -> Icons.Outlined.Collections
+        is LocalImportSource.Folder -> Icons.Outlined.FolderOpen
+    }
+    val sourceLabel = when (displayed.source) {
+        is LocalImportSource.Archive -> "CBZ / ZIP"
+        is LocalImportSource.Images -> "${displayed.source.uris.size} 张图片"
         is LocalImportSource.Folder -> "图片文件夹"
     }
-    AlertDialog(
-        onDismissRequest = { if (!busy) onDismiss() },
-        shape = RoundedCornerShape(24.dp),
-        containerColor = colors.surface,
-        title = { Text("确认本地章节", style = MaterialTheme.typography.titleLarge) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("来源 · $sourceLabel", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                OutlinedTextField(
-                    value = mangaTitle,
-                    onValueChange = { mangaTitle = it.take(120) },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !busy,
-                    singleLine = true,
-                    label = { Text("漫画名称") },
-                )
-                OutlinedTextField(
-                    value = chapterTitle,
-                    onValueChange = { chapterTitle = it.take(120) },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !busy,
-                    singleLine = true,
-                    label = { Text("章节名称") },
-                )
-                Text(
-                    "图片会复制到 MangaFlow 私有目录，原文件移动或删除后仍可阅读。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant,
-                )
-            }
-        },
-        confirmButton = {
-            DownloadTextAction(
-                enabled = !busy && mangaTitle.isNotBlank() && chapterTitle.isNotBlank(),
-                onClick = { onConfirm(pending, mangaTitle, chapterTitle) },
-            ) {
-                if (busy) {
-                    CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp, color = colors.onSurface)
-                    Spacer(Modifier.width(7.dp))
+    fun submit() {
+        if (!busy && pending != null && mangaTitle.isNotBlank() && chapterTitle.isNotBlank()) {
+            focus.clearFocus(force = true)
+            onConfirm(displayed, mangaTitle, chapterTitle)
+        }
+    }
+    MotionDialog(visible = pending != null, onDismissRequest = { if (!busy) onDismiss() }) {
+        LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 24.dp,
+            role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
+            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height)
+                .verticalScroll(rememberScrollState()).padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("导入漫画", style = MaterialTheme.typography.titleMedium)
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Icon(sourceIcon, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
+                            Text(sourceLabel, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        }
+                    }
+                    MotionIconButton(enabled = !busy, onClick = onDismiss, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Outlined.Close, "取消导入", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
+                    }
                 }
-                Text(if (busy) "正在导入" else "导入", color = colors.onSurface)
+                LocalImportNameField("漫画", mangaTitle, !busy, ImeAction.Next,
+                    onChange = { mangaTitle = it.take(120) },
+                    onAction = { focus.moveFocus(FocusDirection.Next) })
+                LocalImportNameField("章节", chapterTitle, !busy, ImeAction.Done,
+                    onChange = { chapterTitle = it.take(120) }, onAction = ::submit)
+                if (error != null) Text(error, style = MaterialTheme.typography.bodySmall, color = colors.error)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(enabled = !busy, onClick = { showStorageNote = !showStorageNote }) {
+                        Icon(Icons.Outlined.Info, "导入说明", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    MotionButton(enabled = !busy && mangaTitle.isNotBlank() && chapterTitle.isNotBlank(),
+                        onClick = ::submit, shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = colors.onSurface,
+                            contentColor = colors.surface,
+                            disabledContainerColor = colors.onSurface.copy(alpha = .10f),
+                            disabledContentColor = colors.onSurfaceVariant)) {
+                        if (busy) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp, color = colors.onSurfaceVariant)
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(if (busy) "正在导入" else if (error != null) "重试" else "导入")
+                    }
+                }
+                if (showStorageNote) Text("保存为离线章节，原文件保留。移动或删除原文件不影响已导入内容。",
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
-        },
-        dismissButton = {
-            DownloadTextAction(enabled = !busy, onClick = onDismiss) {
-                Text("取消", color = colors.onSurfaceVariant)
-            }
-        },
-    )
+        }
+    }
+}
+
+/** Same quiet input surface as the existing source importer, without an outlined form card. */
+@Composable
+private fun LocalImportNameField(
+    label: String,
+    value: String,
+    enabled: Boolean,
+    action: ImeAction,
+    onChange: (String) -> Unit,
+    onAction: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+        BasicTextField(value, onValueChange = onChange, enabled = enabled, singleLine = true,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
+            cursorBrush = SolidColor(colors.onSurface),
+            keyboardOptions = KeyboardOptions(imeAction = action),
+            keyboardActions = KeyboardActions(onNext = { onAction() }, onDone = { onAction() }),
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                .background(colors.onSurface.copy(alpha = .045f))
+                .semantics { contentDescription = "${label}名称" },
+            decorationBox = { input ->
+                Box(Modifier.heightIn(min = 48.dp).padding(horizontal = 12.dp, vertical = 10.dp),
+                    contentAlignment = Alignment.CenterStart) { input() }
+            })
+    }
 }
 
 

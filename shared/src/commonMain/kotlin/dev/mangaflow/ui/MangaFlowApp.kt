@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.layout.asPaddingValues
+
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.ui.platform.*
 
@@ -357,7 +359,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         RecentReadingSheet(history, model.repository, model.library,
             onDismiss = { recentReadingOpen = false },
             onContinue = { model.continueReading(it) },
-            onRemoveHistory = model::removeHistory)
+            onRemoveHistory = model::removeHistory, backdrop = drawerBackdrop)
     }
     authorWorks?.let { author ->
         androidx.compose.runtime.key(author.manga.id, author.name) {
@@ -642,6 +644,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onManageSources = model::manageSources,
                                 onCancelSourceSelection = model::cancelSourceSelection,
                                 sourceLoading = sourceOperation.loading,
+                                pendingSourceCount = sourceDiscovery[current.state.manga.id]?.values?.count {
+                                    it.status == dev.mangaflow.data.SourceDiscoveryStatus.NEEDS_CONFIRMATION
+                                } ?: 0,
                                 sourcesChecking = sourceDiscovery[current.state.manga.id]?.values?.any {
                                     it.status == dev.mangaflow.data.SourceDiscoveryStatus.SEARCHING
                                 } == true,
@@ -672,12 +677,16 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val rootWallpaperActive = current.key == frame.key &&
                             !drawerVisible && !recentReadingOpen && !tagSearchVisible
                         val chromeDensity = LocalDensity.current
+                        val chromeTopInset = screenFitContentInsets().asPaddingValues().calculateTopPadding()
                         val discoveryBackground = model.browseBackground(browse)
                         val displayedDiscovery = if (!browse.isSearch) browse else discoveryBackground
                         val rankingExpanded = displayedDiscovery.mode == DiscoveryMode.RANKING
+                        var retainedRankingState by remember { mutableStateOf(displayedDiscovery) }
+                        SideEffect { if (rankingExpanded) retainedRankingState = displayedDiscovery }
+                        var rankingEmphasis by remember { mutableStateOf<State<Float>?>(null) }
                         var rankingAnchor by remember { mutableStateOf(Rect.Zero) }
-                        var chromeHeightPx by remember(current.section, chromeDensity) {
-                            mutableIntStateOf(with(chromeDensity) { 48.dp.roundToPx() })
+                        var chromeHeightPx by remember(current.section, chromeDensity, chromeTopInset) {
+                            mutableIntStateOf(with(chromeDensity) { (48.dp + chromeTopInset).roundToPx() })
                         }
                         val discoveryTabsWidth = with(chromeDensity) {
                             val labelSlot = maxOf(52.dp, 14.sp.toDp() * 2 + 24.dp)
@@ -715,7 +724,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             else -> MangaLayout.BrowseWidth
                         }
                         BoxWithConstraints(Modifier
-                            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                            .screenFitViewport()
                             .widthIn(max = contentWidth).fillMaxSize().align(Alignment.TopCenter).graphicsLayer {
                             // Only the incoming foreground settles; the real backdrop never disappears.
                             alpha = rootOpacity.value
@@ -724,7 +733,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         }.motionInputGate(!rootHandoff)) {
                             val discoveryActionsWidth = (if (history.isEmpty()) 44.dp else 88.dp) + 16.dp
                             val discoveryStacked = maxWidth - 16.dp < 44.dp + 12.dp + discoveryTabsWidth + discoveryActionsWidth
-                            val discoveryChromeBase = if (discoveryStacked) 92.dp else 48.dp
+                            val discoveryTabHeight = with(chromeDensity) {
+                                maxOf(44.dp, 14.sp.toDp() * (if (fontScale > 1.3f) 2.6f else 1.3f) + 16.dp)
+                            }
+                            val discoveryChromeBase = (if (discoveryStacked) 44.dp + 4.dp + discoveryTabHeight
+                                else maxOf(44.dp, discoveryTabHeight)) + 4.dp + chromeTopInset
                             val chromePadding = (if (current.section == Section.DISCOVER) {
                                 // Recommendation/update content must not follow the old ranking
                                 // subbar's exit measurement or a first-frame header estimate.
@@ -764,7 +777,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 // The full backdrop includes the pixels beneath the menu button.
                                 // Settings reserves chrome inside its scrolling content, so it
                                 // can pass beneath the floating header without an inset clip.
-                                Box(Modifier.fillMaxSize().padding(top = if (current.section == Section.ACCOUNT) chromePadding else 0.dp)) {
+                                Box(Modifier.fillMaxSize()) {
                                 savedState.SaveableStateProvider(current.key) {
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
@@ -815,7 +828,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         active = rootActive && !searchVisible, refreshingIds = refreshingDownloads, history = history)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
-                                        active = rootActive,
+                                        active = rootActive, contentTopPadding = chromePadding,
                                         onLoginWithPassword = model::loginWithPassword,
                                         onLoginWithCookie = model::loginWithCookie,
                                         onLogout = model::logout,
@@ -838,14 +851,16 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             if (current.section in setOf(Section.ACCOUNT, Section.SETTINGS)) {
                                 PageTitleHeader(if (current.section == Section.ACCOUNT) "账号" else "设置",
                                     searchBackdrop, navigation,
-                                    modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
-                                        .onSizeChanged { chromeHeightPx = it.height })
+                                    modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { chromeHeightPx = it.height }
+                                        .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
+                                        .padding(horizontal = 8.dp, vertical = 2.dp))
                             } else if (current.section == Section.DISCOVER) {
                                 SegmentedGlassHeader(searchBackdrop, navigation,
                                     controlsWidth = discoveryTabsWidth,
                                     actionsWidth = discoveryActionsWidth,
-                                    modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
-                                        .onSizeChanged { chromeHeightPx = it.height },
+                                    modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { chromeHeightPx = it.height }
+                                        .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
+                                        .padding(horizontal = 8.dp, vertical = 2.dp),
                                     controlsAlpha = {
                                         if (current.section != Section.DISCOVER) 1f
                                         else if (searchExpanded) 0f
@@ -872,15 +887,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     },
                                     secondary = {
                                         RankingsFromTab(searchBackdrop, rankingExpanded, rankingAnchor,
-                                            enabled = rootActive && chromeReady && rankingExpanded) {
-                                            RankingControls(displayedDiscovery,
-                                                onPeriod = { model.selectDiscovery(displayedDiscovery.mode, period = it) },
-                                                onAudience = { model.selectDiscovery(displayedDiscovery.mode, audience = it) },
+                                            enabled = rootActive && chromeReady && rankingExpanded,
+                                            onEmphasisState = { rankingEmphasis = it }) {
+                                            RankingControls(if (rankingExpanded) displayedDiscovery else retainedRankingState,
+                                                onPeriod = { model.selectDiscovery(DiscoveryMode.RANKING, period = it) },
+                                                onAudience = { model.selectDiscovery(DiscoveryMode.RANKING, audience = it) },
                                                 onRefresh = model::refresh)
                                         }
                                     }) {
                                     BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label },
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+                                            .graphicsLayer { alpha = 1f - .24f * (rankingEmphasis?.value ?: 0f) }
                                             .onGloballyPositioned { coordinates ->
                                                 // BrowseTabs uses equal, stationary hit cells; measure the actual middle cell.
                                                 val bounds = coordinates.boundsInRoot()
@@ -897,6 +914,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             expanded = searchExpanded,
                             query = browse.query,
                             placeholder = "搜索",
+                            searchTarget = browse.searchTarget,
+                            scopeCopyOnly = browse.selectedTags.isNotEmpty(),
+                            onSearchTarget = model::setSearchTarget,
                             active = rootActive,
                             backdrop = searchBackdrop,
                             onExpandedChange = { if (it) searchExpanded = true else closeSearch() },
@@ -904,10 +924,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             onForegroundState = { searchForeground = it },
                             onQuery = model::setQuery,
                             onSearch = model::submitSearch,
-                            modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 2.dp),
+                            modifier = Modifier.fillMaxSize()
+                                .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
                         ) { maxHeight, searchActive ->
                             DiscoverySearchResults(
                                 state = browse, expanded = searchExpanded, active = searchActive,
+                                scopeInToolbar = true,
                                 maxHeight = maxHeight, repository = model.repository,
                                 backdrop = searchBackdrop,
                                 onRetry = model::retryBrowse, onMore = model::loadMore,

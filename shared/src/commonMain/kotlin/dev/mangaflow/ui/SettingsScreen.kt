@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.layout.asPaddingValues
+
 import kotlinx.coroutines.IO
 
 import dev.mangaflow.ui.platform.*
@@ -325,9 +327,9 @@ fun SettingsScreen(
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding().background(
+        modifier = Modifier.fillMaxSize().imePadding().background(
             if (LocalWallpaperActive.current) Color.Transparent else colors.background),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = contentTopPadding, bottom = 32.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = contentTopPadding, bottom = 32.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
     ) {
         item {
             // Keep the import controls composed while scrolling; their in-progress copy owns this lifetime.
@@ -364,6 +366,8 @@ fun SettingsScreen(
                     }
                 }
                 SettingsSection("外观", sourceBackdrop) {
+                    ScreenFitSettings()
+                    DetailAppearanceSettings()
                     SettingsDisclosure("壁纸", when {
                         wallpaper.mediaPath == null -> "默认"
                         wallpaper.rotationEnabled -> "${wallpaper.items.size} 张 · 每 ${wallpaper.rotationMinutes} 分钟"

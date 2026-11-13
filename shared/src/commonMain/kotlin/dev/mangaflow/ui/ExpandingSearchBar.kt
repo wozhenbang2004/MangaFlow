@@ -80,6 +80,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -106,6 +107,9 @@ internal fun ExpandingSearchBar(
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
     placeholder: String = "搜索",
+    searchTarget: SearchTarget? = null,
+    scopeCopyOnly: Boolean = false,
+    onSearchTarget: (SearchTarget) -> Unit = {},
     results: @Composable (maxHeight: Dp, active: Boolean) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -121,6 +125,9 @@ internal fun ExpandingSearchBar(
     var inputFocused by remember { mutableStateOf(false) }
     var inputPlaced by remember { mutableStateOf(false) }
     var foregroundHeight by remember { mutableStateOf(44.dp) }
+    var scopeExpanded by remember { mutableStateOf(false) }
+    val hasScope = searchTarget != null
+    val inputEndInset = if (hasScope) 84.dp else 44.dp
     val displayedQuery = if (expanded) query else retainedQuery
     val shell = updateTransition(expanded, label = "search-shell")
     val reveal = shell.animateFloat(
@@ -152,6 +159,7 @@ internal fun ExpandingSearchBar(
     }
 
     LaunchedEffect(expanded, active) {
+        if (!expanded || !active) scopeExpanded = false
         if ((!expanded || !active) && inputFocused) {
             keyboard?.hide()
             focus.clearFocus(force = true)
@@ -165,13 +173,15 @@ internal fun ExpandingSearchBar(
         }
     }
     val dismiss = {
+        scopeExpanded = false
         keyboard?.hide()
         focus.clearFocus(force = true)
         onExpandedChange(false)
     }
     // The IME owns its first back. The next back previews this shell, not the route beneath it.
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
-    MotionBackHandler(active && expanded && !imeVisible, state = back, onBack = dismiss)
+    MotionBackHandler(active && expanded && !imeVisible && !scopeExpanded, state = back, onBack = dismiss)
+    MotionBackHandler(active && expanded && scopeExpanded, state = null, onBack = { scopeExpanded = false })
 
     // Only the overlay takes IME insets. The toolbar and browsing content keep their layout.
     BoxWithConstraints(modifier.imePadding()) {
@@ -192,15 +202,15 @@ internal fun ExpandingSearchBar(
         val visibleWidth = 44.dp + (width.value - 44.dp) * backRemaining
         val visibleHeight = 44.dp + (height.value - 44.dp) * backRemaining
         val progress = (reveal.value * backRemaining).coerceIn(0f, 1f)
-        val requiredTextWidth = minOf(96.dp, (panelWidth - 60.dp).coerceAtLeast(0.dp))
-        LaunchedEffect(expanded, active, inputPlaced, windowFocused, panelWidth) {
-            if (expanded && active && inputPlaced && windowFocused) {
+        val requiredTextWidth = minOf(96.dp, (panelWidth - inputEndInset - 16.dp).coerceAtLeast(0.dp))
+        LaunchedEffect(expanded, active, inputPlaced, windowFocused, panelWidth, scopeExpanded, searchTarget) {
+            if (expanded && active && inputPlaced && windowFocused && !scopeExpanded && searchTarget != SearchTarget.TAG) {
                 snapshotFlow {
                     val remaining = 1f - back.progress.value.coerceIn(0f, 1f)
                     val liveWidth = 44.dp + (width.value - 44.dp) * remaining
                     val clipLeft = max((panelWidth - 44.dp).value * (1f - visibleForeground.value),
                         (panelWidth - liveWidth).value).coerceAtLeast(16f)
-                    !back.gesturing && panelWidth.value - 44f - clipLeft >= requiredTextWidth.value
+                    !back.gesturing && panelWidth.value - inputEndInset.value - clipLeft >= requiredTextWidth.value
                 }.first { it }
                 requester.requestFocus()
                 keyboard?.show()
@@ -270,12 +280,12 @@ internal fun ExpandingSearchBar(
                         bottom = min(size.height, top + shellHeight)) { this@drawWithContent.drawContent() }
                 }
             }) {
-            Row(Modifier.width(panelWidth).height(44.dp).padding(start = 16.dp, end = 44.dp),
+            Row(Modifier.width(panelWidth).height(44.dp).padding(start = 16.dp, end = inputEndInset),
                 verticalAlignment = Alignment.CenterVertically) {
                 BasicTextField(
                     value = displayedQuery,
                     onValueChange = { if (expanded && active) onQuery(it) },
-                    enabled = expanded && active,
+                    enabled = expanded && active && !scopeExpanded,
                     interactionSource = searchInteraction,
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
@@ -301,8 +311,25 @@ internal fun ExpandingSearchBar(
                     },
                 )
             }
-            results(if (present) resultsRoom else 0.dp, expanded && active)
+            results(if (present) resultsRoom else 0.dp, expanded && active && !scopeExpanded)
         }
+        // Choosing a range is transient chrome. It never changes the result viewport or its anchor.
+        if (scopeExpanded && expanded && active) Box(Modifier.fillMaxSize()
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
+                onClickLabel = "收起搜索范围", onClick = { scopeExpanded = false }))
+        if (searchTarget != null && present && (expanded || visibleForeground.value > .02f)) SearchScopeControl(
+            target = searchTarget, expanded = scopeExpanded,
+            enabled = expanded && active, copyOnly = scopeCopyOnly,
+            backdrop = backdrop, maxWidth = (panelWidth - 52.dp).coerceAtLeast(36.dp),
+            onExpandedChange = {
+                if (it) { keyboard?.hide(); focus.clearFocus(force = true) }
+                scopeExpanded = it
+            },
+            onTarget = onSearchTarget,
+            modifier = Modifier.align(Alignment.TopEnd).padding(end = 52.dp)
+                .graphicsLayer { alpha = visibleForeground.value.coerceIn(0f, 1f) }
+                .motionInputGate(expanded && active),
+        )
         MotionIconButton(
             onClick = { if (expanded) dismiss() else onExpandedChange(true) },
             enabled = active,

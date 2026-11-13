@@ -95,6 +95,10 @@ internal fun VolumeBookTile(
         }
     }
     var imageLoading by remember(request) { mutableStateOf(request != null) }
+    var decodedAspect by remember(request) { mutableStateOf<Float?>(null) }
+    val declaredAspect = cover.page?.takeIf { it.width > 0 && it.height > 0 }
+        ?.let { it.width.toFloat() / it.height }
+    val coverAspect = decodedAspect ?: declaredAspect ?: .7f
     val busy = rememberDelayedBusy(cover.loading || imageLoading)
     Column(
         Modifier.fillMaxWidth().combinedClickable(
@@ -111,15 +115,23 @@ internal fun VolumeBookTile(
         },
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(.7f).mangaCoverCard()
-            .background(DetailSurface), contentAlignment = Alignment.Center) {
-            if (!busy && cover.error == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+        // The card follows the real decoded cover; Fit never needs a wider painted board.
+        Box(Modifier.fillMaxWidth().aspectRatio(coverAspect).mangaCoverCard()
+            .then(if (decodedAspect == null) Modifier.background(DetailSurface) else Modifier),
+            contentAlignment = Alignment.Center) {
+            if (decodedAspect == null && !busy && cover.error == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                 Modifier.size(25.dp), tint = DetailMuted.copy(alpha = .35f))
             if (request != null && cover.error == null) AsyncImage(
                 model = request, contentDescription = null, contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),
                 onLoading = { imageLoading = true },
-                onSuccess = { imageLoading = false },
+                onSuccess = { state ->
+                    imageLoading = false
+                    val image = state.result.image
+                    if (image.width > 0 && image.height > 0) {
+                        decodedAspect = image.width.toFloat() / image.height
+                    }
+                },
                 onError = { imageLoading = false; onCoverError() },
             )
             if (cover.error != null) DetailAction(Icons.Outlined.Refresh, "重试这一卷封面", onClick = onRetryCover)

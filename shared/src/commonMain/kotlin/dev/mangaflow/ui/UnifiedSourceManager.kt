@@ -92,9 +92,10 @@ internal fun UnifiedSourceManager(
             if (id !in rows) rows[id] = SourceOverviewEntry(id, name,
                 if (state.scanning) "SEARCHING" else "NOT_CHECKED")
         }
-        rows.values.toList()
+        rows.values.sortedBy { if (it.status == "NEEDS_CONFIRMATION") 0 else 1 }
     }
     val checking = state.scanning || overview.any { it.status == "SEARCHING" }
+    val pendingCount = overview.count { it.status == "NEEDS_CONFIRMATION" }
     val selectedOverview = overview.firstOrNull { it.id == source }
     val matchesQuery = state.sourceId == source && state.query.trim() == query.trim()
     val searched = requestedSearch == (source to query.trim()) && matchesQuery && !domainChanged
@@ -148,7 +149,7 @@ internal fun UnifiedSourceManager(
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回来源列表", Modifier.size(20.dp))
                 }
                 Column(Modifier.weight(1f)) {
-                    Text(if (sourcePage == null) "正文来源" else sourceDisplayName(source),
+                    Text(if (sourcePage == null) "来源" else sourceDisplayName(source),
                         fontSize = 16.sp, fontWeight = FontWeight.Medium)
                     Text(state.work.title, color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
@@ -175,16 +176,17 @@ internal fun UnifiedSourceManager(
                             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 if (checking) MotionBusyIndicator(Modifier.size(12.dp), strokeWidth = 1.2.dp)
-                                Text(if (checking) "正在检查来源" else
-                                    "已关联 ${associated.map { it.sourceId }.distinct().size} 个来源",
-                                    fontSize = 12.sp, color = colors.onSurfaceVariant)
+                                Text(if (pendingCount > 0) "待确认 $pendingCount" else if (checking) "检查中" else
+                                    "${associated.map { it.sourceId }.distinct().size} 源",
+                                    fontSize = 12.sp,
+                                    color = if (pendingCount > 0) colors.primary else colors.onSurfaceVariant)
                             }
                         }
                         items(overview, key = { "source:" + it.id }) { row ->
                             val canChoose = row.status !in setOf("LINKED", "SEARCHING", "DISABLED") &&
                                 !state.connecting && pageActive
                             val interaction = remember(row.id) { MutableInteractionSource() }
-                            Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).clip(RoundedCornerShape(12.dp))
+                            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
                                 .clickable(interactionSource = interaction, indication = null, enabled = canChoose,
                                     role = Role.Button, onClickLabel = if (row.status == "NEEDS_CONFIRMATION")
                                         "查看${row.name}的待确认版本" else "查找${row.name}的版本") {
@@ -193,7 +195,7 @@ internal fun UnifiedSourceManager(
                                         feedback.perform(FeelEvent.Selection)
                                         openSource(row.id, row.status != "NEEDS_CONFIRMATION")
                                     }
-                                }.motionPress(interaction, enabled = canChoose).padding(horizontal = 6.dp, vertical = 8.dp),
+                                }.motionPress(interaction, enabled = canChoose).padding(horizontal = 6.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 ChapterSourceLogo(row.id, row.name, Modifier.size(21.dp))
                                 Spacer(Modifier.width(12.dp))

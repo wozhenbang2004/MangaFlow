@@ -1,5 +1,9 @@
 package dev.mangaflow.ui
 
+import androidx.compose.ui.unit.Dp
+
+import androidx.compose.foundation.layout.asPaddingValues
+
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 
 import dev.mangaflow.ui.platform.*
@@ -105,8 +109,10 @@ fun AccountScreen(
     onContinue: (CloudHistoryEntry) -> Unit,
     onSetFavorite: (Manga, Boolean) -> Unit,
     onRetrySync: () -> Unit,
+    contentTopPadding: Dp = 0.dp,
 ) {
     val profile = state.profile
+    val bottomInset = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
     val colors = MaterialTheme.colorScheme
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
@@ -158,12 +164,12 @@ fun AccountScreen(
     }
 
     if (profile == null) {
-        BoxWithConstraints(Modifier.fillMaxSize().navigationBarsPadding().imePadding()
-            .padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 16.dp)) {
+        BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
         val accountHeight = maxHeight
         Column(
             modifier = Modifier.fillMaxWidth().heightIn(max = accountHeight)
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(rememberScrollState())
+                .padding(start = 24.dp, end = 24.dp, top = contentTopPadding + 4.dp, bottom = 16.dp + bottomInset),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("匿名阅读已启用", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
@@ -231,12 +237,12 @@ fun AccountScreen(
         key(profile.username) {
             val favoritesPosition = rememberLazyGridState()
             val historyPosition = rememberLazyGridState()
-            BoxWithConstraints(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
+            BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
                 // Long account errors remain reachable without consuming the tabs or list viewport.
                 val profileMaxHeight = (maxHeight - 48.dp).coerceAtLeast(0.dp) * .45f
                 Column(Modifier.fillMaxSize()) {
                     Column(Modifier.fillMaxWidth().heightIn(max = profileMaxHeight)
-                        .verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = 4.dp)) {
+                        .verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = contentTopPadding + 4.dp)) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(42.dp).clip(CircleShape).background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
@@ -278,7 +284,7 @@ fun AccountScreen(
                             columns = GridCells.Adaptive(144.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
                             state = if (historyTab) historyPosition else favoritesPosition,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp),
+                            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp + bottomInset),
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             verticalArrangement = Arrangement.spacedBy(24.dp),
                         ) {

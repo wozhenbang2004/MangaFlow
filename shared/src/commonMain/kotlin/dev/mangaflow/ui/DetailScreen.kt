@@ -137,6 +137,8 @@ import dev.mangaflow.data.MangaReview
 import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.storage.DownloadEntry
+import dev.mangaflow.storage.DetailAppearanceStore
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -204,9 +206,11 @@ fun DetailScreen(
     sourceLoading: Boolean = false,
     sourceError: String? = null,
     sourcesChecking: Boolean = false,
+    pendingSourceCount: Int = 0,
 ) {
     val current = detail?.manga ?: manga
     var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
+    var pendingDownloadAnchor by remember(current.id) { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
     val downloadSourceEntries = remember(downloadEntries) { downloadEntries.associateBy { it.chapter.id } }
     LaunchedEffect(active, current.id) { if (!active) pendingDownload = null }
     val feedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
@@ -238,6 +242,8 @@ fun DetailScreen(
         mutableStateOf(FeaturedCoverColors.get(current.coverUrl))
     }
     val context = LocalContext.current
+    val appearanceStore = remember(context) { DetailAppearanceStore.get(context) }
+    val appearance by appearanceStore.state.collectAsStateWithLifecycle()
     val motion = LocalMotionEnabled.current
     LaunchedEffect(current.coverUrl, coverBitmap) {
         val bitmap = coverBitmap ?: return@LaunchedEffect
@@ -274,9 +280,9 @@ fun DetailScreen(
             coverFailed = false
             coverBitmap = result.result.image
         })
-    val atmosphereBlur = remember {
+    val atmosphereBlur = remember(appearance.blur) {
         HazeBlurStyle {
-            blurRadius(28.dp)
+            blurRadius(appearance.blur.dp)
             backgroundColor(Color.Transparent)
             colorEffects(emptyList())
             noiseFactor(0f)
@@ -292,16 +298,16 @@ fun DetailScreen(
     Box(Modifier.fillMaxSize().background(informationTone)) {
     BoxWithConstraints(
         Modifier.fillMaxSize().align(Alignment.TopCenter)
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
-            .navigationBarsPadding().imePadding(),
+            .screenFitViewport().imePadding(),
     ) {
         val density = LocalDensity.current
         val viewportWidth = minOf(maxWidth, MangaLayout.DetailWidth)
         val fontScale = density.fontScale.coerceAtLeast(1f)
         // Retain the largest real dock clearance: condensing must not move the last chapter rows.
+        val bottomInset = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
         val readingInset = maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
-            with(density) { measuredDockHeight.toDp() }) + 16.dp
-        val statusInset = WindowInsets.safeDrawing.asPaddingValues().calculateTopPadding()
+            with(density) { measuredDockHeight.toDp() }) + 16.dp + bottomInset
+        val statusInset = screenFitContentInsets().asPaddingValues().calculateTopPadding()
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
         val compactHero = availableHeight < 600.dp
         val collapsedHero = availableHeight < 420.dp
@@ -311,7 +317,9 @@ fun DetailScreen(
         // the screen below short metadata.
         val heroHeight = if (collapsedHero) 0.dp else with(density) { naturalHeroHeight.toDp() }
         val heroPixels = with(density) { heroHeight.toPx() }
-        val header = rememberTopAppBarState(initialHeightOffsetLimit = -heroPixels)
+        val collapseTravelScale = if (compactHero) .84f else .76f
+        val collapseRange = heroPixels / collapseTravelScale
+        val header = rememberTopAppBarState(initialHeightOffsetLimit = -collapseRange)
         val dockScrollTravel = with(density) { 96.dp.toPx() }
         val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel) {
             derivedStateOf {
@@ -329,11 +337,11 @@ fun DetailScreen(
             state = header, snapAnimationSpec = null, flingAnimationSpec = rememberSplineBasedDecay(),
         )
         SideEffect {
-            if (header.heightOffsetLimit != -heroPixels) {
+            if (header.heightOffsetLimit != -collapseRange) {
                 val collapsed = header.collapsedFraction
                 contentsJump?.cancel()
-                header.heightOffsetLimit = -heroPixels
-                header.heightOffset = -heroPixels * collapsed
+                header.heightOffsetLimit = -collapseRange
+                header.heightOffset = -collapseRange * collapsed
             }
         }
         val scrolling = remember(behavior, activeSection) {
@@ -373,7 +381,7 @@ fun DetailScreen(
         Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(informationTone)) {
             Box(
                 Modifier.fillMaxWidth().height(heroHeight + statusInset + 56.dp + seamHeight)
-                    .graphicsLayer { translationY = header.heightOffset; clip = true }
+                    .graphicsLayer { translationY = header.heightOffset * collapseTravelScale; clip = true }
                     .mangaHazeSource(artworkBackdrop).background(atmosphereColor),
                 contentAlignment = Alignment.TopCenter,
             ) {
@@ -383,8 +391,9 @@ fun DetailScreen(
                     painter = coverPainter, contentDescription = null,
                     modifier = Modifier.fillMaxSize().graphicsLayer {
                         scaleX = 1.12f; scaleY = 1.12f
-                        alpha = .85f
-                    }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur),
+                        alpha = appearance.strength
+                    }.then(if (appearance.blur > 0f && modernPlatformBlur)
+                        Modifier.hazeBlur(input = HazeInput.Content, style = atmosphereBlur) else Modifier),
                     contentScale = ContentScale.Crop,
                 )
                 Box(Modifier.matchParentSize().background(Brush.verticalGradient(
@@ -419,7 +428,7 @@ fun DetailScreen(
                                 constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity),
                             )
                             val expanded = if (collapsedHero) 0 else foreground.height
-                            val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
+                            val offset = (header.heightOffset * collapseTravelScale).roundToInt().coerceIn(-expanded, 0)
                             layout(foreground.width, (expanded + offset).coerceIn(constraints.minHeight, constraints.maxHeight)) {
                                 foreground.placeRelative(0, offset)
                             }
@@ -470,7 +479,10 @@ fun DetailScreen(
                                     active = active && targetSection == activeSection,
                                     onScrollTarget = { catalogGrid = it },
                                     onRetry = onRetry, onRead = onRead,
-                                    onDownload = { if (active) pendingDownload = it },
+                                    onDownload = { chapter, anchor -> if (active) {
+                                        pendingDownloadAnchor = anchor
+                                        pendingDownload = chapter
+                                    } },
                                     loadVolumeCover = loadVolumeCover, volumeImageHeaders = volumeImageHeaders,
                                     bottomPadding = 16.dp,
                                     downloadMode = chapterDownloadMode,
@@ -483,7 +495,7 @@ fun DetailScreen(
                                     onManageSources = onManageSources,
                                     onCancelSourceSelection = onCancelSourceSelection,
                                     sourceLoading = sourceLoading, sourceError = sourceError,
-                                    sourcesChecking = sourcesChecking,
+                                    sourcesChecking = sourcesChecking, pendingSourceCount = pendingSourceCount,
                                 )
                                 else -> CommunityPanel(
                                     mangaId = current.id, sources = reviews, loading = reviewsLoading,
@@ -504,7 +516,9 @@ fun DetailScreen(
         DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
             resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
             hidden = dockHidden, collapseProgress = dockCollapse, active = active,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Bottom))
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             onHeightChanged = { measuredDockHeight = maxOf(measuredDockHeight, it) },
             onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents)
     }
@@ -522,7 +536,8 @@ fun DetailScreen(
                         else onDownloadVariant(pending, variant)
                     }
                 },
-                onDismiss = { if (pendingDownload == pending) pendingDownload = null })
+                onDismiss = { if (pendingDownload == pending) { pendingDownload = null; pendingDownloadAnchor = null } },
+                anchor = pendingDownloadAnchor)
         }
     }
 }
@@ -559,7 +574,7 @@ private fun ArtworkToolbar(
     }
     SystemBarAppearance(lightStatusBars, lightSurface, active)
     Row(Modifier.fillMaxWidth().drawBehind { drawRect(sceneColor.copy(alpha = sceneColor.alpha * progress)) }
-        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+        .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
         .heightIn(min = 56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         ArtworkAction(Icons.AutoMirrored.Outlined.ArrowBack, "返回", backdrop, 1f - progress, tint, glassTone, onBack)
         Column(Modifier.weight(1f).padding(horizontal = 8.dp).graphicsLayer { alpha = progress }
@@ -638,7 +653,8 @@ private fun HeroBookInformation(
         .padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 8.dp)
         .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })) {
         val contentWidth = maxWidth
-        val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .38f else .48f, 240.dp)
+        val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .38f else .56f,
+            248.dp, (contentWidth - 130.dp).coerceAtLeast(96.dp))
         val infoWidth = with(density) {
             (contentWidth.roundToPx() - posterWidth.roundToPx() - 18.dp.roundToPx()).coerceAtLeast(1).toDp()
         }

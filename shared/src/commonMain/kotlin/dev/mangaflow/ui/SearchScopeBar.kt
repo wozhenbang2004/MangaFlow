@@ -88,6 +88,7 @@ internal fun SearchScopeBar(
     tagsOnly: Boolean = false,
     onTagQuery: ((String) -> Unit)? = null,
     maxChoicesHeight: Dp = 200.dp,
+    showScope: Boolean = true,
 ) {
     val colors = MaterialTheme.colorScheme
     val focus = LocalFocusManager.current
@@ -105,7 +106,7 @@ internal fun SearchScopeBar(
         onTag(tag)
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (!tagsOnly) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        if (!tagsOnly && showScope) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         MotionTabs(targets.indexOf(target).coerceAtLeast(0), labels, {
             if (targets[it] == SearchTarget.TAG) releaseInput()

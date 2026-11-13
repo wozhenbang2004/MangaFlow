@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.layout.asPaddingValues
+
 import dev.mangaflow.ui.platform.*
 
 import androidx.compose.animation.core.animateFloatAsState
@@ -201,7 +203,7 @@ fun DiscoverScreen(
     val retainedAlpha = animateFloatAsState(if (holdingContent) .48f else 1f,
         if (motion) tween(MangaMotion.Content) else snap(), label = "browse-pending-content")
     CompositionLocalProvider(LocalMetricSourceFan provides sourceFan) {
-    Box(Modifier.fillMaxSize().navigationBarsPadding().mangaHazeSource(searchBackdrop)
+    Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)
         .motionInputGate(active && !searchExpanded)) {
         // Wallpaper and scroll content are one captured scene. The header remains a foreground sibling.
@@ -303,6 +305,7 @@ internal fun DiscoverySearchResults(
     tagsOnly: Boolean = false,
     onTagQuery: ((String) -> Unit)? = null,
     backdrop: HazeState? = null,
+    scopeInToolbar: Boolean = false,
 ) {
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
@@ -356,7 +359,7 @@ internal fun DiscoverySearchResults(
         val contentRoom = (this.maxHeight - if (tagsOnly) 0.dp else 16.dp).coerceAtLeast(0.dp)
         val resultReserve = if (showResults) minOf(contentRoom * .5f, 120.dp * fontScale) else 0.dp
         val controlsRoom = (contentRoom - resultReserve).coerceAtLeast(0.dp)
-        val fixedScope = (if (tagsOnly) 0.dp else 42.dp) +
+        val fixedScope = (if (tagsOnly || scopeInToolbar) 0.dp else 42.dp) +
             (if (search.selectedTags.isEmpty()) 0.dp else 42.dp) +
             if (showResults && search.items.isNotEmpty()) 28.dp else 0.dp
         val choicesRoom = (controlsRoom - fixedScope).coerceIn(0.dp, 200.dp)
@@ -367,7 +370,7 @@ internal fun DiscoverySearchResults(
             Column(Modifier.fillMaxWidth().heightIn(max = controlsRoom).verticalScroll(rememberScrollState())) {
                 SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
                     search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly,
-                    onTagQuery = onTagQuery, maxChoicesHeight = choicesRoom)
+                    onTagQuery = onTagQuery, maxChoicesHeight = choicesRoom, showScope = !scopeInToolbar)
                 if (federated)
                     SearchSourceSummary(search.searchSources, onRetry)
                 if (showResults && search.items.isNotEmpty()) Row(
@@ -631,7 +634,8 @@ private fun DiscoveryPane(
     }
     LazyVerticalGrid(
         columns = GridCells.Fixed(visibleColumns), state = grid,
-        contentPadding = PaddingValues(start = inset, end = inset, top = topPadding, bottom = 32.dp),
+        contentPadding = PaddingValues(start = inset, end = inset, top = topPadding,
+            bottom = 32.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
         horizontalArrangement = Arrangement.spacedBy(gap),
         verticalArrangement = Arrangement.spacedBy(if (ranking) 6.dp else if (columns == 1) 12.dp else 10.dp),
         modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
@@ -974,10 +978,13 @@ internal fun RecentReadingSheet(
     onDismiss: () -> Unit,
     onContinue: (ReadingProgress) -> Unit,
     onRemoveHistory: (String) -> Unit,
+    backdrop: HazeState? = null,
 ) {
     var chapterManga by remember { mutableStateOf<Manga?>(null) }
     val recentPosition = rememberLazyListState()
-    MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background) { dismiss ->
+    val recentFeedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
+    MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background,
+        backdrop = backdrop) { dismiss ->
         MotionTabContent(selected = chapterManga, modifier = Modifier.fillMaxWidth(),
             contentKey = { it?.id ?: "recent-books" }, order = { if (it == null) 0 else 1 },
             fillContent = false, soft = true) { selected ->
@@ -994,9 +1001,16 @@ internal fun RecentReadingSheet(
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     items(history, key = { it.manga.id }) { progress ->
+                        val rowInteraction = remember(progress.manga.id) { MutableInteractionSource() }
+                        val chapterReveal = animateFloatAsState(
+                            if (chapterManga?.id == progress.manga.id) 1f else 0f,
+                            if (LocalMotionEnabled.current) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
+                            label = "chapter-history-clock")
                         SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
                             Row(Modifier.fillMaxWidth()
-                                .clickable(onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() })
+                                .clickable(interactionSource = rowInteraction, indication = null, role = Role.Button,
+                                    onClickLabel = "继续阅读", onClick = { onContinue(progress); dismiss() })
+                                .motionPress(rowInteraction, pressedScale = .985f)
                                 .padding(horizontal = 4.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 MangaCover(progress.manga, repository, Modifier.width(32.dp).height(44.dp).mangaCoverCard(5.dp))
@@ -1007,8 +1021,15 @@ internal fun RecentReadingSheet(
                                         fontSize = 12.sp, lineHeight = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
-                                MotionIconButton(onClick = { chapterManga = progress.manga }, modifier = Modifier.size(44.dp)) {
-                                    Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                MotionIconButton(onClick = {
+                                    recentFeedback.perform(dev.mangaflow.ui.motion.FeelEvent.Selection)
+                                    chapterManga = progress.manga
+                                }, modifier = Modifier.size(44.dp)) {
+                                    Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(19.dp).graphicsLayer {
+                                        rotationZ = -32f * chapterReveal.value
+                                        val pressure = 1f - .12f * chapterReveal.value.coerceIn(0f, 1f)
+                                        scaleX = pressure; scaleY = pressure
+                                    }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
                         }

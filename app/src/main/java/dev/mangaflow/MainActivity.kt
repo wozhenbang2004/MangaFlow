@@ -41,6 +41,8 @@ class MainActivity : ComponentActivity() {
             return
         }
         enableEdgeToEdge()
+        // Keep the real app visible behind three-button navigation as well as gestures.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
         val animateLaunch = savedInstanceState == null &&
             !intent.getBooleanExtra("open_updates", false) && !intent.getBooleanExtra("open_downloads", false)
         consumeNavigationIntent(intent)

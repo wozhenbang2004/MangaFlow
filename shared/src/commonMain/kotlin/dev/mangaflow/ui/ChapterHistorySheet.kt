@@ -5,6 +5,8 @@ import kotlinx.coroutines.IO
 import dev.mangaflow.ui.platform.*
 
 import androidx.compose.foundation.clickable
+import dev.mangaflow.ui.motion.motionPress
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -113,8 +115,11 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
                 Text("还没有章节记录", Modifier.padding(vertical = 24.dp), color = secondary, fontSize = 13.sp)
             }
             items(records.orEmpty(), key = { it.chapterId }) { progress ->
+                val interaction = remember(progress.chapterId) { MutableInteractionSource() }
                 Row(Modifier.fillMaxWidth().clickable(role = Role.Button,
+                    interactionSource = interaction, indication = null,
                     onClickLabel = "从保存的位置继续阅读", onClick = { onContinue(progress) })
+                    .motionPress(interaction, pressedScale = .985f)
                     .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(progress.chapterTitle.ifBlank { "已保存的章节" }, fontSize = 14.sp, lineHeight = 20.sp,

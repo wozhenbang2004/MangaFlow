@@ -25,12 +25,36 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class WallpaperKind { IMAGE, VIDEO }
+enum class WallpaperFit { FILL, FIT }
+
+data class WallpaperAdjustment(
+    val strength: Float = .18f,
+    val fit: WallpaperFit = WallpaperFit.FILL,
+    val zoom: Float = 1f,
+    val offsetX: Float = 0f,
+    val offsetY: Float = 0f,
+    val brightness: Float = 1f,
+    val saturation: Float = .70f,
+    val contrast: Float = 1f,
+    val blur: Float = 0f,
+    val shade: Float = 0f,
+) {
+    fun bounded(): WallpaperAdjustment {
+        fun value(raw: Float, fallback: Float, min: Float, max: Float) =
+            raw.takeIf(Float::isFinite)?.coerceIn(min, max) ?: fallback
+        return copy(strength = value(strength, .18f, 0f, .45f), zoom = value(zoom, 1f, 1f, 2.5f),
+            offsetX = value(offsetX, 0f, -1f, 1f), offsetY = value(offsetY, 0f, -1f, 1f),
+            brightness = value(brightness, 1f, .5f, 1.5f), saturation = value(saturation, .70f, 0f, 1.5f),
+            contrast = value(contrast, 1f, .5f, 1.5f), blur = value(blur, 0f, 0f, 24f), shade = value(shade, 0f, 0f, .6f))
+    }
+}
 
 data class WallpaperItem(
     val mediaPath: String,
     val posterPath: String? = null,
     val kind: WallpaperKind = WallpaperKind.IMAGE,
     val name: String = "",
+    val adjustment: WallpaperAdjustment = WallpaperAdjustment(),
 )
 
 data class WallpaperState(
@@ -44,6 +68,7 @@ data class WallpaperState(
     val items: List<WallpaperItem> = emptyList(),
     val rotationEnabled: Boolean = false,
     val rotationMinutes: Int = 10,
+    val adjustment: WallpaperAdjustment = WallpaperAdjustment(strength = strength),
 )
 
 /** Selected local media is copied, never executed or unpacked as a wallpaper project. */
@@ -55,6 +80,7 @@ class WallpaperStore private constructor(context: Context) {
     private val intent = AtomicLong()
     private val cleanup = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val activeOwners = mutableSetOf<Any>()
+    private val editingOwners = mutableSetOf<Any>()
     private var rotationJob: Job? = null
     private val _state = MutableStateFlow(readState())
     val state: StateFlow<WallpaperState> = _state.asStateFlow()
@@ -103,9 +129,10 @@ class WallpaperStore private constructor(context: Context) {
             synchronized(lock) {
                 if (intent.get() != request) throw CancellationException("Wallpaper selection changed")
                 val previous = _state.value
-                val added = WallpaperItem(media.path, poster.path.takeIf { kind == WallpaperKind.VIDEO }, kind, name.take(180))
+                val added = WallpaperItem(media.path, poster.path.takeIf { kind == WallpaperKind.VIDEO }, kind, name.take(180),
+                    WallpaperAdjustment(strength = previous.strength))
                 val retained = previous.items + listOfNotNull(previous.mediaPath?.let { path ->
-                    WallpaperItem(path, previous.posterPath, previous.kind, previous.name)
+                    WallpaperItem(path, previous.posterPath, previous.kind, previous.name, previous.adjustment)
                 })
                 publishLocked(current(previous.copy(items = (retained + added).distinctBy(WallpaperItem::mediaPath)), added))
                 updateRotationLocked(restart = true)
@@ -116,10 +143,36 @@ class WallpaperStore private constructor(context: Context) {
         }
     }
 
-    fun setStrength(value: Float, persist: Boolean = true) = synchronized(lock) {
-        val strength = value.takeIf(Float::isFinite)?.coerceIn(0f, .45f) ?: .18f
-        _state.value = _state.value.copy(strength = strength)
-        if (persist) prefs.edit().putFloat("strength", strength).apply()
+    fun setStrength(value: Float, persist: Boolean = true) {
+        val path = _state.value.mediaPath
+        if (path != null) updateAdjustment(path, persist) { it.copy(strength = value) }
+        else synchronized(lock) {
+            val strength = value.takeIf(Float::isFinite)?.coerceIn(0f, .45f) ?: .18f
+            _state.value = _state.value.copy(strength = strength, adjustment = _state.value.adjustment.copy(strength = strength))
+            if (persist) prefs.edit().putFloat("strength", strength).apply()
+            updateRotationLocked()
+        }
+    }
+
+    /** Live slider changes never change the media revision or recreate a video player. */
+    fun updateAdjustment(path: String, persist: Boolean = true, transform: (WallpaperAdjustment) -> WallpaperAdjustment) = synchronized(lock) {
+        val previous = _state.value
+        val item = previous.items.firstOrNull { it.mediaPath == path } ?: return@synchronized
+        val adjustment = transform(item.adjustment).bounded()
+        val items = previous.items.map { if (it.mediaPath == path) it.copy(adjustment = adjustment) else it }
+        val next = previous.copy(items = items,
+            strength = if (previous.mediaPath == path) adjustment.strength else previous.strength,
+            adjustment = if (previous.mediaPath == path) adjustment else previous.adjustment)
+        if (persist) publishLocked(next) else _state.value = next
+        updateRotationLocked()
+    }
+
+    fun saveAdjustment() = synchronized(lock) { publishLocked(_state.value) }
+    fun resetAdjustment(path: String) = updateAdjustment(path) { WallpaperAdjustment() }
+
+    /** A real adjustment gesture pauses the existing timer, without adding a background job. */
+    fun setEditing(owner: Any, editing: Boolean) = synchronized(lock) {
+        if (editing) editingOwners.add(owner) else editingOwners.remove(owner)
         updateRotationLocked()
     }
 
@@ -175,18 +228,18 @@ class WallpaperStore private constructor(context: Context) {
 
     private fun updateRotationLocked(restart: Boolean = false) {
         val selected = _state.value
-        if (restart || activeOwners.isEmpty() || selected.strength <= 0f || !selected.rotationEnabled || selected.items.size < 2) {
+        if (restart || activeOwners.isEmpty() || editingOwners.isNotEmpty() || selected.strength <= 0f || !selected.rotationEnabled || selected.items.size < 2) {
             rotationJob?.cancel()
             rotationJob = null
         }
-        if (activeOwners.isEmpty() || selected.strength <= 0f || !selected.rotationEnabled || selected.items.size < 2 || rotationJob?.isActive == true) return
+        if (activeOwners.isEmpty() || editingOwners.isNotEmpty() || selected.strength <= 0f || !selected.rotationEnabled || selected.items.size < 2 || rotationJob?.isActive == true) return
         rotationJob = cleanup.launch {
             while (true) {
                 delay(_state.value.rotationMinutes * 60_000L)
                 currentCoroutineContext().ensureActive()
                 synchronized(lock) {
                     val previous = _state.value
-                    if (activeOwners.isEmpty() || previous.strength <= 0f || !previous.rotationEnabled || previous.items.size < 2) return@launch
+                    if (activeOwners.isEmpty() || editingOwners.isNotEmpty() || previous.strength <= 0f || !previous.rotationEnabled || previous.items.size < 2) return@launch
                     val index = previous.items.indexOfFirst { it.mediaPath == previous.mediaPath }
                     val next = previous.items[(index + 1) % previous.items.size]
                     try { publishLocked(current(previous, next)) }
@@ -202,12 +255,14 @@ class WallpaperStore private constructor(context: Context) {
     private fun current(previous: WallpaperState, item: WallpaperItem?): WallpaperState = previous.copy(
         mediaPath = item?.mediaPath, posterPath = item?.posterPath, kind = item?.kind ?: WallpaperKind.IMAGE,
         name = item?.name.orEmpty(), error = null, revision = previous.revision + 1,
+        strength = item?.adjustment?.strength ?: previous.strength,
+        adjustment = item?.adjustment ?: WallpaperAdjustment(strength = previous.strength),
     )
 
     private fun publishLocked(next: WallpaperState) {
         val items = JSONArray()
         next.items.forEach { item -> items.put(JSONObject().put("path", item.mediaPath).put("poster", item.posterPath)
-            .put("kind", item.kind.name).put("name", item.name)) }
+            .put("kind", item.kind.name).put("name", item.name).put("adjustment", adjustmentJson(item.adjustment))) }
         check(prefs.edit().putString("items", items.toString()).putString("path", next.mediaPath)
             .putString("poster", next.posterPath).putString("kind", next.kind.name).putString("name", next.name)
             .putFloat("strength", next.strength).putBoolean("rotation", next.rotationEnabled)
@@ -234,23 +289,43 @@ class WallpaperStore private constructor(context: Context) {
                 val media = item.optString("path").takeIf { it.isNotBlank() && owned(it) } ?: return@mapNotNull null
                 WallpaperItem(media, item.optString("poster").takeIf { it.isNotBlank() && owned(it) },
                     runCatching { WallpaperKind.valueOf(item.optString("kind")) }.getOrDefault(WallpaperKind.IMAGE),
-                    item.optString("name").take(180))
+                    item.optString("name").take(180), readAdjustment(item.optJSONObject("adjustment"), strength))
             }.distinctBy(WallpaperItem::mediaPath)
         }.getOrDefault(emptyList()).let { saved ->
             // Older builds update only the single selection keys; keep that image alongside the saved list.
             val legacy = path?.takeIf(::owned)?.let { media ->
                 WallpaperItem(media, prefs.getString("poster", null)?.takeIf(::owned),
                     runCatching { WallpaperKind.valueOf(prefs.getString("kind", "IMAGE").orEmpty()) }.getOrDefault(WallpaperKind.IMAGE),
-                    prefs.getString("name", "").orEmpty().take(180))
+                    prefs.getString("name", "").orEmpty().take(180), WallpaperAdjustment(strength = strength))
             }
             (saved + listOfNotNull(legacy)).distinctBy(WallpaperItem::mediaPath)
         }
         val selected = items.firstOrNull { it.mediaPath == path } ?: items.firstOrNull()
         val minutes = prefs.getInt("rotation_minutes", 10).takeIf { it in ROTATION_INTERVALS } ?: 10
         return WallpaperState(selected?.mediaPath, selected?.posterPath, selected?.kind ?: WallpaperKind.IMAGE,
-            selected?.name.orEmpty(), strength, items = items,
+            selected?.name.orEmpty(), selected?.adjustment?.strength ?: strength, items = items,
             rotationEnabled = prefs.getBoolean("rotation", false) && items.size > 1, rotationMinutes = minutes,
+            adjustment = selected?.adjustment ?: WallpaperAdjustment(strength = strength),
             error = if (path != null && (selected == null || !File(selected.mediaPath).isFile)) "壁纸文件不存在，请重新选择。" else null)
+    }
+
+    private fun adjustmentJson(value: WallpaperAdjustment): JSONObject = JSONObject()
+        .put("strength", value.strength).put("fit", value.fit.name).put("zoom", value.zoom)
+        .put("offset_x", value.offsetX).put("offset_y", value.offsetY)
+        .put("brightness", value.brightness).put("saturation", value.saturation).put("contrast", value.contrast)
+        .put("blur", value.blur).put("shade", value.shade)
+
+    private fun readAdjustment(json: JSONObject?, strength: Float): WallpaperAdjustment {
+        if (json == null) return WallpaperAdjustment(strength = strength)
+        return WallpaperAdjustment(
+            strength = json.optDouble("strength", strength.toDouble()).toFloat(),
+            fit = runCatching { WallpaperFit.valueOf(json.optString("fit")) }.getOrDefault(WallpaperFit.FILL),
+            zoom = json.optDouble("zoom", 1.0).toFloat(),
+            offsetX = json.optDouble("offset_x", 0.0).toFloat(), offsetY = json.optDouble("offset_y", 0.0).toFloat(),
+            brightness = json.optDouble("brightness", 1.0).toFloat(),
+            saturation = json.optDouble("saturation", .70).toFloat(),
+            contrast = json.optDouble("contrast", 1.0).toFloat(),
+            blur = json.optDouble("blur", 0.0).toFloat(), shade = json.optDouble("shade", 0.0).toFloat()).bounded()
     }
 
     private fun owned(path: String): Boolean = runCatching { File(path).canonicalFile.parentFile == directory.canonicalFile }.getOrDefault(false)

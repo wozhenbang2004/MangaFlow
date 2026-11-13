@@ -7,7 +7,6 @@ import dev.mangaflow.platform.*
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
-import dev.mangaflow.ui.motion.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -67,6 +66,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
@@ -83,7 +83,6 @@ import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
-import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
@@ -182,11 +181,7 @@ private object ChapterSourceWindowOrigin : PopupPositionProvider {
         layoutDirection: LayoutDirection, popupContentSize: IntSize) = IntOffset.Zero
 }
 
-/**
- * A single catalog/reader owner. The measured panel morphs from the selected badge;
- * no grid item changes size. Inaccessible/short windows use the app's frosted sheet.
- * Source selection starts preparation in the caller and stays visible on failure.
- */
+/** The existing screen-coordinate morph, kept compact for both reading and downloading. */
 @Composable
 internal fun ChapterSourcePicker(
     chapter: Chapter?,
@@ -211,39 +206,43 @@ internal fun ChapterSourcePicker(
     if (chapter == null) return
     val key = chapter.logicalId.ifBlank { chapter.id }
     val frozen = remember(key) { chapter }
-    val sourceAnchor = remember(key) { anchor }
+    ChapterChoicePopover("read:$key", anchor, backdrop, onDismiss, closeRequested,
+        onCancelSelection, onPresenceChange, maximumWidth = 228.dp) { dismiss, reveal ->
+        ChapterSourceContent(frozen, downloaded, chapterPositions, loading, error, onReadVariant, dismiss, reveal)
+    }
+}
+
+/**
+ * Adapt ChapterSourcePicker's retained beUI anchor morph, shared by the two real source actions.
+ * The popup owns one natural-sized panel; no bottom sheet or full-window blank content is added.
+ */
+@Composable
+internal fun ChapterChoicePopover(
+    identity: String,
+    anchor: Rect?,
+    backdrop: HazeState,
+    onDismiss: () -> Unit,
+    closeRequested: Boolean = false,
+    onCancel: () -> Unit = {},
+    onPresenceChange: (Boolean) -> Unit = {},
+    maximumWidth: Dp = 228.dp,
+    content: @Composable (() -> Unit, () -> Float) -> Unit,
+) {
+    val sourceAnchor = remember(identity) { anchor }
     val motion = LocalMotionEnabled.current
-    val window = LocalMangaWindow.current
     val density = LocalDensity.current
-    var closing by remember(key) { mutableStateOf(false) }
-    LaunchedEffect(key, closeRequested) { if (closeRequested) closing = true }
+    var closing by remember(identity) { mutableStateOf(false) }
+    LaunchedEffect(identity, closeRequested) { if (closeRequested) closing = true }
     val onClosed by rememberUpdatedState(onDismiss)
-    val cancelSelection by rememberUpdatedState(onCancelSelection)
+    val cancelSelection by rememberUpdatedState(onCancel)
     val reportPresence by rememberUpdatedState(onPresenceChange)
     SideEffect { reportPresence(true) }
-    DisposableEffect(key) { onDispose { reportPresence(false) } }
-    val close = { cancelSelection(); closing = true }
-    val useSheet = sourceAnchor == null || density.fontScale > 1.35f ||
-        window.height < 520.dp
-    val content: @Composable (() -> Unit) -> Unit = { dismiss ->
-        ChapterSourceContent(frozen, downloaded, chapterPositions, loading, error, onReadVariant, dismiss)
-    }
-    if (useSheet) {
-        MotionBottomSheet(onDismissRequest = { if (!closeRequested) cancelSelection(); onClosed() }, backdrop = backdrop,
-            containerColor = DetailSurface, contentColor = DetailForeground) { dismiss ->
-            LaunchedEffect(closeRequested) { if (closeRequested) dismiss() }
-            val userDismiss = { cancelSelection(); dismiss() }
-            BackHandler(enabled = !closeRequested) { userDismiss() }
-            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 16.dp)) {
-                content(userDismiss)
-            }
-        }
-        return
-    }
-    val progress = remember(key) { Animatable(0f) }
-    var origin by remember(key) { mutableStateOf<Offset?>(null) }
-    var panelSize by remember(key) { mutableStateOf(IntSize.Zero) }
-    LaunchedEffect(key, closing, motion, origin != null, panelSize != IntSize.Zero) {
+    DisposableEffect(identity) { onDispose { reportPresence(false) } }
+    val close = { if (!closing) { cancelSelection(); closing = true } }
+    val progress = remember(identity) { Animatable(0f) }
+    var origin by remember(identity) { mutableStateOf<Offset?>(null) }
+    var panelSize by remember(identity) { mutableStateOf(IntSize.Zero) }
+    LaunchedEffect(identity, closing, motion, origin != null, panelSize != IntSize.Zero) {
         if (origin == null || panelSize == IntSize.Zero) return@LaunchedEffect
         progress.animateTo(if (closing) 0f else 1f,
             if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap())
@@ -255,39 +254,51 @@ internal fun ChapterSourcePicker(
             val offset = it.localToScreen(Offset.Zero)
             if (offset.isSpecified) origin = offset
         }.semantics { dismiss { close(); true } }) {
-            val panelWidth = minOf(maxWidth - 24.dp, 260.dp).coerceAtLeast(1.dp)
+            val panelWidth = minOf((maxWidth - 16.dp).coerceAtLeast(1.dp),
+                maximumWidth * density.fontScale.coerceIn(1f, 1.35f))
             val windowWidth = with(density) { maxWidth.toPx() }
             val windowHeight = with(density) { maxHeight.toPx() }
-            val inset = with(density) { 12.dp.toPx() }
+            val inset = with(density) { 8.dp.toPx() }
             val width = with(density) { panelWidth.toPx() }
             val screenOrigin = origin ?: Offset.Zero
-            val from = sourceAnchor!!.translate(-screenOrigin)
-            val left = (from.center.x - width / 2f).coerceIn(inset, (windowWidth - width - inset).coerceAtLeast(inset))
+            val from = sourceAnchor?.translate(-screenOrigin)
+            val centerX = from?.center?.x ?: windowWidth / 2f
+            val left = (centerX - width / 2f).coerceIn(inset,
+                (windowWidth - width - inset).coerceAtLeast(inset))
             val height = panelSize.height.toFloat().coerceAtLeast(1f)
-            val preferredTop = if (from.top > height + inset * 2f) from.top - height - inset else from.bottom + inset
-            val top = preferredTop.coerceIn(inset, (windowHeight - height - inset).coerceAtLeast(inset))
-            Box(Modifier.fillMaxSize().background(DetailForeground.copy(alpha = .09f * progress.value))
+            val preferredTop = when {
+                from == null -> (windowHeight - height) / 2f
+                from.top > height + inset * 2f -> from.top - height - inset
+                else -> from.bottom + inset
+            }
+            val top = preferredTop.coerceIn(inset,
+                (windowHeight - height - inset).coerceAtLeast(inset))
+            Box(Modifier.fillMaxSize().background(DetailForeground.copy(alpha = .035f * progress.value))
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
                     onClickLabel = "收起章节来源", onClick = close))
             LiquidGlassSurface(backdrop,
                 Modifier.absoluteOffset { IntOffset(left.roundToInt(), top.roundToInt()) }
-                    .width(panelWidth).heightIn(max = minOf(maxHeight - 24.dp, 360.dp).coerceAtLeast(48.dp))
+                    .width(panelWidth)
+                    .heightIn(max = minOf((maxHeight - 16.dp).coerceAtLeast(1.dp), 320.dp))
                     .onSizeChanged { panelSize = it }
-                    .motionInputGate(!closing && progress.value >= .95f)
+                    .motionInputGate(!closing && progress.value >= .85f)
                     .graphicsLayer {
                         val p = progress.value
-                        transformOrigin = TransformOrigin(0f, 0f)
-                        translationX = (from.left - left) * (1f - p)
-                        translationY = (from.top - top) * (1f - p)
-                        scaleX = (from.width / width).coerceIn(.08f, 1f) * (1f - p) + p
-                        scaleY = (from.height / height).coerceIn(.04f, 1f) * (1f - p) + p
-                        alpha = if (origin == null) 0f else .65f + .35f * p
-                    },
-                cornerRadius = 20.dp, role = GlassSurfaceRole.POPOVER, softCard = true,
+                        val anchorX = from?.center?.x ?: centerX
+                        val anchorY = from?.center?.y ?: (top + height / 2f)
+                        transformOrigin = TransformOrigin(
+                            ((anchorX - left) / width).coerceIn(0f, 1f),
+                            ((anchorY - top) / height).coerceIn(0f, 1f))
+                        translationX = (anchorX - (left + width / 2f)) * (1f - p) * .18f
+                        translationY = (anchorY - (top + height / 2f)) * (1f - p) * .18f
+                        scaleX = .84f + .16f * p
+                        scaleY = .84f + .16f * p
+                        alpha = if (origin == null) 0f else p
+                    }, cornerRadius = 16.dp, role = GlassSurfaceRole.POPOVER, softCard = true,
                 materialExpansion = { progress.value }) {
-                Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-                    .graphicsLayer { alpha = ((progress.value - .35f) / .65f).coerceIn(0f, 1f) }
-                    .padding(8.dp)) { content(close) }
+                Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(6.dp)) {
+                    content(close) { progress.value }
+                }
             }
         }
     }
@@ -302,6 +313,7 @@ private fun ChapterSourceContent(
     error: String?,
     onRead: (Chapter, ChapterVariant) -> Unit,
     dismiss: () -> Unit,
+    reveal: () -> Float,
 ) {
     var requestedVariant by remember(chapter.logicalId, chapter.id) { mutableStateOf<ChapterVariant?>(null) }
     val variants = remember(chapter.id, chapter.variants) {
@@ -310,12 +322,14 @@ private fun ChapterSourceContent(
     val editions = variants.map { it.edition }.filter(String::isNotBlank).distinct()
     val languages = variants.map { it.language }.filter(String::isNotBlank).distinct()
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 32.dp).padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(chapter.title, color = DetailForeground, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            DetailAction(Icons.Outlined.Close, "收起章节来源", onClick = dismiss)
+            dev.mangaflow.ui.motion.MotionIconButton(onClick = dismiss, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Outlined.Close, "收起章节来源", Modifier.size(16.dp), tint = DetailMuted)
+            }
         }
-        variants.forEach { variant ->
+        variants.forEachIndexed { index, variant ->
             val selected = variant.storageId == chapter.id
             val entry = downloaded[variant.storageId]
             val saved = positions?.get(variant.storageId)
@@ -328,7 +342,12 @@ private fun ChapterSourceContent(
                 saved?.takeIf { !selected }?.let { "续读第${it.pageIndex + 1}页" },
             ).distinct().joinToString(" · ")
             val interaction = remember(variant.storageId) { MutableInteractionSource() }
-            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
+            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).graphicsLayer {
+                    val start = index.coerceAtMost(3) * .07f
+                    val p = ((reveal() - start) / (1f - start)).coerceIn(0f, 1f)
+                    alpha = p
+                    translationY = (1f - p) * 6.dp.toPx()
+                }.clip(RoundedCornerShape(10.dp))
                 .background(if (selected) DetailForeground.copy(alpha = .035f) else Color.Transparent)
                 .clickable(enabled = !loading, interactionSource = interaction, indication = null,
                     role = Role.Button, onClickLabel = "使用${variant.sourceName}阅读本章",
@@ -338,7 +357,7 @@ private fun ChapterSourceContent(
                     "当前来源".takeIf { selected }, details.takeIf(String::isNotBlank),
                     "已下载".takeIf { entry?.status == DownloadStatus.COMPLETED },
                 ).joinToString("，") }
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 6.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(20.dp))
                 Spacer(Modifier.width(9.dp))

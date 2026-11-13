@@ -1,5 +1,13 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.layout.WindowInsetsSides
+
+import androidx.compose.foundation.layout.windowInsetsPadding
+
+import androidx.compose.foundation.layout.only
+
+import androidx.compose.foundation.layout.asPaddingValues
+
 import dev.mangaflow.ui.platform.*
 
 import dev.mangaflow.platform.*
@@ -134,7 +142,10 @@ fun LibraryScreen(
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
     val haptics = rememberFeelFeedback()
-    var headerHeightPx by remember { mutableIntStateOf(with(density) { 44.dp.toPx().toInt() }) }
+    val contentInsets = screenFitContentInsets().asPaddingValues()
+    val topInset = contentInsets.calculateTopPadding()
+    val bottomInset = contentInsets.calculateBottomPadding()
+    var headerHeightPx by remember(density, topInset) { mutableIntStateOf(with(density) { (48.dp + topInset).roundToPx() }) }
     val headerPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showCollections by rememberSaveable { mutableStateOf(false) }
@@ -229,7 +240,7 @@ fun LibraryScreen(
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val shelfWidth = preferredShelfWidth.coerceAtMost((maxWidth - 180.dp).coerceAtLeast(70.dp))
     val historyInset = 16.dp + ((maxWidth - MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp)
-    Box(Modifier.fillMaxSize().navigationBarsPadding().mangaHazeSource(backdrop)
+    Box(Modifier.fillMaxSize().mangaHazeSource(backdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
         wallpaper()
         Column(Modifier.fillMaxSize()) {
@@ -240,7 +251,7 @@ fun LibraryScreen(
                     LazyColumn(
                         state = historyPosition,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(start = historyInset, end = historyInset, top = headerPadding + 4.dp, bottom = 24.dp),
+                        contentPadding = PaddingValues(start = historyInset, end = historyInset, top = headerPadding + 4.dp, bottom = 24.dp + bottomInset),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         if (history.isEmpty()) item(key = "empty-history") {
@@ -276,7 +287,7 @@ fun LibraryScreen(
                             state = favoritesPosition,
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(start = 16.dp, end = 16.dp,
-                                top = headerPadding + 8.dp, bottom = 32.dp),
+                                top = headerPadding + 8.dp, bottom = 32.dp + bottomInset),
                             horizontalArrangement = Arrangement.spacedBy(gap),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
@@ -356,8 +367,9 @@ fun LibraryScreen(
         }
         }
     }
-        Column(Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
-            .onSizeChanged { headerHeightPx = it.height }) {
+        Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
+            .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
+            .padding(horizontal = 8.dp, vertical = 2.dp)) {
             PageTitleHeader("书架", backdrop, navigation,
                 leadingWidth = shelfWidth,
                 leading = {

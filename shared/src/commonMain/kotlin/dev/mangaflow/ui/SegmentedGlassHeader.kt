@@ -14,6 +14,11 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
@@ -143,8 +148,8 @@ internal fun SegmentedGlassHeader(
 }
 
 /**
- * Adapt beUI's measured-trigger morph and distinct exit curve. A fixed-size foreground leaves
- * before the surface returns behind the tab; reserved list space follows the final return phase.
+ * Adapt beUI's measured-trigger morph: foreground leaves before its shell returns.
+ * One geometry progress owns both the surface and its reserved layout space.
  */
 @Composable
 internal fun RankingsFromTab(
@@ -152,61 +157,88 @@ internal fun RankingsFromTab(
     expanded: Boolean,
     anchor: Rect,
     enabled: Boolean,
+    onEmphasisState: (State<Float>?) -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
     var origin by remember { mutableStateOf<Offset?>(null) }
     var contentHeight by remember(density) { mutableStateOf(44.dp) }
+    var measuredWidth by remember(density) { mutableStateOf<Dp?>(null) }
+    var returnAnchor by remember(density) { mutableStateOf<Rect?>(null) }
     val ready = origin != null && anchor.width > 0f && anchor.height > 0f
     val presence = remember { MutableTransitionState(false) }
-    presence.targetState = expanded && ready
-    val transition = updateTransition(presence, label = "ranking-from-tab")
-    val reveal = transition.animateFloat(transitionSpec = {
-        if (!motion) snap()
-        else if (targetState) spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness)
-        else tween(200, easing = MangaMotion.EnterEasing)
-    }, label = "ranking-tab-surface") { if (it) 1f else 0f }
-    val foreground = transition.animateFloat(transitionSpec = {
-        if (!motion) snap()
-        else if (targetState) tween(120, delayMillis = 60, easing = MangaMotion.EnterEasing)
-        else tween(70, easing = MangaMotion.EnterEasing)
-    }, label = "ranking-tab-foreground") { if (it) 1f else 0f }
-    val reservedSpace = transition.animateFloat(transitionSpec = {
-        if (!motion) snap()
-        else if (targetState) tween(260, easing = MangaMotion.EnterEasing)
-        else tween(100, delayMillis = 100, easing = MangaMotion.EnterEasing)
-    }, label = "ranking-tab-reserved-space") { if (it) 1f else 0f }
-    val progress = reveal.value.coerceIn(0f, 1f)
-    val present = presence.currentState || presence.targetState || !presence.isIdle
-    BoxWithConstraints(Modifier.fillMaxWidth().onGloballyPositioned { origin = it.positionInRoot() }
-        .height((contentHeight + 2.dp) * reservedSpace.value.coerceIn(0f, 1f))) {
-        if (present) {
-            val endLeft = 50.dp.coerceAtMost(maxWidth)
-            val endWidth = (maxWidth - endLeft).coerceAtLeast(1.dp)
-            val rootOrigin = origin ?: Offset.Zero
-            val startWidth = with(density) { anchor.width.toDp() }.coerceIn(1.dp, endWidth)
-            val startLeft = with(density) { (anchor.left - rootOrigin.x).toDp() }
-                .coerceIn(0.dp, (maxWidth - startWidth).coerceAtLeast(0.dp))
-            val startTop = with(density) { (anchor.top - rootOrigin.y).toDp() }
-            val startHeight = with(density) { anchor.height.toDp() }.coerceAtLeast(1.dp)
-            val startRadius = (startHeight / 2).coerceAtMost(22.dp)
-            val left = startLeft + (endLeft - startLeft) * progress
-            val top = startTop + (2.dp - startTop) * progress
-            val width = startWidth + (endWidth - startWidth) * progress
-            val height = startHeight + (contentHeight - startHeight) * progress
-            LiquidGlassSurface(backdrop, Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).offset {
-                IntOffset(with(density) { left.roundToPx() }, with(density) { top.roundToPx() })
-            }.width(width).height(height).graphicsLayer {
-                // Keep the shell readable through its return; remove only the final overlapping remnant.
-                alpha = (reveal.value / .15f).coerceIn(0f, 1f)
-            },
-                cornerRadius = startRadius + (22.dp - startRadius) * progress, role = GlassSurfaceRole.NAVIGATION,
-                trackPointer = true, materialExpansion = { progress }) {
-                Column(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).width(endWidth)
-                    .onSizeChanged { contentHeight = with(density) { it.height.toDp() } }
-                    .graphicsLayer { alpha = foreground.value }
-                    .motionInputGate(enabled && expanded && progress >= .85f && foreground.value >= .95f)) { content() }
+    val reportEmphasis by rememberUpdatedState(onEmphasisState)
+    BoxWithConstraints(Modifier.fillMaxWidth().onGloballyPositioned { origin = it.positionInRoot() }) {
+        val endLeft = 50.dp.coerceAtMost(maxWidth)
+        val endWidth = (maxWidth - endLeft).coerceAtLeast(1.dp)
+        val relativeAnchor = if (ready) origin?.let { point ->
+            Rect(anchor.left - point.x, anchor.top - point.y,
+                anchor.right - point.x, anchor.bottom - point.y)
+        } else null
+        // The leaving tab's measured destination belongs to this exit, rather than
+        // following subsequent selected-content or header measurement updates.
+        SideEffect { if (expanded && relativeAnchor != null) returnAnchor = relativeAnchor }
+        val startBounds = (if (expanded) relativeAnchor else returnAnchor ?: relativeAnchor) ?: Rect.Zero
+        // Mount invisibly for natural-height measurement before the first expansion.
+        // A later opening can reuse that measurement only at the same width/density.
+        presence.targetState = expanded && ready && measuredWidth == endWidth
+        val transition = updateTransition(presence, label = "ranking-from-tab")
+        val reveal = transition.animateFloat(transitionSpec = {
+            if (!motion) snap()
+            else if (targetState) spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness)
+            else tween(MangaMotion.Exit, delayMillis = 60, easing = MangaMotion.EnterEasing)
+        }, label = "ranking-tab-surface") { if (it) 1f else 0f }
+        val foreground = transition.animateFloat(transitionSpec = {
+            if (!motion) snap()
+            else if (targetState) tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing)
+            else tween(60, easing = MangaMotion.ExitEasing)
+        }, label = "ranking-tab-foreground") { if (it) 1f else 0f }
+        val progress = reveal.value.coerceIn(0f, 1f)
+        val present = presence.currentState || presence.targetState || !presence.isIdle
+        val contentEmphasis = remember(reveal, foreground) {
+            derivedStateOf {
+                val room = ((reveal.value.coerceIn(0f, 1f) - .4f) / .6f).coerceIn(0f, 1f)
+                foreground.value * room * room * (3f - 2f * room)
+            }
+        }
+        // Share the observable animation once; callers read it only in their
+        // drawing layer, without forwarding frame values through composition.
+        DisposableEffect(contentEmphasis) {
+            reportEmphasis(contentEmphasis)
+            onDispose { reportEmphasis(null) }
+        }
+        Box(Modifier.fillMaxWidth().height((contentHeight + 2.dp) * progress)) {
+            if (expanded || present) {
+                val startWidth = with(density) { startBounds.width.toDp() }.coerceIn(1.dp, endWidth)
+                val startLeft = with(density) { startBounds.left.toDp() }
+                    .coerceIn(0.dp, (maxWidth - startWidth).coerceAtLeast(0.dp))
+                val startTop = with(density) { startBounds.top.toDp() }
+                val startHeight = with(density) { startBounds.height.toDp() }.coerceAtLeast(1.dp)
+                val startRadius = (startHeight / 2).coerceAtMost(22.dp)
+                val left = startLeft + (endLeft - startLeft) * progress
+                val top = startTop + (2.dp - startTop) * progress
+                val width = startWidth + (endWidth - startWidth) * progress
+                val height = startHeight + (contentHeight - startHeight) * progress
+                LiquidGlassSurface(backdrop, Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).offset {
+                    IntOffset(with(density) { left.roundToPx() }, with(density) { top.roundToPx() })
+                }.width(width).height(height).graphicsLayer {
+                    // Land smoothly beneath the existing tab instead of clipping off
+                    // a final strip at a separate alpha threshold.
+                    val merge = (progress / .22f).coerceIn(0f, 1f)
+                    alpha = merge * merge * (3f - 2f * merge)
+                },
+                    cornerRadius = startRadius + (22.dp - startRadius) * progress, role = GlassSurfaceRole.NAVIGATION,
+                    trackPointer = enabled && expanded && progress >= .85f, materialExpansion = { progress }) {
+                    Column(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).width(endWidth)
+                        .onSizeChanged {
+                            if (expanded && it.height > 0) {
+                                contentHeight = with(density) { it.height.toDp() }
+                                measuredWidth = endWidth
+                            }
+                        }.graphicsLayer { alpha = contentEmphasis.value }
+                        .motionInputGate(enabled && expanded && progress >= .85f && foreground.value >= .95f)) { content() }
+                }
             }
         }
     }
