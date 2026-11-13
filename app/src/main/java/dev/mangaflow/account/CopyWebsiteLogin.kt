@@ -277,7 +277,14 @@ internal class CopyWebsiteLogin(
             if (!viewport) { viewport = document.createElement('meta'); viewport.name = 'viewport'; document.head.appendChild(viewport); }
             viewport.content = 'width=device-width, initial-scale=1';
             const style = document.createElement('style');
-            style.textContent = 'html,body,#app,#loginV2{min-width:0!important;width:100%!important;margin:0!important}#loginV2>.el-header,#loginV2>.el-footer{display:none!important}#loginV2>.el-main{padding:0!important}#loginV2>.el-main>section{width:100%!important;min-width:0!important}#loginV2 .el-form{width:100%!important}#loginV2 .el-tabs--border-card{border:0!important;box-shadow:none!important}#loginV2 .el-tabs__content{padding:12px!important}';
+            style.textContent = 'html,body,#app,#loginV2{min-width:0!important;width:100%!important;margin:0!important}#loginV2>.el-header,#loginV2>.el-footer{display:none!important}#loginV2>.el-main{padding:0!important}#loginV2>.el-main>section{width:100%!important;min-width:0!important}#loginV2 .el-form{width:100%!important}#loginV2 .el-tabs--border-card{border:0!important;box-shadow:none!important}#loginV2 .el-tabs__content{padding:12px!important}' +
+            // Element UI mounts its message box under body, outside #loginV2.
+            // Keep source rejection text and its existing confirmation action visible.
+            '.el-message-box{width:calc(100vw - 32px)!important;max-width:420px!important;box-sizing:border-box!important}' +
+            '.el-message-box__wrapper{overflow:auto!important}' +
+            '.el-message-box__content,.el-message-box__message{min-width:0!important}' +
+            '.el-message-box__message,.el-message-box__message p{white-space:pre-wrap!important;overflow-wrap:anywhere!important;word-break:break-word!important}' +
+            '.el-message-box__btns{white-space:normal!important}';
             document.head.appendChild(style);
           }, {once: true});
           const documentId = Array.from(crypto.getRandomValues(new Uint32Array(4)), x => x.toString(16).padStart(8, '0')).join('');
