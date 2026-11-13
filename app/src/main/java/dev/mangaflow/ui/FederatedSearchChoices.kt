@@ -70,7 +70,7 @@ internal fun SearchSourceMarks(
                     val source = sourceMatches.first()
                     val name = sourceDisplayName(source.sourceId)
                     val interaction = remember(source.sourceId) { MutableInteractionSource() }
-                    val description = if (sourceMatches.size == 1) "打开$name的搜索结果"
+                    val description = if (sourceMatches.size == 1) "打开${name}的搜索结果"
                         else "$name，${sourceMatches.size}条搜索结果，选择条目"
                     Box(Modifier.size(24.dp).clip(RoundedCornerShape(5.dp))
                         .clickable(interactionSource = interaction, indication = null, role = Role.Button,

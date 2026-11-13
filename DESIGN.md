@@ -1,5 +1,7 @@
 # MangaFlow detail · 2026-11-12
 
+CI-158 correction (2026-11-13): user reports “ci 失败了最新的 158 交给你 fix 快”. Release run 43410802008 / job 131836440484 at 576b46f failed `:app:compileReleaseKotlin` on the missing ReaderScreen `safeDrawing` extension import and a source-choice description whose unbraced `$name` absorbed the adjacent Chinese identifier. Add the import and delimit the interpolation; preserve current main, existing workflow/signing/R8 and no-test/no-local-build boundaries. The compiler log proves these source errors, not device/startup acceptance; replacement CI result remains separate.
+
 ## Reader flow, source pressure and offline versions · 2026-11-13 (READING-FLOW-26; device/service acceptance pending)
 
 Current user request: “增加一个下滑回上一话的功能以及我问个问题现在缓存压力加载速度压力是不是更大了这么多源，以及我需要把那个智能分镜功能关闭隐藏掉先”; “现在标签搜索一直出不了结果我怀疑和你的多源有关以及现在多源了那个下载是不是也得改改”, followed by “继续” and “？”. Exact message IDs are unavailable. Preserve the concurrent `89bdaf3` federation/source-row/source-resume changes and `9eb59ca` shared foundation.
