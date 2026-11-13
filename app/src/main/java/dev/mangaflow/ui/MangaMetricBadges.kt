@@ -128,10 +128,7 @@ internal fun MangaMetricBadges(
                     (if (metric.scoreScale > 0) "，满分 ${metric.scoreScale}" else "，原站满分未知") +
                     (metric.ratingCount?.let { "，$it 人评分" } ?: ""), metric.sourceId)
         }
-    val textStyle = MaterialTheme.typography.labelSmall.copy(
-        fontFamily = FontFamily.SansSerif, fontSize = valueSize ?: if (compact) 10.5.sp else 11.sp, lineHeight = 16.sp,
-        letterSpacing = 0.sp, fontFeatureSettings = "tnum",
-        fontWeight = if (compact) FontWeight.Normal else FontWeight.Medium)
+    val textStyle = mangaMetricValueStyle(valueSize ?: if (compact) 10.5.sp else 12.sp)
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
     val tokenPadding = with(density) { (if (plain) 0.dp else 2.dp).roundToPx().toFloat() }

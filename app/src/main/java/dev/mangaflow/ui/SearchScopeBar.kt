@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,6 +34,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -60,6 +64,7 @@ internal fun SearchScopeBar(
     onTarget: (SearchTarget) -> Unit,
     onTag: (MangaTag) -> Unit,
     onRetryTags: () -> Unit,
+    tagsOnly: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val targets = listOf(SearchTarget.TITLE, SearchTarget.AUTHOR, SearchTarget.TAG)
@@ -67,13 +72,15 @@ internal fun SearchScopeBar(
     val icons = listOf(Icons.Outlined.MenuBook, Icons.Outlined.PersonOutline, Icons.Outlined.Label)
     val selectedPaths = remember(selectedTags) { selectedTags.mapTo(mutableSetOf()) { it.path } }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        MotionTabs(targets.indexOf(target).coerceAtLeast(0), labels, { onTarget(targets[it]) },
-            controlHeight = 44.dp, fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
-            fontSize = 12.sp, itemContent = { index, _, color ->
+        if (!tagsOnly) MotionTabs(targets.indexOf(target).coerceAtLeast(0), labels, { onTarget(targets[it]) },
+            modifier = Modifier.widthIn(max = 228.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
+            controlHeight = 36.dp, indicatorHeight = 28.dp, indicatorCornerRadius = 8.dp,
+            fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+            fontSize = 11.sp, itemContent = { index, _, color ->
                 Row(verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Icon(icons[index], null, Modifier.size(16.dp), tint = color)
-                    Text(labels[index], color = color, fontSize = 12.sp, maxLines = 1)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(icons[index], null, Modifier.size(14.dp), tint = color)
+                    Text(labels[index], color = color, fontSize = 11.sp, maxLines = 1)
                 }
             })
         if (selectedTags.isNotEmpty()) {
@@ -136,6 +143,13 @@ private fun simplifiedTagQuery(value: String): String = value.map { character ->
 private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember(tag.path) { MutableInteractionSource() }
+    val light = colors.surface.luminance() > .5f
+    val accent = when ((tag.path.hashCode() and Int.MAX_VALUE) % 4) {
+        0 -> if (light) Color(0xFF805C43) else Color(0xFFD9B49E)
+        1 -> if (light) Color(0xFF486481) else Color(0xFFAFC4E2)
+        2 -> if (light) Color(0xFF75588A) else Color(0xFFC7B0DC)
+        else -> if (light) Color(0xFF865B6B) else Color(0xFFD5AFBB)
+    }
     Box(Modifier.heightIn(min = 36.dp)
         .toggleable(selected, interactionSource = interaction, indication = null, role = Role.Checkbox,
             onValueChange = { onClick() })
@@ -143,13 +157,13 @@ private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = 
         .semantics(mergeDescendants = true) { contentDescription = tag.name },
         contentAlignment = Alignment.Center) {
         Row(Modifier.clip(RoundedCornerShape(7.dp))
-            .background(colors.onSurface.copy(alpha = if (selected) .09f else .035f))
+            .background(accent.copy(alpha = if (selected) .14f else .06f))
             .padding(horizontal = 7.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(3.dp)) {
             if (remove || selected) Icon(if (remove) Icons.Outlined.Close else Icons.Outlined.Check, null,
-                Modifier.size(10.dp), tint = colors.onSurfaceVariant)
+                Modifier.size(10.dp), tint = accent)
             Text(tag.name, fontSize = 10.sp, lineHeight = 14.sp,
-                color = if (selected) colors.onSurface else colors.onSurfaceVariant,
+                color = accent,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }

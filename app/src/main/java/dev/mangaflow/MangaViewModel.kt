@@ -81,7 +81,7 @@ data class BrowseState(
     val cacheKey: String get() = when {
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
-            "search-v2:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+            "search-v3-heat:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
         }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
@@ -409,7 +409,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             if (requestId != browseRequestId || generation != browseCache.generation) return
             _browse.update { current ->
                 if (requestId != browseRequestId) current else current.copy(
-                    items = (if (page == 0) replacement else current.items + replacement).distinctBy(Manga::id),
+                    items = (if (page == 0) replacement else current.items + replacement).distinctBy(Manga::id)
+                        .let { items -> if (state.isSearch) items.sortedByDescending {
+                            it.totalPopularity ?: it.popularity ?: -1L
+                        } else items },
                     loading = false, refreshing = false, loadingMore = false, error = null, failedPage = null,
                     hasMore = result.hasMore, page = loadedPage,
                     updatedAt = if (page == 0 || current.updatedAt <= 0) System.currentTimeMillis() else current.updatedAt,

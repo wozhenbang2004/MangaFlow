@@ -203,14 +203,15 @@ internal fun DetailCatalog(
             } else {
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val showGroup = targetGroup == null && groups.size > 1
-                val volumesOnly = visibleChapters.all { isVolumeGroup(it.group) }
+                val volumesOnly = visibleChapters.all(::isVolumeChapter)
                 val tileHeight = (42f * fontScale).dp
                 // Source groups are consecutive. Keep that exact order and give each run
                 // its own grid row so a book cover never stretches a normal chapter row.
                 val runs = remember(visibleChapters) {
                     buildList<MutableList<Chapter>> {
                         visibleChapters.forEach { chapter ->
-                            if (lastOrNull()?.lastOrNull()?.group == chapter.group) last().add(chapter)
+                            if (lastOrNull()?.lastOrNull()?.let { it.group == chapter.group &&
+                                    isVolumeChapter(it) == isVolumeChapter(chapter) } == true) last().add(chapter)
                             else add(mutableListOf(chapter))
                         }
                     }
@@ -239,9 +240,13 @@ internal fun DetailCatalog(
                                 Text(chapterGroupLabel(run.first().group), color = DetailMuted, fontSize = 11.sp,
                                     modifier = Modifier.padding(top = if (runIndex == 0) 2.dp else 10.dp, bottom = 3.dp))
                             }
+                            if (!showGroup && runIndex > 0) item(key = "run-break:$runIndex",
+                                span = { GridItemSpan(maxLineSpan) }, contentType = "run-break") { Spacer(Modifier.height(4.dp)) }
                             items(run, key = Chapter::id,
-                                contentType = { if (isVolumeGroup(it.group)) "volume" else "chapter" }) { chapter ->
-                                if (isVolumeGroup(chapter.group)) {
+                                span = { if (!volumesOnly && chapterColumns == 4 && isVolumeChapter(it))
+                                    GridItemSpan(2) else GridItemSpan(1) },
+                                contentType = { if (isVolumeChapter(it)) "volume" else "chapter" }) { chapter ->
+                                if (isVolumeChapter(chapter)) {
                                     val cover = volumeCovers[chapter.id] ?: VolumeCoverState()
                                     LaunchedEffect(chapter.id, paneActive, cover.attempt) {
                                         if (!paneActive || cover.page != null || cover.error != null) return@LaunchedEffect
@@ -348,12 +353,12 @@ internal fun DetailCatalog(
                 )
                 TextButton(onClick = { dismissActions(); onRead(chapter) },
                     modifier = Modifier.fillMaxWidth()) {
-                    Text(if (isVolumeGroup(chapter.group)) "阅读这一卷" else "阅读这一章", color = DetailForeground)
+                    Text(if (isVolumeChapter(chapter)) "阅读这一卷" else "阅读这一章", color = DetailForeground)
                 }
                 TextButton(onClick = { dismissActions(); onDownload(chapter) },
                     enabled = canDownload(entry), modifier = Modifier.fillMaxWidth()) {
                     Text(if (entry?.status == DownloadStatus.COMPLETED) "已下载" else
-                        if (isVolumeGroup(chapter.group)) "下载这一卷" else "下载这一章",
+                        if (isVolumeChapter(chapter)) "下载这一卷" else "下载这一章",
                         color = if (canDownload(entry)) DetailForeground else DetailMuted)
                 }
             }
@@ -411,6 +416,14 @@ private fun ChapterGroups(
     }
 }
 
+private val VolumeTitle = Regex(
+    """^(?:第\s*)?[0-9０-９零〇一二三四五六七八九十百千两兩]+\s*[卷巻册冊](?=$|[\s（(:：·-])|^vol(?:ume)?\.?\s*[0-9]+(?=$|[\s（(:：·-])""",
+    RegexOption.IGNORE_CASE,
+)
+
+private fun isVolumeChapter(chapter: Chapter): Boolean =
+    isVolumeGroup(chapter.group) || VolumeTitle.containsMatchIn(chapter.title.trim())
+
 private fun isVolumeGroup(name: String): Boolean = name.contains("单行本") || name.contains("單行本")
 
 private fun isDefaultChapterGroup(name: String): Boolean =
@@ -437,6 +450,7 @@ private fun ChapterTile(
     val complete = detailReadingFraction(progress) == 1f
     val readingColor = MaterialTheme.colorScheme.primary
     val hasDownloadMark = downloadMode || entry != null
+    val markSize = 10.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
     Box(
         Modifier.fillMaxWidth().height((height + 6.dp).coerceAtLeast(48.dp))
             .combinedClickable(
@@ -457,23 +471,27 @@ private fun ChapterTile(
             .motionPress(interaction, enabled = enabled, pressedScale = .98f)
             .clip(RoundedCornerShape(10.dp))
             .background(if (current) readingColor.copy(alpha = .075f) else Color.Transparent)) {
-            Text(
-                chapter.title, color = when {
-                    current -> readingColor
-                    !enabled -> DetailMuted.copy(alpha = .45f)
-                    complete -> DetailSecondary.copy(alpha = .65f)
-                    else -> DetailForeground.copy(alpha = .82f)
-                },
-                fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
-                modifier = Modifier.align(Alignment.Center).fillMaxWidth()
-                    .padding(start = 7.dp, end = 19.dp),
-            )
-            ChapterReadMark(progress, progressKnown,
-                Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 4.dp).size(12.dp))
-            if (hasDownloadMark) Box(Modifier.align(Alignment.BottomEnd).padding(bottom = 4.dp, end = 4.dp)) {
-                ChapterDownloadMark(entry, downloadMode, size = 12.dp)
+            Row(Modifier.align(Alignment.CenterStart).fillMaxWidth().padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    chapter.title, color = when {
+                        current -> readingColor
+                        !enabled -> DetailMuted.copy(alpha = .45f)
+                        complete -> DetailSecondary.copy(alpha = .65f)
+                        else -> DetailForeground.copy(alpha = .82f)
+                    },
+                    fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Spacer(Modifier.width(3.dp))
+                // Reserve the same compact status allowance even when download mode changes.
+                Row(Modifier.width(markSize * 2f + 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (progress != null) ChapterReadMark(progress, progressKnown, size = markSize)
+                    if (hasDownloadMark) ChapterDownloadMark(entry, downloadMode, size = markSize)
+                }
             }
         }
     }

@@ -71,6 +71,7 @@ class CopyMangaRepository(
         val url = apiOrigin.newBuilder().addPathSegments("api/v3/search/comic")
             .addQueryParameter("q", keyword)
             .addQueryParameter("q_type", if (target == SearchTarget.AUTHOR) "author" else "name")
+            .addQueryParameter("ordering", "-popular")
             .addQueryParameter("free_type", "1")
             .addQueryParameter("limit", "20")
             .addQueryParameter("offset", (page * 20).toString())
@@ -152,7 +153,7 @@ class CopyMangaRepository(
         }
         val offset = page * 21
         val url = apiOrigin.newBuilder().addPathSegments("api/v3/comics")
-            .addQueryParameter("author", segment(key)).addQueryParameter("ordering", "-datetime_updated")
+            .addQueryParameter("author", segment(key)).addQueryParameter("ordering", "-popular")
             .addQueryParameter("free_type", "1").addQueryParameter("limit", "21")
             .addQueryParameter("offset", "$offset").addQueryParameter("platform", "3").build()
         catalogPage(apiJson(url, "作者作品"), offset, 21)

@@ -260,6 +260,7 @@ internal fun DiscoverySearchResults(
     onTarget: (SearchTarget) -> Unit,
     onTag: (MangaTag) -> Unit,
     onRetryTags: () -> Unit,
+    tagsOnly: Boolean = false,
 ) {
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
@@ -275,7 +276,7 @@ internal fun DiscoverySearchResults(
     Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).padding(8.dp)
         .motionInputGate(active)) {
         SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
-            search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags)
+            search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly)
         val selectingTags = search.searchTarget == SearchTarget.TAG && search.selectedTags.isEmpty()
         val awaitingKeyword = search.query.isBlank() && search.selectedTags.isEmpty()
         if (search.isSearch && !selectingTags && !awaitingKeyword) Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 5.dp),

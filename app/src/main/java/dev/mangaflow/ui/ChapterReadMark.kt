@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.data.Manga
 import dev.mangaflow.storage.LibraryStore
@@ -72,23 +73,25 @@ internal fun chapterReadingStatus(progress: ReadingProgress?, known: Boolean = t
 
 /** Keep the actual saved-page ring; unread chapters do not gain a decorative empty ring. */
 @Composable
-internal fun ChapterReadMark(progress: ReadingProgress?, known: Boolean = true, modifier: Modifier = Modifier) {
+internal fun ChapterReadMark(progress: ReadingProgress?, known: Boolean = true, modifier: Modifier = Modifier, size: Dp = 14.dp) {
     if (progress == null) return
     val fraction = detailReadingFraction(progress)
     val color = MaterialTheme.colorScheme.primary
     val complete = fraction == 1f
-    MotionSwap(complete, modifier.size(14.dp).semantics {
+    val ringStroke = (size.value * .1f).coerceAtLeast(1f).dp
+    val dotRadius = (size.value * .13f).dp
+    MotionSwap(complete, modifier.size(size).semantics {
         contentDescription = chapterReadingStatus(progress, known)
     }) { completed ->
-        if (completed) Icon(Icons.Outlined.DoneAll, null, Modifier.size(14.dp), tint = color.copy(alpha = .72f))
-        else Canvas(Modifier.size(14.dp)) {
-            val stroke = 1.4.dp.toPx()
+        if (completed) Icon(Icons.Outlined.DoneAll, null, Modifier.size(size), tint = color.copy(alpha = .72f))
+        else Canvas(Modifier.size(size)) {
+            val stroke = ringStroke.toPx()
             val inset = stroke / 2f
             drawCircle(color.copy(alpha = .18f),
-                radius = (size.minDimension - stroke) / 2f, style = Stroke(stroke))
-            if (fraction == null) drawCircle(color.copy(alpha = .72f), radius = 1.8.dp.toPx())
+                radius = (this.size.minDimension - stroke) / 2f, style = Stroke(stroke))
+            if (fraction == null) drawCircle(color.copy(alpha = .72f), radius = dotRadius.toPx())
             else if (fraction > 0f) drawArc(color.copy(alpha = .72f), -90f, 360f * fraction, false,
-                topLeft = Offset(inset, inset), size = Size(size.width - stroke, size.height - stroke),
+                topLeft = Offset(inset, inset), size = Size(this.size.width - stroke, this.size.height - stroke),
                 style = Stroke(stroke, cap = StrokeCap.Round))
         }
     }

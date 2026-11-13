@@ -241,8 +241,8 @@ fun DetailScreen(
         val density = LocalDensity.current
         val fontScale = density.fontScale.coerceAtLeast(1f)
         // Retain the largest real dock clearance: condensing must not move the last chapter rows.
-        val readingInset = maxOf((36f * fontScale + 12f).coerceAtLeast(60f).dp,
-            with(density) { measuredDockHeight.toDp() }) + 24.dp
+        val readingInset = maxOf((36f * fontScale + 8f).coerceAtLeast(52f).dp,
+            with(density) { measuredDockHeight.toDp() }) + 16.dp
         val statusInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
         val landscape = maxWidth > availableHeight

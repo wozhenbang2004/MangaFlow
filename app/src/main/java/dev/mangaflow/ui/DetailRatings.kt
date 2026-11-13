@@ -69,7 +69,7 @@ internal fun DetailRatingSheet(manga: Manga, backdrop: HazeState? = null, onDism
                     Text(if (manga.rank != null) "榜期热度" else "拷贝热度", Modifier.weight(1f),
                         color = DetailForeground, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                     Text(detailMetricCount(value), color = DetailForeground,
-                        fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                        style = mangaMetricValueStyle(19.sp, 24.sp))
                 }
             }
             if (metrics.isEmpty()) Text("暂未取得可显示的评分", color = DetailSecondary, fontSize = 14.sp)
@@ -85,7 +85,7 @@ internal fun DetailRatingSheet(manga: Manga, backdrop: HazeState? = null, onDism
                     }
                     Text(detailMetricScore(metric.score ?: 0.0) +
                         (if (metric.scoreScale > 0) " / ${metric.scoreScale}" else ""),
-                        color = DetailForeground, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                        color = DetailForeground, style = mangaMetricValueStyle(19.sp, 24.sp))
                 }
             }
             Text("贝叶斯分、平均分与热度含义不同；样本数仅在来源提供时显示。具体算法权重以来源公开规则为准。",

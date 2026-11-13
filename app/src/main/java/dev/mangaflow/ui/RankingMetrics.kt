@@ -23,8 +23,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -39,11 +37,9 @@ internal fun RankingMetrics(manga: Manga, heatLabel: String, onExpand: () -> Uni
         .sortedBy { dev.mangaflow.data.ReviewProviders.order(it.sourceId) }
     val foreground = MaterialTheme.colorScheme.onSurface
     val onDark = foreground.luminance() > .5f
-    val valueStyle = MaterialTheme.typography.labelSmall.copy(
-        fontFamily = FontFamily.SansSerif, fontSize = 12.sp, lineHeight = 16.sp,
-        fontWeight = FontWeight.Medium, letterSpacing = 0.sp, fontFeatureSettings = "tnum")
+    val valueStyle = mangaMetricValueStyle()
     val density = LocalDensity.current
-    val markSlot = reviewSourceMarkWidth(18.dp, density.fontScale)
+    val markSlot = reviewSourceMarkWidth(16.dp, density.fontScale)
     val measurer = rememberTextMeasurer()
     val values = scores.map { metric ->
         detailMetricScore(requireNotNull(metric.score)) +
@@ -62,8 +58,8 @@ internal fun RankingMetrics(manga: Manga, heatLabel: String, onExpand: () -> Uni
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             manga.popularity?.let { heat ->
                 ReviewSourceMark("copy", size = 16.dp, onDark = onDark, heat = true)
-                Text(detailMetricCount(heat), style = valueStyle.copy(fontSize = 11.sp),
-                    color = foreground.copy(alpha = .54f), maxLines = 1)
+                Text(detailMetricCount(heat), style = valueStyle,
+                    color = foreground.copy(alpha = .78f), maxLines = 1)
             }
         }
         BoxWithConstraints(Modifier.fillMaxWidth().heightIn(min = 20.dp)) {
@@ -87,7 +83,7 @@ internal fun RankingMetrics(manga: Manga, heatLabel: String, onExpand: () -> Uni
                     scores.take(count).forEachIndexed { index, metric ->
                         Row(verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                            ReviewSourceMark(metric.sourceId, size = 18.dp, onDark = onDark)
+                            ReviewSourceMark(metric.sourceId, size = 16.dp, onDark = onDark)
                             Text(values[index], style = valueStyle, color = foreground.copy(alpha = .78f), maxLines = 1)
                         }
                     }

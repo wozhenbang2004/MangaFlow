@@ -228,14 +228,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
                         modifier = Modifier.weight(1f).padding(horizontal = 12.dp)
-                            .semantics { contentDescription = "搜索作品、作者或标签" },
+                            .semantics { contentDescription = "筛选漫画标签" },
                         decorationBox = { input ->
                             Box {
-                                if (browse.query.isEmpty()) Text(when (browse.searchTarget) {
-                                    SearchTarget.TITLE -> "搜索作品"
-                                    SearchTarget.AUTHOR -> "搜索作者"
-                                    SearchTarget.TAG -> "筛选标签"
-                                }, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (browse.query.isEmpty()) Text("筛选标签", color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 input()
                             }
                         })
@@ -247,8 +243,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     maxHeight = panelHeight, repository = model.repository,
                     onRetry = model::retryBrowse, onMore = model::loadMore,
                     onOpen = { manga -> selectedCover = null; dismiss(); model.openManga(manga) },
-                    onTarget = model::setSearchTarget, onTag = model::toggleSearchTag,
-                    onRetryTags = model::retrySearchTags)
+                    onTarget = { model.setSearchTarget(SearchTarget.TAG) }, onTag = model::toggleSearchTag,
+                    onRetryTags = model::retrySearchTags, tagsOnly = true)
             }
         }
         }
