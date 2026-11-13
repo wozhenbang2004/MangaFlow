@@ -1,5 +1,16 @@
 # MangaFlow · current work
 
+## Direct Wallpaper Engine pairing · 2026-11-14
+
+Active PC-WALLPAPER-40 in DESIGN.md records the user's direct-PC static/dynamic-video requirement and explicit “去做啊”. The LocalSend/share substitute is historical. Raw-user batch/source pins are in DESIGN/research; exact message IDs unavailable.
+
+This ready batch adds the actual wallpaper computer action/PANEL pairing sheet, LAN/manual IPv4/PIN, secure remembered pairing with RSA pinning, framed encrypted receiving, bounded PKGM/PKGV/media parsing and serial WallpaperStore import retaining the human title. Only persisted imports increment success. Closing/background cancels foreground work. Android/Windows compile the shared JVM receiver; iOS reports unsupported. Scene/Web/Application or unsupported compressed packages require real media conversion; no preview substitution.
+
+Independent implementations supplied isolated cloud blobs; root alone integrates tree/commit/ref. Baseline 9219e75f9ad6240e0e5809966f7fd6ec7242a491. Preserve current UI/updater/source/auth corrections; submit this entire ready batch once on latest main with expected-head lease, then keep main stable for existing publication. No local operations, tests, builds, probes or extra review gate.
+
+Next exact action: confirm this batch's normal Android/applications CI trigger and report real identities. Repair concrete compile/package failures if observed within scope. Official-Windows PIN/extra-command/MPKG interoperability and phone/Windows media/visual behavior remain unverified pending the current CI product and user feedback.
+
+
 Updated: 2026-11-14. Route: DELIVERY with focused research branches. Execution: cloud-only GitHub connector and in-memory edits, per the latest explicit user instruction.
 
 

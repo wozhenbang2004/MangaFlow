@@ -375,7 +375,7 @@ fun SettingsScreen(
                         else -> wallpaper.name.ifBlank { "本地壁纸" }
                     }, Icons.Outlined.Image,
                         expandedSetting == "wallpaper", { toggleSetting("wallpaper") }) {
-                        WallpaperSettings(store = wallpaperStore)
+                        WallpaperSettings(store = wallpaperStore, backdrop = sourceBackdrop)
                     }
                 }
                 SettingsSection("数据", sourceBackdrop) {

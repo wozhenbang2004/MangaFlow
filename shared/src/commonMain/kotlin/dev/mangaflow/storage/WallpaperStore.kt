@@ -85,10 +85,12 @@ class WallpaperStore private constructor(context: Context) {
     private val _state = MutableStateFlow(readState())
     val state: StateFlow<WallpaperState> = _state.asStateFlow()
 
-    suspend fun importMedia(uri: String) = withContext(Dispatchers.IO) {
+    suspend fun importMedia(uri: String, displayName: String? = null) = withContext(Dispatchers.IO) {
         val request = intent.incrementAndGet()
-        val name = documentDisplayName(app, uri).ifBlank { "本地壁纸" }
-        val suffix = name.substringAfterLast('.', "").lowercase()
+        val sourceName = documentDisplayName(app, uri).ifBlank { "本地壁纸" }
+        val name = displayName?.filterNot { it < ' ' || it == '\u007f' }?.trim()
+            ?.takeIf { it.isNotEmpty() }?.take(180) ?: sourceName
+        val suffix = sourceName.substringAfterLast('.', "").lowercase()
         require(suffix !in setOf("pkg", "mpkg", "json", "zip", "html", "exe")) {
             "请选择原始图片或视频；Wallpaper Engine 的工程与 .pkg / .mpkg 不能在这里播放。"
         }

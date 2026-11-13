@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AddPhotoAlternate
 import androidx.compose.material.icons.outlined.Autorenew
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Info
@@ -64,6 +65,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.storage.WallpaperItem
 import dev.mangaflow.storage.WallpaperAdjustment
 import dev.mangaflow.storage.WallpaperFit
@@ -92,6 +94,7 @@ import kotlin.math.roundToInt
 internal fun WallpaperSettings(
     store: WallpaperStore = WallpaperStore.get(LocalContext.current),
     modifier: Modifier = Modifier,
+    backdrop: HazeState? = null,
 ) {
     val selected by store.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -102,6 +105,7 @@ internal fun WallpaperSettings(
     var notice by remember { mutableStateOf<String?>(null) }
     var controlsExpanded by remember { mutableStateOf(false) }
     var formatDetails by remember { mutableStateOf(false) }
+    var pcVisible by remember { mutableStateOf(false) }
     var removal by remember { mutableStateOf<WallpaperItem?>(null) }
     var clearRequested by remember { mutableStateOf(false) }
     var removalVisible by remember { mutableStateOf(false) }
@@ -187,6 +191,10 @@ internal fun WallpaperSettings(
                     style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (selected.items.isNotEmpty()) Text("${selected.items.size} 张",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
+            MotionIconButton(onClick = { finishAdjustment(); pcVisible = true }, enabled = !importing,
+                modifier = Modifier.size(44.dp)) {
+                Icon(Icons.Outlined.Computer, "连接电脑", Modifier.size(21.dp), tint = colors.onSurfaceVariant)
             }
             MotionIconButton(onClick = { finishAdjustment(); picker.launch(arrayOf("image/*")) }, enabled = !importing,
                 modifier = Modifier.size(44.dp)) {
@@ -351,7 +359,7 @@ internal fun WallpaperSettings(
                     }
                 }
                 if (formatDetails) Text(
-                    "支持设备可读取的图片与静音视频，单个最多 512 MB。视频切后台会暂停。\nWallpaper Engine 请导出原图片或视频；工程、.pkg 与 .mpkg 暂不支持。",
+                    "支持设备可读取的图片与静音视频，单个最多 512 MB。视频切后台会暂停。\nWallpaper Engine 可通过「连接电脑」接收图片和动态视频；实时场景需先转换。本地选择仍只接收原图片或视频。",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
         }
@@ -361,6 +369,7 @@ internal fun WallpaperSettings(
             if (selected.error != null && !importing) MotionTextButton(onClick = { store.retry(); notice = null }) { Text("重试") }
         }
     }
+    WallpaperPcSheet(onDismiss = { pcVisible = false }, visible = pcVisible, backdrop = backdrop)
     MotionDialog(visible = removalVisible,
         onDismissRequest = { removalVisible = false }) {
         Surface(shape = RoundedCornerShape(22.dp), color = colors.surfaceContainerLow, tonalElevation = 0.dp) {

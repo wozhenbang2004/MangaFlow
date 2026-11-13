@@ -1,5 +1,20 @@
 # Wallpaper Engine 与 MangaFlow 壁纸接入研究
 
+## 当前直接配对实现 · 2026-11-14
+
+本段替代下方2026-11-13的“外部LocalSend首片”作为当前采用路线。用户本轮原话：“我们要的能直接和 wallpaper 那个配对直接拿到壁纸的功能怎么没看到？只要精态和动态的继续交互的没必要”，随后明确“去做啊”。“精态”按此前已确认的静态图片理解；范围是静态图片/动态视频，不实现交互场景播放器。历史LocalSend研究保留，不能当成已满足直接配对。
+
+本轮GitHub code search找到[Mirage固定服务端](https://github.com/laobamac/MirageWallpaper/blob/e66f14b9cffa8129602b3582711f5881df91d159/Mirage/Mirage%20Wallpaper/Services/MobilePairingService.swift)，完整读取握手、分帧、认证和发送实现，改变了原“没有可取得合同”的判断。它是第三方Mac兼容服务端，不是官方Windows协议文档，不证明我方互操作。根LICENSE为GPL3且文件头另有版权声明；我方仅从公开协议事实独立编写接收器，未移植其代码。
+
+事实合同：UDP7884/239.100.0.1与WallpaperEngine/Ping；TCP7889裸LE32长度/无符号大端RSA exponent、modulus；客户端三帧RSA-OAEP-SHA1发送UUID、随机IV16、AESkey32；后续LE32 framed AES256-CBC/PKCS7、按legacy协议逐帧重新使用会话IV；version4/PIN/name/deviceUserName/displayWidth/displayHeight认证；AuthOK后beginUpload/transmissionStart/transmissionContinue与真实数据块。没有已证实的手机端图库查询或完成ACK；UI指导电脑“发送到移动设备”，本地持久化成功才算入库。
+
+[MobilePackageArchive](https://github.com/laobamac/MirageWallpaper/blob/e66f14b9cffa8129602b3582711f5881df91d159/Mirage/Mirage%20Wallpaper/Services/MobilePackageArchive.swift)和[MobileMPKGExporter](https://github.com/laobamac/MirageWallpaper/blob/e66f14b9cffa8129602b3582711f5881df91d159/Mirage/Mirage%20Wallpaper/Services/MobileMPKGExporter.swift)确认PKGM0014未压缩表/视频主媒体；MIT的[XHR666 pkg-extract](https://github.com/XHR666/dsh-mpkg-wallpaper/blob/ab8d50db9b4a29916be7ba8b45aed452ee80d538/lib/pkg-extract.js)进一步给出PKGM/PKGV四位版本族相同目录表。本片只读未压缩表及project.json明确的图片/视频主文件，检查路径/唯一性/offset/size/overlap、魔数并继续走Store实际decoder。未知格式/压缩媒体/Scene/Web/Application明确拒绝，不用preview冒充，不加渲染/LZ4依赖。
+
+正式入口：“设置→外观→壁纸旁电脑图标”。PANEL/MotionDialog接LAN列表、手动IPv4、四位PIN、已配对复连/重新配对/忘记、真实进度/入库计数。Android/Windows共用小型JVM接收器；iOS明确暂未接通。用既有Android Keystore/Windows DPAPI保存PIN、UUID和RSA指纹，复连先验公钥；不记日志，不对公网建立连接。每份限512MiB、分帧有界、串行导入，失败/取消清理本次临时文件，保持既有壁纸。离开面板/后台结束接收，无常驻服务。
+
+按AGENTS仅cloud connector/in-memory authoring、完整main批次及既有CI，无本地操作/测试/构建/设备探测。源码实现不等于互操作通过；官方Windows额外指令、原生包兼容、真实PIN/解码/取消和UI手感仍待当前CI产物与用户反馈。
+
+
 更新时间：2026-11-13。状态：用户已选择“互动不用我只要图片和动态视频”（root 转达；精确消息 ID 未取得），首片采用外部 LocalSend 传输加 Android 分享导入。分享接收源码已准备，尚未编译或设备验证；应用内 PC 直连、官方 WE PIN、Scene 转换／播放器未实现。本文不把研究候选、源码存在或作者自报结果记为本项目运行通过。
 
 用户原话：“再派一个子代理专项做和电脑wallpaper链接传输壁纸然后弄到我们的壁纸里这个得好好先研究下成熟的方案社区”。本轮只读取公开资料、相关源码、软件安装元信息和本项目壁纸实现；没有读取私人壁纸或账号数据，没有传输用户文件、运行候选程序、测试、构建或网络探测。

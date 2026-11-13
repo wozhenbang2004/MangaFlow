@@ -76,6 +76,9 @@ kotlin {
     sourceSets {
         val nonAndroidMain = create("nonAndroidMain") { dependsOn(commonMain.get()) }
         val desktopMain = getByName("desktopMain")
+        // Compile the small Java socket/crypto receiver for each JVM platform.
+        getByName("androidMain").kotlin.srcDir("src/jvmMain/kotlin")
+        desktopMain.kotlin.srcDir("src/jvmMain/kotlin")
         desktopMain.dependsOn(nonAndroidMain)
         iosMain.get().dependsOn(nonAndroidMain)
         commonMain.dependencies {

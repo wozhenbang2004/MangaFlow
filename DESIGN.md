@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## PC-WALLPAPER-40 · direct pairing correction · 2026-11-14
+
+Raw user (exact message IDs unavailable): “我们要的能直接和 wallpaper 那个配对直接拿到壁纸的功能怎么没看到？只要精态和动态的继续交互的没必要”, followed by “去做啊”. External LocalSend/share import did not satisfy direct pairing. Receive static images/dynamic videos; no interactive scene runtime.
+
+Use one44dp computer action in the existing wallpaper toolbar and the actual PANEL/MotionDialog/SourceImportSheet control language. LAN discovery/manual IPv4, four-digit PC PIN including leading zero, securely remembered pairing, deliberate re-pair/forget. Connected state instructs the real PC-side Send to Mobile operation; no invented phone-side catalogue. Thin progress follows real bytes and the added count follows actual decoder validation plus WallpaperStore persistence. Close/background cancels owned foreground work and clears typed PIN; errors allow deliberate retry.
+
+Independent ADAPT of public wire facts from MirageWallpaper e66f14b9 and PKGM/PKGV facts from XHR666 ab8d50db, without translating GPL server code. Reuse Android Keystore/Windows DPAPI for PIN/UUID/server-key pin; bound frames/files and only extract the declared real image/video main file. Do not substitute scene previews. Android/Windows share JVM sources; iOS reports unsupported. No renderer, LZ4, LocalSend dependency, background service or global TLS change.
+
+Quality comparison PC-WALLPAPER-40: official documented PIN/device/send journey; public compatible server supplies wire facts, not proof of official Windows interoperability. See research/wallpaper-engine-integration-20261113.md for exact sources and limitations. This batch is source authoring; normal CI trigger, compiled package and actual device acceptance remain separate. Preserve all current UI/updater/source/account changes. Cloud-only, no tests/local builds/probes/extra review gate.
+
+
 
 ## One complete submission and Windows updater · 2026-11-14
 
