@@ -64,6 +64,7 @@ internal fun ReviewSourceMark(
     size: Dp = 18.dp,
     onDark: Boolean = MaterialTheme.colorScheme.onSurface.luminance() > .5f,
     heat: Boolean = false,
+    alignment: Alignment = Alignment.Center,
 ) {
     val color = reviewSourceAccent(id, onDark)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
@@ -74,7 +75,7 @@ internal fun ReviewSourceMark(
         else -> null
     }
     Box(modifier.size(width = reviewSourceMarkWidth(size, fontScale), height = size * fontScale)
-        .clearAndSetSemantics { }, contentAlignment = Alignment.Center) {
+        .clearAndSetSemantics { }, contentAlignment = alignment) {
         when {
             heat -> Icon(Icons.Outlined.LocalFireDepartment, null, tint = color,
                 modifier = Modifier.size(size * (.88f * fontScale)))

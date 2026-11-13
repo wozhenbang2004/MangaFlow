@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -113,7 +114,7 @@ internal fun SearchScopeBar(
                     color = colors.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.padding(8.dp))
                 else -> FlowRow(Modifier.fillMaxWidth().heightIn(max = 120.dp).verticalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    verticalArrangement = Arrangement.spacedBy(0.dp)) {
                     matches.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) { onTag(tag) } }
                 }
             }
@@ -135,17 +136,21 @@ private fun simplifiedTagQuery(value: String): String = value.map { character ->
 private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember(tag.path) { MutableInteractionSource() }
-    Row(Modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(10.dp))
-        .background(colors.onSurface.copy(alpha = if (selected) .09f else .035f))
+    Box(Modifier.heightIn(min = 36.dp)
         .toggleable(selected, interactionSource = interaction, indication = null, role = Role.Checkbox,
             onValueChange = { onClick() })
         .motionPress(interaction, pressedScale = .97f)
-        .semantics(mergeDescendants = true) { contentDescription = tag.name }
-        .padding(horizontal = 9.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (remove || selected) Icon(if (remove) Icons.Outlined.Close else Icons.Outlined.Check, null,
-            Modifier.size(12.dp), tint = colors.onSurfaceVariant)
-        Text(tag.name, fontSize = 11.sp, color = if (selected) colors.onSurface else colors.onSurfaceVariant,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        .semantics(mergeDescendants = true) { contentDescription = tag.name },
+        contentAlignment = Alignment.Center) {
+        Row(Modifier.clip(RoundedCornerShape(7.dp))
+            .background(colors.onSurface.copy(alpha = if (selected) .09f else .035f))
+            .padding(horizontal = 7.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+            if (remove || selected) Icon(if (remove) Icons.Outlined.Close else Icons.Outlined.Check, null,
+                Modifier.size(10.dp), tint = colors.onSurfaceVariant)
+            Text(tag.name, fontSize = 10.sp, lineHeight = 14.sp,
+                color = if (selected) colors.onSurface else colors.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }

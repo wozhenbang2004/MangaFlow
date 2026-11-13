@@ -80,7 +80,18 @@ internal fun glassMaterial(
             environmentStrength = .80f, interactionLight = 0f)
     }
 
-    val clear = role == GlassSurfaceRole.CONTROL || role == GlassSurfaceRole.ARTWORK ||
+    // A small artwork action needs one thin lens, not a control-sized wall across its centre.
+    if (role == GlassSurfaceRole.ARTWORK) return GlassMaterial(
+        blurRadius = 3.dp, tintOpacity = if (light) .08f else .12f,
+        depth = .80f, edgeWidth = 2.5.dp, displacement = 3.dp,
+        refractionStrength = .18f, heightFraction = .12f,
+        whitePoint = if (light) .04f else -.04f, contrast = 0f, chroma = 1.02f,
+        ambient = .025f, specular = .06f, edgeShadow = 0f, dispersion = 0f,
+        contentNormalBlend = .025f, readability = .22f,
+        environmentStrength = .22f, interactionLight = .045f,
+    )
+
+    val clear = role == GlassSurfaceRole.CONTROL ||
         role == GlassSurfaceRole.THUMB
     if (clear) return GlassMaterial(
         blurRadius = (1.25f + 8f * expanded).dp, edgeWidth = 14.dp, displacement = 20.dp,

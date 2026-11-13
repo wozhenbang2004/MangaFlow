@@ -523,14 +523,18 @@ private fun ArtworkToolbar(
 @Composable
 private fun ArtworkAction(icon: ImageVector, description: String, backdrop: HazeState, glassAlpha: Float,
     tint: Color, glassTone: Color, onClick: () -> Unit) {
-    MotionIconButton(onClick = onClick, modifier = Modifier.size(48.dp)) {
+    val interaction = remember { MutableInteractionSource() }
+    Box(Modifier.size(48.dp)
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+        .motionPress(interaction, pressedScale = .965f), contentAlignment = Alignment.Center) {
         Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
             LiquidGlassSurface(backdrop,
                 Modifier.matchParentSize().graphicsLayer {
                     alpha = glassAlpha
                     compositingStrategy = CompositingStrategy.ModulateAlpha
-                }, cornerRadius = 16.dp, elevation = 8.dp,
-                trackPointer = true, surfaceColor = glassTone, softCard = true) {}
+                }, cornerRadius = 20.dp, elevation = 0.dp, role = GlassSurfaceRole.ARTWORK,
+                interactionSource = interaction, trackPointer = true, surfaceColor = glassTone,
+                materialReferenceSize = 40.dp, softCard = false) {}
             MotionSwap(icon, Modifier.size(21.dp)) { shown ->
                 Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp))
             }
@@ -651,7 +655,9 @@ private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
                 role = Role.Button, onClickLabel = "搜索${label}漫画", onClick = onClick)
                 .motionPress(interaction, enabled = enabled) else Modifier).padding(horizontal = 3.dp),
             contentAlignment = Alignment.Center) {
-            Text(label, color = Color.White.copy(alpha = .76f), fontSize = 11.sp, lineHeight = 16.sp,
+            Text(label, modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                .background(accent.copy(alpha = .12f)).padding(horizontal = 6.dp, vertical = 3.dp),
+                color = accent, fontSize = 10.sp, lineHeight = 14.sp,
                 maxLines = 1)
         }
         return
