@@ -47,7 +47,6 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
@@ -152,14 +151,11 @@ internal fun MangaMetricBadges(
     val groupGap = if (compact) 8.dp else 11.dp
     val outerGap = with(density) { groupGap.roundToPx().toFloat() }
     val fontScale = density.fontScale.coerceAtLeast(1f)
-    val sourceWidths = scores.associate { it.sourceId to metricSourceWidth(it.sourceId) }
+    val sourceWidths = scores.associate { it.sourceId to metricSourceWidth() }
     val heatSeparation = with(density) { 5.dp.toPx() }
     val heatMarkSize = 14.dp * fontScale
     val heatMarkWidth = with(density) { heatMarkSize.roundToPx().toFloat() }
     val lineHeight = 22.dp * fontScale
-    val markStyle = MaterialTheme.typography.labelSmall.copy(
-        fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
-        lineHeight = 15.sp, letterSpacing = 0.sp)
     fun tokenWidth(token: MetricToken): Float {
         val sourceWidth = if (token.sourceId == "copy") heatMarkWidth else with(density) { requireNotNull(sourceWidths[token.sourceId]).toPx() }
         return sourceWidth + innerGap + measurer.measure(metricValueText(token.value, textStyle.fontSize), textStyle, maxLines = 1).size.width + tokenPadding * 2f
@@ -186,14 +182,7 @@ internal fun MangaMetricBadges(
             measurer.measure(it.value, heatStyle, maxLines = 1).size.width } ?: 0f
         val widths = scores.map(::tokenWidth)
         val baseStackSize = if (narrow) 12.dp else 15.dp
-        val baseStackWidth = scores.maxOfOrNull { token ->
-            val labelWidth = reviewSourceWordmark(token.sourceId)?.let {
-                measurer.measure(it, markStyle.copy(fontSize =
-                    (baseStackSize.value * reviewSourceLabelScale(it)).sp), maxLines = 1).size.width
-            } ?: 0
-            maxOf(with(density) { (baseStackSize * 1.25f * fontScale).roundToPx() },
-                labelWidth + with(density) { (2.dp * fontScale).roundToPx() })
-        } ?: 0
+        val baseStackWidth = with(density) { (baseStackSize * 1.25f * fontScale).roundToPx() }
         fun stackFor(start: Int, room: Float): List<StackedMetric> {
             if (!showOverflow) return emptyList()
             val hidden = scores.drop(start).distinctBy { it.sourceId }
@@ -319,7 +308,7 @@ private fun MetricBadge(
             val size = heatIconSize ?: 14.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
             MangaHeatFlame(token.popularity ?: 0L,
                 Modifier.size(width = size, height = size * (16f / 14f)), onDark = onDark)
-        } else ReviewSourceMark(token.sourceId, Modifier.width(metricSourceWidth(token.sourceId)), size = 15.dp, onDark = onDark)
+        } else ReviewSourceMark(token.sourceId, Modifier.width(metricSourceWidth()), size = 15.dp, onDark = onDark)
         Text(metricValueText(token.value, textStyle.fontSize, foreground.copy(alpha = foreground.alpha * .56f)),
             color = foreground.copy(alpha = foreground.alpha * .90f), style = textStyle,
             maxLines = 1, softWrap = false)
@@ -339,16 +328,7 @@ private fun metricValueText(value: String, size: TextUnit, denominator: Color = 
     }
 
 @Composable
-private fun metricSourceWidth(sourceId: String): Dp {
-    val density = LocalDensity.current
-    val scale = density.fontScale.coerceAtLeast(1f)
-    val wordmark = reviewSourceWordmark(sourceId) ?: return 16.dp * scale
-    val measurer = rememberTextMeasurer()
-    val width = measurer.measure(wordmark, TextStyle(fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.Medium, fontSize = (15f * reviewSourceLabelScale(wordmark)).sp,
-        letterSpacing = 0.sp), maxLines = 1).size.width
-    return with(density) { width.toDp() } + 1.dp * scale
-}
+private fun metricSourceWidth(): Dp = reviewSourceMarkWidth(15.dp, LocalDensity.current.fontScale)
 
 private fun metricScore(value: Double): String =
     if (value == value.toInt().toDouble()) value.toInt().toString() else String.format(Locale.ROOT, "%.1f", value)

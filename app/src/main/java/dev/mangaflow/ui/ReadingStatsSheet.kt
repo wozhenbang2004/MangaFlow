@@ -63,6 +63,7 @@ import dev.mangaflow.storage.ReadingActivity
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
+import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.motionPress
 import java.time.Instant
 import java.time.LocalDate
@@ -70,6 +71,10 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import kotlin.math.roundToInt
+
+private enum class ReadingPeriod(val label: String) {
+    DAY("今天"), WEEK("本周"), MONTH("本月"), YEAR("今年"), ALL("全部"),
+}
 
 /** The chosen date range owns the time summary, actual daily heatmap and work ranking. */
 @Composable
@@ -79,30 +84,37 @@ internal fun ReadingStatsSheet(
     onDismiss: () -> Unit,
     onOpenManga: (Manga) -> Unit,
 ) {
-    var period by remember { mutableIntStateOf(0) }
+    var periodIndex by remember { mutableIntStateOf(ReadingPeriod.MONTH.ordinal) }
+    val period = ReadingPeriod.entries[periodIndex]
     val today = LocalDate.now()
     val earliest = remember(activity, today) {
         activity.flatMap { it.days.keys }.mapNotNull { runCatching { LocalDate.parse(it) }.getOrNull() }
-            .filter { !it.isAfter(today) }.minOrNull() ?: today.minusDays(364)
+            .filter { !it.isAfter(today) }.minOrNull() ?: today
     }
-    val recentPeriod = period == 0
-    val rangeStart = if (recentPeriod) today.minusDays(90) else minOf(earliest, today.minusDays(364))
-    val dates = remember(rangeStart, today) {
-        (0L..ChronoUnit.DAYS.between(rangeStart, today)).map(rangeStart::plusDays)
+    val rangeStart = when (period) {
+        ReadingPeriod.DAY -> today
+        ReadingPeriod.WEEK -> today.minusDays(today.dayOfWeek.value - 1L)
+        ReadingPeriod.MONTH -> today.withDayOfMonth(1)
+        ReadingPeriod.YEAR -> today.withDayOfYear(1)
+        ReadingPeriod.ALL -> earliest
     }
     val since = rangeStart.toString()
     val until = today.toString()
-    fun recent(item: ReadingActivity): Long = item.days.entries
-        .filter { it.key >= since && it.key <= until }.sumOf { it.value }
-    val total = activity.sumOf { it.totalMillis }
-    val recentTotal = activity.sumOf(::recent)
-    val daily = dates.map { day -> activity.sumOf { it.days[day.toString()] ?: 0L } }
-    val visibleTotal = if (recentPeriod) recentTotal else total
-    val activeDays = if (recentPeriod) daily.count { it > 0L } else activity
-        .flatMap { it.days.filterValues { millis -> millis > 0L }.keys }.distinct().size
-    val ordered = activity.filter { if (recentPeriod) recent(it) > 0L else it.totalMillis > 0L }
-        .sortedWith(compareByDescending<ReadingActivity> { if (recentPeriod) recent(it) else it.totalMillis }
-            .thenByDescending { it.lastReadAt })
+    val durations = remember(activity, period, since, until) {
+        activity.associate { entry -> entry.manga.id to if (period == ReadingPeriod.ALL) entry.totalMillis else
+            entry.days.entries.filter { it.key >= since && it.key <= until }.sumOf { it.value } }
+    }
+    val visibleTotal = durations.values.sum()
+    val activeDays = remember(activity, since, until) {
+        activity.flatMap { entry -> entry.days.filter { (date, millis) ->
+            date >= since && date <= until && millis > 0L
+        }.keys }.distinct().size
+    }
+    val ordered = remember(activity, durations) {
+        activity.filter { durations.getValue(it.manga.id) > 0L }
+            .sortedWith(compareByDescending<ReadingActivity> { durations.getValue(it.manga.id) }
+                .thenByDescending { it.lastReadAt })
+    }
     val colors = MaterialTheme.colorScheme
 
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = colors.background) { dismiss ->
@@ -110,10 +122,6 @@ internal fun ReadingStatsSheet(
             verticalAlignment = Alignment.CenterVertically) {
             Text("阅读统计", color = colors.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            MotionTabs(period, listOf("近三月", "累计"), { period = it },
-                modifier = Modifier.width(156.dp), compact = true, controlHeight = 40.dp,
-                fontSize = 12.sp, muted = colors.onSurfaceVariant,
-                selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal)
             MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Outlined.Close, "关闭阅读统计", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             }
@@ -122,14 +130,28 @@ internal fun ReadingStatsSheet(
             modifier = Modifier.fillMaxWidth().heightIn(max = 620.dp).navigationBarsPadding(),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 20.dp),
         ) {
+            item(key = "period") {
+                MotionTabs(periodIndex, ReadingPeriod.entries.map { it.label }, { periodIndex = it },
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                    treatment = MotionTabTreatment.Soft, controlHeight = 40.dp,
+                    fontSize = 12.sp, muted = colors.onSurfaceVariant)
+            }
             item(key = "summary") {
                 ReadingTimeSummary(visibleTotal, activeDays, ordered.size,
-                    if (recentPeriod) "近三月" else "累计",
-                    average = if (recentPeriod) visibleTotal / dates.size.coerceAtLeast(1) else null)
+                    period.label,
+                    average = if (period != ReadingPeriod.ALL && period != ReadingPeriod.DAY)
+                        visibleTotal / (ChronoUnit.DAYS.between(rangeStart, today) + 1L) else null)
             }
-            item(key = "daily-time") { ReadingHeatmap(activity, rangeStart, today) }
+            item(key = "daily-time") {
+                val datePattern = if (rangeStart.year != today.year) "yyyy/M/d" else "M/d"
+                val format = DateTimeFormatter.ofPattern(datePattern)
+                Text(if (rangeStart == today) "今天" else "${rangeStart.format(format)} – ${today.format(format)}",
+                    color = colors.onSurfaceVariant, fontSize = 11.sp,
+                    modifier = Modifier.padding(bottom = 8.dp))
+                ReadingHeatmap(activity, rangeStart, today)
+            }
             if (ordered.isNotEmpty()) item(key = "ranking-heading") {
-                Text("阅读排行", color = colors.onSurfaceVariant, fontSize = 11.sp,
+                Text("${period.label}排行", color = colors.onSurfaceVariant, fontSize = 11.sp,
                     modifier = Modifier.padding(top = 18.dp, bottom = 4.dp))
             }
             if (ordered.isEmpty()) item(key = "empty") {
@@ -139,13 +161,13 @@ internal fun ReadingStatsSheet(
                     Icon(Icons.Outlined.Schedule, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                     Text(when {
                         activity.isEmpty() -> "从下一次阅读开始记录"
-                        recentPeriod -> "近三月暂无阅读记录"
-                        else -> "暂无阅读时长"
+                        period == ReadingPeriod.ALL -> "暂无阅读时长"
+                        else -> "${period.label}暂无阅读记录"
                     }, color = colors.onSurfaceVariant, fontSize = 13.sp)
                 }
             }
             itemsIndexed(ordered, key = { _, entry -> entry.manga.id }) { index, entry ->
-                val duration = if (recentPeriod) recent(entry) else entry.totalMillis
+                val duration = durations.getValue(entry.manga.id)
                 val share = if (visibleTotal > 0L) (duration.toDouble() / visibleTotal).toFloat().coerceIn(0f, 1f) else 0f
                 ReadingTimeRow(entry, duration, share, index + 1, today, repository) {
                     onOpenManga(entry.manga)
@@ -165,6 +187,7 @@ private fun ReadingTimeSummary(millis: Long, activeDays: Int, books: Int, range:
         Icon(Icons.Outlined.Schedule, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("${range}阅读", color = colors.onSurfaceVariant, fontSize = 11.sp)
             Text(readingDuration(millis), color = colors.onSurface,
                 fontSize = 25.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold)
             if (average != null) Text("日均 " + readingDuration(average),
@@ -204,6 +227,8 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
     val calendarStart = remember(firstDay) { firstDay.minusDays(firstDay.dayOfWeek.value - 1L) }
     val dayCount = ChronoUnit.DAYS.between(calendarStart, today).toInt() + 1
     val weeks = (dayCount + 6) / 7
+    // Day/week/month views use a familiar seven-column calendar; long ranges keep GitHub weeks.
+    val compactCalendar = ChronoUnit.DAYS.between(firstDay, today) < 32L
     val monthLabels = remember(calendarStart, firstDay, weeks) {
         buildList {
             var previousMonth = -1
@@ -231,16 +256,20 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
     }
     val labelHeight = 20.dp * fontScale
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val weekdayWidth = 22.dp * fontScale
+        val weekdayWidth = if (compactCalendar) 0.dp else 22.dp * fontScale
         val viewport = (maxWidth - weekdayWidth).coerceAtLeast(1.dp)
-        val block = if (weeks > 16) 14.dp else
+        val gap = if (compactCalendar) 6.dp else 3.dp
+        val block = if (compactCalendar) (viewport / 7f - gap).coerceIn(20.dp, 40.dp)
+            else if (weeks > 16) 14.dp else
             (viewport / weeks.coerceAtLeast(1).toFloat() - 3.dp).coerceIn(12.dp, 22.dp)
-        val step = block + 3.dp
-        val chartWidth = step * weeks - 3.dp
-        val chartHeight = labelHeight + step * 7 - 3.dp
+        val step = block + gap
+        val columns = if (compactCalendar) 7 else weeks
+        val rows = if (compactCalendar) weeks else 7
+        val chartWidth = step * columns - gap
+        val chartHeight = labelHeight + step * rows - gap
         LaunchedEffect(firstDay, today, scroll.maxValue) { scroll.scrollTo(scroll.maxValue) }
         Row(Modifier.fillMaxWidth()) {
-            Canvas(Modifier.width(weekdayWidth).height(chartHeight)) {
+            if (!compactCalendar) Canvas(Modifier.width(weekdayWidth).height(chartHeight)) {
                 listOf(0 to "一", 2 to "三", 4 to "五").forEach { (row, label) ->
                     drawText(measurer.measure(label, TextStyle(fontSize = 10.sp, color = colors.onSurfaceVariant)),
                         topLeft = Offset(0f, labelHeight.toPx() + row * step.toPx() + (block.toPx() - 10.sp.toPx()) / 2f))
@@ -252,8 +281,12 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
                         detectTapGestures { position ->
                             val column = (position.x / step.toPx()).toInt()
                             val row = ((position.y - labelHeight.toPx()) / step.toPx()).toInt()
-                            if (position.y >= labelHeight.toPx() && column in 0 until weeks && row in 0..6) {
-                                val date = calendarStart.plusDays(column * 7L + row)
+                            val inCell = position.x % step.toPx() < block.toPx() &&
+                                (position.y - labelHeight.toPx()) % step.toPx() < block.toPx()
+                            if (position.y >= labelHeight.toPx() && inCell &&
+                                column in 0 until columns && row in 0 until rows) {
+                                val index = if (compactCalendar) row * 7L + column else column * 7L + row
+                                val date = calendarStart.plusDays(index)
                                 if (!date.isBefore(firstDay) && !date.isAfter(today)) selectedDay = date
                             }
                         }
@@ -269,14 +302,19 @@ private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate,
                                 if (selectedDay.isBefore(today)) { selectedDay = selectedDay.plusDays(1); true } else false
                             })
                     }) {
-                    monthLabels.forEach { (column, label) ->
+                    if (compactCalendar) listOf("一", "二", "三", "四", "五", "六", "日").forEachIndexed { column, label ->
+                        val text = measurer.measure(label, TextStyle(fontSize = 10.sp, color = colors.onSurfaceVariant))
+                        drawText(text, topLeft = Offset(column * step.toPx() + (block.toPx() - text.size.width) / 2f, 0f))
+                    } else monthLabels.forEach { (column, label) ->
                         drawText(measurer.measure(label, TextStyle(fontSize = 10.sp, color = colors.onSurfaceVariant)),
                             topLeft = Offset(column * step.toPx(), 0f))
                     }
                     repeat(dayCount) { index ->
                         val date = calendarStart.plusDays(index.toLong())
                         if (!date.isBefore(firstDay)) {
-                            val point = Offset(index / 7 * step.toPx(), labelHeight.toPx() + index % 7 * step.toPx())
+                            val column = if (compactCalendar) index % 7 else index / 7
+                            val row = if (compactCalendar) index / 7 else index % 7
+                            val point = Offset(column * step.toPx(), labelHeight.toPx() + row * step.toPx())
                             drawRoundRect(levels[level(daily[date.toString()] ?: 0L)], point,
                                 Size(block.toPx(), block.toPx()), CornerRadius(2.dp.toPx()))
                             if (date == selectedDay) drawRoundRect(colors.onSurface.copy(alpha = .85f), point,

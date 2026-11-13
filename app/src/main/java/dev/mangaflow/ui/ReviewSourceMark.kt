@@ -2,6 +2,17 @@ package dev.mangaflow.ui
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.LocalFireDepartment
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.PlaylistPlay
+import androidx.compose.material.icons.automirrored.outlined.LibraryBooks
+import androidx.compose.material.icons.outlined.Tv
+import androidx.compose.material.icons.outlined.CollectionsBookmark
+import androidx.compose.material.icons.outlined.Theaters
+import androidx.compose.material.icons.outlined.SmartDisplay
+import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.Bookmarks
+import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.AutoStories
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -17,13 +28,12 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.R
-import dev.mangaflow.data.ReviewProviders
 
 internal fun reviewSourceAccent(id: String, onDark: Boolean): Color = when (id) {
     "copy" -> if (onDark) Color(0xFFA8BED2) else Color(0xFF567593)
@@ -37,25 +47,8 @@ internal fun reviewSourceAccent(id: String, onDark: Boolean): Color = when (id) 
     else -> if (onDark) Color(0xFFCFCCD4) else Color(0xFF76717E)
 }
 
-/** The measured slot is identical for vectors and wordmarks, including enlarged text. */
-internal fun reviewSourceMarkWidth(size: Dp, fontScale: Float): Dp = size * (1.45f * fontScale.coerceAtLeast(1f))
-
-/** Stack layout measures the same honest wordmark that this renderer uses. */
-internal fun reviewSourceWordmark(id: String): String? = when (id) {
-    "anilist", "myanimelist", "kitsu" -> null
-    "copy" -> "拷"
-    "bangumi" -> "bgm"
-    "mangaupdates" -> "MU"
-    "mangadex" -> "MD"
-    else -> ReviewProviders.find(id)?.mark ?: id.take(2).uppercase()
-}
-
-internal fun reviewSourceLabelScale(mark: String): Float {
-    val units = mark.fold(0) { count, character ->
-        count + if (character.code >= 0x2E80) 2 else 1
-    }.coerceAtLeast(1)
-    return minOf(.68f, 2.8f / units)
-}
+/** Every app source glyph uses the same square optical box, independent of a site's initials. */
+internal fun reviewSourceMarkWidth(size: Dp, fontScale: Float): Dp = size * (1.1f * fontScale.coerceAtLeast(1f))
 
 /** One local typographic source mark, shared by compact badges and full source rows. */
 @Composable
@@ -72,7 +65,7 @@ internal fun CopySourceWordmark(modifier: Modifier = Modifier) {
     }
 }
 
-/** Local source markers and honest wordmarks share one optically balanced reference box. */
+/** App-owned pictograms, not replacement official logos. Names retain exact source identity. */
 @Composable
 internal fun ReviewSourceMark(
     id: String,
@@ -85,8 +78,6 @@ internal fun ReviewSourceMark(
     val color = reviewSourceAccent(id, onDark)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val resource = when (id) {
-        "anilist" -> R.drawable.ic_source_anilist
-        "myanimelist" -> R.drawable.ic_source_myanimelist
         "kitsu" -> R.drawable.ic_source_kitsu
         else -> null
     }
@@ -97,19 +88,24 @@ internal fun ReviewSourceMark(
                 modifier = Modifier.size(size * (.88f * fontScale)))
             id == "copy" -> CopySourceWordmark(Modifier.requiredSize(size * fontScale))
             resource != null -> {
-                // The original AL path fills 75% of its viewport height; MAL fills 42%.
-                // Match their visible ink instead of making every 24px viewport equally tall.
-                val opticalScale = when (id) { "anilist" -> .76f; "myanimelist" -> 1.14f; else -> .66f }
                 Icon(painterResource(resource), null, tint = color,
-                    modifier = Modifier.requiredSize(size * (opticalScale * fontScale)))
+                    modifier = Modifier.size(size * (.92f * fontScale)))
             }
             else -> {
-                val mark = reviewSourceWordmark(id).orEmpty()
-                val labelScale = reviewSourceLabelScale(mark)
-                Text(mark, color = color, style = MaterialTheme.typography.labelSmall.copy(
-                    fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
-                    fontSize = (size.value * labelScale).sp, lineHeight = size.value.sp, letterSpacing = 0.sp),
-                    maxLines = 1, softWrap = false)
+                val glyph = when (id) {
+                    "bangumi" -> Icons.Outlined.Tv
+                    "anilist" -> Icons.AutoMirrored.Outlined.MenuBook
+                    "mangaupdates" -> Icons.Outlined.CollectionsBookmark
+                    "myanimelist" -> Icons.AutoMirrored.Outlined.PlaylistPlay
+                    "mangadex" -> Icons.Outlined.Bookmarks
+                    "shikimori" -> Icons.Outlined.Theaters
+                    "tencent" -> Icons.Outlined.SmartDisplay
+                    "bahamut" -> Icons.Outlined.Forum
+                    "manhuagui" -> Icons.AutoMirrored.Outlined.LibraryBooks
+                    "mangabaka" -> Icons.Outlined.AutoStories
+                    else -> Icons.Outlined.Language
+                }
+                Icon(glyph, null, tint = color, modifier = Modifier.size(size * (.92f * fontScale)))
             }
         }
     }
