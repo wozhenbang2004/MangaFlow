@@ -1,6 +1,7 @@
 package dev.mangaflow
 
 import android.app.Application
+import android.content.Context
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.disk.DiskCache
@@ -14,8 +15,20 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 class MangaFlowApplication : Application() {
+    private var initialized = false
+
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(base)
+        LaunchFailure.install(this)
+    }
+
     override fun onCreate() {
         super.onCreate()
+        if (LaunchFailure.recoveryReport == null) initializeServices()
+    }
+
+    internal fun initializeServices() {
+        if (initialized) return
         dev.mangaflow.ui.glass.MangaHazeRuntime.initialize(this)
         SingletonImageLoader.setSafe { context ->
             ImageLoader.Builder(context)
@@ -38,5 +51,6 @@ class MangaFlowApplication : Application() {
                 .build()
         }
         UpdateManager.get(this).start()
+        initialized = true
     }
 }

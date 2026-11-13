@@ -25,6 +25,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        LaunchFailure.recoveryReport?.let { report ->
+            setContent {
+                MangaFlowTheme {
+                    dev.mangaflow.ui.LaunchFailureMessage(report) {
+                        LaunchFailure.retry()
+                        (application as MangaFlowApplication).initializeServices()
+                        recreate()
+                    }
+                }
+            }
+            return
+        }
         enableEdgeToEdge()
         val animateLaunch = savedInstanceState == null &&
             !intent.getBooleanExtra("open_updates", false) && !intent.getBooleanExtra("open_downloads", false)

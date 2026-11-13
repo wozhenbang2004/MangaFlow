@@ -96,6 +96,15 @@ jobs:
             -PmangaVersionName="$RELEASE_VERSION_NAME" \
             :app:assembleRelease
 
+      - name: Preserve release mapping
+        if: env.RELEASE_ALREADY_PUBLISHED != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mangaflow-mapping-${{ env.RELEASE_VERSION_NAME }}-${{ github.run_attempt }}
+          path: app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Sign APK and update metadata
         if: env.RELEASE_ALREADY_PUBLISHED != 'true'
         env:
