@@ -26,7 +26,7 @@ data class PanelDetection(
     val notice: String? = null,
 )
 
-internal fun PanelBox.sanitized(): PanelBox? {
+fun PanelBox.sanitized(): PanelBox? {
     if (!left.isFinite() || !top.isFinite() || !right.isFinite() || !bottom.isFinite()) return null
     val box = copy(left = left.coerceIn(0f, 1f), top = top.coerceIn(0f, 1f),
         right = right.coerceIn(0f, 1f), bottom = bottom.coerceIn(0f, 1f),
@@ -39,7 +39,7 @@ internal fun PanelBox.sanitized(): PanelBox? {
  * Changes: normalized MangaFlow geometry and direction, bounded input, no upstream reader dependency.
  * Horizontal cuts retain rows; a tall panel beside a vertical stack requires a column cut first.
  */
-internal object PanelOrdering {
+object PanelOrdering {
     fun order(boxes: List<PanelBox>, direction: PanelDirection, isSpread: Boolean): List<PanelBox> {
         if (boxes.size <= 1) return boxes
         val rightToLeft = direction == PanelDirection.RIGHT_TO_LEFT

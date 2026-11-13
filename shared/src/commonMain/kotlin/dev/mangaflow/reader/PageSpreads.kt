@@ -3,7 +3,7 @@ package dev.mangaflow.reader
 import dev.mangaflow.data.Page
 
 /** Indexes are always the original zero-based image indexes, never UI spread indexes. */
-internal data class PageSpread(val first: Int, val second: Int? = null) {
+data class PageSpread(val first: Int, val second: Int? = null) {
     val last: Int get() = second ?: first
     fun contains(index: Int): Boolean = index == first || index == second
 }
@@ -13,7 +13,7 @@ internal data class PageSpread(val first: Int, val second: Int? = null) {
  * A single inserted page flips the pairing of everything that follows without reordering images.
  * The source order remains authoritative; RTL changes only which side is drawn first.
  */
-internal fun pageSpreads(
+fun pageSpreads(
     pages: List<Page>,
     coverAlone: Boolean,
     manuallySingle: Set<Int>,

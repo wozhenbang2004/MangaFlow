@@ -13,17 +13,17 @@ import androidx.compose.ui.unit.dp
 
 /** Layout policy uses the app's measured window, never a device model or physical display. */
 @Immutable
-internal data class MangaWindowSize(val width: Dp, val height: Dp, val fontScale: Float) {
+data class MangaWindowSize(val width: Dp, val height: Dp, val fontScale: Float) {
     val shortHeight: Boolean get() = height < 480.dp
     val panelHeight: Dp get() = (height - 48.dp).coerceAtLeast(1.dp)
 }
 
-internal val LocalMangaWindow = staticCompositionLocalOf {
+val LocalMangaWindow = staticCompositionLocalOf {
     MangaWindowSize(360.dp, 640.dp, 1f)
 }
 
 /** These bounds keep artwork and text readable without stretching phone-sized controls. */
-internal object MangaLayout {
+object MangaLayout {
     val BrowseWidth = 1120.dp
     val DetailWidth = 960.dp
     val ListWidth = 880.dp
@@ -40,9 +40,9 @@ internal object MangaLayout {
     }
 }
 
-/** Compose-only boundary; the same window policy can move into commonMain later. */
+/** All targets supply their actual Compose window to the same layout policy. */
 @Composable
-internal fun MangaAdaptiveLayout(content: @Composable () -> Unit) {
+fun MangaAdaptiveLayout(content: @Composable () -> Unit) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val window = MangaWindowSize(maxWidth, maxHeight, LocalDensity.current.fontScale.coerceAtLeast(1f))
         CompositionLocalProvider(LocalMangaWindow provides window, content = content)

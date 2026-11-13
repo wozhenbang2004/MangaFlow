@@ -14,7 +14,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.TextUnit
 
 /** Native score, scale and heat digits use one family, weight and tabular-number treatment. */
-internal fun mangaMetricValueStyle(size: TextUnit = 12.sp, lineHeight: TextUnit = 16.sp): TextStyle = TextStyle(
+fun mangaMetricValueStyle(size: TextUnit = 12.sp, lineHeight: TextUnit = 16.sp): TextStyle = TextStyle(
     fontFamily = FontFamily.SansSerif, fontWeight = FontWeight.Medium,
     fontSize = size, lineHeight = lineHeight, letterSpacing = 0.sp, fontFeatureSettings = "tnum",
 )

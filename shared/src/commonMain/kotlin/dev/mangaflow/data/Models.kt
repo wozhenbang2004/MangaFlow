@@ -1,7 +1,5 @@
 package dev.mangaflow.data
 
-import java.io.IOException
-
 data class Manga(
     val id: String,
     val title: String,
@@ -48,14 +46,6 @@ interface MangaRepository {
     suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean = false): List<Page>
     fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> = emptyMap()
 }
-
-class SourceException(
-    message: String,
-    val sourceUrl: String = "",
-    val retryAfterSeconds: Long = 0,
-    cause: Throwable? = null,
-    val httpStatus: Int? = null,
-) : IOException(message, cause)
 
 enum class ReviewStatus { READY, NO_MATCH, UNAVAILABLE }
 

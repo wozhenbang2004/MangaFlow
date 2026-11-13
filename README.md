@@ -4,6 +4,8 @@ Current 2026-11-12 interface: an ordinary flat full-cover collection grid, witho
 
 一个专注于阅读的 Android 漫画客户端。使用 Kotlin 和 Jetpack Compose，支持 Android 8.0 及以上。
 
+正在原仓库中迁移至 Kotlin Multiplatform + Compose Multiplatform。现有 Android 应用已接入 `:shared`，共用主题、窗口适配、动效参数、漫画数据与阅读几何。GitHub Actions 新增桌面 JVM 库和 iOS 设备／模拟器框架构建；目前仍是共享代码迁移阶段，尚未提供完整桌面 EXE 或 iOS 安装包。后续沿用现有界面与功能继续迁移。
+
 [项目主页](https://github.com/wozhenbang2004/MangaFlow)
 
 ## 功能
