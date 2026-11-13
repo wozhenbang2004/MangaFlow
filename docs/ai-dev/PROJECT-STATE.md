@@ -1,5 +1,14 @@
 # MangaFlow · current work
 
+## Detail foreground scroll and reader download · 2026-11-14
+
+Active additions are DETAIL-SCROLL-98 / READER-DOWNLOAD-99 in DESIGN.md, covering user attachments1000121645/1000121646 and both current requests. Background atmosphere is fixed; foreground travel is one-to-one; the opaque chapters/comments plane rises over it at the measured hero boundary. The reader's last action directly saves the current chapter with the existing pause/completed/retry path and no normal-width two-item popup.
+
+Root owns DetailScreen; reader_download_action supplied the isolated ReaderScreen blob. All source/doc changes are one ready cloud batch, preserving latest91–97, platform/source/updater/wallpaper/account work. Parent0debe49's Android189/run43475155537 is already completed/success; do not block its publication with an intermediate or documentation-only push.
+
+Next exact action: submit the complete batch with expected-head protection, confirm its normal Android/applications CI identities, then keep the branch stable. Source changes and CI trigger do not constitute phone gesture/occlusion/download acceptance. No tests, local builds, filesystem/terminal/browser/device operations or extra review gate.
+
+
 ## Whole-system review and screenshot implementation batch · 2026-11-14
 
 Active scope is DESIGN.md FILTER-SELECTED-89/UIUX-REVIEW-90 and screenshot91–97. Raw-user batch is covered through1000121636 and the latest clear-poster width correction; exact chat/message IDs are unavailable. The original review and selected-first request remain active alongside the later source/volume/filter/detail/search/reader/discovery corrections.

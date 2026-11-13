@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## Detail scroll / direct reader download · 2026-11-14 (98–99)
+
+Raw user (exact message IDs unavailable): “这个上滑时除了背景虚化的固定其他的都得一起往上滑然后章节那下面那块往上滑会不断遮住虚化的背景” with1000121645.jpg; then “这三个点换成下载。。” with1000121646.jpg. These are additions to91–97, not permission to abandon their unrelated pending requirements.
+
+DETAIL-SCROLL-98: Keep the cover atmosphere fixed in the viewport. Remove its header/seam translation and remove the .76/.84 foreground travel multipliers; the clear poster, metadata and following chapter surface use the actual one-to-one header displacement. The chapters/comments column has its own informationTone backing, with a full-viewport-width plane whose top is the same measured hero-bottom plus live header offset. It rises over the fixed blur, including wide-window gutters, instead of transporting the background or merely fading it. Use existing nested grid/comment scroll ownership, cancellation and dock state; paint reads displacement during drawing and foreground placement reads it during layout.
+
+READER-DOWNLOAD-99: The last44dp floating-reader action directly calls the existing save-current-chapter path, exposing real pause/completed/failure-retry states and a short local submission guard. Normal phone width no longer opens the old save/settings two-item popup. The independent top settings action remains; overflow is composed only for real missing narrow-window actions, spread correction or an actual return location. Its menu no longer duplicates download/settings. No new download model, source conversion or history behavior.
+
+Root integrates these two source files plus these records once against latest main. Baseline0debe49's Android189 publication already completed/success before this push. Cloud-only source authoring and normal CI trigger; no local operations, tests/builds/probes or added review gate. Actual scroll depth/occlusion, touch feel and download feedback still need the user's new package feedback.
+
+
 ## Screenshot-led hierarchy correction · 2026-11-14 (91–97)
 
 This batch includes the user's follow-ups after UIUX-REVIEW-90, not an automatic implementation of its whole backlog. Raw wording (exact message IDs unavailable) includes “那几个卷的大小”, “轮盘弄到侧面竖着排列…最右边的就左侧竖着”, “列数filter…横向展开”, “卷怎么还没图标”, “详情页…格式塔信息视觉层级…源那块…不是很满意”, followed by “搜索…没必要展开源了图标能显示状态就行”, “底部…之前那样悬浮的坞”, and “发现页…轮播图和下面之间”. Before-state screenshots1000121623–1000121629 have no identified installed version.

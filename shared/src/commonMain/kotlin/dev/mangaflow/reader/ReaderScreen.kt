@@ -854,11 +854,14 @@ fun ReaderScreen(
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
                             val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
                                 preferences.mode in setOf(ReadingMode.RIGHT_TO_LEFT, ReadingMode.LEFT_TO_RIGHT)
-                            // Reserve the final touch target before admitting optional actions.
-                            val inlineChapterNavigation = maxWidth >= 176.dp
-                            val inlineCatalog = maxWidth >= 88.dp
+                            // Keep download in the final slot; disclose only actions that need overflow.
+                            val reserveSecondarySlot = maxWidth < 264.dp || canCorrectSpread ||
+                                returnLocation != null || (canChooseSource && pages.isEmpty())
+                            val finalSlots = if (reserveSecondarySlot) 2 else 1
+                            val inlineChapterNavigation = maxWidth >= ((3 + finalSlots) * 44).dp
+                            val inlineCatalog = maxWidth >= ((1 + finalSlots) * 44).dp
                             val chapterSlots = if (inlineChapterNavigation) 3 else if (inlineCatalog) 1 else 0
-                            val extraSlots = ((maxWidth.value - (chapterSlots + 1) * 44f) / 44f)
+                            val extraSlots = ((maxWidth.value - (chapterSlots + finalSlots) * 44f) / 44f)
                                 .toInt().coerceIn(0, 2)
                             val inlinePicture = extraSlots >= 1
                             val inlineComments = extraSlots >= 2
@@ -872,11 +875,34 @@ fun ReaderScreen(
                                 siblings.getOrNull(chapterIndex - 1)?.let { chapterId = it.id }
                             }
                             val commentsLabel = if (localImport) "本地章节没有在线评论" else "本章评论"
+                            var savingChapter by remember(chapterId) { mutableStateOf(false) }
                             val downloaded = activeDownload?.status == DownloadStatus.COMPLETED
                             val downloading = activeDownload?.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
+                            val downloadIcon = when {
+                                downloading -> Icons.Rounded.Pause
+                                downloaded -> Icons.Rounded.Check
+                                activeDownload?.status == DownloadStatus.FAILED -> Icons.Rounded.Refresh
+                                else -> Icons.Rounded.Download
+                            }
+                            val downloadLabel = when {
+                                savingChapter -> "正在保存本章"
+                                downloading -> "暂停下载，本章已保存 ${activeDownload?.completedPages ?: 0} 页"
+                                downloaded -> "本章已下载"
+                                localImport -> "本地章节无需下载"
+                                activeDownload?.status == DownloadStatus.FAILED -> "重试下载"
+                                else -> "保存本章"
+                            }
+                            val secondaryActions = !inlineChapterNavigation || !inlineCatalog ||
+                                (!inlinePicture && currentPicture != null) ||
+                                (!inlineComments && pages.isNotEmpty() && !localImport) ||
+                                (canChooseSource && pages.isEmpty()) || canCorrectSpread || returnLocation != null
+                            LaunchedEffect(secondaryActions) {
+                                if (!secondaryActions) showReaderActions = false
+                            }
                             val saveChapter: () -> Unit = {
                                 if (downloading) activeDownload?.let { downloadStore.pause(it.id) }
-                                else {
+                                else if (!savingChapter) {
+                                    savingChapter = true
                                     val expectedEntry = activeDownload
                                     val chapterToSave = chapter
                                     val pagesToSave = pages
@@ -891,6 +917,7 @@ fun ReaderScreen(
                                             if (saved) downloadMessage = "正在保存本章，可继续阅读"
                                         } catch (cancelled: CancellationException) { throw cancelled }
                                         catch (failure: Exception) { downloadMessage = failure.message ?: "无法保存本章" }
+                                        finally { savingChapter = false }
                                     }
                                 }
                             }
@@ -916,10 +943,10 @@ fun ReaderScreen(
                                     interactive = controlsVisible, buttonSize = 44.dp, onClick = { showComments = true })
                                 key(chapterId) {
                                     Box {
-                                        ReaderIcon(Icons.Outlined.MoreHoriz, "更多阅读操作", interactive = controlsVisible,
+                                        if (secondaryActions) ReaderIcon(Icons.Outlined.MoreHoriz, "其他阅读操作", interactive = controlsVisible,
                                             buttonSize = 44.dp) { showReaderActions = !showReaderActions }
                                         CompactGlassPopover(
-                                            visible = showReaderActions && controlsVisible && active && !leavingReader,
+                                            visible = secondaryActions && showReaderActions && controlsVisible && active && !leavingReader,
                                             backdrop = readerBackdrop, aboveAnchor = true,
                                             onDismiss = { showReaderActions = false },
                                             onPresenceChange = { readerActionsPresent = it },
@@ -953,21 +980,6 @@ fun ReaderScreen(
                                                 showReaderActions = false
                                                 showComments = true
                                             }
-                                            CompactMenuAction(when {
-                                                downloading -> Icons.Rounded.Pause
-                                                downloaded -> Icons.Rounded.Check
-                                                activeDownload?.status == DownloadStatus.FAILED -> Icons.Rounded.Refresh
-                                                else -> Icons.Rounded.Download
-                                            }, when {
-                                                downloading -> "暂停下载，本章已保存 ${activeDownload?.completedPages ?: 0} 页"
-                                                downloaded -> "本章已下载"
-                                                localImport -> "本地章节无需下载"
-                                                activeDownload?.status == DownloadStatus.FAILED -> "重试下载"
-                                                else -> "保存本章"
-                                            }, enabled = showReaderActions && pages.isNotEmpty() && !downloaded && !localImport) {
-                                                showReaderActions = false
-                                                saveChapter()
-                                            }
                                             if (canChooseSource && pages.isEmpty()) {
                                                 CompactMenuAction(Icons.Outlined.Source, "本章来源", enabled = showReaderActions) {
                                                     showReaderActions = false
@@ -992,13 +1004,13 @@ fun ReaderScreen(
                                                     }
                                                 }
                                             }
-                                            CompactMenuAction(Icons.Rounded.Tune, "阅读设置", enabled = showReaderActions) {
-                                                showReaderActions = false
-                                                showSettings = true
-                                            }
                                         }
                                     }
                                 }
+                                ReaderIcon(downloadIcon, downloadLabel,
+                                    enabled = pages.isNotEmpty() && !downloaded && !localImport && !savingChapter,
+                                    interactive = controlsVisible && active && !leavingReader,
+                                    buttonSize = 44.dp, onClick = saveChapter)
                             }
                         }
                     }

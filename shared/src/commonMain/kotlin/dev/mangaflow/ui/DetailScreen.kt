@@ -328,16 +328,16 @@ fun DetailScreen(
         val atmosphereFadeStart = (atmosphereFadeEnd - 104.dp / atmosphereHeight.coerceAtLeast(1.dp))
             .coerceIn(.25f, .84f)
         val heroPixels = with(density) { heroHeight.toPx() }
-        val collapseTravelScale = if (compactHero) .84f else .76f
-        val collapseRange = heroPixels / collapseTravelScale
+        // Foreground movement follows the gesture one-to-one; only the atmosphere stays fixed.
+        val collapseRange = heroPixels
         val header = key(current.id) { rememberTopAppBarState(initialHeightOffsetLimit = -collapseRange) }
         val dockScrollTravel = with(density) { 96.dp.toPx() }
-        val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel, heroPixels, collapseTravelScale) {
+        val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel, heroPixels) {
             derivedStateOf {
                 if (activeSection != 0) 0f else {
                     // Start with the first actual pixel; an unmeasured header is not a scroll.
                     val coverTravel = if (heroPixels > 0f)
-                        (-header.heightOffset * collapseTravelScale).coerceIn(0f, heroPixels) else 0f
+                        (-header.heightOffset).coerceIn(0f, heroPixels) else 0f
                     val coverProgress = (coverTravel / dockScrollTravel).coerceIn(0f, 1f)
                     val catalogProgress = catalogGrid?.let { grid ->
                         if (grid.firstVisibleItemIndex > 0) 1f
@@ -390,16 +390,12 @@ fun DetailScreen(
                 }
             }
         }
-        // Capture the local artwork and clean body together for floating controls.
-        // The cover atmosphere ends with the book header, above chapters/comments.
+        // A fixed atmosphere sits behind the moving book and opaque catalogue plane.
+        // Floating controls sample the final composed scene through the existing Haze source.
         Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(informationTone)) {
             Box(
                 Modifier.fillMaxWidth().height(atmosphereHeight)
-                    .graphicsLayer {
-                        translationY = header.heightOffset * collapseTravelScale -
-                            seamHeight.toPx() * header.collapsedFraction
-                        clip = true
-                    }
+                    .graphicsLayer { clip = true }
                     .mangaHazeSource(artworkBackdrop).background(atmosphereColor),
                 contentAlignment = Alignment.TopCenter,
             ) {
@@ -423,6 +419,12 @@ fun DetailScreen(
                     1f to informationTone,
                 )))
             }
+            // The catalogue's surface rises over the stationary atmosphere, including wide-window gutters.
+            Box(Modifier.matchParentSize().drawBehind {
+                val chapterTop = (heroPixels + header.heightOffset).coerceIn(0f, size.height)
+                drawRect(informationTone, topLeft = Offset(0f, chapterTop),
+                    size = androidx.compose.ui.geometry.Size(size.width, size.height - chapterTop))
+            })
             Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
                 .align(Alignment.TopCenter).nestedScroll(scrolling)) {
                 Box(
@@ -448,7 +450,7 @@ fun DetailScreen(
                                 constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity),
                             )
                             val expanded = if (collapsedHero) 0 else foreground.height
-                            val offset = (header.heightOffset * collapseTravelScale).roundToInt().coerceIn(-expanded, 0)
+                            val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
                             val visibleHeight = maxOf(toolbarPixels, expanded + offset)
                                 .coerceIn(constraints.minHeight, constraints.maxHeight)
                             layout(foreground.width, visibleHeight) {
@@ -469,7 +471,7 @@ fun DetailScreen(
                     }
                 }
                 Column(
-                    Modifier.weight(1f).fillMaxWidth()
+                    Modifier.weight(1f).fillMaxWidth().background(informationTone)
                         // Share the grid's scroll mutex as well as its position: a new drag
                         // on the surrounding surface must cancel an existing grid fling.
                         .scrollable(artworkScroll, Orientation.Vertical,
