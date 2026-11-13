@@ -1,7 +1,9 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
@@ -38,26 +40,34 @@ internal fun GlassControlGroup(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
+    // This source owns proximity only. Each SDK member observes its own pointer
+    // coordinates; broadcasting a sibling's local Press would light the wrong edge.
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    val mergeDistance by animateDpAsState(
+        targetValue = if (motion && pressed) 16.dp else 0.dp,
+        animationSpec = if (motion) tween(if (pressed) MangaMotion.Quick else MangaMotion.Content,
+            easing = MangaMotion.EnterEasing) else snap(),
+        label = "glass-group-connection",
+    )
     Row(Modifier.fillMaxWidth().graphicsLayer {
         this.alpha = alpha()
         compositingStrategy = CompositingStrategy.ModulateAlpha
     }.hazeGlassContainer(
-        mergeDistance = if (motion && pressed) 16.dp else 0.dp,
+        mergeDistance = mergeDistance,
         memberTransitionSpec = if (motion) spring(dampingRatio = 1f,
             stiffness = MangaMotion.NavigationStiffness) else snap(),
     ), verticalAlignment = Alignment.Top) {
         BoxWithConstraints(Modifier.weight(1f)) {
             LiquidGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth))
                 .glassGroupPress(interaction), cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-                interactionSource = interaction) {
+                trackPointer = true) {
                 Column(Modifier.fillMaxWidth(), content = content)
             }
         }
         Spacer(Modifier.width(6.dp))
         LiquidGlassSurface(backdrop, Modifier.width(actionsWidth).glassGroupPress(interaction),
             cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-            interactionSource = interaction) { actions() }
+            trackPointer = true) { actions() }
     }
 }

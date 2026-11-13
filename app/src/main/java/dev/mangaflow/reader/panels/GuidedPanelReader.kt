@@ -243,7 +243,8 @@ internal fun GuidedPanelReader(
                         fontSize = 11.sp, lineHeight = 15.sp, textAlign = TextAlign.Center)
                 }
             }
-            LiquidGlassSurface(backdrop, role = GlassSurfaceRole.READING_DOCK) {
+            LiquidGlassSurface(backdrop, role = GlassSurfaceRole.READING_DOCK,
+                trackPointer = active && !loading) {
                 Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     MotionIconButton(enabled = active && !loading && (pageIndex > 0 || selected > 0),

@@ -69,7 +69,9 @@ internal fun LiquidGlassSurface(
     val liquid = role !in setOf(GlassSurfaceRole.PANEL, GlassSurfaceRole.POPOVER, GlassSurfaceRole.DRAWER)
     val clear = role == GlassSurfaceRole.CONTROL || role == GlassSurfaceRole.ARTWORK || role == GlassSurfaceRole.THUMB
     val motion = LocalMotionEnabled.current
-    val interactive = motion && (trackPointer || interactionSource != null)
+    // Declaring hover/press installs Haze's non-consuming, node-local pointer observer.
+    // External sources add focus/keyboard/ancestor presses; raw touch needs no second detector.
+    val interactive = liquid && motion && (trackPointer || interactionSource != null)
     val expansion = rememberUpdatedState(materialExpansion)
     // Popups/dialogs, artwork-specific samples and nested glass controls need the
     // explicitly selected source. A window backdrop cannot cross a window boundary.
@@ -86,15 +88,43 @@ internal fun LiquidGlassSurface(
             shape(shape)
             val progress = expansion.value().coerceIn(0f, 1f)
             tint(tintColor.copy(alpha = if (role == GlassSurfaceRole.GALLERY) .10f else .035f + .055f * progress))
-            // Keep the SDK's responsive depth, semantic blur, detail overlay, normals,
-            // Fresnel, rim, colour grading and fallback. Only author the expansion delta.
-            optics { copy(
-                refractionStrength = (refractionStrength * (1f + .08f * progress)).coerceAtMost(1f),
-                refractionDisplacement = refractionDisplacement * (1f + .12f * progress),
-            ) }
-            if (surfaceColor != null) {
-                whitePoint(if (light) if (clear) .17f else .55f else if (clear) -.18f else -.22f)
+            // Keep SDK size-responsive diffusion/depth and adaptive accessibility. Author
+            // only the lens at the boundary, bounding compact-control displacement
+            // separately from the SDK's large general-purpose 48/56dp presets.
+            when (role) {
+                GlassSurfaceRole.CONTROL, GlassSurfaceRole.THUMB -> {
+                    val thumb = role == GlassSurfaceRole.THUMB
+                    optics { copy(refractionStrength = if (thumb) .20f else .26f,
+                        refractionHeightFraction = .14f,
+                        refractionDisplacement = if (thumb) 3.dp else 6.dp,
+                        refractionProfile = RefractionProfile.Edge(if (thumb) 2.dp else 3.5.dp),
+                        refractionDetailIntensity = .12f) }
+                    tint(tintColor.copy(alpha = if (light) .14f else .18f))
+                    whitePoint(if (light) .28f else -.40f)
+                    specularIntensity(if (light) .18f else .14f)
+                    ambientResponse(.06f)
+                    edgeShadow(Color.Transparent)
+                    chromaticAberrationStrength(0f)
+                    contentNormalBlend(.035f)
+                }
+                GlassSurfaceRole.NAVIGATION, GlassSurfaceRole.READING_DOCK -> {
+                    val dock = role == GlassSurfaceRole.READING_DOCK
+                    optics { copy(refractionStrength = if (dock) .24f else .30f + .025f * progress,
+                        refractionHeightFraction = .14f,
+                        refractionDisplacement = if (dock) 6.dp else 8.dp + 2.dp * progress,
+                        refractionProfile = RefractionProfile.Edge(if (dock) 3.dp else 4.dp + progress.dp)) }
+                    tint(tintColor.copy(alpha = (if (dock) .10f else .065f) + .035f * progress))
+                    // Stabilize foreground polarity even over opposite-tone comic pages;
+                    // this is tonal protection, independent of blur and rim highlights.
+                    whitePoint(if (light) if (dock) .58f else .55f else if (dock) -.60f else -.56f)
+                    specularIntensity(if (light) .18f else .14f)
+                    ambientResponse(.05f)
+                    edgeShadow(Color.Transparent)
+                    contentNormalBlend(.04f)
+                }
+                else -> Unit
             }
+            if (liquid && role != GlassSurfaceRole.GALLERY) chromaMultiplier(1.04f)
             if (role == GlassSurfaceRole.ARTWORK) {
                 // Retain the latest compact artwork action's quiet, single-lens treatment.
                 optics { copy(refractionStrength = .18f, refractionHeightFraction = .12f,
@@ -110,12 +140,9 @@ internal fun LiquidGlassSurface(
                 chromaticAberrationStrength(0f)
                 contentNormalBlend(.025f)
             }
-            if (role == GlassSurfaceRole.READING_DOCK) {
-                // This floating action is separated by the shared soft shadow, not a dark rim.
-                edgeShadow(Color.Transparent)
-            }
             if (role == GlassSurfaceRole.GALLERY) {
-                optics { copy(refractionStrength = .12f,
+                optics { copy(refractionStrength = .10f, refractionDisplacement = 3.dp,
+                    refractionProfile = RefractionProfile.Edge(3.dp), refractionHeightFraction = .10f,
                     progressive = HazeProgressive.verticalGradient(startIntensity = .25f, endIntensity = 1f)) }
                 whitePoint(if (light) .10f else -.08f)
                 specularIntensity(0f)
@@ -128,9 +155,11 @@ internal fun LiquidGlassSurface(
                 focused { animate(tween(MangaMotion.Quick), tween(MangaMotion.Content)) { lightingIntensity(.25f) } }
                 pressed {
                     animate(tween(MangaMotion.Quick), tween(MangaMotion.Content)) {
-                        lightingIntensity(if (role == GlassSurfaceRole.ARTWORK) .12f else .65f)
-                        refractionMultiplier(1.12f)
-                        scale(.99f)
+                        lightingIntensity(if (role == GlassSurfaceRole.ARTWORK) .12f else if (clear) .26f else .22f)
+                        refractionMultiplier(if (clear) 1.06f else 1.035f)
+                        // Long controls already own their content press motion. Keep the
+                        // member boundary stable while Haze joins/separates the group.
+                        scale(if (clear) .995f else 1f)
                     }
                 }
             }

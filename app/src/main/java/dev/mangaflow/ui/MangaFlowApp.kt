@@ -750,8 +750,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 Modifier.mangaHazeSource(searchBackdrop)
                                 else Modifier)) {
                                 // The full backdrop includes the pixels beneath the menu button.
-                                // Content clearance belongs to the foreground, outside this capture's bounds.
-                                Box(Modifier.fillMaxSize().padding(top = if (rootCapturesBackground) chromePadding else 0.dp)) {
+                                // Settings reserves chrome inside its scrolling content, so it
+                                // can pass beneath the floating header without an inset clip.
+                                Box(Modifier.fillMaxSize().padding(top = if (current.section == Section.ACCOUNT) chromePadding else 0.dp)) {
                                 savedState.SaveableStateProvider(current.key) {
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
@@ -804,7 +805,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     )
                                     Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications,
                                         readBrowseCacheBytes = model::browseCacheSize, clearBrowseCache = model::clearBrowseCache,
-                                        readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache)
+                                        readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache,
+                                        contentTopPadding = chromePadding)
                                 }
                                 }
                                 }

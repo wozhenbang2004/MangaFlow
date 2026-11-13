@@ -106,6 +106,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -151,6 +152,7 @@ fun SettingsScreen(
     clearBrowseCache: suspend () -> Unit,
     readMetadataCacheBytes: suspend () -> Long,
     clearMetadataCache: suspend () -> Unit,
+    contentTopPadding: Dp = 0.dp,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -331,7 +333,7 @@ fun SettingsScreen(
     LazyColumn(
         modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding().background(
             if (LocalWallpaperActive.current) Color.Transparent else colors.background),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 32.dp),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = contentTopPadding, bottom = 32.dp),
     ) {
         item {
             // Keep the import controls composed while scrolling; their in-progress copy owns this lifetime.
