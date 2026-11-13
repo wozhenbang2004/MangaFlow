@@ -1,5 +1,11 @@
 # MangaFlow detail · 2026-11-12
 
+## Feel System · 2026-11-13 (FEEL-20261113; current task)
+
+User outcome: “快而不硬，软而不拖，活而不乱。” Current user authorization requires an independent branch/PR, completed CI/static/Lint/debug/release builds and real Android operation when available; it supersedes historical direct-main/CI-trigger-only/no-build delivery limits for this task. The existing Ovio/beUI/Vaul/AndroidX/Haze architecture remains authoritative. No second animation runtime, palette/navigation redesign or shelf sorting is introduced.
+
+The audit, adopted role parameters, per-page integration and explicit runtime evidence boundary are in [Feel System](research/feel-system-20261113.md). Existing M2-01–14 and fixed glass-role rules stay in force except where that document identifies a specific correction. Original source implementation is not device acceptance.
+
 ## Restore Android Lint in CI · 2026-11-13 (CI-LINT-01; configured, first analysis pending)
 
 Additional sequencing instruction: “等 125 成功你再发布新的 lint 工作流”. Prepared the changes locally and kept main unchanged. Before submission, confirmed run 43367315040 completed successfully and v0.1.125 was published (GitHub timestamp 2026-11-13T04:50:33Z), with main still at 0ad8dfc. The user's sequencing condition was satisfied.

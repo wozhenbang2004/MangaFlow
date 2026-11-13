@@ -61,9 +61,12 @@ jobs:
           retention-days: 14
 
       - name: Compile and package
-        run: ./gradlew --no-daemon --console=plain --max-workers=2 :app:assembleDebug
+        run: ./gradlew --no-daemon --console=plain --max-workers=2 :app:assembleDebug :app:assembleRelease
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: mangaflow-build-${{ github.run_number }}
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/release/app-release-unsigned.apk
+            app/build/outputs/mapping/release/mapping.txt
           retention-days: 7

@@ -3,7 +3,6 @@ package dev.mangaflow.ui
 import android.graphics.Bitmap
 import android.os.Build
 import android.util.LruCache
-import android.view.accessibility.AccessibilityManager
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
@@ -27,7 +26,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -164,9 +163,9 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         var touched by remember { mutableStateOf(false) }
         var direction by remember { mutableIntStateOf(1) }
         val lifecycle = LocalLifecycleOwner.current.lifecycle
-        val accessibility = LocalContext.current.getSystemService(AccessibilityManager::class.java)
+        val touchExploration = dev.mangaflow.ui.motion.LocalTouchExplorationEnabled.current
         val speed = with(density) { 900.dp.toPx() }
-        val autoAdvance = motion && visible && !touched && manga.size > 1 && accessibility?.isTouchExplorationEnabled != true
+        val autoAdvance = motion && visible && !touched && manga.size > 1 && !touchExploration
         LaunchedEffect(autoAdvance, state, fling, identities, lifecycle) {
             if (autoAdvance) lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 while (true) {
@@ -325,7 +324,7 @@ private fun FeaturedManga(
                     .55f to Color.Transparent, 1f to surface.copy(alpha = .62f)))
             })
             Box(Modifier.fillMaxSize().padding(top = 6.dp, bottom = captionHeight), contentAlignment = Alignment.Center) {
-                if (decoded == null) Icon(Icons.Outlined.MenuBook, null,
+                if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                     tint = ink.copy(alpha = .22f), modifier = Modifier.size(28.dp))
                 Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize().mangaSharedCover(manga.id, "discovery-featured")

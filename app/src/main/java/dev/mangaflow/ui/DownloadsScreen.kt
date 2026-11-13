@@ -9,6 +9,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -55,7 +56,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -134,6 +135,7 @@ fun DownloadsScreen(
     val entries by store.entries.collectAsStateWithLifecycle()
     val loading by store.loading.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val haptics = dev.mangaflow.ui.motion.rememberFeelFeedback()
     val snackbar = remember { SnackbarHostState() }
     var filter by rememberSaveable { mutableStateOf(DownloadFilter.ALL) }
     var removingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -229,6 +231,7 @@ fun DownloadsScreen(
             try {
                 undone = snackbar.showSnackbar("已移除 ${ids.size} 话", actionLabel = "撤销",
                     withDismissAction = true, duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
+                if (undone) haptics.perform(dev.mangaflow.ui.motion.FeelEvent.Undo)
             } finally {
                 // Page navigation commits an already requested removal; undo never recreates deleted files.
                 if (!undone) withContext(NonCancellable) {
@@ -260,6 +263,9 @@ fun DownloadsScreen(
                     DownloadFilter.ALL -> allScroll
                     DownloadFilter.ACTIVE -> activeScroll
                     DownloadFilter.SAVED -> savedScroll
+                }
+                LaunchedEffect(active, index, filter) {
+                    if (!active || index != filter.ordinal) scroll.stopScroll()
                 }
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(), state = scroll,
@@ -601,7 +607,7 @@ private fun DownloadTextAction(
 ) {
     val interaction = remember { MutableInteractionSource() }
     TextButton(onClick = onClick, enabled = enabled, contentPadding = contentPadding, interactionSource = interaction) {
-        Row(Modifier.motionPress(interaction, enabled), verticalAlignment = Alignment.CenterVertically,
+        Row(verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center, content = content)
     }
 }

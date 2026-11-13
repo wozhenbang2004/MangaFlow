@@ -40,8 +40,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
@@ -120,25 +118,7 @@ internal fun ReaderSeekBar(
     val previewText = pageCount?.let { count ->
         "${value.roundToInt().coerceIn(0, (count - 1).coerceAtLeast(0)) + 1} / $count"
     } ?: "${(fraction * 100f).roundToInt()}%"
-    val haptics = LocalHapticFeedback.current
-    var lastStep by remember { mutableIntStateOf(value.roundToInt()) }
-    LaunchedEffect(engaged, value, pageCount) {
-        val step = value.roundToInt()
-        val count = pageCount
-        if (!engaged || count == null) {
-            lastStep = step
-        } else if (step != lastStep) {
-            val stride = when {
-                count <= 48 -> 1
-                count <= 120 -> 2
-                else -> 5
-            }
-            if (step == 0 || step == count - 1 || step / stride != lastStep / stride) {
-                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            }
-            lastStep = step
-        }
-    }
+    // Continuous reading/scrubbing is silent; the preview and release commit are the feedback.
     val layoutDirection = LocalLayoutDirection.current
     val visualFraction = if (layoutDirection == LayoutDirection.Rtl) 1f - fraction else fraction
     BoxWithConstraints(modifier.height(48.dp)) {

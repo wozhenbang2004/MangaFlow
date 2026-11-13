@@ -27,6 +27,7 @@ import dev.mangaflow.data.ReviewStatus
 import dev.mangaflow.data.ReviewPage
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.MangaReview
+import dev.mangaflow.data.foregroundRequest
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
@@ -40,6 +41,7 @@ import dev.mangaflow.storage.BrowseCache
 import dev.mangaflow.storage.BrowseSnapshot
 import dev.mangaflow.update.UpdateManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -393,19 +395,22 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long) {
         try {
-            val query = state.query.trim()
-            var result = if (!state.isSearch) community.browse(state.mode, state.period, state.audience, page)
-                else repository.search(query, state.searchTarget, state.selectedTags, page)
-            val replacement = result.items.toMutableList()
-            var loadedPage = result.nextPage?.minus(1) ?: page
-            if (!state.isSearch && state.mode == DiscoveryMode.RANKING && page == 0 && state.items.isNotEmpty()) {
-                // Never combine a new first page with old ranking pages. Keep the old list
-                // visible until the previously loaded range (or the new source end) is ready.
-                while (loadedPage < state.page && result.hasMore) {
-                    if (requestId != browseRequestId || generation != browseCache.generation) return
-                    result = community.browse(state.mode, state.period, state.audience, ++loadedPage)
-                    replacement += result.items
+            val (result, replacement, loadedPage) = foregroundRequest("漫画列表") {
+                val query = state.query.trim()
+                var result = if (!state.isSearch) community.browse(state.mode, state.period, state.audience, page)
+                    else repository.search(query, state.searchTarget, state.selectedTags, page)
+                val replacement = result.items.toMutableList()
+                var loadedPage = result.nextPage?.minus(1) ?: page
+                if (!state.isSearch && state.mode == DiscoveryMode.RANKING && page == 0 && state.items.isNotEmpty()) {
+                    // Never combine a new first page with old ranking pages. Keep the old list
+                    // visible until the previously loaded range (or the new source end) is ready.
+                    while (loadedPage < state.page && result.hasMore) {
+                        if (requestId != browseRequestId || generation != browseCache.generation) throw CancellationException("Superseded browse")
+                        result = community.browse(state.mode, state.period, state.audience, ++loadedPage)
+                        replacement += result.items
+                    }
                 }
+                Triple(result, replacement, loadedPage)
             }
             if (requestId != browseRequestId || generation != browseCache.generation) return
             _browse.update { current ->
@@ -621,7 +626,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _authorWorks.value = current.copy(loading = page == 0, loadingMore = page > 0, error = null, failedPage = null)
         authorJob = viewModelScope.launch {
             try {
-                val result = repository.byAuthor(current.manga, current.name, page)
+                val result = foregroundRequest("作者作品") { repository.byAuthor(current.manga, current.name, page) }
                 if (request != authorRequest) return@launch
                 _authorWorks.value = current.copy(items = (if (page > 0) current.items + result.items else result.items).distinctBy { it.id },
                     loading = false, loadingMore = false, hasMore = result.hasMore, page = page, error = null, failedPage = null)
@@ -1400,7 +1405,6 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch { library.awaitReady(); toggleFavorite(manga) }
             return
         }
-        if (manga.id in _account.value.syncingFavorites) return
         library.toggleFavorite(manga)
         if (_account.value.profile != null && !_account.value.busy) {
             setCloudFavorite(manga, library.favorites.value.any { it.id == manga.id })
@@ -1416,12 +1420,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         if (!library.isFavorite(manga.id)) return
         library.removeFavorite(manga.id)
         if (_account.value.profile != null && !_account.value.busy) {
-            val version = accountRepository.sessionVersion
-            viewModelScope.launch {
-                // A prior favorite operation may still be saving. The latest local intent wins.
-                favoriteSyncJobs[manga.id]?.join()
-                if (isCurrentAccount(version) && !library.isFavorite(manga.id)) setCloudFavorite(manga, false)
-            }
+            setCloudFavorite(manga, false)
         }
     }
 
@@ -1432,34 +1431,47 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setCloudFavorite(manga: Manga, favorite: Boolean) {
         val state = _account.value
-        if (state.profile == null || state.busy || manga.id in state.syncingFavorites) return
+        if (state.profile == null || state.busy) return
         val version = accountRepository.sessionVersion
-        pendingFavoriteSync.remove(manga.id)
+        // Coalesce only the desired state. Never cancel or replay an in-flight account POST.
+        pendingFavoriteSync[manga.id] = manga to favorite
+        if (favoriteSyncJobs[manga.id]?.isActive == true) return
         _account.update { it.copy(syncingFavorites = it.syncingFavorites + manga.id,
             syncMessage = "正在同步收藏…", canRetrySync = hasPendingSync()) }
-        favoriteSyncJobs[manga.id] = viewModelScope.launch {
+        val request = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
-                val uuid = repository.comicUuid(manga.id)
-                if (!isCurrentAccount(version)) return@launch
-                val confirmed = accountRepository.setFavorite(manga.id, uuid, favorite)
-                if (!isCurrentAccount(version)) return@launch
-                if (!confirmed) throw SourceException("来源尚未确认收藏同步，请稍后重试。")
-                _account.update { it.copy(syncMessage = if (favorite) "已加入云端收藏" else "已从云端收藏移除") }
+                while (isCurrentAccount(version)) {
+                    val desired = pendingFavoriteSync[manga.id] ?: break
+                    val confirmed = foregroundRequest("云端收藏同步", 45_000L) {
+                        val uuid = repository.comicUuid(manga.id)
+                        if (!isCurrentAccount(version)) throw CancellationException("Account changed")
+                        accountRepository.setFavorite(manga.id, uuid, desired.second)
+                    }
+                    if (!isCurrentAccount(version)) return@launch
+                    if (!confirmed) throw SourceException("来源尚未确认收藏同步，请稍后重试。")
+                    if (pendingFavoriteSync[manga.id]?.second == desired.second) {
+                        pendingFavoriteSync.remove(manga.id)
+                        _account.update { it.copy(syncMessage = if (desired.second) "已加入云端收藏" else "已从云端收藏移除",
+                            canRetrySync = hasPendingSync()) }
+                        break
+                    }
+                }
                 loadCloudFavorites(refresh = true)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
                 if (isCurrentAccount(version)) {
                     val message = accountError(failure, "云端收藏同步失败，请稍后重试。")
-                    pendingFavoriteSync[manga.id] = manga to favorite
                     _account.update { it.copy(syncMessage = "$message 本地书架不受影响。", canRetrySync = true) }
                     messages.send("$message 本地书架不受影响。")
                 }
             } finally {
                 if (isCurrentAccount(version)) _account.update { it.copy(syncingFavorites = it.syncingFavorites - manga.id) }
-                if (accountRepository.sessionVersion == version) favoriteSyncJobs.remove(manga.id)
+                if (favoriteSyncJobs[manga.id] === currentCoroutineContext()[Job]) favoriteSyncJobs.remove(manga.id)
             }
         }
+        favoriteSyncJobs[manga.id] = request
+        request.start()
     }
 
     fun retryAccountSync() {

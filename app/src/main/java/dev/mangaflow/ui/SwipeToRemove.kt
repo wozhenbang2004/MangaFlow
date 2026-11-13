@@ -37,15 +37,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import dev.mangaflow.ui.motion.FeelEvent
+import dev.mangaflow.ui.motion.rememberFeelFeedback
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlin.math.PI
@@ -95,13 +95,13 @@ internal fun SwipeToRemove(
     val readiness = animateFloatAsState(if (armed) 1f else 0f,
         if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
         label = "record-delete-ready")
-    val haptics = LocalHapticFeedback.current
+    val haptics = rememberFeelFeedback()
     val colors = MaterialTheme.colorScheme
     val wallpaper = LocalWallpaperActive.current
     LaunchedEffect(fraction, dragging) {
         if (armed && dragging && !thresholdAnnounced) {
             thresholdAnnounced = true
-            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            haptics.perform(FeelEvent.Threshold)
         } else if (!dragging || fraction < .47f) thresholdAnnounced = false
     }
     LaunchedEffect(enabled, motion) {

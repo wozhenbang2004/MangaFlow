@@ -5,7 +5,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.updateTransition
+import androidx.compose.animation.core.rememberTransition
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Column
@@ -70,7 +70,7 @@ internal fun CompactGlassPopover(
     val direction = LocalLayoutDirection.current
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = visible
-    val transition = updateTransition(presence, label = "reader-actions")
+    val transition = rememberTransition(presence, label = "reader-actions")
     val alpha = transition.animateFloat(transitionSpec = {
         tween(if (motion) if (targetState) MangaMotion.Content else MangaMotion.Quick else 0)
     }, label = "reader-actions-opacity") { if (it) 1f else 0f }

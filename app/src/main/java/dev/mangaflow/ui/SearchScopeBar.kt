@@ -22,8 +22,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FilterAlt
-import androidx.compose.material.icons.outlined.Label
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.Label
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
@@ -69,7 +69,7 @@ internal fun SearchScopeBar(
     val colors = MaterialTheme.colorScheme
     val targets = listOf(SearchTarget.TITLE, SearchTarget.AUTHOR, SearchTarget.TAG)
     val labels = listOf("作品", "作者", "标签")
-    val icons = listOf(Icons.Outlined.MenuBook, Icons.Outlined.PersonOutline, Icons.Outlined.Label)
+    val icons = listOf(Icons.AutoMirrored.Outlined.MenuBook, Icons.Outlined.PersonOutline, Icons.AutoMirrored.Outlined.Label)
     val selectedPaths = remember(selectedTags) { selectedTags.mapTo(mutableSetOf()) { it.path } }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         if (!tagsOnly) MotionTabs(targets.indexOf(target).coerceAtLeast(0), labels, { onTarget(targets[it]) },

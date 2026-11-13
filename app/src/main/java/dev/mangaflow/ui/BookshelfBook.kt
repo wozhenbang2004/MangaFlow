@@ -51,6 +51,7 @@ import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -112,7 +113,6 @@ internal fun BookshelfBook(
             !motion -> 1f
             dragging && deleteArmed -> .9f
             dragging -> 1.02f
-            pressed -> .985f
             else -> 1f
         },
         animationSpec = if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
@@ -164,8 +164,9 @@ internal fun BookshelfBook(
             translationY = offset.y
             scaleX = scale.value
             scaleY = scale.value
-            alpha = if (dragging && deleteArmed) .82f else if (!motion && pressed) .84f else 1f
+            alpha = if (dragging && deleteArmed) .82f else 1f
         }
+        .motionPress(interaction, enabled = !dragging && !returning)
         .zIndex(if (dragging) 8f else if (pressed) 1f else 0f)
         .semantics(mergeDescendants = true) {
             contentDescription = manga.title

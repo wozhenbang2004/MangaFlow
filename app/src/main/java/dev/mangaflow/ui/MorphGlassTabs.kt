@@ -5,7 +5,7 @@ import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.updateTransition
+import androidx.compose.animation.core.rememberTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -32,12 +32,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -53,6 +52,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.ui.motion.FeelEvent
+import dev.mangaflow.ui.motion.rememberFeelFeedback
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.motionInputGate
@@ -118,11 +119,11 @@ internal fun BoxScope.MorphGlassTabSelector(
     onSelect: (Int) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
-    val haptic = LocalHapticFeedback.current
+    val haptic = rememberFeelFeedback()
     val interaction = remember { MutableInteractionSource() }
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = expanded
-    val transition = updateTransition(presence, label = "header-tab-morph")
+    val transition = rememberTransition(presence, label = "header-tab-morph")
     val animation = transition.animateFloat(transitionSpec = {
         if (motion) spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness)
         else snap()
@@ -149,20 +150,21 @@ internal fun BoxScope.MorphGlassTabSelector(
         if (present) Column(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true)
             .size(width = extendedWidth, height = extendedHeight).graphicsLayer {
             alpha = ((progress - .25f) / .65f).coerceIn(0f, 1f)
-        }.motionInputGate(enabled && expanded && progress >= .7f)
+        }.then(if (enabled && expanded) Modifier else Modifier.clearAndSetSemantics { }
+            .focusProperties { canFocus = false })
             .padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
             choices.forEachIndexed { index, choice ->
                 val interaction = remember(index) { MutableInteractionSource() }
                 val active = selected == index
                 val selectionTint = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f)
                 Box(Modifier.fillMaxWidth().height(rowHeight)
-                    .clickable(enabled = enabled && expanded && progress >= .7f,
+                    .then(if (enabled && expanded) Modifier.clickable(
                         interactionSource = interaction, indication = null,
                         role = Role.Tab, onClickLabel = "显示" + choice.label,
                         onClick = {
-                            if (index != selected) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            if (index != selected) haptic.perform(FeelEvent.Selection)
                             onSelect(index)
-                        })) {
+                        }) else Modifier)) {
                     Box(Modifier.matchParentSize().padding(4.dp)
                         .motionPress(interaction, enabled && expanded, .985f)
                         .clip(RoundedCornerShape(12.dp))
@@ -173,7 +175,7 @@ internal fun BoxScope.MorphGlassTabSelector(
         }
         // At the end this IS the trigger, not a replica handed to another render node.
         // Remove its pointer node while hidden so it cannot cover the menu's first row.
-        val labelInteractive = enabled && !expanded && progress <= .4f
+        val labelInteractive = enabled && !expanded
         GlassTabLabel(choices[selected], Modifier.width(collapsedWidth).graphicsLayer {
             alpha = (1f - progress * 2.4f).coerceIn(0f, 1f)
         }.then(if (labelInteractive) Modifier.clickable(interactionSource = interaction,

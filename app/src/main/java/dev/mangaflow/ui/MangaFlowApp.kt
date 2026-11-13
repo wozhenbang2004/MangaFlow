@@ -53,7 +53,7 @@ import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Menu
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Close
@@ -122,6 +122,7 @@ import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.update.UpdatePhase
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 private enum class Section(val title: String, val icon: ImageVector) {
@@ -201,7 +202,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
 
-    LaunchedEffect(Unit) { model.events.collect { snackbar.showSnackbar(it) } }
+    LaunchedEffect(Unit) { model.events.collectLatest { snackbar.showSnackbar(it) } }
     LaunchedEffect(openUpdatesRequest) {
         if (openUpdatesRequest > 0) {
             tagSearchVisible = false
@@ -330,7 +331,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         .focusProperties { canFocus = false })
                     .padding(horizontal = 14.dp, vertical = 12.dp)) {
                     Row(Modifier.padding(12.dp, 12.dp, 12.dp, 28.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(28.dp))
+                        Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(28.dp))
                         Spacer(Modifier.width(12.dp))
                         Column {
                             Text("漫流", style = MaterialTheme.typography.titleLarge)
@@ -382,9 +383,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 clip = progress > 0f
             },
             containerColor = MaterialTheme.colorScheme.background,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
             snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
-        ) { _ ->
-            Box(Modifier.fillMaxSize()) {
+        ) { innerPadding ->
+            Box(Modifier.fillMaxSize().padding(innerPadding)) {
             SharedTransitionLayout {
             val coverScope = this
             AnimatedContent(
@@ -448,7 +450,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             model.downloads.observeManga(current.state.manga.id)
                         }
                         val downloads by downloadFlow.collectAsStateWithLifecycle(
-                            initialValue = model.downloads.entries.value.filter { it.manga.id == current.state.manga.id })
+                            initialValue = remember { model.downloads.entries.value.filter { it.manga.id == current.state.manga.id } })
                         val chapterPositions = rememberChapterPositions(current.state.manga, model.library,
                             active = current.key == frame.key)
                         CompositionLocalProvider(LocalWallpaperActive provides (wallpaper.mediaPath != null)) {
@@ -697,7 +699,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onRetry = model::retryBrowse, onMore = model::loadMore,
                                 onTarget = model::setSearchTarget, onTag = model::toggleSearchTag,
                                 onRetryTags = model::retrySearchTags,
-                                onOpen = { manga -> selectedCover = null; closeSearch(); model.openManga(manga) },
+                                onOpen = { manga -> model.openManga(manga) },
                             )
                         }
                         }

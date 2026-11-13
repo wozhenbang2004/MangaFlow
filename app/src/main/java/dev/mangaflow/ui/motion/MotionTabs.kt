@@ -87,6 +87,7 @@ internal fun MotionTabs(
     val left = remember { Animatable(index.toFloat()) }
     val right = remember { Animatable(index + 1f) }
     val motion = LocalMotionEnabled.current
+    val feedback = rememberFeelFeedback()
     // Capsule treatment owns its restrained optical indicator; no user-selectable glass skin.
     val liquid = treatment == MotionTabTreatment.Capsule
     val light = MaterialTheme.colorScheme.surface.luminance() > .5f
@@ -113,15 +114,15 @@ internal fun MotionTabs(
             launch {
                 if (!motion) left.snapTo(target.toFloat())
                 else left.animateTo(target.toFloat(), spring(
-                    dampingRatio = if (toRight) .989f else 1.009f,
-                    stiffness = if (toRight) 230f else 520f,
+                    dampingRatio = if (toRight) MangaMotion.TabTrailingDamping else MangaMotion.TabLeadingDamping,
+                    stiffness = if (toRight) MangaMotion.TabTrailingStiffness else MangaMotion.TabLeadingStiffness,
                 ), initialVelocity = leftVelocity)
             }
             launch {
                 if (!motion) right.snapTo(target + 1f)
                 else right.animateTo(target + 1f, spring(
-                    dampingRatio = if (toRight) 1.009f else .989f,
-                    stiffness = if (toRight) 520f else 230f,
+                    dampingRatio = if (toRight) MangaMotion.TabLeadingDamping else MangaMotion.TabTrailingDamping,
+                    stiffness = if (toRight) MangaMotion.TabLeadingStiffness else MangaMotion.TabTrailingStiffness,
                 ), initialVelocity = rightVelocity)
             }
         }
@@ -206,7 +207,7 @@ internal fun MotionTabs(
                 else Modifier.weight(1f)
             Box(tab.height(height).selectable(
                 selected = i == index, role = role, interactionSource = interaction, indication = null,
-                onClick = { onSelect(i) },
+                onClick = { if (i != index) feedback.perform(FeelEvent.Selection); onSelect(i) },
             ).drawBehind {
                 drawRoundRect(foreground.copy(alpha = pressAlpha.value), cornerRadius = CornerRadius(10.dp.toPx()))
             }.then(if (compact) Modifier.widthIn(min = labelWidth + 6.dp).padding(horizontal = 3.dp) else Modifier),

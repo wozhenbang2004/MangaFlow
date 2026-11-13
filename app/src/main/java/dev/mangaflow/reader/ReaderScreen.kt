@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.view.WindowManager
-import android.view.accessibility.AccessibilityManager
 import androidx.activity.compose.BackHandler
 import dev.mangaflow.ui.motion.MotionBackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -60,7 +59,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -72,7 +71,7 @@ import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.MenuBook
+import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Tune
@@ -80,7 +79,7 @@ import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -406,7 +405,9 @@ fun ReaderScreen(
             val stored = downloadStore.storedPages(manga.id, chapterId)
             val loaded = stored ?: if (localImport) {
                 throw IllegalStateException("本地章节不存在，请重新导入")
-            } else repository.pages(manga.id, chapterId, forceRefresh = retry > 0)
+            } else dev.mangaflow.data.foregroundRequest("章节图片") {
+                repository.pages(manga.id, chapterId, forceRefresh = retry > 0)
+            }
             if (loaded.isEmpty()) throw IllegalStateException("这一章还没有可读取的图片")
             val restarting = restartPending && chapterId == initialChapterId && initialCollection == null
             val saved = if (restarting) null else libraryStore.progressFor(manga.id, chapterId)
@@ -471,7 +472,7 @@ fun ReaderScreen(
                     Text("正在打开章节", color = preferences.theme.foreground().copy(alpha = .6f), fontSize = 13.sp)
                 }
                 error != null -> Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Rounded.MenuBook, null, Modifier.size(32.dp), tint = preferences.theme.foreground().copy(alpha = .5f))
+                    Icon(Icons.AutoMirrored.Rounded.MenuBook, null, Modifier.size(32.dp), tint = preferences.theme.foreground().copy(alpha = .5f))
                     Spacer(Modifier.height(16.dp))
                     Text(error.orEmpty(), color = preferences.theme.foreground(), style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(16.dp))
@@ -643,7 +644,7 @@ fun ReaderScreen(
                                     enabled = chapterIndex > 0, interactive = controlsVisible) {
                                     siblings.getOrNull(chapterIndex - 1)?.let { chapterId = it.id }
                                 }
-                                ReaderIcon(Icons.Outlined.MenuBook, "章节目录", interactive = controlsVisible) { showChapters = true }
+                                ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = controlsVisible) { showChapters = true }
                                 ReaderIcon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
                                     enabled = openNextChapter != null && !nextRequested, interactive = controlsVisible) {
                                     openNextChapter?.invoke()
@@ -1589,17 +1590,8 @@ private fun ReaderProgressSlider(
 }
 
 @Composable
-private fun rememberReaderTouchExploration(): Boolean {
-    val context = LocalContext.current
-    val manager = remember(context) { context.getSystemService(AccessibilityManager::class.java) }
-    var enabled by remember(manager) { mutableStateOf(manager?.isTouchExplorationEnabled == true) }
-    DisposableEffect(manager) {
-        val listener = AccessibilityManager.TouchExplorationStateChangeListener { enabled = it }
-        manager?.addTouchExplorationStateChangeListener(listener)
-        onDispose { manager?.removeTouchExplorationStateChangeListener(listener) }
-    }
-    return enabled
-}
+private fun rememberReaderTouchExploration(): Boolean =
+    dev.mangaflow.ui.motion.LocalTouchExplorationEnabled.current
 
 @Composable
 private fun ReaderWindow(keepScreenOn: Boolean, controlsVisible: Boolean, lightChrome: Boolean) {
@@ -1719,7 +1711,7 @@ private fun ReaderChaptersDialog(
     MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         val downloadFlow = remember(downloadStore, manga.id) { downloadStore.observeManga(manga.id) }
         val downloads by downloadFlow.collectAsStateWithLifecycle(
-            initialValue = downloadStore.entries.value.filter { it.manga.id == manga.id })
+            initialValue = remember { downloadStore.entries.value.filter { it.manga.id == manga.id } })
         val saved = remember(downloads) { downloads.associateBy { it.chapter.id } }
         ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth(), backdrop) {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {

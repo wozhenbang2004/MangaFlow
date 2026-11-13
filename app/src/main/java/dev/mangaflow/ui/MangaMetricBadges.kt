@@ -91,7 +91,7 @@ internal fun observedMangaMetrics(manga: Manga, requestDelay: Long = 180L): List
     val updates = remember(state, manga.id) {
         state.values.map { it[manga.id].orEmpty() }.distinctUntilChanged()
     }
-    val metrics by updates.collectAsStateWithLifecycle(initialValue = state.values.value[manga.id].orEmpty())
+    val metrics by updates.collectAsStateWithLifecycle(initialValue = remember { state.values.value[manga.id].orEmpty() })
     return metrics
 }
 

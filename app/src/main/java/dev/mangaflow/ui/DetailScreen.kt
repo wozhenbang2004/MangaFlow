@@ -50,7 +50,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FilterList
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -174,6 +174,7 @@ fun DetailScreen(
     wallpaper: @Composable () -> Unit = {},
 ) {
     val current = detail?.manga ?: manga
+    val feedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
     val downloaded = remember(downloadEntries, manga.id) {
         downloadEntries.filter { it.manga.id == manga.id }.associateBy { it.chapter.id }
     }
@@ -317,7 +318,7 @@ fun DetailScreen(
                     .mangaHazeSource(artworkBackdrop).background(DetailSurface),
                 contentAlignment = Alignment.TopCenter,
             ) {
-                Icon(Icons.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
+                Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
                     modifier = Modifier.align(Alignment.Center).size(48.dp))
                 if (current.coverUrl.isNotBlank()) AsyncImage(
                     model = coverRequest, contentDescription = null,
@@ -351,7 +352,7 @@ fun DetailScreen(
                     comments = activeSection == 1, commentCount = commentCount,
                     sceneColor = contentColor,
                     onBack = onBack, onIntroduction = { fullIntroduction = true },
-                    onToggleFavorite = onToggleFavorite, onRetryCover = {
+                    onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() }, onRetryCover = {
                         coverFailed = false
                         coverRetry++
                     },
@@ -414,7 +415,7 @@ fun DetailScreen(
                         downloadMode = chapterDownloadMode,
                         onToggleDownload = { chapterDownloadMode = !chapterDownloadMode },
                     )
-                    MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth()) { targetSection ->
+                    MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth(), soft = true) { targetSection ->
                         sections.SaveableStateProvider(targetSection) {
                             when (targetSection) {
                                 0 -> DetailCatalog(

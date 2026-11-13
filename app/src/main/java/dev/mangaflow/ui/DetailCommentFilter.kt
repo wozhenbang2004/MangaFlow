@@ -8,7 +8,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.updateTransition
+import androidx.compose.animation.core.rememberTransition
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -35,14 +35,14 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Article
+import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -98,7 +98,7 @@ internal fun DetailCommentFilter(
     val motion = LocalMotionEnabled.current
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = visible
-    val transition = updateTransition(presence, label = "comment-filter")
+    val transition = rememberTransition(presence, label = "comment-filter")
     val alpha = transition.animateFloat(transitionSpec = {
         tween(if (motion) if (targetState) MangaMotion.Content else MangaMotion.Quick else 0)
     }, label = "filter-opacity") { if (it) 1f else 0f }
@@ -145,7 +145,7 @@ internal fun DetailCommentFilter(
                 }
                 HorizontalDivider(color = DetailForeground.copy(alpha = .055f), thickness = .5.dp)
                 Column {
-                    FilterToggle(Icons.Outlined.Article, "仅看长评", longOnly) { onLongOnly(!longOnly) }
+                    FilterToggle(Icons.AutoMirrored.Outlined.Article, "仅看长评", longOnly) { onLongOnly(!longOnly) }
                     FilterToggle(Icons.Outlined.VisibilityOff, "折叠推广", hidePromotions) { onHidePromotions(!hidePromotions) }
                 }
                 if (pending.isNotEmpty()) {

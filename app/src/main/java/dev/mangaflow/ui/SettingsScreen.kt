@@ -60,10 +60,10 @@ import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Storage
-import androidx.compose.material.icons.outlined.OpenInNew
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material3.Button
+import dev.mangaflow.ui.motion.MotionButton as Button
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -73,7 +73,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -451,8 +451,9 @@ fun SettingsScreen(
                             verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             val activity = context.settingsActivity()
                             val checked = update.lastChecked.takeIf { it > 0 }?.let(::settingsLastCheck)
+                            val locale = androidx.compose.ui.platform.LocalConfiguration.current.locales[0]
                             val timestamp = update.lastChecked.takeIf { it > 0 }?.let {
-                                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()).format(Date(it))
+                                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, locale).format(Date(it))
                             }
                             val updateAction = when (update.phase) {
                                 UpdatePhase.CHECKING -> "检查中"
@@ -757,7 +758,7 @@ private fun WebDavBackupDialog(
                     enabled = enabled,
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(15.dp),
-                    elevation = null,
+                    
                 ) {
                     Text("上传当前阅读备份")
                 }
@@ -976,7 +977,7 @@ private fun SettingsLinkRow(title: String, detail: String, icon: ImageVector, ex
         if (inlineDetail && detail.isNotBlank()) Text(detail, style = MaterialTheme.typography.bodySmall,
             color = colors.onSurfaceVariant)
         Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
-            Icon(if (external) Icons.Outlined.OpenInNew else Icons.Outlined.ChevronRight,
+            Icon(if (external) Icons.AutoMirrored.Outlined.OpenInNew else Icons.Outlined.ChevronRight,
                 contentDescription = null, tint = colors.onSurfaceVariant.copy(alpha = .7f), modifier = Modifier.size(18.dp))
         }
     }

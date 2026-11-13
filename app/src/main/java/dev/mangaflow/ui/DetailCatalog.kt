@@ -1,6 +1,11 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -48,7 +53,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -138,9 +143,19 @@ internal fun DetailCatalog(
         if (group == null) chapters else chapters.filter { it.group == group }
     }
 
+    val parentMotion = dev.mangaflow.ui.motion.LocalTabVisibilityScope.current
+    val motion = dev.mangaflow.ui.motion.LocalMotionEnabled.current
+    val groupReveal = if (motion && parentMotion != null) with(parentMotion) {
+        Modifier.animateEnterExit(
+            enter = fadeIn(tween(MangaMotion.Content)) + expandVertically(
+                spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness), expandFrom = Alignment.Top),
+            exit = fadeOut(tween(MangaMotion.Quick)) + shrinkVertically(
+                spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness), shrinkTowards = Alignment.Top),
+        )
+    } else Modifier
     Column(Modifier.fillMaxSize()) {
         if (groups.size > 1 || error != null) Row(
-            Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 16.dp),
+            Modifier.fillMaxWidth().then(groupReveal).heightIn(min = 44.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (groups.size > 1) {

@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -52,7 +53,7 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,8 +67,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInRoot
@@ -95,6 +94,8 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
+import dev.mangaflow.ui.motion.FeelEvent
+import dev.mangaflow.ui.motion.rememberFeelFeedback
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.rememberDelayedBusy
@@ -118,7 +119,7 @@ fun LibraryScreen(
 ) {
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
-    val haptics = LocalHapticFeedback.current
+    val haptics = rememberFeelFeedback()
     var headerHeightPx by remember { mutableIntStateOf(with(density) { 44.dp.toPx().toInt() }) }
     val headerPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     var showHistory by rememberSaveable { mutableStateOf(false) }
@@ -149,9 +150,13 @@ fun LibraryScreen(
     val trashEmphasis = animateFloatAsState(if (trashArmed) 1.12f else 1f,
         if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else androidx.compose.animation.core.snap(),
         label = "trash-target-press")
-    LaunchedEffect(trashArmed) { if (trashArmed) haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
+    LaunchedEffect(trashArmed) { if (trashArmed) haptics.perform(FeelEvent.Threshold) }
     val favoritesPosition = rememberLazyGridState()
     val historyPosition = rememberLazyListState()
+    LaunchedEffect(active, showHistory) {
+        if (!active || showHistory) favoritesPosition.stopScroll()
+        if (!active || !showHistory) historyPosition.stopScroll()
+    }
     val progressById = remember(history) { history.associateBy { it.manga.id } }
     val snackbar = remember { SnackbarHostState() }
     val removalScope = rememberCoroutineScope()
@@ -166,6 +171,7 @@ fun LibraryScreen(
             try {
                 undone = snackbar.showSnackbar("已移出书架", actionLabel = "撤销",
                     withDismissAction = true, duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
+                if (undone) haptics.perform(dev.mangaflow.ui.motion.FeelEvent.Undo)
             } finally {
                 if (!undone) withContext(NonCancellable) { onRemoveFavorite(manga) }
                 pendingFavorites = pendingFavorites - manga.id
@@ -181,6 +187,7 @@ fun LibraryScreen(
             try {
                 undone = snackbar.showSnackbar("已移除阅读记录", actionLabel = "撤销",
                     withDismissAction = true, duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
+                if (undone) haptics.perform(dev.mangaflow.ui.motion.FeelEvent.Undo)
             } finally {
                 if (!undone) withContext(NonCancellable) { onRemoveHistory(mangaId) }
                 pendingHistory = pendingHistory - mangaId

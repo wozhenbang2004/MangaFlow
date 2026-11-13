@@ -21,7 +21,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CalendarToday
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -156,7 +156,7 @@ private fun ReadingTimeSummary(millis: Long, activeDays: Int, books: Int, range:
                 Text("$activeDays 天", color = colors.onSurfaceVariant, fontSize = 11.sp)
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                Icon(Icons.Outlined.MenuBook, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
+                Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
                 Text("$books 部", color = colors.onSurfaceVariant, fontSize = 11.sp)
             }
         }
