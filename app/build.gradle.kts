@@ -58,7 +58,7 @@ dependencies {
     implementation("dev.chrisbanes.haze:haze:2.1.0")
     implementation("dev.chrisbanes.haze:haze-blur:2.1.0")
     implementation("dev.chrisbanes.haze:haze-blur-material3:2.1.0")
-    implementation("dev.chrisbanes.haze:haze-materials:2.1.0")
+    implementation("dev.chrisbanes.haze:haze-blur-materials:2.1.0")
     implementation("dev.chrisbanes.haze:haze-glass:2.1.0")
     implementation("dev.chrisbanes.haze:haze-glass-material3:2.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
