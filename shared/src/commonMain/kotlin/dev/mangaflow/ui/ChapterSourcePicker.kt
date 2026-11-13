@@ -196,19 +196,21 @@ internal fun ChapterSourcePicker(
     val key = chapter.logicalId.ifBlank { chapter.id }
     val frozen = remember(key) { chapter }
     var requestedVariant by remember(key) { mutableStateOf<ChapterVariant?>(null) }
+    var inspected by remember(key) { mutableStateOf<String?>(null) }
     val variants = remember(key, frozen.variants) {
         frozen.variants.sortedBy { if (it.storageId == frozen.id) 0 else 1 }.distinctBy { it.storageId }
     }
     ChapterSourceOrbit("read:$key", anchor, backdrop, variants.size, onDismiss,
         closeRequested = closeRequested, onCancel = onCancelSelection,
         onPresenceChange = onPresenceChange,
-        hasStatus = loading && requestedVariant == null || !error.isNullOrBlank() || variants.isEmpty(),
+        hasStatus = loading && requestedVariant == null || !error.isNullOrBlank() || variants.isEmpty() || inspected != null,
         status = {
             if (variants.isEmpty()) Text("本章暂无可用来源", color = DetailSecondary, fontSize = 12.sp)
             if (loading && requestedVariant == null) MotionBusyIndicator(Modifier.size(16.dp),
                 color = DetailSecondary, strokeWidth = 1.4.dp)
             if (!error.isNullOrBlank()) Text(error, color = MaterialTheme.colorScheme.error,
                 fontSize = 12.sp, lineHeight = 18.sp)
+            inspected?.let { Text(it, color = DetailSecondary, fontSize = 11.sp, lineHeight = 17.sp) }
         }) { index, modifier, _ ->
         val variant = variants[index]
         val peers = variants.filter { it.sourceId == variant.sourceId }
@@ -221,13 +223,14 @@ internal fun ChapterSourcePicker(
             variant.title.takeIf { peers.map { it.title }.distinct().size > 1 && it != frozen.title },
             saved?.takeIf { !selected }?.let { "续读第${it.pageIndex + 1}页" },
         ).distinct().joinToString(" · ")
-        val secondary = if (peers.size > 1) listOf(variant.language, variant.edition, variant.scanlator)
-            .firstOrNull(String::isNotBlank).orEmpty() else ""
+        val secondary = chapterVariantDistinction(variant, peers)
         ChapterSourceDisc(variant, backdrop, modifier, selected = selected,
             busy = loading && requestedVariant?.storageId == variant.storageId,
             enabled = !loading, details = details, secondary = secondary,
             entry = downloaded[variant.storageId],
             actionLabel = "使用${variant.sourceName}阅读本章",
+            onInspect = { inspected = listOf(variant.sourceName, secondary, details)
+                .filter(String::isNotBlank).distinct().joinToString(" · ") },
             onClick = { requestedVariant = variant; onReadVariant(frozen, variant) })
     }
 }

@@ -123,7 +123,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
         val captionHeight = if (inlineInformation) 0.dp else
             (10f + (17f * titleLines + 22f) * fontScale).dp.coerceAtMost(galleryHeight - 96.dp)
-        val itemHeight = galleryHeight - 38.dp
+        val itemHeight = galleryHeight - 22.dp
         val artworkHeight = (itemHeight - captionHeight).coerceAtLeast(1.dp)
         val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
         if (manga.isEmpty()) {
@@ -160,16 +160,16 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
         val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
         val imageWidthPx = with(density) { preferredWidth.roundToPx() }.coerceAtLeast(1)
         val imageHeightPx = with(density) { artworkHeight.roundToPx() }.coerceAtLeast(1)
-        Column(Modifier.height(galleryHeight).padding(bottom = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.height(galleryHeight).padding(bottom = 2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)) {
             HorizontalPager(state = state, pageSize = PageSize.Fixed(preferredWidth),
                 // The adopted cover shadow draws outside its mask. Give its vertical
                 // falloff room without changing the pager's equal horizontal insets.
-                contentPadding = PaddingValues(start = edgePadding, end = edgePadding, top = 10.dp, bottom = 14.dp),
+                contentPadding = PaddingValues(start = edgePadding, end = edgePadding, top = 6.dp, bottom = 8.dp),
                 pageSpacing = 10.dp,
                 beyondViewportPageCount = 1, flingBehavior = fling, userScrollEnabled = visible,
                 key = { manga[it].id },
-                modifier = Modifier.fillMaxWidth().height(itemHeight + 24.dp)
+                modifier = Modifier.fillMaxWidth().height(itemHeight + 14.dp)
                     .semantics { stateDescription = "推荐 ${state.currentPage + 1} / ${manga.size}" }) { index ->
                 val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
                 FeaturedManga(manga[index], repository, captionHeight, titleLines, inlineInformation, imageWidthPx, imageHeightPx,

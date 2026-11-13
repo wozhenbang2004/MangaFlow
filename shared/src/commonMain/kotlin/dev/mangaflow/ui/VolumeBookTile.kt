@@ -81,6 +81,7 @@ internal fun VolumeBookTile(
     onActions: () -> Unit,
     onCoverError: () -> Unit,
     onRetryCover: () -> Unit,
+    sourceMarks: @Composable () -> Unit = {},
 ) {
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
@@ -95,10 +96,7 @@ internal fun VolumeBookTile(
         }
     }
     var imageLoading by remember(request) { mutableStateOf(request != null) }
-    var decodedAspect by remember(request) { mutableStateOf<Float?>(null) }
-    val declaredAspect = cover.page?.takeIf { it.width > 0 && it.height > 0 }
-        ?.let { it.width.toFloat() / it.height }
-    val coverAspect = decodedAspect ?: declaredAspect ?: .7f
+    var imageReady by remember(request) { mutableStateOf(false) }
     val busy = rememberDelayedBusy(cover.loading || imageLoading)
     Column(
         Modifier.fillMaxWidth().combinedClickable(
@@ -115,34 +113,29 @@ internal fun VolumeBookTile(
         },
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        // The card follows the real decoded cover; Fit never needs a wider painted board.
-        Box(Modifier.fillMaxWidth().aspectRatio(coverAspect).mangaCoverCard()
-            .then(if (decodedAspect == null) Modifier.background(DetailSurface) else Modifier),
+        // Reuse the browse cover's stable book frame; changing image dimensions cannot move this grid.
+        Box(Modifier.fillMaxWidth().aspectRatio(.70f).mangaCoverCard()
+            .then(if (!imageReady) Modifier.background(DetailSurface) else Modifier),
             contentAlignment = Alignment.Center) {
-            if (decodedAspect == null && !busy && cover.error == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+            if (!imageReady && !busy && cover.error == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
                 Modifier.size(25.dp), tint = DetailMuted.copy(alpha = .35f))
             if (request != null && cover.error == null) AsyncImage(
-                model = request, contentDescription = null, contentScale = ContentScale.Fit,
+                model = request, contentDescription = null, contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
                 onLoading = { imageLoading = true },
-                onSuccess = { state ->
-                    imageLoading = false
-                    val image = state.result.image
-                    if (image.width > 0 && image.height > 0) {
-                        decodedAspect = image.width.toFloat() / image.height
-                    }
-                },
+                onSuccess = { imageLoading = false; imageReady = true },
                 onError = { imageLoading = false; onCoverError() },
             )
             if (cover.error != null) DetailAction(Icons.Outlined.Refresh, "重试这一卷封面", onClick = onRetryCover)
             else if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = DetailMuted, strokeWidth = 1.5.dp)
         }
+        Text(chapter.title, color = if (current) DetailForeground else DetailSecondary,
+            fontSize = 12.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp))
         Row(Modifier.fillMaxWidth().padding(horizontal = 1.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(chapter.title, color = if (current) DetailForeground else DetailSecondary,
-                fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
-                modifier = Modifier.weight(1f))
+            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) { sourceMarks() }
             ChapterReadMark(progress, progressKnown, size = 12.dp)
             ChapterDownloadMark(entry, downloadMode, size = 12.dp)
         }

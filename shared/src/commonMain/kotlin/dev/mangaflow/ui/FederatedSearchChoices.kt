@@ -11,10 +11,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.ExpandLess
-import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -107,50 +105,40 @@ internal fun SearchSourceMarks(
     }
 }
 
-/** Partial source failures disclose their own status without replacing successful results. */
+/** Source state stays on its own mark; diagnostics never become a second result list. */
 @Composable
-internal fun SearchSourceSummary(sources: Map<String, FederatedSearchSource>, onRetry: () -> Unit) {
+internal fun SearchSourceSummary(
+    sources: Map<String, FederatedSearchSource>,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     if (sources.isEmpty()) return
     val colors = MaterialTheme.colorScheme
-    val loading = sources.values.count { it.loading }
-    val failed = sources.values.count { !it.loading && it.error != null }
-    var expanded by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp)) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 30.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                sources.values.forEach { source ->
-                    Box(Modifier.size(24.dp).semantics(mergeDescendants = true) {
-                        contentDescription = source.sourceName + if (source.loading) "，查询中"
-                            else if (source.error != null) "，查询失败" else "，已完成"
-                    }, contentAlignment = Alignment.Center) {
-                        ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(14.dp), muted = source.loading)
-                        if (source.loading) MotionBusyIndicator(Modifier.align(Alignment.BottomEnd).size(7.dp),
-                            color = colors.onSurfaceVariant, strokeWidth = 1.dp)
-                        else if (source.error != null) Icon(Icons.Outlined.ErrorOutline, null,
-                            Modifier.align(Alignment.BottomEnd).size(9.dp), tint = colors.error)
+    val busy = sources.values.any { it.loading }
+    Row(modifier.heightIn(min = 28.dp).horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        sources.values.forEach { source ->
+            val failed = !source.loading && source.error != null
+            val interaction = remember(source.sourceId) { MutableInteractionSource() }
+            Box(Modifier.size(24.dp)
+                .then(if (failed) Modifier.clickable(enabled = !busy,
+                    interactionSource = interaction, indication = null, role = Role.Button,
+                    onClickLabel = "重试搜索", onClick = onRetry)
+                    .motionPress(interaction, enabled = !busy, pressedScale = .94f) else Modifier)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = source.sourceName + when {
+                        source.loading -> "，查询中"
+                        failed -> "，查询失败，" + source.error + "，点按重试搜索"
+                        else -> "，已完成"
                     }
-                }
-            }
-            if (failed > 0) MotionIconButton(onClick = onRetry, enabled = loading == 0,
-                modifier = Modifier.size(30.dp)) {
-                Icon(Icons.Outlined.Refresh, "重试${failed}个失败来源", Modifier.size(16.dp),
-                    tint = colors.onSurfaceVariant)
-            }
-            MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(30.dp)) {
-                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                    if (expanded) "收起来源状态" else "查看来源状态", Modifier.size(17.dp), tint = colors.onSurfaceVariant)
-            }
-        }
-        if (expanded) sources.values.forEach { source ->
-            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(14.dp), muted = true)
-                Text(source.sourceName, Modifier.padding(start = 7.dp).widthIn(min = 66.dp),
-                    fontSize = 11.sp, color = colors.onSurfaceVariant)
-                Text(if (source.loading) "检查中" else source.error ?: "已完成",
-                    modifier = Modifier.weight(1f), fontSize = 11.sp, color = colors.onSurfaceVariant,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }, contentAlignment = Alignment.Center) {
+                ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(15.dp), muted = source.loading)
+                if (source.loading) MotionBusyIndicator(Modifier.align(Alignment.BottomEnd).size(7.dp),
+                    color = colors.onSurfaceVariant, strokeWidth = 1.dp)
+                else Icon(if (failed) Icons.Outlined.ErrorOutline else Icons.Outlined.Check, null,
+                    Modifier.align(Alignment.BottomEnd).size(9.dp),
+                    tint = if (failed) colors.error else colors.onSurfaceVariant)
             }
         }
     }

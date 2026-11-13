@@ -20,6 +20,9 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -71,6 +74,8 @@ internal fun UnifiedSourceManager(
     var source by remember(state.work.id) { mutableStateOf(state.sourceId) }
     var query by remember(state.work.id) { mutableStateOf(state.query) }
     var manual by remember(state.work.id) { mutableStateOf(false) }
+    var sourcePickerOpen by remember(state.work.id) { mutableStateOf(false) }
+    var errorDetailsSource by remember(state.work.id) { mutableStateOf<String?>(null) }
     var requestedSearch by remember(state.work.id) { mutableStateOf<Pair<String, String>?>(null) }
     var domainChanged by remember(state.work.id) { mutableStateOf(false) }
     var attaching by remember(state.work.id) { mutableStateOf<Manga?>(null) }
@@ -121,16 +126,19 @@ internal fun UnifiedSourceManager(
         if (!state.connecting) {
             keyboard?.hide(); focus.clearFocus()
             sourcePage = null; manual = false; attaching = null
+            sourcePickerOpen = false; errorDetailsSource = null
         }
     }
     val openSource: (String, Boolean) -> Unit = { id, needsSearch ->
         source = id; sourcePage = id; manual = needsSearch
+        sourcePickerOpen = false; errorDetailsSource = null
         query = state.work.title; requestedSearch = null; domainChanged = false; attaching = null
         onChooseSource(id)
     }
     LaunchedEffect(state.linked, attaching?.id) {
         if (attaching != null && state.linked.any { it.id == attaching?.id }) {
             sourcePage = null; manual = false; attaching = null
+            sourcePickerOpen = false; errorDetailsSource = null
         }
     }
     LaunchedEffect(state.sourceDomain, state.sourceId, state.query, state.loading) {
@@ -150,8 +158,22 @@ internal fun UnifiedSourceManager(
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回来源列表", Modifier.size(20.dp))
                 }
                 Column(Modifier.weight(1f)) {
-                    Text(if (sourcePage == null) "来源" else sourceDisplayName(source),
-                        fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    val canSwitchSource = sourcePage != null && manual && state.sources.size > 1 && !busy
+                    val sourceInteraction = remember { MutableInteractionSource() }
+                    Row(Modifier.clip(RoundedCornerShape(8.dp)).then(if (canSwitchSource)
+                        Modifier.clickable(interactionSource = sourceInteraction, indication = null,
+                            role = Role.Button, onClickLabel = "切换查找来源",
+                            onClick = { sourcePickerOpen = !sourcePickerOpen })
+                            .motionPress(sourceInteraction, pressedScale = .985f) else Modifier),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text(if (sourcePage == null) "来源" else state.sources.firstOrNull { it.first == source }?.second
+                            ?: selectedOverview?.name ?: sourceDisplayName(source),
+                            fontSize = 16.sp, fontWeight = FontWeight.Medium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                        if (canSwitchSource) Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp),
+                            tint = colors.onSurfaceVariant)
+                    }
                     Text(state.work.title, color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
                 }
@@ -173,12 +195,11 @@ internal fun UnifiedSourceManager(
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     if (page == "overview") {
-                        item(key = "summary") {
+                        if (checking || pendingCount > 0) item(key = "summary") {
                             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 if (checking) MotionBusyIndicator(Modifier.size(12.dp), strokeWidth = 1.2.dp)
-                                Text(if (pendingCount > 0) "待确认 $pendingCount" else if (checking) "检查中" else
-                                    "${associated.map { it.sourceId }.distinct().size} 源",
+                                Text(if (pendingCount > 0) "待确认 $pendingCount 个来源" else "检查中",
                                     fontSize = 12.sp,
                                     color = if (pendingCount > 0) colors.primary else colors.onSurfaceVariant)
                             }
@@ -214,20 +235,31 @@ internal fun UnifiedSourceManager(
                                     verticalAlignment = Alignment.CenterVertically) {
                                     val count = when {
                                         row.status == "LINKED" && row.chapters > 0 -> "${row.chapters}话"
-                                        row.status == "NEEDS_CONFIRMATION" -> "${row.candidates.size}个"
+                                        row.status == "NEEDS_CONFIRMATION" -> "${row.candidates.size}个候选"
                                         else -> ""
                                     }
                                     if (count.isNotBlank()) Text(count, fontSize = 11.sp,
                                         color = colors.onSurfaceVariant, maxLines = 1)
                                     if (row.status == "SEARCHING") MotionBusyIndicator(Modifier.size(13.dp),
                                         strokeWidth = 1.3.dp, color = colors.onSurfaceVariant)
-                                    else Text(if (row.message == "尚未检查") "尚未检查" else sourceStatusLabel(row.status),
+                                    else if (row.status == "FAILED") {
+                                        val detailsInteraction = remember(row.id) { MutableInteractionSource() }
+                                        Row(Modifier.heightIn(min = 32.dp)
+                                            .clickable(enabled = pageActive && !state.connecting,
+                                                interactionSource = detailsInteraction, indication = null,
+                                                role = Role.Button, onClickLabel = "查看${row.name}失败原因",
+                                                onClick = {
+                                                    openSource(row.id, false)
+                                                    errorDetailsSource = row.id
+                                                }).padding(horizontal = 2.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text("检查失败", fontSize = 11.sp, color = colors.error, maxLines = 1)
+                                            Icon(Icons.Outlined.Info, null, Modifier.size(13.dp), tint = colors.error)
+                                        }
+                                    } else Text(if (row.message == "尚未检查") "尚未检查" else sourceStatusLabel(row.status),
                                         fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                        color = when (row.status) {
-                                            "FAILED" -> colors.error
-                                            "NEEDS_CONFIRMATION" -> colors.primary
-                                            else -> colors.onSurfaceVariant
-                                        })
+                                        color = if (row.status == "NEEDS_CONFIRMATION") colors.primary else colors.onSurfaceVariant)
                                 }
                             }
                         }
@@ -244,13 +276,26 @@ internal fun UnifiedSourceManager(
                         }
                     } else {
                         if (manual) item(key = "search") {
-                            if (state.sources.size > 1) MotionTabs(
-                                selected = state.sources.indexOfFirst { it.first == source }.coerceAtLeast(0),
-                                labels = state.sources.map { it.second }, modifier = Modifier.fillMaxWidth(),
-                                controlHeight = 36.dp, fontSize = 12.sp, treatment = MotionTabTreatment.Soft,
-                                indicator = colors.onSurface.copy(alpha = .065f), onSelect = { index ->
-                                    if (!busy && pageActive) openSource(state.sources[index].first, true)
-                                })
+                            if (sourcePickerOpen && state.sources.size > 1) {
+                                state.sources.forEach { (id, name) ->
+                                    val sourceInteraction = remember(id) { MutableInteractionSource() }
+                                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable(enabled = pageActive && !busy,
+                                            interactionSource = sourceInteraction, indication = null,
+                                            role = Role.Button, onClickLabel = "在${name}查找",
+                                            onClick = { openSource(id, true) })
+                                        .motionPress(sourceInteraction, enabled = pageActive && !busy, pressedScale = .985f)
+                                        .padding(horizontal = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        ChapterSourceLogo(id, name, Modifier.size(19.dp))
+                                        Text(name, Modifier.weight(1f), fontSize = 12.sp,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        if (id == source) Icon(Icons.Outlined.Check, null, Modifier.size(16.dp))
+                                    }
+                                }
+                            }
                             if (source == "komiic" && state.domainOptions.size > 1)
                                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically) {
@@ -316,10 +361,29 @@ internal fun UnifiedSourceManager(
                             }
                         }
                         currentError?.let { error -> item(key = "error") {
-                            Text(error, color = colors.error, fontSize = 12.sp, lineHeight = 18.sp,
-                                modifier = Modifier.padding(vertical = 8.dp))
-                            if (manual && !state.connecting) MotionTextButton(enabled = pageActive && !state.loading,
-                                onClick = search) { Text("重试搜索", fontSize = 12.sp) }
+                            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp)
+                                .semantics { stateDescription = error },
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Text(if (attaching != null) "关联未完成" else if (manual) "搜索未完成" else "来源暂不可用",
+                                    Modifier.weight(1f), color = colors.error, fontSize = 12.sp)
+                                MotionIconButton(onClick = {
+                                    errorDetailsSource = if (errorDetailsSource == source) null else source
+                                }, modifier = Modifier.size(44.dp)) {
+                                    Icon(Icons.Outlined.Info,
+                                        if (errorDetailsSource == source) "收起失败原因" else "查看失败原因",
+                                        Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+                                }
+                                if (!state.connecting) MotionIconButton(enabled = pageActive && !state.loading,
+                                    modifier = Modifier.size(44.dp), onClick = {
+                                        if (source == state.work.sourceId && !manual) onRetryAll() else search()
+                                    }) {
+                                    Icon(Icons.Outlined.Refresh, "重试这个来源", Modifier.size(18.dp),
+                                        tint = colors.onSurfaceVariant)
+                                }
+                            }
+                            if (errorDetailsSource == source) Text(error, color = colors.onSurfaceVariant,
+                                fontSize = 11.sp, lineHeight = 17.sp,
+                                modifier = Modifier.padding(bottom = 8.dp))
                         } }
                         if (!busy && currentError == null && results.isEmpty()) item(key = "empty") {
                             Text(if (searched) "未找到匹配作品，可换别名再试。" else "暂无候选，可换个名称查找。",

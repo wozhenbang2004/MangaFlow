@@ -1,5 +1,24 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.rememberTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
+
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.outlined.ViewList
 
@@ -333,7 +352,8 @@ internal fun DiscoverySearchResults(
         val controlsRoom = (contentRoom - resultReserve).coerceAtLeast(0.dp)
         val fixedScope = (if (tagsOnly || scopeInToolbar) 0.dp else 42.dp) +
             (if (search.selectedTags.isEmpty()) 0.dp else 42.dp) +
-            if (showResults && search.items.isNotEmpty()) 28.dp else 0.dp
+            if ((federated && search.searchSources.isNotEmpty()) ||
+                (showResults && search.items.isNotEmpty())) 28.dp else 0.dp
         val choicesRoom = (controlsRoom - fixedScope).coerceIn(0.dp, 200.dp)
         Column(Modifier.fillMaxWidth().heightIn(max = this.maxHeight).padding(if (tagsOnly) 0.dp else 8.dp)
             .motionInputGate(active && sourceChoices == null)) {
@@ -343,22 +363,29 @@ internal fun DiscoverySearchResults(
                 SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
                     search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly,
                     onTagQuery = onTagQuery, maxChoicesHeight = choicesRoom, showScope = !scopeInToolbar)
-                if (federated)
-                    SearchSourceSummary(search.searchSources, onRetry)
-                if (showResults && search.items.isNotEmpty()) Row(
+                if ((federated && search.searchSources.isNotEmpty()) ||
+                    (showResults && search.items.isNotEmpty())) Row(
                     Modifier.fillMaxWidth().heightIn(min = 28.dp)
-                        .padding(horizontal = if (tagsOnly) 0.dp else 6.dp)
-                        .semantics(mergeDescendants = true) {
-                            contentDescription = "已显示${search.items.size}本漫画" + if (search.hasMore) "，可继续加载" else ""
-                        },
+                        .padding(horizontal = if (tagsOnly) 0.dp else 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(search.items.size.toString() + if (search.hasMore) "+" else "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (search.loading) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                    if (federated) SearchSourceSummary(search.searchSources, onRetry, Modifier.weight(1f))
+                    else Spacer(Modifier.weight(1f))
+                    if (showResults && search.items.isNotEmpty()) Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        modifier = Modifier.semantics(mergeDescendants = true) {
+                            contentDescription = "已显示${search.items.size}本漫画" +
+                                if (search.hasMore) "，可继续加载" else ""
+                        }) {
+                        Icon(Icons.AutoMirrored.Outlined.MenuBook, null, Modifier.size(13.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(search.items.size.toString() + if (search.hasMore) "+" else "",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (search.loading && !federated)
+                            CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                    }
                 }
             }
             when {
@@ -605,6 +632,16 @@ private fun DiscoveryPane(
         else -> MangaLayout.columns(maxWidth, columns,
             (if (!desktop && columns == 4) 68.dp else 88.dp) * fontScale, gap, inset)
     }
+    val sectionControls: @Composable () -> Unit = {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现",
+                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+            DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
+                onPresenceChange = { layoutPresent = it })
+            DiscoveryRefresh(state, onRefresh)
+        }
+    }
     LazyVerticalGrid(
         columns = GridCells.Fixed(visibleColumns), state = grid,
         contentPadding = PaddingValues(start = inset, end = inset, top = topPadding,
@@ -615,9 +652,12 @@ private fun DiscoveryPane(
     ) {
         if (state.mode == DiscoveryMode.RECOMMENDED && (state.loading || state.items.isNotEmpty())) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "hero") {
-                FeaturedCarousel(state.items.take(6), repository,
-                    active && heroVisible && canAutoAdvance && !grid.isScrollInProgress && !layoutPresent,
-                    onOpen = onOpen, onRatings = onRatings, loading = state.loading)
+                Column(Modifier.fillMaxWidth()) {
+                    FeaturedCarousel(state.items.take(6), repository,
+                        active && heroVisible && canAutoAdvance && !grid.isScrollInProgress && !layoutPresent,
+                        onOpen = onOpen, onRatings = onRatings, loading = state.loading)
+                    if (state.items.isNotEmpty()) sectionControls()
+                }
             }
         }
         if (state.loading && state.items.isEmpty()) {
@@ -632,15 +672,9 @@ private fun DiscoveryPane(
                 EmptyMessage("暂时没有漫画", "来源暂时没有返回内容，可以稍后刷新。", "刷新", onRefresh)
             }
         } else {
-            if (!ranking) item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现",
-                        modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
-                    DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
-                        onPresenceChange = { layoutPresent = it })
-                    DiscoveryRefresh(state, onRefresh)
-                }
+            if (!ranking && state.mode != DiscoveryMode.RECOMMENDED)
+                item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
+                sectionControls()
             }
             if (ranking) {
                 itemsIndexed(state.items, key = { _, manga -> manga.id }, span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
@@ -756,13 +790,56 @@ private fun DiscoveryLayoutControl(
     var expanded by remember { mutableStateOf(false) }
     LaunchedEffect(enabled) { if (!enabled) expanded = false }
     val density = LocalDensity.current
+    val direction = LocalLayoutDirection.current
+    val motion = LocalMotionEnabled.current
     val desktop = platformKind == PlatformKind.DESKTOP
+    val window = LocalMangaWindow.current
     val choices = remember(desktop) { if (desktop) listOf(0, 1, 2, 3, 4, 6, 8) else listOf(1, 2, 3, 4) }
     val labels = remember(choices) { choices.map { if (it == 0) "自动" else if (it == 1) "列表" else "${it}列" } }
     val selected = choices.indexOf(columns).coerceAtLeast(0)
-    // The real trigger stays in the row. The retained popover has one fixed
-    // measured size; its existing opacity/scale reveal never relocates this icon.
-    Box(Modifier.size(44.dp)) {
+    val presence = remember { MutableTransitionState(false) }
+    presence.targetState = expanded && enabled
+    val transition = rememberTransition(presence, label = "layout-choice-reveal")
+    val reveal = transition.animateFloat(transitionSpec = {
+        if (motion) spring(MangaMotion.SearchDamping, MangaMotion.SearchStiffness) else snap()
+    }, label = "layout-choice-width") { if (it) 1f else 0f }
+    val present = presence.currentState || presence.targetState || !presence.isIdle
+    val reportPresence by rememberUpdatedState(onPresenceChange)
+    SideEffect { reportPresence(present) }
+    DisposableEffect(Unit) { onDispose { reportPresence(false) } }
+    var availableWidth by remember { mutableStateOf(0.dp) }
+    val cellWidth = 44.dp * density.fontScale.coerceIn(1f, 1.35f)
+    val panelWidth = minOf(cellWidth * choices.size + 8.dp, availableWidth)
+    val scroll = rememberScrollState()
+    LaunchedEffect(expanded, selected, scroll.maxValue) {
+        if (expanded) scroll.scrollTo(with(density) { (cellWidth * selected).roundToPx() }
+            .coerceIn(0, scroll.maxValue))
+    }
+    val position = remember(density) {
+        val gap = with(density) { 4.dp.roundToPx() }
+        val margin = with(density) { 12.dp.roundToPx() }
+        object : PopupPositionProvider {
+            override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize,
+                layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
+                val x = if (layoutDirection == LayoutDirection.Ltr)
+                    anchorBounds.left - gap - popupContentSize.width else anchorBounds.right + gap
+                return IntOffset(x.coerceIn(margin,
+                    (windowSize.width - margin - popupContentSize.width).coerceAtLeast(margin)),
+                    (anchorBounds.top + (anchorBounds.height - popupContentSize.height) / 2)
+                        .coerceIn(margin, (windowSize.height - margin - popupContentSize.height).coerceAtLeast(margin)))
+            }
+        }
+    }
+    // The real trigger never leaves its row. Only a fixed-size sibling window
+    // reveals the final-size choices horizontally, following the beUI search shell.
+    Box(Modifier.size(44.dp).onGloballyPositioned { coordinates ->
+        val origin = coordinates.localToWindow(Offset.Zero)
+        if (origin.x.isFinite()) with(density) {
+            val room = if (direction == LayoutDirection.Ltr) origin.x
+                else window.width.toPx() - origin.x - coordinates.size.width
+            availableWidth = (room.toDp() - 16.dp).coerceAtLeast(0.dp)
+        }
+    }) {
         MotionIconButton(
             onClick = { expanded = !expanded },
             modifier = Modifier.size(44.dp).semantics {
@@ -781,49 +858,53 @@ private fun DiscoveryLayoutControl(
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        CompactGlassPopover(
-            visible = enabled && expanded,
-            backdrop = backdrop,
-            onDismiss = { expanded = false },
-            onPresenceChange = onPresenceChange,
-            maximumWidth = 164.dp * density.fontScale.coerceIn(1f, 1.6f),
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                choices.chunked(2).forEach { row ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        row.forEach { choice ->
+        if (present && panelWidth > 0.dp) Popup(popupPositionProvider = position,
+            onDismissRequest = { expanded = false }, properties = PopupProperties(focusable = expanded && enabled)) {
+            // Popup geometry stays final-sized throughout; animated optical width
+            // never re-enters the position provider or moves the trigger.
+            Box(Modifier.width(panelWidth).height(44.dp)) {
+                val progress = reveal.value.coerceIn(0f, 1f)
+                LiquidGlassSurface(backdrop,
+                    Modifier.align(if (direction == LayoutDirection.Ltr) Alignment.CenterEnd else Alignment.CenterStart)
+                        .width((panelWidth * progress).coerceAtLeast(1.dp)).height(44.dp)
+                        .motionInputGate(enabled && expanded && progress >= .85f)
+                        .graphicsLayer { alpha = progress },
+                    cornerRadius = 22.dp, role = GlassSurfaceRole.CONTROL, softCard = true,
+                    materialExpansion = { progress }) {
+                    Row(Modifier.layout { measurable, constraints ->
+                        val fullWidth = panelWidth.roundToPx()
+                        val placeable = measurable.measure(constraints.copy(minWidth = fullWidth, maxWidth = fullWidth))
+                        layout(constraints.maxWidth, constraints.maxHeight) {
+                            placeable.placeRelative(constraints.maxWidth - fullWidth, 0)
+                        }
+                    }.width(panelWidth).height(44.dp).horizontalScroll(scroll).padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        choices.forEachIndexed { index, choice ->
                             val chosen = choice == columns
                             val interaction = remember(choice) { MutableInteractionSource() }
-                            val label = labels[choices.indexOf(choice)]
                             val color = if (chosen) MaterialTheme.colorScheme.onSurface
                                 else MaterialTheme.colorScheme.onSurfaceVariant
-                            Box(
-                                Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(12.dp))
+                            Box(Modifier.width(cellWidth).height(44.dp)
+                                .selectable(selected = chosen, enabled = enabled && expanded,
+                                    interactionSource = interaction, indication = null, role = Role.RadioButton,
+                                    onClick = { if (!chosen) onChange(choice); expanded = false })
+                                .motionPress(interaction, enabled && expanded, pressedScale = .96f)
+                                .semantics { contentDescription = labels[index] },
+                                contentAlignment = Alignment.Center) {
+                                Box(Modifier.fillMaxSize().padding(vertical = 5.dp, horizontal = 2.dp)
+                                    .clip(RoundedCornerShape(16.dp))
                                     .background(if (chosen) MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)
-                                        else Color.Transparent)
-                                    .selectable(
-                                        selected = chosen, enabled = enabled && expanded,
-                                        interactionSource = interaction, indication = null, role = Role.RadioButton,
-                                        onClick = {
-                                            if (!chosen) onChange(choice)
-                                            expanded = false
-                                        },
-                                    )
-                                    .motionPress(interaction, enabled && expanded, pressedScale = .96f)
-                                    .semantics { contentDescription = label },
-                                contentAlignment = Alignment.Center,
-                            ) {
+                                        else Color.Transparent))
                                 Row(verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                                     modifier = Modifier.clearAndSetSemantics {}) {
                                     Icon(if (choice == 1) Icons.Outlined.ViewList else Icons.Outlined.ViewModule,
-                                        null, Modifier.size(19.dp), tint = color)
+                                        null, Modifier.size(17.dp), tint = color)
                                     if (choice != 1) Text(if (choice == 0) "自" else choice.toString(),
-                                        color = color, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                        color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                                 }
                             }
                         }
-                        if (row.size == 1) Spacer(Modifier.weight(1f))
                     }
                 }
             }

@@ -57,6 +57,7 @@ internal fun DetailRatingStrip(manga: Manga, foreground: Color, enabled: Boolean
         .clickable(enabled = enabled, role = Role.Button, onClickLabel = "查看各站评分、样本与口径", onClick = onExpand),
         verticalAlignment = Alignment.CenterVertically) {
         MangaMetricBadges(manga, Modifier.weight(1f), foreground = foreground, compact = true,
+            heatLabel = if (manga.rank != null) "榜期热度" else "拷贝热度",
             plain = true, valueSize = if (compact) 12.sp else 14.sp,
             onExpand = onExpand.takeIf { enabled })
         Spacer(Modifier.width(6.dp))
@@ -90,7 +91,7 @@ internal fun DetailRatingSheet(manga: Manga, backdrop: HazeState? = null, onDism
             .padding(horizontal = 20.dp).padding(bottom = 20.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("各站评分", Modifier.weight(1f), color = DetailForeground,
-                    fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    fontSize = 16.sp, fontWeight = FontWeight.Medium)
                 MotionIconButton(onClick = { showNotes = !showNotes }, modifier = Modifier.size(48.dp)) {
                     Icon(Icons.Outlined.Info, if (showNotes) "收起评分说明" else "评分说明",
                         tint = DetailSecondary, modifier = Modifier.size(18.dp))
@@ -125,7 +126,7 @@ internal fun DetailRatingSheet(manga: Manga, backdrop: HazeState? = null, onDism
             metrics.forEach { metric ->
                 val details = listOfNotNull(metric.ratingCount?.let { "$it 人" },
                     metric.scoreLabel.takeIf(String::isNotBlank)).joinToString(" · ")
-                Row(Modifier.fillMaxWidth().heightIn(min = 54.dp).padding(vertical = 8.dp)
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(vertical = 6.dp)
                     .semantics(mergeDescendants = true) {
                         contentDescription = listOf(metric.name,
                             detailMetricScore(metric.score ?: 0.0) +

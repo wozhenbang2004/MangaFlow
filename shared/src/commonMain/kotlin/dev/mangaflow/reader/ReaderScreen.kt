@@ -145,6 +145,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
@@ -204,7 +205,6 @@ import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabContent
-import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
@@ -801,156 +801,174 @@ fun ReaderScreen(
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
                 slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
         ) {
-            LiquidGlassSurface(
-                state = readerBackdrop,
-                role = GlassSurfaceRole.NAVIGATION,
-                trackPointer = true,
-                softCard = true,
-                // Paint through the navigation area. Only the controls consume safe
-                // insets; placing those outside the glass leaves a visible bottom gap.
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                cornerRadius = 20.dp,
-                surfaceShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
-            ) {
-                Column(Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxWidth().align(Alignment.TopCenter)
-                    .windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
-                        .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-                    .pointerInput(Unit) {}.padding(horizontal = 24.dp, vertical = 4.dp)) {
-                    if (pages.isNotEmpty()) key(chapterId) {
-                        ReaderProgressSlider(
-                            pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
-                            enabled = controlsVisible,
-                            onSeek = { destination ->
-                                if (destination != pageIndex) {
-                                    returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
-                                    targetOffset = 0
-                                    targetPage = destination
-                                }
-                            },
-                            onOpenNavigator = { showPageNavigator = true },
-                            onInteractionChanged = { progressInteracting = it },
-                            sourceContent = {
-                                if (canChooseSource || sourceLoading) Box(
-                                    Modifier.width(48.dp).heightIn(min = 44.dp)
-                                        .onGloballyPositioned { coordinates ->
-                                            val origin = coordinates.localToScreen(Offset.Zero)
-                                            if (origin.isSpecified) sourceTriggerAnchor = Rect(origin,
-                                                Size(coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
-                                        },
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    if (sourceLoading) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
-                                    else ReaderSourceStack(
-                                        chapter = chapter,
-                                        enabled = controlsVisible && active && !leavingReader,
-                                        onOpen = {
-                                            sourceCloseRequested = false
-                                            sourceChapter = chapter
-                                        },
-                                    )
-                                }
-                            },
-                        )
-
-                    }
-                    BoxWithConstraints(Modifier.fillMaxWidth()) {
-                        val actionsScroll = rememberScrollState()
-                        val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
-                            preferences.mode in setOf(ReadingMode.RIGHT_TO_LEFT, ReadingMode.LEFT_TO_RIGHT)
-                        val hasMoreActions = canCorrectSpread || returnLocation != null || canChooseSource
-                        val narrow = maxWidth < (if (hasMoreActions) 348.dp else 300.dp)
-                        Row(Modifier.fillMaxWidth().then(if (narrow) Modifier.horizontalScroll(actionsScroll) else Modifier),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                ReaderIcon(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章",
-                                    enabled = chapterIndex > 0, interactive = controlsVisible) {
-                                    siblings.getOrNull(chapterIndex - 1)?.let { chapterId = it.id }
-                                }
-                                ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = controlsVisible) { showChapters = true }
-                                ReaderIcon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
-                                    enabled = openNextChapter != null && !chapterChangeRequested, interactive = controlsVisible) {
-                                    openNextChapter?.invoke()
-                                }
+            Box(Modifier.windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
+                    .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
+                .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 12.dp)
+                .widthIn(max = 440.dp).fillMaxWidth()) {
+                LiquidGlassSurface(
+                    state = readerBackdrop,
+                    role = GlassSurfaceRole.READING_DOCK,
+                    trackPointer = true,
+                    softCard = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    cornerRadius = 22.dp,
+                ) {
+                    Column(Modifier.fillMaxWidth().pointerInput(Unit) {}
+                        .padding(horizontal = 10.dp, vertical = 4.dp)) {
+                        if (pages.isNotEmpty()) key(chapterId) {
+                            ReaderProgressSlider(
+                                pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,
+                                enabled = controlsVisible,
+                                onSeek = { destination ->
+                                    if (destination != pageIndex) {
+                                        returnLocation = ReaderReturnLocation(pageIndex, cursor.scrollOffset)
+                                        targetOffset = 0
+                                        targetPage = destination
+                                    }
+                                },
+                                onOpenNavigator = { showPageNavigator = true },
+                                onInteractionChanged = { progressInteracting = it },
+                                sourceContent = {
+                                    if (canChooseSource || sourceLoading) Box(
+                                        Modifier.width(44.dp).heightIn(min = 44.dp)
+                                            .onGloballyPositioned { coordinates ->
+                                                val origin = coordinates.localToScreen(Offset.Zero)
+                                                if (origin.isSpecified) sourceTriggerAnchor = Rect(origin,
+                                                    Size(coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
+                                            },
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        if (sourceLoading) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
+                                        else ReaderSourceStack(
+                                            chapter = chapter,
+                                            enabled = controlsVisible && active && !leavingReader,
+                                            onOpen = {
+                                                sourceCloseRequested = false
+                                                sourceChapter = chapter
+                                            },
+                                        )
+                                    }
+                                },
+                            )
+                        }
+                        BoxWithConstraints(Modifier.fillMaxWidth()) {
+                            val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
+                                preferences.mode in setOf(ReadingMode.RIGHT_TO_LEFT, ReadingMode.LEFT_TO_RIGHT)
+                            // Reserve the final touch target before admitting optional actions.
+                            val inlineChapterNavigation = maxWidth >= 176.dp
+                            val inlineCatalog = maxWidth >= 88.dp
+                            val chapterSlots = if (inlineChapterNavigation) 3 else if (inlineCatalog) 1 else 0
+                            val extraSlots = ((maxWidth.value - (chapterSlots + 1) * 44f) / 44f)
+                                .toInt().coerceIn(0, 2)
+                            val inlinePicture = extraSlots >= 1
+                            val inlineComments = extraSlots >= 2
+                            val pictureLabel = if (currentPictureCollected) "取消画面收藏"
+                                else if (currentPicture?.spread == true) "收藏当前跨页" else "收藏当前画面"
+                            val pictureIcon = if (currentPictureCollected) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder
+                            val toggleCurrentPicture: () -> Unit = {
+                                currentPicture?.let { togglePicture(it.firstPage, it.lastPage) }
                             }
-                            Spacer(Modifier.width(12.dp))
-                            if (!narrow) Spacer(Modifier.weight(1f))
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                ReaderIcon(
-                                    if (currentPictureCollected) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                    if (currentPictureCollected) "取消画面收藏" else if (currentPicture?.spread == true) "收藏当前跨页" else "收藏当前画面",
-                                    enabled = currentPicture != null, interactive = controlsVisible,
-                                ) {
-                                    currentPicture?.let { togglePicture(it.firstPage, it.lastPage) }
-                                }
-                                ReaderIcon(
-                                    Icons.Outlined.Forum,
-                                    if (localImport) "本地章节没有在线评论" else "本章评论",
-                                    enabled = pages.isNotEmpty() && !localImport,
-                                    interactive = controlsVisible,
-                                ) {
-                                    showComments = true
-                                }
-                                val downloaded = activeDownload?.status == DownloadStatus.COMPLETED
-                                val downloading = activeDownload?.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
-                                MotionIconButton(
-                                    enabled = controlsVisible && pages.isNotEmpty() && !downloaded && !localImport,
-                                    modifier = Modifier.size(48.dp),
-                                    onClick = {
-                                        if (downloading) activeDownload?.let { downloadStore.pause(it.id) }
-                                        else {
-                                            val expectedEntry = activeDownload
-                                            val chapterToSave = chapter
-                                            val pagesToSave = pages
-                                            onRequestNotificationPermission()
-                                            scope.launch {
-                                                try {
-                                                    val sourcePages = if (expectedEntry?.needsSourceRefresh == true)
-                                                        repository.pages(chapterSourceMangaId(manga.id, chapterToSave), chapterToSave.id, forceRefresh = true) else pagesToSave
-                                                    val saved = if (expectedEntry != null)
-                                                        downloadStore.refreshReadingDownload(manga, chapterToSave, sourcePages, headers, expectedEntry)
-                                                    else { downloadStore.enqueue(manga, chapterToSave, sourcePages, headers); true }
-                                                    if (saved) downloadMessage = "正在保存本章，可继续阅读"
-                                                } catch (cancelled: CancellationException) { throw cancelled }
-                                                catch (failure: Exception) { downloadMessage = failure.message ?: "无法保存本章" }
-                                            }
-                                        }
-                                    },
-                                ) {
-                                    MotionSwap(activeDownload?.status, Modifier.size(22.dp)) { status ->
-                                        val busy = status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
-                                        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
-                                            if (busy) CircularProgressIndicator(
-                                                progress = { (activeDownload?.completedPages?.toFloat() ?: 0f) /
-                                                    (activeDownload?.totalPages ?: 1).coerceAtLeast(1) },
-                                                modifier = Modifier.size(22.dp), strokeWidth = 1.5.dp,
-                                                color = colors.onSurface.copy(alpha = .65f), trackColor = colors.onSurface.copy(alpha = .10f),
-                                            )
-                                            Icon(when {
-                                                busy -> Icons.Rounded.Pause
-                                                status == DownloadStatus.COMPLETED -> Icons.Rounded.Check
-                                                status == DownloadStatus.FAILED -> Icons.Rounded.Refresh
-                                                else -> Icons.Rounded.Download
-                                            }, when {
-                                                busy -> "暂停下载，本章已保存 ${activeDownload?.completedPages ?: 0} 页"
-                                                status == DownloadStatus.COMPLETED -> "本章已下载"
-                                                status == DownloadStatus.FAILED -> "重试下载"
-                                                else -> "保存本章"
-                                            }, Modifier.size(if (busy) 12.dp else 21.dp), tint = colors.onSurface.copy(alpha = .75f))
-                                        }
+                            val openPrevious: () -> Unit = {
+                                siblings.getOrNull(chapterIndex - 1)?.let { chapterId = it.id }
+                            }
+                            val commentsLabel = if (localImport) "本地章节没有在线评论" else "本章评论"
+                            val downloaded = activeDownload?.status == DownloadStatus.COMPLETED
+                            val downloading = activeDownload?.status in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
+                            val saveChapter: () -> Unit = {
+                                if (downloading) activeDownload?.let { downloadStore.pause(it.id) }
+                                else {
+                                    val expectedEntry = activeDownload
+                                    val chapterToSave = chapter
+                                    val pagesToSave = pages
+                                    onRequestNotificationPermission()
+                                    scope.launch {
+                                        try {
+                                            val sourcePages = if (expectedEntry?.needsSourceRefresh == true)
+                                                repository.pages(chapterSourceMangaId(manga.id, chapterToSave), chapterToSave.id, forceRefresh = true) else pagesToSave
+                                            val saved = if (expectedEntry != null)
+                                                downloadStore.refreshReadingDownload(manga, chapterToSave, sourcePages, headers, expectedEntry)
+                                            else { downloadStore.enqueue(manga, chapterToSave, sourcePages, headers); true }
+                                            if (saved) downloadMessage = "正在保存本章，可继续阅读"
+                                        } catch (cancelled: CancellationException) { throw cancelled }
+                                        catch (failure: Exception) { downloadMessage = failure.message ?: "无法保存本章" }
                                     }
                                 }
+                            }
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                if (inlineChapterNavigation) ReaderIcon(
+                                    Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章",
+                                    enabled = chapterIndex > 0, interactive = controlsVisible,
+                                    buttonSize = 44.dp, onClick = openPrevious)
+                                if (inlineCatalog) ReaderIcon(
+                                    Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = controlsVisible,
+                                    buttonSize = 44.dp, onClick = { showChapters = true })
+                                if (inlineChapterNavigation) ReaderIcon(
+                                    Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
+                                    enabled = openNextChapter != null && !chapterChangeRequested,
+                                    interactive = controlsVisible, buttonSize = 44.dp,
+                                    onClick = { openNextChapter?.invoke() })
+                                Spacer(Modifier.weight(1f))
+                                if (inlinePicture) ReaderIcon(
+                                    pictureIcon, pictureLabel, enabled = currentPicture != null,
+                                    interactive = controlsVisible, buttonSize = 44.dp, onClick = toggleCurrentPicture)
+                                if (inlineComments) ReaderIcon(
+                                    Icons.Outlined.Forum, commentsLabel, enabled = pages.isNotEmpty() && !localImport,
+                                    interactive = controlsVisible, buttonSize = 44.dp, onClick = { showComments = true })
                                 key(chapterId) {
                                     Box {
-                                        if (hasMoreActions) ReaderIcon(Icons.Outlined.MoreHoriz, "更多阅读操作", interactive = controlsVisible) {
-                                            showReaderActions = !showReaderActions
-                                        }
+                                        ReaderIcon(Icons.Outlined.MoreHoriz, "更多阅读操作", interactive = controlsVisible,
+                                            buttonSize = 44.dp) { showReaderActions = !showReaderActions }
                                         CompactGlassPopover(
-                                            visible = hasMoreActions && showReaderActions && controlsVisible && active && !leavingReader,
+                                            visible = showReaderActions && controlsVisible && active && !leavingReader,
                                             backdrop = readerBackdrop, aboveAnchor = true,
                                             onDismiss = { showReaderActions = false },
                                             onPresenceChange = { readerActionsPresent = it },
                                         ) {
-                                            if (canChooseSource) {
+                                            if (!inlineChapterNavigation) {
+                                                CompactMenuAction(Icons.AutoMirrored.Rounded.KeyboardArrowLeft, "上一章",
+                                                    enabled = showReaderActions && chapterIndex > 0) {
+                                                    showReaderActions = false
+                                                    openPrevious()
+                                                }
+                                            }
+                                            if (!inlineCatalog) CompactMenuAction(Icons.AutoMirrored.Outlined.MenuBook, "章节目录",
+                                                enabled = showReaderActions) {
+                                                showReaderActions = false
+                                                showChapters = true
+                                            }
+                                            if (!inlineChapterNavigation) {
+                                                CompactMenuAction(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
+                                                    enabled = showReaderActions && openNextChapter != null && !chapterChangeRequested) {
+                                                    showReaderActions = false
+                                                    openNextChapter?.invoke()
+                                                }
+                                            }
+                                            if (!inlinePicture) CompactMenuAction(pictureIcon, pictureLabel,
+                                                enabled = showReaderActions && currentPicture != null) {
+                                                showReaderActions = false
+                                                toggleCurrentPicture()
+                                            }
+                                            if (!inlineComments) CompactMenuAction(Icons.Outlined.Forum, commentsLabel,
+                                                enabled = showReaderActions && pages.isNotEmpty() && !localImport) {
+                                                showReaderActions = false
+                                                showComments = true
+                                            }
+                                            CompactMenuAction(when {
+                                                downloading -> Icons.Rounded.Pause
+                                                downloaded -> Icons.Rounded.Check
+                                                activeDownload?.status == DownloadStatus.FAILED -> Icons.Rounded.Refresh
+                                                else -> Icons.Rounded.Download
+                                            }, when {
+                                                downloading -> "暂停下载，本章已保存 ${activeDownload?.completedPages ?: 0} 页"
+                                                downloaded -> "本章已下载"
+                                                localImport -> "本地章节无需下载"
+                                                activeDownload?.status == DownloadStatus.FAILED -> "重试下载"
+                                                else -> "保存本章"
+                                            }, enabled = showReaderActions && pages.isNotEmpty() && !downloaded && !localImport) {
+                                                showReaderActions = false
+                                                saveChapter()
+                                            }
+                                            if (canChooseSource && pages.isEmpty()) {
                                                 CompactMenuAction(Icons.Outlined.Source, "本章来源", enabled = showReaderActions) {
                                                     showReaderActions = false
                                                     sourceCloseRequested = false
@@ -973,6 +991,10 @@ fun ReaderScreen(
                                                         returnLocation = current
                                                     }
                                                 }
+                                            }
+                                            CompactMenuAction(Icons.Rounded.Tune, "阅读设置", enabled = showReaderActions) {
+                                                showReaderActions = false
+                                                showSettings = true
                                             }
                                         }
                                     }
@@ -1949,7 +1971,7 @@ private fun ReaderProgressSlider(
     DisposableEffect(interactions) { onDispose { interactionChanged(false) } }
 
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         sourceContent?.invoke()
         ReaderSeekBar(
             value = shown,
@@ -1959,7 +1981,7 @@ private fun ReaderProgressSlider(
                 preview = null
             },
             valueRange = 0f..lastPage.coerceAtLeast(1).toFloat(),
-            modifier = Modifier.weight(1f).padding(end = 8.dp),
+            modifier = Modifier.weight(1f).padding(end = 4.dp),
             enabled = enabled && pageCount > 1,
             interactions = interactions,
             label = "阅读进度，第 ${shown.roundToInt() + 1} 页，共 $pageCount 页",
@@ -1967,7 +1989,7 @@ private fun ReaderProgressSlider(
         Row(Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
             .clickable(enabled = enabled && pageCount > 0, role = Role.Button,
                 onClickLabel = "打开页面导航", onClick = onOpenNavigator)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .padding(horizontal = 6.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
             Text("${shown.roundToInt() + 1}", color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             Text(" / $pageCount", color = colors.onSurfaceVariant, fontSize = 12.sp)
@@ -2153,9 +2175,9 @@ internal fun ReaderPanelHeading(title: String, closeLabel: String, onDismiss: ()
 
 @Composable
 private fun ReaderIcon(icon: ImageVector, label: String, enabled: Boolean = true, interactive: Boolean = true,
-    emphasis: Float = .82f, onClick: () -> Unit) {
+    emphasis: Float = .82f, buttonSize: Dp = 48.dp, onClick: () -> Unit) {
     val tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) emphasis else .25f)
-    MotionIconButton(onClick = onClick, enabled = enabled && interactive, modifier = Modifier.size(48.dp)) {
+    MotionIconButton(onClick = onClick, enabled = enabled && interactive, modifier = Modifier.size(buttonSize)) {
         Icon(icon, label, Modifier.size(21.dp), tint = tint)
     }
 }

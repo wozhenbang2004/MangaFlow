@@ -1,5 +1,32 @@
 # MangaFlow detail · 2026-11-12
 
+## Screenshot-led hierarchy correction · 2026-11-14 (91–97)
+
+This batch includes the user's follow-ups after UIUX-REVIEW-90, not an automatic implementation of its whole backlog. Raw wording (exact message IDs unavailable) includes “那几个卷的大小”, “轮盘弄到侧面竖着排列…最右边的就左侧竖着”, “列数filter…横向展开”, “卷怎么还没图标”, “详情页…格式塔信息视觉层级…源那块…不是很满意”, followed by “搜索…没必要展开源了图标能显示状态就行”, “底部…之前那样悬浮的坞”, and “发现页…轮播图和下面之间”. Before-state screenshots1000121623–1000121629 have no identified installed version.
+
+| ID | Adopted design and implementation boundary |
+| --- | --- |
+| VOLUME-UNIFORM-91 | Reuse the browse cover's stable .70 book-thumbnail frame. Image decode must not change catalogue row height; Crop is a thumbnail presentation, while the actual first page, reader images and source/download identities remain the originals. One-line volume name and a quiet source/read/download metadata row share consistent alignment. Every volume gets its real source mark, including a single source; no fake provider count. This supersedes the earlier decode-driven actual-aspect thumbnail geometry in response to the new unequal-size screenshot. |
+| SOURCE-SIDE-92 | Replace83's radial orbit with a compact vertical source list beside the actual trigger. Near the right edge it opens to the left, otherwise choose the side with usable room and clamp to safe bounds. Preserve selected/download/loading/error/inspection, exact variant actions, more-page behavior, cancellation/reverse close and reduced motion. Keep the source marks, with no white radial field or repeated CONTROL glass circles. Same-source variants expose fields that actually distinguish the candidates before secondary detail. |
+| LAYOUT-INLINE-93 | Replace78's2×2 layout-choice panel with horizontal reveal. Keep the actual44dp trigger stationary and a stable final popup layout/position; reveal content instead of feeding per-frame window width into Popup clamping. Retain true saved choices, desktop automatic/6/8, current badge, dismissal/back, focus and reduced motion. |
+| DETAIL-RELATION-94 | Keep real clear-cover/toolbar overlay continuity and natural collapse. Phone poster uses about38% available width (34% with larger type), real-aspect Fit; title/author/update form the adjacent primary book group. Synopsis moves to a full-width two-line disclosure, with nearby tags and native scores. Chapter/comment remains primary navigation; the catalogue's current group is one small content-led disclosure, with counts in its menu, rather than another full equal-tab row. Source management is a distinct local action; its44dp overview keeps real candidate count/short state, provider switching and long errors are secondary. No enclosing glass information card. |
+| SEARCH-STATUS-95 | Search displays actual provider glyphs with loading/complete/error state, without the expanded provider table or its chevron. Failures retain deliberate retry/necessary detail and accessibility information; query results and real source-specific candidates stay available. The state summary must not crowd the actual results into several permanent rows. |
+| READER-DOCK-96 | Explicitly supersede81's full-width/physical-bottom panel. Restore a centered floating READING_DOCK with rounded four corners, soft shadow, max440dp and12dp outside air plus real navigation/cutout safety. Keep source stack/actual anchor, elastic progress and page count above; chapter navigation below, with an always-visible44dp overflow and width-dependent secondary actions. Download and the original action/state paths remain available in overflow. No whole-page viewport clipping. |
+| DISCOVER-GROUP-97 | Reduce the unowned space between the actual recommendation carousel and its next section. Section title/tools sit with their grid, the carousel has a distinct short transition gap, and the first result row does not drift away. Preserve the current portrait height budget, manual centering, real artwork/metrics and common glass roles. |
+
+Writers are isolated: root owns MorphGlassTabs/DetailCatalog/VolumeBookTile and documentation; browse owns DiscoverScreen/FederatedSearchChoices/FeaturedCarousel; source owns ChapterSourceOrbit/Picker/DownloadSourceSheet; detail owns DetailScreen/DetailRatings/UnifiedSourceManager; reader owns ReaderScreen. Root alone integrates the complete ready batch on latest main with an expected-head lease. Review R02/R03/R07 related code is addressed in this batch; all remaining R findings retain their explicit pending/conditional status. Code completion, normal CI and actual phone acceptance remain separate. No tests/local builds/product probes/additional review gate or intermediate pushes.
+
+
+## Selected-first classification / whole-system review · 2026-11-14 (89–90)
+
+Raw user (exact message IDs unavailable): “这个全部那三个东西选了某一个就得排在最上面”, screenshot1000121620; then “然后接着对整个系统的 uiux 做信息层级 格式塔 最小信息原则 渐进式披露全部扫描 review”. Later screenshot corrections are recorded in91–97 above and the report, not lost or treated as a replacement for this review.
+
+| ID | Implementation/evidence |
+| --- | --- |
+| FILTER-SELECTED-89 | The shared MorphGlassTabSelector shows the current choice first and preserves all other choices' relative order. Original indexes still own callbacks, saved filters and page data. Stable composition keys retain interaction identity; selected icon/label, dimensions, glass, dismissal/back and reduced motion remain. Downloads and library use one rule. Source complete; phone appearance/feel remains pending. |
+| UIUX-REVIEW-90 | [Whole-system review](docs/research/UIUX-REVIEW-20261114.md) covers65 UI files/related UI segments at0739661 and finds18 structural issues plus2 conditional risks. Its fixed source evidence, coverage and remedies remain review findings; the report separately marks R02/R03/R07 related code implemented by this screenshot batch and R13 partly superseded by SCREEN-FILL-87. No blanket UI acceptance or all-backlog implementation is claimed. |
+
+
 ## SCREEN-FILL-87 / REFRESH-88 · current screenshot corrections · 2026-11-14
 
 Raw user batch (exact message IDs unavailable): “底部还是一样那个边界。。我希望的是全部都能出，以及刚点进来漫画那个没铺满上面虽然可以滑上去” with1000121631.jpg; “点击刷新后顶上不要出现那个黑色转圈了” with1000121632.jpg; then “没事了以后就默认这个什么避让关闭就行然后把这个按钮删掉” with1000121633.jpg. The last decision supersedes this batch's proposed detail-edge/hero-layout changes: the user reports disabling cutout avoidance resolves the problem and wants that fixed default. Do not move the sharp poster or change the floating detail dock in this batch.

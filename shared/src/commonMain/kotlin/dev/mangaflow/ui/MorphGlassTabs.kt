@@ -38,6 +38,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -172,23 +173,29 @@ internal fun BoxScope.MorphGlassTabSelector(
         }.then(if (enabled && expanded) Modifier else Modifier.clearAndSetSemantics { }
             .focusProperties { canFocus = false })
             .padding(bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
-            choices.forEachIndexed { index, choice ->
-                val interaction = remember(index) { MutableInteractionSource() }
-                val active = selected == index
-                val selectionTint = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f)
-                Box(Modifier.fillMaxWidth().height(rowHeight)
-                    .then(if (enabled && expanded) Modifier.clickable(
-                        interactionSource = interaction, indication = null,
-                        role = Role.Tab, onClickLabel = "显示" + choice.label,
-                        onClick = {
-                            if (index != selected) haptic.perform(FeelEvent.Selection)
-                            onSelect(index)
-                        }) else Modifier)) {
-                    Box(Modifier.matchParentSize().padding(4.dp)
-                        .motionPress(interaction, enabled && expanded, .985f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(if (active) selectionTint else Color.Transparent))
-                    GlassTabLabel(choice, Modifier.fillMaxWidth(), menuSelection = active)
+            val orderedIndices = remember(choices.size, selected) {
+                choices.indices.sortedBy { if (it == selected) 0 else 1 }
+            }
+            orderedIndices.forEach { index ->
+                val choice = choices[index]
+                key(index) {
+                    val interaction = remember { MutableInteractionSource() }
+                    val active = selected == index
+                    val selectionTint = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f)
+                    Box(Modifier.fillMaxWidth().height(rowHeight)
+                        .then(if (enabled && expanded) Modifier.clickable(
+                            interactionSource = interaction, indication = null,
+                            role = Role.Tab, onClickLabel = "显示" + choice.label,
+                            onClick = {
+                                if (index != selected) haptic.perform(FeelEvent.Selection)
+                                onSelect(index)
+                            }) else Modifier)) {
+                        Box(Modifier.matchParentSize().padding(4.dp)
+                            .motionPress(interaction, enabled && expanded, .985f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (active) selectionTint else Color.Transparent))
+                        GlassTabLabel(choice, Modifier.fillMaxWidth(), menuSelection = active)
+                    }
                 }
             }
         }

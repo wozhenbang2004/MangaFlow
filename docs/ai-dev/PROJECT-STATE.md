@@ -1,5 +1,18 @@
 # MangaFlow · current work
 
+## Whole-system review and screenshot implementation batch · 2026-11-14
+
+Active scope is DESIGN.md FILTER-SELECTED-89/UIUX-REVIEW-90 and screenshot91–97. Raw-user batch is covered through1000121636 and the latest clear-poster width correction; exact chat/message IDs are unavailable. The original review and selected-first request remain active alongside the later source/volume/filter/detail/search/reader/discovery corrections.
+
+This checkpoint integrates the current-choice-first selector; stable .70 volume thumbnails and every volume's actual source mark; side-anchored44dp vertical source choices (right-edge triggers open left), visibly distinct same-provider versions and retained inspection/status; stable horizontal column disclosure;38%/34% clear hero poster with full-width synopsis and tighter metadata; a single on-demand catalogue group; compact source management; icon-only search provider status; floating rounded reader dock with always-visible overflow; and smaller owned gaps around carousel/section/grid. Source code completion is separate from actual phone acceptance.
+
+[The requested UIUX scan](../research/UIUX-REVIEW-20261114.md) preserves65-file/UI-segment coverage,18 structural findings,2 conditional risks, exact original-source links and retained good design. R02/R03/R07 related fixes are implemented in this batch; remaining findings/conditional cases are explicit follow-ups. R13's original cutout row was removed by the concurrently integrated SCREEN-FILL-87 and is not reintroduced or called a current fault.
+
+Integration builds on latest main f87d5b8ce9cc912bce63bbc431194ac5893f7ef4, preserving fixed FILL, removed cutout settings, showRefreshingIndicator=false, TYPE-86 proposal-only status, real updater/wallpaper/source/auth/platform changes and all actual compilation repairs. No font family migration or unrelated API change. Independent writers own separate modules; root alone integrates one complete main batch with expected-head protection, then confirms normal CI. Do not create intermediate or documentation-only pushes.
+
+Cloud GitHub connector/in-memory objects only; no local user-computer operations, tests, local builds, service/device/browser probes or extra review gate. Android187 had passed; its matching Windows job failed staging incremental assets and its iOS archive was later cancelled when main advanced to f87. Those observations do not validate this batch. Next exact action: submit the complete code+review batch after the existing Android publication has finished, confirm its actual normal CI identities, leave main stable, and use concrete compiler errors or actual user artifact feedback for the next correction.
+
+
 ## Current typography design and screenshot decisions · 2026-11-14
 
 Read TYPE-86 / SCREEN-FILL-87 / REFRESH-88 in DESIGN.md. Active user request: design the font system with real font candidates, roles, readable numbers and cross-platform/package tradeoffs. That proposal is now recorded; family/token/asset migration has not been approved or applied and needs comparable actual Chinese samples.

@@ -701,13 +701,13 @@ private fun HeroBookInformation(
     )
     BoxWithConstraints(modifier.fillMaxWidth().wrapContentHeight(unbounded = true)
         .onSizeChanged { onNaturalHeight(it.height) }
-        .padding(horizontal = 20.dp).padding(top = 12.dp + artworkHeadroom, bottom = 8.dp)
+        .padding(horizontal = 20.dp).padding(top = 12.dp + artworkHeadroom, bottom = 6.dp)
         .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })) {
         val contentWidth = maxWidth
-        val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .38f else .56f,
-            248.dp, (contentWidth - 130.dp).coerceAtLeast(96.dp))
+        val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .34f else .38f,
+            224.dp, (contentWidth - 136.dp).coerceAtLeast(72.dp))
         val infoWidth = with(density) {
-            (contentWidth.roundToPx() - posterWidth.roundToPx() - 18.dp.roundToPx()).coerceAtLeast(1).toDp()
+            (contentWidth.roundToPx() - posterWidth.roundToPx() - 16.dp.roundToPx()).coerceAtLeast(1).toDp()
         }
         val titleLayout = remember(manga.title, titleStyle, infoWidth, density) {
             measurer.measure(manga.title, style = titleStyle,
@@ -715,13 +715,12 @@ private fun HeroBookInformation(
         }
         val maximumInlineLines = if (density.fontScale >= 1.4f) 3 else 5
         val stacked = infoWidth < 112.dp || titleLayout.lineCount > maximumInlineLines
-        val inlineSynopsis = !stacked && !compact && density.fontScale <= 1.2f && titleLayout.lineCount <= 3
         // Measure the content independently of the display-height floor so long text
         // can expand through the existing scroll without a size-feedback loop.
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = if (stacked) 1 else 2,
-                horizontalArrangement = Arrangement.spacedBy(18.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Box(Modifier.width(posterWidth).mangaSharedCover(manga.id)) {
                     LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 12.dp,
                         role = GlassSurfaceRole.ARTWORK, elevation = 0.dp, softCard = false) {
@@ -735,7 +734,7 @@ private fun HeroBookInformation(
                     }
                 }
                 Column(Modifier.width(if (stacked) contentWidth else infoWidth),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(manga.title, color = ink, style = titleStyle,
                         modifier = Modifier.fillMaxWidth().clickable(enabled = infoVisible,
                             interactionSource = titleInteraction, indication = null,
@@ -746,13 +745,14 @@ private fun HeroBookInformation(
                         ?.let { "更新 · $it" }.orEmpty()).filter(String::isNotBlank).joinToString(" · ")
                     if (state.isNotBlank()) Text(state, color = ink.copy(alpha = .80f),
                         fontSize = 11.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (inlineSynopsis) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
                 }
             }
-            if (!inlineSynopsis) HeroSynopsis(manga, ink, infoVisible, onIntroduction)
-            DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag)
-            DetailRatingStrip(manga, ink.copy(alpha = .86f), enabled = infoVisible,
-                compact = true, onExpand = onRatings)
+            HeroSynopsis(manga, ink, infoVisible, onIntroduction)
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                DetailTags(manga, includeState = false, enabled = infoVisible, onTag = onTag)
+                DetailRatingStrip(manga, ink.copy(alpha = .86f), enabled = infoVisible,
+                    compact = true, onExpand = onRatings)
+            }
         }
     }
 }
@@ -760,13 +760,13 @@ private fun HeroBookInformation(
 @Composable
 private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduction: () -> Unit) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
-    Row(Modifier.fillMaxWidth().clickable(enabled = enabled, role = Role.Button,
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(enabled = enabled, role = Role.Button,
         interactionSource = interaction, indication = null,
         onClickLabel = "展开简介与作品信息", onClick = onIntroduction)
-        .motionPress(interaction, enabled = enabled, pressedScale = .985f).padding(vertical = 4.dp),
+        .motionPress(interaction, enabled = enabled, pressedScale = .985f).padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(manga.description.ifBlank { "作品信息" }, color = ink.copy(alpha = .82f),
-            fontSize = 13.sp, lineHeight = 21.sp, maxLines = 3, overflow = TextOverflow.Ellipsis,
+            fontSize = 13.sp, lineHeight = 20.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f))
         Icon(Icons.Outlined.ChevronRight, null, tint = ink.copy(alpha = .55f), modifier = Modifier.size(16.dp))
     }

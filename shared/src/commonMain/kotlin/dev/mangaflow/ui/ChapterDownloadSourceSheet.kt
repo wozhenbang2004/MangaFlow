@@ -79,7 +79,8 @@ internal fun ChapterDownloadSourceSheet(
             DownloadStatus.FAILED -> "重试"
             null -> ""
         }
-        val sameSource = variants.count { it.sourceId == variant.sourceId } > 1
+        val peers = variants.filter { it.sourceId == variant.sourceId }
+        val sameSource = peers.size > 1
         val edition = listOfNotNull(
             variant.language.takeIf { sameSource && it.isNotBlank() },
             variant.edition.takeIf { sameSource && it.isNotBlank() },
@@ -88,8 +89,7 @@ internal fun ChapterDownloadSourceSheet(
         ).distinct().joinToString(" · ")
         val details = listOf(edition, status, qualityText).filter(String::isNotBlank).joinToString(" · ")
         val secondary = when {
-            sameSource -> listOf(variant.language, variant.edition, variant.scanlator)
-                .firstOrNull(String::isNotBlank).orEmpty()
+            sameSource -> chapterVariantDistinction(variant, peers)
             status.isNotBlank() -> status
             else -> quality.totalPages?.let { "$it 页" }.orEmpty()
         }
