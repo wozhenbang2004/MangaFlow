@@ -33,7 +33,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.carousel.CarouselDefaults
-import androidx.compose.material3.carousel.CarouselItemInfo
+import androidx.compose.material3.carousel.CarouselItemDrawInfo
 import androidx.compose.material3.carousel.HorizontalMultiBrowseCarousel
 import androidx.compose.material3.carousel.rememberCarouselState
 import androidx.compose.runtime.Composable
@@ -125,7 +125,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
             snapAnimationSpec = if (motion) spring(dampingRatio = MangaMotion.GestureDamping,
                 stiffness = MangaMotion.GestureStiffness) else snap())
         val identities = manga.map { it.id }
-        val items = remember(identities) { mutableStateMapOf<Int, CarouselItemInfo>() }
+        val items = remember(identities) { mutableStateMapOf<Int, CarouselItemDrawInfo>() }
         val focused by remember(items, manga.size) {
             derivedStateOf { items.entries.filter { it.key in manga.indices }.maxByOrNull { it.value.size }?.key ?: 0 }
         }
@@ -207,7 +207,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                             }
                         },
                 ) { index ->
-                    val info = carouselItemInfo
+                    val info = carouselItemDrawInfo
                     DisposableEffect(items, index, info) {
                         items[index] = info
                         onDispose { if (items[index] === info) items.remove(index) }
@@ -244,7 +244,7 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-private fun featuredExpansion(info: CarouselItemInfo, peekPixels: Float): Float =
+private fun featuredExpansion(info: CarouselItemDrawInfo, peekPixels: Float): Float =
     ((info.size - peekPixels) / (info.maxSize - peekPixels).coerceAtLeast(1f)).coerceIn(0f, 1f)
 
 @Composable
