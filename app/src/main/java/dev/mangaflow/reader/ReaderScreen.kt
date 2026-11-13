@@ -158,6 +158,10 @@ import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.PageCollection
 import dev.mangaflow.storage.ReaderPreferences
+import dev.mangaflow.reader.panels.GuidedPanelReader
+import dev.mangaflow.reader.panels.PanelEngine
+import dev.mangaflow.reader.panels.PanelModelsDialog
+import dev.mangaflow.reader.panels.panelLayoutKey
 import dev.mangaflow.storage.ReaderTheme
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.ui.LiquidGlassSurface
@@ -272,12 +276,14 @@ fun ReaderScreen(
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showPanelModels by rememberSaveable { mutableStateOf(false) }
     var showComments by remember(chapterId) { mutableStateOf(false) }
     var showSpreadAdjustment by remember(chapterId) { mutableStateOf(false) }
     var manualSingles by remember(manga.id, chapterId, presentedCollection?.key) {
         mutableStateOf(presentedCollection?.singlePages ?: libraryStore.spreadSinglesFor(manga.id, chapterId))
     }
-    var atChapterEnd by remember(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) {
+    var atChapterEnd by remember(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles,
+        preferences.panelLayoutKey) {
         mutableStateOf(false)
     }
     var nextRequested by remember(chapterId) { mutableStateOf(false) }
@@ -344,12 +350,14 @@ fun ReaderScreen(
 
     val clock = rememberReaderClock(active && !leavingReader)
     val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
-        !showSettings && !showChapters && !showComments && !showSpreadAdjustment && !showPageNavigator &&
+        !showSettings && !showPanelModels && !showChapters && !showComments && !showSpreadAdjustment && !showPageNavigator &&
         !showReaderActions && !readerActionsPresent
     RecordReaderActivity(manga, readingEligible, libraryStore, chapterId) { owner, confirmedChapter ->
         if (owner == manga.id && confirmedChapter == chapterId && readingEligible) {
             recentConfirmed = true
-            libraryStore.saveProgress(manga, chapter, pageIndex, pages.size, cursor.scrollOffset)
+            libraryStore.saveProgress(manga, chapter, pageIndex, pages.size, cursor.scrollOffset,
+                panelIndex = if (preferences.panelEngine != PanelEngine.OFF) cursor.panelIndex else -1,
+                panelLayout = if (preferences.panelEngine != PanelEngine.OFF) preferences.panelLayoutKey else "")
         }
     }
     fun updatePreferences(next: ReaderPreferences) {
@@ -362,7 +370,11 @@ fun ReaderScreen(
             doublePage = if (next.doublePage != preferences.doublePage) next.doublePage else savedPreferences.doublePage,
             coverAlone = if (next.coverAlone != preferences.coverAlone) next.coverAlone else savedPreferences.coverAlone,
             dimAmount = if (next.dimAmount != preferences.dimAmount) next.dimAmount else savedPreferences.dimAmount,
+            panelEngine = next.panelEngine,
+            panelDirection = next.panelDirection,
+            panelLearnedOrder = next.panelLearnedOrder,
         )
+        if (next.panelLayoutKey != preferences.panelLayoutKey) cursor.panelIndex = 0
         if (presentedCollection != null) collectionLayout = next
         libraryStore.updateMangaPreferences(manga.id, saved)
     }
@@ -372,8 +384,9 @@ fun ReaderScreen(
             previewUrls = (first..last).map { pages[it].url }, mode = preferences.mode,
             coverAlone = preferences.coverAlone, singlePages = manualSingles)
     }
-    val spreadGroups = remember(pages, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) {
-        if (preferences.mode != ReadingMode.VERTICAL && preferences.doublePage)
+    val spreadGroups = remember(pages, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles,
+        preferences.panelEngine) {
+        if (preferences.panelEngine == PanelEngine.OFF && preferences.mode != ReadingMode.VERTICAL && preferences.doublePage)
             pageSpreads(pages, preferences.coverAlone, manualSingles) else emptyList()
     }
     val currentSpread = remember(pages, spreadGroups, pageIndex) {
@@ -391,7 +404,7 @@ fun ReaderScreen(
         }
     }
 
-    if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showChapters || showSpreadAdjustment || showComments, lightChrome)
+    if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showPanelModels || showChapters || showSpreadAdjustment || showComments, lightChrome)
     val leaveReader = { leavingReader = true; onBack() }
     MotionBackHandler(enabled = active, onBack = leaveReader)
     LaunchedEffect(active) { leavingReader = !active }
@@ -414,6 +427,8 @@ fun ReaderScreen(
             val collection = initialCollection?.takeIf { collectionPresentation && !collectionPositionApplied && it.chapter.id == chapterId }
             pageIndex = (collection?.firstPage ?: saved?.pageIndex ?: 0).coerceIn(0, loaded.lastIndex)
             cursor.scrollOffset = if (collection != null) 0 else saved?.scrollOffset ?: 0
+            cursor.panelIndex = if (collection == null && saved?.panelLayout == preferences.panelLayoutKey)
+                saved.panelIndex.coerceAtLeast(0) else 0
             if (collection != null) collectionPositionApplied = true
             libraryStore.migratePageBookmarks(manga, chapter, loaded)
             downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
@@ -478,8 +493,40 @@ fun ReaderScreen(
                     Spacer(Modifier.height(16.dp))
                     TextButton(onClick = { retry++ }) { Text("重新读取", color = preferences.theme.foreground()) }
                 }
-                pages.isNotEmpty() -> key(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles) {
-                    ChapterPages(
+                pages.isNotEmpty() -> key(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles,
+                    preferences.panelLayoutKey) {
+                    if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
+                        pages = pages, headers = headers, resolvePage = resolvePage, retryPage = retryPage,
+                        preferences = preferences, initialPage = pageIndex, initialPanel = cursor.panelIndex,
+                        targetPage = targetPage,
+                        onTargetConsumed = { targetPage = null; targetOffset = 0 },
+                        onLocation = { index, panel -> pageIndex = index; cursor.panelIndex = panel; cursor.scrollOffset = 0 },
+                        onSave = { index, panel -> libraryStore.saveProgress(manga, chapter, index, pages.size,
+                            updateRecent = recentConfirmed && chapterId == chapter.id && active && !leavingReader,
+                            panelIndex = panel, panelLayout = preferences.panelLayoutKey) },
+                        onReadingNavigation = { if (chapterId == chapter.id && readingEligible) recentConfirmed = true },
+                        onVisibleImageChanged = { visible ->
+                            imageVisible = visible
+                            if (visible && readerForeground && !leavingReader && chapterId == chapter.id && !chapterVisibilityReported) {
+                                chapterVisibilityReported = true
+                                chapterVisible(manga, chapter)
+                            }
+                        },
+                        onNearEnd = {
+                            val next = nextChapter
+                            if (readerForeground && !leavingReader && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
+                                nextChapterPrefetched = true
+                                nearChapterEnd(manga, next)
+                            }
+                        },
+                        onAtEndChanged = { atChapterEnd = it },
+                        onTap = { controlsVisible = !controlsVisible }, onNext = openNextChapter,
+                        onDisable = { updatePreferences(preferences.copy(panelEngine = PanelEngine.OFF)) },
+                        active = readerForeground && !leavingReader && !showSettings && !showPanelModels && !showChapters &&
+                            !showSpreadAdjustment && !showComments && !showPageNavigator && !nextRequested,
+                        backdrop = readerBackdrop,
+                        bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
+                    ) else ChapterPages(
                         pages = pages,
                         headers = headers,
                         resolvePage = resolvePage,
@@ -585,7 +632,8 @@ fun ReaderScreen(
                         Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title).joinToString(" · "),
                             color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    if (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT) {
+                    if (preferences.panelEngine == PanelEngine.OFF &&
+                        (preferences.mode == ReadingMode.RIGHT_TO_LEFT || preferences.mode == ReadingMode.LEFT_TO_RIGHT)) {
                         TextButton(enabled = controlsVisible, onClick = {
                             cursor.scrollOffset = 0
                             updatePreferences(preferences.copy(doublePage = !preferences.doublePage))
@@ -633,7 +681,7 @@ fun ReaderScreen(
                     }
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
                         val actionsScroll = rememberScrollState()
-                        val canCorrectSpread = preferences.doublePage &&
+                        val canCorrectSpread = preferences.panelEngine == PanelEngine.OFF && preferences.doublePage &&
                             preferences.mode in setOf(ReadingMode.RIGHT_TO_LEFT, ReadingMode.LEFT_TO_RIGHT)
                         val hasMoreActions = canCorrectSpread || returnLocation != null
                         val narrow = maxWidth < (if (hasMoreActions) 348.dp else 300.dp)
@@ -755,7 +803,7 @@ fun ReaderScreen(
             }
         }
 
-        if (!controlsVisible && pages.isNotEmpty()) Text(
+        if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Text(
             "$clock · ${pageIndex + 1} / ${pages.size}",
             color = preferences.theme.foreground().copy(alpha = .5f), fontSize = 11.sp,
             modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility)
@@ -794,7 +842,8 @@ fun ReaderScreen(
         },
         onDismiss = { showPageNavigator = false },
     )
-    ReaderSettingsDialog(visible = showSettings, preferences = preferences, backdrop = readerBackdrop,
+    ReaderSettingsDialog(visible = showSettings && !showPanelModels, preferences = preferences, backdrop = readerBackdrop,
+        onModels = { showPanelModels = true },
         onDimPreview = { dimPreview.value = it }, update = { next ->
         if (next.mode != preferences.mode || next.doublePage != preferences.doublePage || next.coverAlone != preferences.coverAlone) {
             cursor.scrollOffset = 0
@@ -806,6 +855,7 @@ fun ReaderScreen(
         }
         showSettings = false
     }
+    PanelModelsDialog(visible = showPanelModels, backdrop = readerBackdrop) { showPanelModels = false }
     ReaderSpreadDialog(
         visible = showSpreadAdjustment && pages.isNotEmpty(),
         pages = pages,
@@ -1121,7 +1171,7 @@ private fun ChapterPages(
     }
 }
 
-private class ReaderCursor(var scrollOffset: Int = 0)
+private class ReaderCursor(var scrollOffset: Int = 0, var panelIndex: Int = 0)
 
 private data class PrefetchWindow(
     val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>, val enabled: Boolean,

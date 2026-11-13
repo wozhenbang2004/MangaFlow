@@ -30,6 +30,8 @@ data class ReadingProgress(
     val pageCount: Int,
     val scrollOffset: Int = 0,
     val updatedAt: Long = System.currentTimeMillis(),
+    val panelIndex: Int = -1,
+    val panelLayout: String = "",
 )
 
 data class ChapterProgress(
@@ -38,6 +40,8 @@ data class ChapterProgress(
     val scrollOffset: Int = 0,
     val chapterTitle: String = "",
     val updatedAt: Long = 0L,
+    val panelIndex: Int = -1,
+    val panelLayout: String = "",
 )
 
 enum class ShelfState { NORMAL, FOLLOWING, HOARDING, PAUSED }
@@ -343,6 +347,8 @@ class LibraryStore(context: Context) {
                     scrollOffset = json.optInt("scrollOffset").coerceAtLeast(0),
                     chapterTitle = json.optString("chapterTitle").take(160),
                     updatedAt = json.optLong("updatedAt").coerceAtLeast(0L),
+                    panelIndex = json.optInt("panelIndex", -1).coerceIn(-1, 127),
+                    panelLayout = json.optString("panelLayout").take(160),
                 )
             }.getOrNull()
         }
@@ -369,7 +375,8 @@ class LibraryStore(context: Context) {
                 val json = JSONObject(value)
                 ChapterProgress(json.getInt("pageIndex").coerceAtLeast(0),
                     json.getInt("pageCount").coerceAtLeast(0), json.optInt("scrollOffset").coerceAtLeast(0),
-                    json.optString("chapterTitle").take(160), json.optLong("updatedAt").coerceAtLeast(0L))
+                    json.optString("chapterTitle").take(160), json.optLong("updatedAt").coerceAtLeast(0L),
+                    json.optInt("panelIndex", -1).coerceIn(-1, 127), json.optString("panelLayout").take(160))
             }.getOrNull()?.let { positions[chapterId] = it }
         }
         positions.putAll(pending)
@@ -382,7 +389,7 @@ class LibraryStore(context: Context) {
         positions.mapNotNull { (chapterId, position) ->
             if (position.pageCount <= 0) null else ReadingProgress(manga, chapterId, position.chapterTitle,
                 position.pageIndex.coerceIn(0, position.pageCount - 1), position.pageCount,
-                position.scrollOffset, position.updatedAt)
+                position.scrollOffset, position.updatedAt, position.panelIndex, position.panelLayout)
         }.sortedWith(compareByDescending<ReadingProgress> { it.updatedAt }.thenBy { it.chapterTitle }.thenBy { it.chapterId })
     }
 
@@ -400,11 +407,13 @@ class LibraryStore(context: Context) {
         manga: Manga, chapter: Chapter, pageIndex: Int, pageCount: Int, scrollOffset: Int = 0,
         clearLegacyLongImagePosition: Boolean = false,
         updateRecent: Boolean = true,
+        panelIndex: Int = -1,
+        panelLayout: String = "",
     ) {
         if (pageCount <= 0) return
         synchronized(lock) {
             if (deferUntilReady { saveProgress(manga, chapter, pageIndex, pageCount, scrollOffset,
-                clearLegacyLongImagePosition, updateRecent) }) return@synchronized
+                clearLegacyLongImagePosition, updateRecent, panelIndex, panelLayout) }) return@synchronized
             val progress = ReadingProgress(
                 manga = manga,
                 chapterId = chapter.id,
@@ -412,6 +421,8 @@ class LibraryStore(context: Context) {
                 pageIndex = pageIndex.coerceIn(0, pageCount - 1),
                 pageCount = pageCount,
                 scrollOffset = scrollOffset.coerceAtLeast(0),
+                panelIndex = panelIndex.coerceIn(-1, 127),
+                panelLayout = panelLayout.take(160),
             )
             val recent = progressFor(manga.id)
             val replaceRecent = updateRecent || recent == null || recent.chapterId == chapter.id
@@ -768,6 +779,13 @@ class LibraryStore(context: Context) {
             dimAmount = optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
             discoverColumns = optInt("discoverColumns", 3).coerceIn(1, 4),
             updateColumns = optInt("updateColumns", 3).coerceIn(1, 4),
+            panelEngine = dev.mangaflow.reader.panels.PanelEngine.entries.firstOrNull {
+                it.name == optString("panelEngine")
+            } ?: dev.mangaflow.reader.panels.PanelEngine.OFF,
+            panelDirection = dev.mangaflow.reader.panels.PanelDirection.entries.firstOrNull {
+                it.name == optString("panelDirection")
+            } ?: dev.mangaflow.reader.panels.PanelDirection.RIGHT_TO_LEFT,
+            panelLearnedOrder = optBoolean("panelLearnedOrder", false),
         )
     }
 
@@ -785,6 +803,9 @@ class LibraryStore(context: Context) {
         put("dimAmount", dimAmount.toDouble())
         put("discoverColumns", discoverColumns)
         put("updateColumns", updateColumns)
+        put("panelEngine", panelEngine.name)
+        put("panelDirection", panelDirection.name)
+        put("panelLearnedOrder", panelLearnedOrder)
     }
 
     private fun readLegacyLongImageMigration(): Boolean {
@@ -836,7 +857,8 @@ class LibraryStore(context: Context) {
     }
 }
 
-private fun ReadingProgress.chapterProgress() = ChapterProgress(pageIndex, pageCount, scrollOffset, chapterTitle.take(160), updatedAt)
+private fun ReadingProgress.chapterProgress() = ChapterProgress(pageIndex, pageCount, scrollOffset,
+    chapterTitle.take(160), updatedAt, panelIndex, panelLayout)
 
 private fun ChapterProgress.toJson(): JSONObject = JSONObject().apply {
     put("pageIndex", pageIndex)
@@ -844,6 +866,7 @@ private fun ChapterProgress.toJson(): JSONObject = JSONObject().apply {
     put("scrollOffset", scrollOffset)
     if (chapterTitle.isNotBlank()) put("chapterTitle", chapterTitle.take(160))
     if (updatedAt > 0L) put("updatedAt", updatedAt)
+    if (panelIndex >= 0) { put("panelIndex", panelIndex); put("panelLayout", panelLayout) }
 }
 
 internal fun Manga.toJson(): JSONObject = JSONObject().apply {
@@ -914,6 +937,7 @@ private fun ReadingProgress.toJson(): JSONObject = JSONObject().apply {
     put("pageCount", pageCount)
     put("scrollOffset", scrollOffset)
     put("updatedAt", updatedAt)
+    if (panelIndex >= 0) { put("panelIndex", panelIndex); put("panelLayout", panelLayout) }
 }
 
 private fun readProgress(json: JSONObject): ReadingProgress = ReadingProgress(
@@ -924,6 +948,8 @@ private fun readProgress(json: JSONObject): ReadingProgress = ReadingProgress(
     pageCount = json.optInt("pageCount").coerceAtLeast(0),
     scrollOffset = json.optInt("scrollOffset").coerceAtLeast(0),
     updatedAt = json.optLong("updatedAt"),
+    panelIndex = json.optInt("panelIndex", -1).coerceIn(-1, 127),
+    panelLayout = json.optString("panelLayout").take(160),
 )
 
 private fun JSONArray?.strings(): List<String> = if (this == null) emptyList()

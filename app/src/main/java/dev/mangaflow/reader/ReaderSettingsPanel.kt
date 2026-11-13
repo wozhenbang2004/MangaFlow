@@ -31,6 +31,8 @@ import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReadingMode
+import dev.mangaflow.reader.panels.PanelSettings
+import dev.mangaflow.reader.panels.PanelEngine
 import dev.mangaflow.ui.PaperThemePicker
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
@@ -47,6 +49,7 @@ internal fun ReaderSettingsDialog(
     backdrop: HazeState,
     onDimPreview: (Float) -> Unit,
     update: (ReaderPreferences) -> Unit,
+    onModels: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var dimAmount by remember { mutableFloatStateOf(preferences.dimAmount) }
@@ -80,15 +83,19 @@ internal fun ReaderSettingsDialog(
                             animationSpec = tween(if (motion) MangaMotion.Content else 0,
                                 easing = MangaMotion.EnterEasing),
                         )) {
-                            if (preferences.mode == ReadingMode.VERTICAL) {
+                            if (preferences.panelEngine == PanelEngine.OFF && preferences.mode == ReadingMode.VERTICAL) {
                                 ReaderToggle("页间留白", preferences.pageGap) { update(preferences.copy(pageGap = it)) }
-                            } else {
+                            } else if (preferences.panelEngine == PanelEngine.OFF) {
                                 ReaderToggle("双页跨页", preferences.doublePage) { update(preferences.copy(doublePage = it)) }
                                 if (preferences.doublePage) {
                                     ReaderToggle("封面独页", preferences.coverAlone) { update(preferences.copy(coverAlone = it)) }
                                 }
                             }
                         }
+                    }
+
+                    ReaderSettingsSection("分镜") {
+                        PanelSettings(preferences, update, onModels)
                     }
 
                     ReaderSettingsSection("外观") {
