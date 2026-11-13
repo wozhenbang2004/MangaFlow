@@ -90,6 +90,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -104,6 +105,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.graphics.ColorUtils
 import androidx.core.view.WindowCompat
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
@@ -147,6 +149,21 @@ internal val DetailForeground: Color @Composable get() = MaterialTheme.colorSche
 internal val DetailSecondary: Color @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
 internal val DetailMuted: Color @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .85f)
 internal val DetailLine: Color @Composable get() = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)
+
+private fun detailCoverTone(artwork: Color): Color {
+    val hsl = FloatArray(3)
+    ColorUtils.colorToHSL(artwork.toArgb(), hsl)
+    // Retain achromatic covers; chromatic covers get a restrained version of their own hue.
+    if (hsl[1] > .06f) hsl[1] = hsl[1].coerceIn(.28f, .60f)
+    hsl[2] = .26f
+    var tone = Color(ColorUtils.HSLToColor(hsl))
+    // Yellow and blue at equal HSL lightness have very different text contrast.
+    while (tone.luminance() > .06f && hsl[2] > .10f) {
+        hsl[2] -= .01f
+        tone = Color(ColorUtils.HSLToColor(hsl))
+    }
+    return tone
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -218,8 +235,8 @@ fun DetailScreen(
     var coverLight by remember(current.coverUrl) { mutableStateOf(false) }
     var coverRetry by remember(current.coverUrl) { mutableIntStateOf(0) }
     var coverBitmap by remember(current.coverUrl) { mutableStateOf<Bitmap?>(null) }
-    var coverColor by remember(current.coverUrl) {
-        mutableStateOf(FeaturedCoverColors.get(current.coverUrl) ?: Color.Black)
+    var extractedCoverColor by remember(current.coverUrl) {
+        mutableStateOf(FeaturedCoverColors.get(current.coverUrl))
     }
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
@@ -227,9 +244,11 @@ fun DetailScreen(
         val bitmap = coverBitmap ?: return@LaunchedEffect
         val color = FeaturedCoverColors.get(current.coverUrl)
             ?: withContext(Dispatchers.Default) { FeaturedCoverColors.extract(current.coverUrl, bitmap) }
-        if (color != null) coverColor = color
+        if (color != null) extractedCoverColor = color
     }
-    val coverShadow by animateColorAsState(lerp(Color.Black, coverColor, .14f),
+    val coverColor = extractedCoverColor ?: DetailSurface
+    val coverTone = remember(coverColor) { detailCoverTone(coverColor) }
+    val coverShadow by animateColorAsState(coverTone,
         animationSpec = if (motion) tween(420, easing = MangaMotion.EnterEasing) else snap(),
         label = "detail-cover-shadow")
     val contentColor by animateColorAsState(lerp(DetailBackground, coverColor,
@@ -365,13 +384,14 @@ fun DetailScreen(
                         }.getOrNull()?.let { coverLight = it }
                     },
                 )
-                // The gradient covers the actual information group. Its final light/dark
-                // transition starts below the white labels and meets the opaque content tone.
+                // Preserve the artwork's hue instead of mixing it into an almost-black veil.
+                // Only the seam below the white labels yields to the opaque chapter surface.
                 Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                     .height(((if (compactHero) 112f else 230f) * fontScale).dp + seamHeight)
                     .background(Brush.verticalGradient(0f to Color.Transparent,
-                        .22f to coverShadow.copy(alpha = .50f), .50f to coverShadow.copy(alpha = .78f),
-                        .88f to coverShadow.copy(alpha = .92f), 1f to contentColor)))
+                        .16f to coverShadow.copy(alpha = .46f), .32f to coverShadow.copy(alpha = .90f),
+                        .60f to coverShadow.copy(alpha = .96f), .88f to coverShadow.copy(alpha = .98f),
+                        1f to contentColor)))
             }
             Column(Modifier.fillMaxSize().nestedScroll(scrolling)) {
                 ArtworkToolbar(
@@ -613,13 +633,13 @@ private fun HeroBookInformation(
                     onClickLabel = "展开简介与作品信息", onClick = onIntroduction),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 manga.authors.firstOrNull()?.takeIf(String::isNotBlank)?.let { author ->
-                    Text(author, color = Color.White.copy(alpha = .68f), fontSize = 11.sp, lineHeight = 18.sp,
+                    Text(author, color = Color.White.copy(alpha = .84f), fontSize = 11.sp, lineHeight = 18.sp,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.widthIn(max = 96.dp).clickable(enabled = infoVisible,
                             role = Role.Button, onClickLabel = "查看${author}的漫画") { onAuthor(author) })
                     Text("·", color = Color.White.copy(alpha = .4f), fontSize = 11.sp)
                 }
-                Text(manga.description.ifBlank { "作品信息" }, color = Color.White.copy(alpha = .78f),
+                Text(manga.description.ifBlank { "作品信息" }, color = Color.White.copy(alpha = .86f),
                     fontSize = 12.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f))
                 Icon(Icons.Outlined.ChevronRight, null, tint = Color.White.copy(alpha = .65f), modifier = Modifier.size(14.dp))

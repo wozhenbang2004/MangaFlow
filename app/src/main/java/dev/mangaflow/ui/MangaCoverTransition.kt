@@ -41,14 +41,18 @@ internal fun Modifier.mangaSharedCover(mangaId: String, placement: String? = nul
         else host.selected?.takeIf { it.mangaId == mangaId } ?: return this
     return with(host.shared) {
         val content = rememberSharedContentState(key)
+        // Keep the moving cover in its route's drawing order. Lifting only the image
+        // into the shared overlay hides detail's scrim, title and actions until landing.
         // The carousel fits the whole artwork; the portrait detail uses a different crop.
         if (key.placement == "discovery-featured" || key.placement.startsWith("ranking-")) this@mangaSharedCover.sharedBounds(
             content, animatedVisibilityScope = host.visibility,
+            renderInOverlayDuringTransition = false,
             enter = fadeIn(tween(MangaMotion.NavigationFade, easing = MangaMotion.EnterEasing)),
             exit = fadeOut(tween(MangaMotion.Quick, easing = MangaMotion.ExitEasing)),
             boundsTransform = { _, _ -> spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) },
         ) else this@mangaSharedCover.sharedElement(
             content, animatedVisibilityScope = host.visibility,
+            renderInOverlayDuringTransition = false,
             boundsTransform = { _, _ -> spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) },
         )
     }
