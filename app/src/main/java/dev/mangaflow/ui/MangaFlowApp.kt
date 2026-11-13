@@ -166,6 +166,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val drawerBackdrop = rememberHazeState()
+    val glassLight = remember { dev.mangaflow.ui.glass.GlassInteractionLight() }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val savedState = rememberSaveableStateHolder()
@@ -278,6 +279,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val routeTravel = with(density) { 24.dp.roundToPx() }
     CompositionLocalProvider(
         LocalMangaMetrics provides metricState,
+        dev.mangaflow.ui.glass.LocalGlassInteractionLight provides glassLight,
         LocalWallpaperActive provides (frame is Frame.Root && wallpaper.mediaPath != null),
     ) {
     ModalNavigationDrawer(
@@ -358,12 +360,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
         ) { _ ->
             Box(Modifier.fillMaxSize()) {
-            // The three primary scenes render their wallpaper inside their own Haze source.
-            // Account/settings retain the shared root wallpaper.
-            if (frame is Frame.Root && wallpaper.mediaPath != null &&
-                frame.section !in setOf(Section.DISCOVER, Section.LIBRARY, Section.DOWNLOADS)) {
-                AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = !drawerVisible && !recentReadingOpen)
-            }
             SharedTransitionLayout {
             val coverScope = this
             AnimatedContent(

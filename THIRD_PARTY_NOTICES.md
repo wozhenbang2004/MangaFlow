@@ -303,8 +303,11 @@ backdrop, with content labels/icons kept separate. Source map and exact differen
 `third_party/haze-glass/ADAPTATION.md`.
 
 This replaces the former Backdrop edge-only optical adaptation. It is not the
-full Haze 2.1 framework or Apple's renderer. Merged glass bridges and a separate
-sharp edge-detail overlay are not included. Compilation and source reuse do not
+full Haze 2.1 framework or Apple's renderer. The current adaptation also takes
+the upstream merged-field smooth minimum for the discovery browse/actions pair;
+it does not include arbitrary-member registration/ghost transitions or a separate
+sharp edge-detail overlay. Rim and environment shading share one optical stage,
+with per-surface shader uniforms and finite nearby interaction light. Compilation and source reuse do not
 establish device visual equivalence, performance or user acceptance.
 
 ## Backdrop soft shadows

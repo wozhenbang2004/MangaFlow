@@ -117,7 +117,8 @@ internal fun CompactGlassPopover(
                     scaleX = scale.value; scaleY = scale.value
                     transformOrigin = origin
                     translationY = (if (origin.pivotFractionY >= .5f) 6.dp.toPx() else -6.dp.toPx()) * (1f - alpha.value)
-                }, cornerRadius = 18.dp, role = GlassSurfaceRole.POPOVER, softCard = true) {
+                }, cornerRadius = 18.dp, role = GlassSurfaceRole.POPOVER, softCard = true,
+            materialExpansion = { alpha.value }) {
             Column(Modifier.heightIn(max = (LocalConfiguration.current.screenHeightDp - 64).coerceAtLeast(96).dp)
                 .verticalScroll(rememberScrollState()).padding(6.dp), content = content)
         }

@@ -246,7 +246,7 @@ fun DownloadsScreen(
 
     Box(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
         // The captured scene contains the wallpaper and scrolling list, never the header itself.
-        Box(Modifier.fillMaxSize().hazeSource(backdrop)) {
+        Box(Modifier.fillMaxSize().hazeSource(backdrop).background(MaterialTheme.colorScheme.background)) {
             wallpaper()
             // The filter owns the transition; progress updates keep the existing list in place.
             MotionTabContent(filter.ordinal, Modifier.fillMaxSize()) { index ->

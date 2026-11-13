@@ -226,7 +226,6 @@ fun DetailScreen(
     var catalogGrid by remember(current.id) { mutableStateOf<LazyGridState?>(null) }
     val artworkBackdrop = rememberHazeState()
     val readingBackdrop = rememberHazeState()
-    val commentsBackdrop = rememberHazeState()
 
     BoxWithConstraints(
         Modifier.fillMaxSize().background(DetailBackground)
@@ -293,7 +292,7 @@ fun DetailScreen(
             }
         }
         // Capture wallpaper, artwork and foreground as one scene for the floating dock.
-        Box(Modifier.fillMaxSize().hazeSource(readingBackdrop)) {
+        Box(Modifier.fillMaxSize().hazeSource(readingBackdrop).background(DetailBackground)) {
             wallpaper()
             // Sakurairo's fixed-background relationship: only the foreground moves.
             // Keep this image's bounds independent of heightOffset to avoid recropping each frame.
@@ -429,7 +428,8 @@ fun DetailScreen(
                                     mangaId = current.id, sources = reviews, loading = reviewsLoading,
                                     onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
                                     onRelink = onReviewRelink, loadReplies = loadReplies,
-                                    onScrollTarget = { commentsList = it }, backdrop = commentsBackdrop,
+                                    onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
+                                    captureBackdrop = false,
                                     active = active && targetSection == activeSection, bottomPadding = readingInset,
                                     filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
                                     onFilterChanged = { commentFilterChanged = it },

@@ -219,9 +219,10 @@ internal fun ExpandingSearchBar(
                     compositingStrategy = CompositingStrategy.ModulateAlpha
                 },
             cornerRadius = 22.dp + 2.dp * progress,
-            role = if (present) GlassSurfaceRole.NAVIGATION else GlassSurfaceRole.CONTROL,
+            role = GlassSurfaceRole.NAVIGATION,
             interactionSource = searchInteraction,
             softCard = true,
+            materialExpansion = { progress },
         ) {}
 
         // Keep the result-position owner composed while closed, but place no hidden hit region.

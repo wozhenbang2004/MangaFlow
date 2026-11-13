@@ -203,7 +203,8 @@ fun LibraryScreen(
         ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
     }
     Box(Modifier.fillMaxSize()) {
-    Box(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(backdrop)) {
+    Box(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(backdrop)
+        .background(MaterialTheme.colorScheme.background)) {
         wallpaper()
         Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {

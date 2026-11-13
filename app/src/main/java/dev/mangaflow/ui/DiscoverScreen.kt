@@ -168,6 +168,7 @@ fun DiscoverScreen(
     val retainedAlpha = animateFloatAsState(if (holdingContent) .48f else 1f,
         if (motion) tween(MangaMotion.Content) else snap(), label = "browse-pending-content")
     Box(Modifier.fillMaxSize().navigationBarsPadding().hazeSource(searchBackdrop)
+        .background(MaterialTheme.colorScheme.background)
         .motionInputGate(active && !searchExpanded)) {
         // Wallpaper and scroll content are one captured scene. The header remains a foreground sibling.
         wallpaper()

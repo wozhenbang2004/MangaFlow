@@ -34,11 +34,12 @@ import kotlin.math.ceil
 import kotlin.math.roundToInt
 
 /** The shadow is outside the surface; its cleared center never darkens captured glass. */
-internal fun Modifier.softSurfaceShadow(shape: Shape, light: Boolean, strength: Float = 1f, radius: Dp = 24.dp): Modifier {
+internal fun Modifier.softSurfaceShadow(shape: Shape, light: Boolean, strength: Float = 1f, radius: Dp = 24.dp,
+    strengthScale: () -> Float = { 1f }): Modifier {
     if (strength <= 0f) return this
     return this
-        .then(SoftShadowElement(shape, radius, radius / 4f, Color.Black.copy(alpha = (if (light) .10f else .28f) * strength)))
-        .then(SoftShadowElement(shape, radius * (5f / 24f), radius / 12f, Color.Black.copy(alpha = (if (light) .025f else .12f) * strength)))
+        .then(SoftShadowElement(shape, radius, radius / 4f, Color.Black.copy(alpha = (if (light) .10f else .28f) * strength), strengthScale))
+        .then(SoftShadowElement(shape, radius * (5f / 24f), radius / 12f, Color.Black.copy(alpha = (if (light) .025f else .12f) * strength), strengthScale))
 }
 
 private data class SoftShadowElement(
@@ -46,6 +47,7 @@ private data class SoftShadowElement(
     val radius: Dp,
     val offsetY: Dp,
     val color: Color,
+    val strengthScale: () -> Float,
 ) : ModifierNodeElement<SoftShadowNode>() {
     override fun create() = SoftShadowNode(this)
     override fun update(node: SoftShadowNode) {
@@ -64,12 +66,15 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
     private var cachedFontScale = 0f
     private var cachedDirection = LayoutDirection.Ltr
     private var maskScale = 1f
+    private var cachedMembers: GlassMembers? = null
 
     override fun ContentDrawScope.draw() {
         if (size.width <= 0f || size.height <= 0f) return drawContent()
         val radius = spec.radius.toPx()
         val offsetY = spec.offsetY.toPx()
-        if (mask == null || cachedSpec != spec || cachedSize != size || cachedDensity != density ||
+        val members = (spec.shape as? GlassMemberShape)?.members
+        if (mask == null || cachedSpec?.shape != spec.shape || cachedSpec?.radius != spec.radius ||
+            cachedSpec?.offsetY != spec.offsetY || cachedMembers != members || cachedSize != size || cachedDensity != density ||
             cachedFontScale != fontScale || cachedDirection != layoutDirection) {
             val fullWidth = size.width + radius * 4f
             val fullHeight = size.height + radius * 4f + offsetY
@@ -81,7 +86,7 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
             val outline = spec.shape.createOutline(Size(size.width * scale, size.height * scale),
                 layoutDirection, Density(density * scale, fontScale))
             val paint = Paint().apply {
-                color = spec.color
+                color = Color.White
                 asFrameworkPaint().maskFilter = BlurMaskFilter(radius * scale, BlurMaskFilter.Blur.NORMAL)
             }
             // Canvas(ImageBitmap) is software: hardware Canvas does not support BlurMaskFilter.
@@ -93,6 +98,7 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
             canvas.drawOutline(outline, ShadowMaskPaint)
             mask = image
             cachedSpec = spec
+            cachedMembers = members
             cachedSize = size
             cachedDensity = density
             cachedFontScale = fontScale
@@ -102,7 +108,8 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
             drawImage(image, srcOffset = IntOffset.Zero, srcSize = IntSize(image.width, image.height),
                 dstOffset = IntOffset((-radius * 2f).roundToInt(), (-radius * 2f).roundToInt()),
                 dstSize = IntSize((image.width / maskScale).roundToInt(), (image.height / maskScale).roundToInt()),
-                colorFilter = ColorFilter.tint(Color.Black),
+                colorFilter = ColorFilter.tint(spec.color.copy(alpha =
+                    (spec.color.alpha * spec.strengthScale()).coerceIn(0f, 1f))),
                 filterQuality = FilterQuality.Low)
         }
         drawContent()

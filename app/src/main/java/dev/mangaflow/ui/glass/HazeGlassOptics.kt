@@ -17,7 +17,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RenderEffect
-import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.toArgb
 import kotlin.math.min
@@ -26,12 +25,8 @@ import android.graphics.RenderEffect as AndroidEffect
 /** Haze 1.6 transports a padded sharp backdrop; this owns its optical response. */
 @RequiresApi(33)
 internal class HazeGlassOptics {
-    // RuntimeShader uniforms and ShaderBrush are mutable. Each remembered surface owns
-    // its programs, so another panel's size/interaction cannot alter a cached draw.
-    private val programs = try { GlassPrograms() } catch (failure: RuntimeException) {
-        Log.w("MangaFlowGlass", "Glass shader unavailable; using the frosted surface", failure)
-        null
-    }
+    // Each surface owns mutable uniforms. Only shader validation is shared.
+    private val programs = if (GlassPrograms.supported) Programs() else null
     private var previous: OpticalFrame? = null
     private var cached: RenderEffect? = null
     private var previousDepth: Pair<Float, Float>? = null
@@ -42,6 +37,8 @@ internal class HazeGlassOptics {
     fun effect(
         width: Float, height: Float, padding: Float, corner: Float, density: Float,
         engagement: Float, pointer: Offset, surface: Color, material: GlassMaterial,
+        blurredInput: Boolean = false,
+        members: GlassMembers? = null, mergeWidth: Float = 0f,
     ): RenderEffect? {
         val programs = programs ?: return null
         val w = width - 2f * padding
@@ -49,7 +46,7 @@ internal class HazeGlassOptics {
         if (!available || w <= 0f || h <= 0f) return null
         val radius = corner.coerceIn(0f, min(w, h) * .5f)
         val point = if (pointer.isSpecified && pointer.x.isFinite() && pointer.y.isFinite()) pointer else Offset(w * .5f, h * .5f)
-        val frame = OpticalFrame(width, height, padding, radius, density, engagement, point, surface, material)
+        val frame = OpticalFrame(width, height, padding, radius, density, engagement, point, surface, material, blurredInput, members, mergeWidth)
         if (frame == previous) return cached
         return try {
             val shader = programs.optical
@@ -58,6 +55,15 @@ internal class HazeGlassOptics {
             shader.setFloatUniform("materialSize", w, h)
             shader.setFloatUniform("sampleStep", 2f)
             shader.setFloatUniform("cornerRadii", radius, radius, radius, radius)
+            shader.setFloatUniform("memberCount", if (members == null) 0f else 2f)
+            val first = members?.first
+            val second = members?.second
+            shader.setFloatUniform("firstMember", first?.left ?: 0f, first?.top ?: 0f,
+                first?.width ?: 0f, first?.height ?: 0f)
+            shader.setFloatUniform("secondMember", second?.left ?: 0f, second?.top ?: 0f,
+                second?.width ?: 0f, second?.height ?: 0f)
+            shader.setFloatUniform("memberCorner", members?.corner ?: 0f)
+            shader.setFloatUniform("mergeWidth", mergeWidth)
             shader.setFloatUniform("refractionStrength", material.refractionStrength)
             shader.setFloatUniform("refractionHeight", min(w, h) * material.heightFraction)
             shader.setFloatUniform("edgeRefractionWidth", material.edgeWidth.value * density)
@@ -72,40 +78,18 @@ internal class HazeGlassOptics {
             shader.setFloatUniform("fresnelExponent", material.fresnelExponent)
             shader.setColorUniform("tintColor", surface.copy(alpha = material.tintOpacity).toArgb())
             shader.setFloatUniform("interactionPosition", point.x, point.y)
-            shader.setFloatUniform("interactionRadius", min(w, h) * .7f)
+            shader.setFloatUniform("interactionRadius", maxOf(min(w, h) * .7f, 64f * density))
             shader.setFloatUniform("engagement", engagement)
-            val optical = AndroidEffect.createRuntimeShaderEffect(shader, "content")
-            val depth = depthInput(material.blurRadius.value * density, material.depth)
-            (if (depth != null) AndroidEffect.createChainEffect(optical, depth) else optical)
-                .asComposeRenderEffect().also { cached = it; previous = frame }
-        } catch (failure: RuntimeException) {
-            disable(failure)
-            null
-        }
-    }
-
-    /** Invoke and draw together: a recorded brush snapshots these uniforms. */
-    fun rim(
-        width: Float, height: Float, corner: Float, density: Float,
-        engagement: Float, pointer: Offset, material: GlassMaterial,
-    ): ShaderBrush? {
-        val programs = programs ?: return null
-        if (!available || width <= 0f || height <= 0f) return null
-        return try {
-            val shader = programs.rim
-            val radius = corner.coerceIn(0f, min(width, height) * .5f)
-            val point = if (pointer.isSpecified && pointer.x.isFinite() && pointer.y.isFinite()) pointer else Offset(width * .5f, height * .5f)
-            shader.setFloatUniform("materialSize", width, height)
-            shader.setFloatUniform("sampleStep", 2f)
-            shader.setFloatUniform("cornerRadii", radius, radius, radius, radius)
+            shader.setFloatUniform("readability", material.readability)
+            shader.setFloatUniform("environmentStrength", material.environmentStrength)
+            shader.setFloatUniform("interactionLight", material.interactionLight)
             shader.setFloatUniform("specularIntensity", material.specular)
             shader.setFloatUniform("specularExponent", material.specularExponent)
-            shader.setFloatUniform("edgeSoftness", material.edgeSoftness.value * density)
-            shader.setColorUniform("edgeShadow", Color.Black.copy(alpha = material.edgeShadow).toArgb())
-            shader.setFloatUniform("lightPosition",
-                width * .2f + (point.x - width * .2f) * engagement,
-                -height * .4f + (point.y + height * .4f) * engagement)
-            programs.rimBrush
+            shader.setFloatUniform("edgeShadowIntensity", material.edgeShadow)
+            val optical = AndroidEffect.createRuntimeShaderEffect(shader, "content")
+            val depth = if (blurredInput) null else depthInput(material.blurRadius.value * density, material.depth)
+            (if (depth != null) AndroidEffect.createChainEffect(optical, depth) else optical)
+                .asComposeRenderEffect().also { cached = it; previous = frame }
         } catch (failure: RuntimeException) {
             disable(failure)
             null
@@ -143,14 +127,23 @@ internal class HazeGlassOptics {
     private data class OpticalFrame(
         val width: Float, val height: Float, val padding: Float, val radius: Float,
         val density: Float, val engagement: Float, val point: Offset, val surface: Color,
-        val material: GlassMaterial,
+        val material: GlassMaterial, val blurredInput: Boolean,
+        val members: GlassMembers?, val mergeWidth: Float,
     )
 }
 
-/** Created once per remembered optical surface, never inside a frame or resize callback. */
 @RequiresApi(33)
-private class GlassPrograms {
+private class Programs {
     val optical = RuntimeShader(HazeOpticalShader)
-    val rim = RuntimeShader(HazeRimShader)
-    val rimBrush = ShaderBrush(rim)
+}
+
+/** Validate once; a driver rejection disables the path without retrying on each frame. */
+@RequiresApi(33)
+private object GlassPrograms {
+    val supported: Boolean by lazy(LazyThreadSafetyMode.NONE) {
+        try { RuntimeShader(HazeOpticalShader); true } catch (failure: RuntimeException) {
+            Log.w("MangaFlowGlass", "Glass shader unavailable; using the frosted surface", failure)
+            false
+        }
+    }
 }

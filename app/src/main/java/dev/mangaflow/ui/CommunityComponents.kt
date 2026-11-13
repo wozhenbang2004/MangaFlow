@@ -136,6 +136,7 @@ internal fun CommunityPanel(
     modifier: Modifier = Modifier,
     onScrollTarget: (LazyListState) -> Unit = {},
     backdrop: HazeState = rememberHazeState(),
+    captureBackdrop: Boolean = true,
     active: Boolean = true,
     bottomPadding: Dp = 12.dp,
     filterOpen: Boolean = false,
@@ -189,7 +190,8 @@ internal fun CommunityPanel(
     }
     val resetPosition = { scope.launch { listState.scrollToItem(0) }; Unit }
     Box(modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().then(if ((filterOpen || filterPresent) && active) Modifier.hazeSource(backdrop) else Modifier)) {
+        Column(Modifier.fillMaxSize().then(if (captureBackdrop && (filterOpen || filterPresent) && active)
+            Modifier.hazeSource(backdrop) else Modifier)) {
             LazyColumn(state = listState, userScrollEnabled = active, modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomPadding)) {
                 items(clusters, key = { it.key }) { cluster ->

@@ -29,6 +29,9 @@ internal data class GlassMaterial(
     val contentNormalBlend: Float = .15f,
     val specularExponent: Float = 24f,
     val fresnelExponent: Float = 3f,
+    val readability: Float = .55f,
+    val environmentStrength: Float = .65f,
+    val interactionLight: Float = .14f,
 )
 
 internal fun glassMaterial(
@@ -37,7 +40,9 @@ internal fun glassMaterial(
     liquid: Boolean,
     softCard: Boolean,
     shortestSide: Dp,
+    expansion: Float = 0f,
 ): GlassMaterial {
+    val expanded = expansion.coerceIn(0f, 1f)
     // The gallery caption is a continuation of the artwork, with no separate rim or lens wall.
     // Other glass roles retain their existing authored response.
     if (role == GlassSurfaceRole.GALLERY) return GlassMaterial(
@@ -47,17 +52,18 @@ internal fun glassMaterial(
         whitePoint = if (light) .10f else -.08f, contrast = 0f, chroma = 1.05f,
         ambient = .03f, specular = 0f, edgeShadow = 0f, dispersion = 0f,
         contentNormalBlend = .05f,
+        readability = 0f, environmentStrength = .16f, interactionLight = .04f,
     )
     if (!liquid) {
         val tint = if (softCard && role == GlassSurfaceRole.NAVIGATION) {
-            if (light) .54f else .62f
+            if (light) .30f else .38f
         } else if (softCard && role != GlassSurfaceRole.DRAWER) {
-            if (light) .70f else .76f
+            if (light) .40f else .48f
         } else when (role) {
             GlassSurfaceRole.READING_DOCK -> if (light) .40f else .52f
-            GlassSurfaceRole.POPOVER -> if (light) .64f else .72f
-            GlassSurfaceRole.DRAWER -> if (light) .38f else .52f
-            else -> if (light) .72f else .78f
+            GlassSurfaceRole.POPOVER -> if (light) .38f else .46f
+            GlassSurfaceRole.DRAWER -> if (light) .26f else .36f
+            else -> if (light) .42f else .50f
         }
         val blur = when (role) {
             GlassSurfaceRole.THUMB -> 4.dp
@@ -66,18 +72,24 @@ internal fun glassMaterial(
             GlassSurfaceRole.NAVIGATION -> 28.dp
             else -> 20.dp
         }
-        return GlassMaterial(blurRadius = blur, tintOpacity = tint)
+        return GlassMaterial(blurRadius = blur, tintOpacity = tint,
+            depth = 0f, displacement = 0.dp, refractionStrength = 0f,
+            whitePoint = if (light) .12f else -.12f, contrast = 0f,
+            chroma = 1.08f, ambient = 0f, specular = 0f, edgeShadow = 0f,
+            contentNormalBlend = 0f, readability = .72f,
+            environmentStrength = .80f, interactionLight = 0f)
     }
 
     val clear = role == GlassSurfaceRole.CONTROL || role == GlassSurfaceRole.ARTWORK ||
         role == GlassSurfaceRole.THUMB
     if (clear) return GlassMaterial(
-        blurRadius = 1.25.dp, edgeWidth = 28.dp, displacement = 56.dp,
-        refractionStrength = .85f, heightFraction = .35f,
-        whitePoint = if (light) .17f else -.18f, contrast = if (light) .08f else .12f,
-        chroma = if (light) 1.05f else 1f, ambient = if (light) .42f else .22f,
-        specular = if (light) .55f else .42f, edgeShadow = if (light) .10f else .25f,
-        dispersion = .04f, contentNormalBlend = .10f, specularExponent = 16f, fresnelExponent = 2.5f,
+        blurRadius = (1.25f + 8f * expanded).dp, edgeWidth = 14.dp, displacement = 20.dp,
+        refractionStrength = .60f + .10f * expanded, heightFraction = .28f,
+        whitePoint = if (light) .13f else -.16f, contrast = .02f,
+        chroma = 1.05f, ambient = if (light) .20f else .12f,
+        specular = if (light) .30f else .24f, edgeShadow = if (light) .08f else .16f,
+        dispersion = 0f, contentNormalBlend = .08f, specularExponent = 16f, fresnelExponent = 2.5f,
+        readability = .35f + .25f * expanded,
     )
 
     // Haze's responsive Regular response: 64dp -> 176dp -> 220dp.
@@ -90,15 +102,18 @@ internal fun glassMaterial(
     val panel = role == GlassSurfaceRole.PANEL || role == GlassSurfaceRole.POPOVER ||
         role == GlassSurfaceRole.DRAWER
     return GlassMaterial(
-        blurRadius = (20f + 4f * compactToPanel + panelToLarge).dp,
-        depth = .65f + .35f * compactToPanel,
-        tintOpacity = if (panel) .08f else 0f,
-        refractionStrength = if (panel) .50f else .7f,
-        whitePoint = if (light) .55f else -.22f,
-        contrast = if (light) 0f else .08f,
-        chroma = if (light) 1.5f else 1.1f,
-        ambient = if (light) .15f else .08f,
-        specular = if (light) .48f else .38f,
-        edgeShadow = if (light) .14f else .32f,
+        blurRadius = (12f + 3f * compactToPanel + panelToLarge + 4f * expanded).dp,
+        depth = .78f + .16f * compactToPanel + .06f * expanded,
+        tintOpacity = .06f + .10f * expanded,
+        edgeWidth = (12f + 4f * expanded).dp,
+        displacement = (20f + 4f * expanded).dp,
+        refractionStrength = (if (panel) .38f else .52f) + .08f * expanded,
+        whitePoint = if (light) .20f else -.18f,
+        contrast = .02f,
+        chroma = if (light) 1.12f else 1.06f,
+        ambient = if (light) .12f else .06f,
+        specular = (if (light) .28f else .22f) + .04f * expanded,
+        edgeShadow = (if (light) .09f else .20f) + .03f * expanded,
+        readability = .62f + .12f * expanded,
     )
 }

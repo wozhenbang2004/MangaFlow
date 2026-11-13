@@ -16,6 +16,7 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,26 +24,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeInputScale
@@ -51,11 +50,14 @@ import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 import dev.mangaflow.ui.glass.HazeGlassOptics
+import dev.mangaflow.ui.glass.GlassMemberShape
+import dev.mangaflow.ui.glass.LocalGlassInteractionLight
 import dev.mangaflow.ui.glass.glassMaterial
 import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlin.math.min
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER, DRAWER, GALLERY }
@@ -74,6 +76,8 @@ internal fun LiquidGlassSurface(
     surfaceColor: Color? = null,
     softCard: Boolean = role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.DRAWER,
     materialReferenceSize: Dp? = null,
+    materialExpansion: () -> Float = { 0f },
+    memberShape: GlassMemberShape? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val baseColors = MaterialTheme.colorScheme
@@ -82,7 +86,7 @@ internal fun LiquidGlassSurface(
     val light = colors.surface.luminance() > .5f
     val surfaceTint = if (softCard && surfaceColor == null) lerp(baseColors.background, colors.surface, .70f)
         else colors.surface
-    val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
+    val shape = memberShape ?: remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
     // Material selection belongs to the UI role, not a user-controlled app skin.
     val wantsLiquid = when (role) {
         GlassSurfaceRole.CONTROL, GlassSurfaceRole.ARTWORK,
@@ -91,58 +95,67 @@ internal fun LiquidGlassSurface(
         GlassSurfaceRole.PANEL, GlassSurfaceRole.POPOVER,
         GlassSurfaceRole.DRAWER -> false
     }
-    val optics = remember(wantsLiquid) {
-        if (wantsLiquid && Build.VERSION.SDK_INT >= 33) runCatching { HazeGlassOptics() }.getOrElse {
+    val optics = remember(state) {
+        if (Build.VERSION.SDK_INT >= 33) runCatching { HazeGlassOptics() }.getOrElse {
             Log.w("MangaFlowGlass", "Glass optics unavailable; using the frosted surface", it)
             null
         } else null
     }
-    val liquid = wantsLiquid && Build.VERSION.SDK_INT >= 33 &&
+    val adaptive = Build.VERSION.SDK_INT >= 33 &&
         optics?.available == true && state.blurEnabled
+    val liquid = wantsLiquid && adaptive
     val interactions = interactionSource ?: remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
     val dragged by interactions.collectIsDraggedAsState()
     var pointerDown by remember { mutableStateOf(false) }
     var hasPointer by remember { mutableStateOf(false) }
     val pointerPosition = remember { mutableStateOf(Offset.Unspecified) }
+    val lightGroup = LocalGlassInteractionLight.current
+    val lightToken = remember { Any() }
+    val windowPosition = remember { mutableStateOf(Offset.Unspecified) }
+    DisposableEffect(lightGroup, lightToken) {
+        onDispose { lightGroup?.release(lightToken) }
+    }
     LaunchedEffect(interactions, pressed || dragged) {
         // A new keyboard/source interaction uses the centre. Retain the last raw
         // point after release so the optical light can fade out continuously.
         if ((pressed || dragged) && !hasPointer) pointerPosition.value = Offset.Unspecified
     }
-    var surfaceSize by remember { mutableStateOf(IntSize.Zero) }
     val displayDensity = LocalDensity.current
-    val shortestSide = materialReferenceSize ?: if (surfaceSize.width > 0 && surfaceSize.height > 0) with(displayDensity) {
-        min(surfaceSize.width, surfaceSize.height).toDp()
-    } else 64.dp
     val motion = LocalMotionEnabled.current
     val engagement = animateFloatAsState(
         if (liquid && motion && (pointerDown || pressed || dragged)) 1f else 0f,
         tween(if (motion) MangaMotion.Quick else 0), label = "glass-engagement",
     )
-    val material = remember(role, light, liquid, softCard, shortestSide) {
-        glassMaterial(role, light, liquid, softCard, shortestSide)
+    val groupEngagement = animateFloatAsState(
+        if (liquid && motion && lightGroup?.owner != null) 1f else 0f,
+        tween(if (motion) MangaMotion.Quick else 0), label = "glass-shared-light",
+    )
+    val material = remember(role, light, liquid, softCard) {
+        glassMaterial(role, light, liquid, softCard, 64.dp)
     }
     // Native Gaussian blur needs its source outside the visible silhouette. Reserve its
     // three-sigma kernel plus the bounded ray displacement on the background child only.
-    val opticalPadding = if (liquid) with(displayDensity) {
-        val maximumDisplacement = material.displacement.toPx() * material.refractionStrength
-        // A resizing selector reserves its full travel once; no delayed measurement may
-        // change its capture origin or blur material halfway through the same morph.
-        val displacement = if (materialReferenceSize != null) maximumDisplacement
-            else min(maximumDisplacement, shortestSide.toPx() * .5f)
-        (3f * material.blurRadius.toPx() + displacement + material.edgeSoftness.toPx()).roundToInt()
-    } else 0
-    val style = remember(surfaceTint, material, liquid) {
+    // Reserve the largest authored kernel once. Morphing must not resize the capture's
+    // padding or replace its HazeStyle on every frame, nor lag the geometry by one layout.
+    val opticalPadding = remember(role, light, liquid, softCard, displayDensity) {
+        if (liquid) with(displayDensity) {
+            val envelope = glassMaterial(role, light, true, softCard, 220.dp, expansion = 1f)
+            (3f * envelope.blurRadius.toPx() + envelope.displacement.toPx() * envelope.refractionStrength +
+                envelope.edgeSoftness.toPx()).roundToInt()
+        } else 0
+    }
+    val fallback = surfaceTint.copy(alpha = if (light) .82f else .88f)
+    val style = remember(surfaceTint, material, liquid, adaptive, fallback) {
         HazeStyle(
             backgroundColor = surfaceTint,
             // Liquid transports a sharp image; the optical owner composes its depth/blur.
             // An explicit transparent tint also prevents inherited frosted tints.
-            tints = listOf(HazeTint(if (liquid) Color.Transparent
-                else surfaceTint.copy(alpha = material.tintOpacity))),
+            tints = listOf(HazeTint(if (adaptive) Color.Transparent
+                else surfaceTint.copy(alpha = material.tintOpacity.coerceAtLeast(if (light) .64f else .72f)))),
             blurRadius = if (liquid) 0.dp else material.blurRadius,
             noiseFactor = 0f,
-            fallbackTint = HazeTint(surfaceTint.copy(alpha = .96f)),
+            fallbackTint = HazeTint(fallback),
         )
     }
     // Decorative surfaces must stay outside hit testing so touches reach artwork beneath them.
@@ -154,6 +167,7 @@ internal fun LiquidGlassSurface(
                     hasPointer = true
                     pointerPosition.value = down.position
                     pointerDown = true
+                    if (windowPosition.value.isSpecified) lightGroup?.update(lightToken, windowPosition.value + down.position)
                     do {
                         val change = awaitPointerEvent(PointerEventPass.Main).changes
                             .firstOrNull { it.id == down.id }
@@ -169,10 +183,14 @@ internal fun LiquidGlassSurface(
                             pointerDown = false
                         }
                         pointerPosition.value = change.position
+                        if (pointerDown && windowPosition.value.isSpecified)
+                            lightGroup?.update(lightToken, windowPosition.value + change.position)
+                        else lightGroup?.release(lightToken)
                     } while (true)
                 } finally {
                     pointerDown = false
                     hasPointer = false
+                    lightGroup?.release(lightToken)
                 }
             }
         }
@@ -181,19 +199,23 @@ internal fun LiquidGlassSurface(
     CompositionLocalProvider(LocalContentColor provides colors.onSurface) {
         // Backdrop's explicit blurred shadow stays outside the optical/content clipping layer.
         val shadow = if (softCard) Modifier.softSurfaceShadow(shape, light,
-            strength = elevation?.let { (it.value / 16f).coerceIn(0f, 1f) } ?: 1f)
+            strength = elevation?.let { (it.value / 16f).coerceIn(0f, 1f) } ?: 1f,
+            strengthScale = { 1f + .28f * materialExpansion().coerceIn(0f, 1f) })
         else Modifier.shadow(elevation ?: if (liquid) 4.dp else 2.dp, shape, clip = false,
             ambientColor = Color.Black.copy(alpha = .04f), spotColor = Color.Black.copy(alpha = .065f))
         Box(modifier.then(shadow)
-            .clip(shape).then(if (materialReferenceSize == null)
-                Modifier.onSizeChanged { surfaceSize = it } else Modifier).then(pointerTracking)) {
+            // A merged field owns its complete silhouette, including the narrow joining neck.
+            .then(if (memberShape != null && adaptive) Modifier else Modifier.clip(shape))
+            .then(pointerTracking).onGloballyPositioned {
+                windowPosition.value = it.positionInWindow()
+            }) {
             Box(Modifier.matchParentSize()
                 .drawWithContent {
                     // Do not put an opaque card beneath a successfully captured backdrop.
                     // Keep the first/no-source frame and software drawing readable instead.
                     if (drawContext.canvas.nativeCanvas.isHardwareAccelerated &&
-                        state.areas.any { it.contentLayer != null }) drawContent()
-                    else drawRect(surfaceTint.copy(alpha = .96f))
+                        state.areas.any { it.contentLayer?.isReleased == false }) drawContent()
+                    else drawOutline(shape.createOutline(size, layoutDirection, this), fallback)
                 }
                 .layout { measurable, constraints ->
                     val width = constraints.minWidth
@@ -203,31 +225,33 @@ internal fun LiquidGlassSurface(
                     layout(width, height) { child.place(-opticalPadding, -opticalPadding) }
                 }
                 .graphicsLayer {
-                    renderEffect = if (liquid && Build.VERSION.SDK_INT >= 33 && optics != null) {
+                    renderEffect = if (adaptive && Build.VERSION.SDK_INT >= 33 && optics != null) {
+                        val side = materialReferenceSize ?: ((min(size.width, size.height) - 2f * opticalPadding) / density).coerceAtLeast(0f).dp
+                        val response = glassMaterial(role, light, liquid, softCard, side,
+                            materialExpansion().coerceIn(0f, 1f))
+                        val sharedPoint = if (liquid && groupEngagement.value > 0f)
+                            lightGroup?.positionInWindow?.takeIf { it.isSpecified && windowPosition.value.isSpecified }
+                            ?.let { it - windowPosition.value }
+                        else null
+                        val visibleWidth = size.width - 2f * opticalPadding
+                        val visibleHeight = size.height - 2f * opticalPadding
+                        val distance = sharedPoint?.let { p ->
+                            (p - Offset(p.x.coerceIn(0f, visibleWidth.coerceAtLeast(0f)),
+                                p.y.coerceIn(0f, visibleHeight.coerceAtLeast(0f)))).getDistance()
+                        } ?: Float.POSITIVE_INFINITY
+                        val sharedStrength = groupEngagement.value * (1f - distance / (96f * density)).coerceIn(0f, 1f)
+                        val pressure = max(engagement.value, sharedStrength)
+                        val point = when {
+                            pressure <= 0f -> Offset.Unspecified
+                            engagement.value > 0f -> pointerPosition.value
+                            else -> sharedPoint ?: Offset.Unspecified
+                        }
                         optics.effect(size.width, size.height, opticalPadding.toFloat(), cornerRadius.toPx(), density,
-                            engagement.value, if (engagement.value > 0f) pointerPosition.value
-                                else Offset.Unspecified, surfaceTint, material)
+                            pressure, point, surfaceTint, response, blurredInput = !liquid,
+                            members = memberShape?.members, mergeWidth = if (liquid) 24f * density * pressure else 0f)
                     } else null
                 }
                 .hazeEffect(state, style) { inputScale = if (liquid) HazeInputScale.None else HazeInputScale.Auto })
-            if (role != GlassSurfaceRole.GALLERY && (liquid || !softCard)) Box(Modifier.matchParentSize().drawBehind {
-                val stroke = .65.dp.toPx()
-                val inset = stroke * .5f
-                val radius = min(cornerRadius.toPx(), size.minDimension * .5f)
-                val outlineSize = Size((size.width - stroke).coerceAtLeast(0f), (size.height - stroke).coerceAtLeast(0f))
-                val outlineRadius = CornerRadius((radius - inset).coerceAtLeast(0f))
-                if (!liquid) drawRoundRect(colors.onSurface.copy(alpha = .055f),
-                    topLeft = Offset(inset, inset), size = outlineSize,
-                    cornerRadius = outlineRadius, style = Stroke(stroke))
-                if (liquid && Build.VERSION.SDK_INT >= 33 && optics != null &&
-                    drawContext.canvas.nativeCanvas.isHardwareAccelerated) {
-                    optics.rim(size.width, size.height, radius, density,
-                        engagement.value, if (engagement.value > 0f) pointerPosition.value
-                            else Offset.Unspecified, material)?.let { brush ->
-                        drawRect(brush)
-                    }
-                }
-            })
             content()
         }
     }
