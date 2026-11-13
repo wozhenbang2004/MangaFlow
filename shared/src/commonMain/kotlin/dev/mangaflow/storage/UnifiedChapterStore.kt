@@ -132,6 +132,21 @@ class UnifiedChapterStore(context: Context) {
         true
     }
 
+    /** Upgrade numbering evidence only while the exact confirmed association is still current. */
+    fun confirmChapterSystem(workId: String, expected: LinkedMangaSource): Boolean = synchronized(lock) {
+        require(workId.isNotBlank())
+        val root = readRoot()
+        val old = root.optJSONObject(workId)?.let(::readSettings) ?: return@synchronized false
+        val current = old.links.firstOrNull { it.manga.id == expected.manga.id } ?: return@synchronized false
+        if (current != expected || current.confirmedAt <= 0L || current.sameChapterSystem) return@synchronized false
+        val next = old.copy(links = old.links.map {
+            if (it.manga.id == current.manga.id) it.copy(sameChapterSystem = true) else it
+        })
+        root.put(workId, writeSettings(next))
+        check(disk.edit().putString(KEY, root.toString()).commit()) { "章节编号确认未能保存，请重试。" }
+        true
+    }
+
     fun detach(workId: String, linkedMangaId: String) = mutate(workId) { old ->
         // Preferences may keep a dormant exact choice. Reattaching can restore it; history is untouched.
         val removed = old.links.firstOrNull { it.manga.id == linkedMangaId }

@@ -1,5 +1,16 @@
 # MangaFlow · current work
 
+## Source-confirmation and multilingual-identity repair · 2026-11-14
+
+Active requirements are SOURCE-CONFIRM-108 / SEARCH-DIRECT-109 / WORK-IDENTITY-110 / EDITION-BOUNDARY-111 in DESIGN.md, covering1000121648–1651 and the explicit correction “连载和章节也不一定一样”. Do not restore the cancelled global group alias draft. Existing names/versions remain; real work association and verified numbering are independent.
+
+The ready batch reconciles saved associations with repository discovery and late scan results, refreshes genuine chapter projections/marks, opens a search row's displayed native work directly, and retains upstream multilingual/relationship metadata with old-record-compatible serialization. Cross-script author names are not automatically declared conflicting; automatic association requires complementary real evidence. Late identity metadata uses controlled cached-candidate re-evaluation, not an endless scan. Native-catalog provenance gates any existing-link numbering upgrade; expected-link compare prevents detached/replaced links from being changed.
+
+Writers: root owns the search callback and docs/only tree+commit+ref integration; source_confirmation_state owns Models/SourceDiscovery/Repository/ViewModel/Manager; metadata writer owns MangaDex and shared optional Manga JSON; group writer supplied only the narrow Store API after the user's correction. No group/edition/anchor migration is included. Base 167559d573f805d586b459f2e144f8630d71494e preserves100–107, fixed background, direct reader download, scenario fonts, updater, wallpaper and account/platform work.
+
+Next exact action: integrate the whole completed batch on latest main with expected-head protection, after the existing Android publication, confirm the normal CI identities and keep main stable. Source completion does not prove the pictured live provider case or phone state accepted; use actual new-package feedback for that. Cloud-only, no tests/local builds/service or device probes/extra review gate; no intermediate or documentation-only push.
+
+
 ## Foreground loading / reading · 2026-11-14
 
 Current raw request and acceptance are DESIGN.md LOAD-SPEED-112–115: “去优化现在的加载速度和阅读体验，主要是现在感觉加载慢慢的”. Source work removes auxiliary IO from manifest/image publication, gates speculative adjacent images on real visible-image success, schedules actual visible tiles first, reuses cached/header dimensions and shares only identical live foreign chapter manifests. ViewModel's reader catalogue projection runs on Default and usable state appears before the directory save. Original pixels, source ownership/variant/storage IDs, progress, errors, offline handling and latest font/UI work remain.

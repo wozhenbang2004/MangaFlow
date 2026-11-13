@@ -21,6 +21,11 @@ data class Manga(
     val sourceMangaId: String = "",
     /** Persisted user-facing identity for an imported source, even after it is uninstalled. */
     val sourceName: String = "",
+    /** Actual upstream names, never machine-translated guesses or display-title replacements. */
+    val alternativeTitles: List<String> = emptyList(),
+    val authorAliases: List<String> = emptyList(),
+    /** Confirmed provider identities; absent in legacy catalogs/backups. */
+    val externalIds: Map<String, String> = emptyMap(),
 )
 
 data class Chapter(

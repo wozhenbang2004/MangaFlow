@@ -1,5 +1,19 @@
 # MangaFlow detail · 2026-11-12
 
+## Source confirmation / direct search / multilingual identity · 2026-11-14 (108–111)
+
+Raw user (message IDs unavailable): “都确认完了还是4个待确认且章节来源图标也不更新以及搜索那里点击漫画要直接跳到详情页而不是弄个抽屉让我选来源以及连载和章节是一个东西”, screenshots1000121648/1649/1650. The user then corrects the last assumption: “不对连载和章节也不一定一样”. That correction supersedes global group-name aliasing; no unconditional连载/章节/edition/display-group merge is authorized. Finally1000121651 shows8月31日的長夏/伊藤一角 against MangaDex The Long Summer of August31/Itou Ikkado with “这种怎么能待确定呢”.
+
+| ID | Implementation contract and evidence boundary |
+| --- | --- |
+| SOURCE-CONFIRM-108 | Reconcile repository discovery with actual saved confirmed work links whenever a scan result is published or a linked projection refreshes. A late scan cannot restore a stale NEEDS_CONFIRMATION for a linked work. A true failed/loading request remains truthful. Manager, detail count and real chapter projection consume the same association state. Real chapter variants drive existing source marks; do not hide the badge, set arbitrary zeros or invent provider marks. |
+| SEARCH-DIRECT-109 | Clicking a search result opens the exact native work already shown on its row, preserving cover transition and current query history. Remove the automatic multi-provider drawer intercept. Only an explicit provider-mark action opens provider-specific selection. Visual result grouping still does not persist work links. |
+| WORK-IDENTITY-110 | Preserve genuine upstream alternative titles/author aliases/external IDs as optional metadata without replacing the display title/author. MangaDex must retain all real title/altTitles entries and supported relationship IDs rather than dropping repeated locales. Distinguish matching, conflicting and incomparable author evidence; a script difference alone cannot be a conflict. Combine complete alias identity with actual author/validated relationship or native-directory evidence, with ambiguity/edition safeguards. Never auto-link by the cover alone, candidate count alone, fabricated author readings or a hardcoded screenshot title. Late identity metadata re-evaluates cached candidates through existing controlled ownership without a new retry loop/all-source rescan. Old optional-field-free records/backups remain readable. |
+| EDITION-BOUNDARY-111 | Work identity and a common chapter-numbering system are separate facts. The withdrawn global group-alias draft is excluded. Existing group/edition/branch/semantic keys remain; an associated work whose numbering is unverified keeps its independent directory. Only real native adapter catalogues and existing strict normal-chapter evidence can upgrade a false sameChapterSystem via expected-link guarded Store API; mixed/restored projections are not proof. Preserve manual links/splits, exact storage/logical IDs, chosen variants, reading progress and downloads. |
+
+Root integrates one complete cloud batch, preserving all100–107 detail/volume/source-focus changes, prior98–99 scroll/direct download and the current scenario-font/updater/platform work. Source authoring/normal CI trigger and actual service/device behavior remain separate. No local computer operations, tests/local builds, source-service/device probes or additional review gate. The screenshots establish the user's failure case; they are not a post-change runtime verification.
+
+
 ## Foreground loading and reading · 2026-11-14 (LOAD-SPEED-112–115)
 
 Raw user (exact message ID unavailable): “去优化现在的加载速度和阅读体验，主要是现在感觉加载慢慢的”. Route is a bounded performance delivery based on current source and the user's experience, retaining PERF-01–09, SOURCE-PERF-14 and READING-FLOW-26. No latency, FPS or network diagnosis is inferred from code alone.

@@ -28,5 +28,10 @@ internal fun normalizedBodySourceAuthor(value: String): String {
             if (character == '々' && isNotEmpty()) append(last()) else append(character)
         }
     }
-    return normalizedBodySourceTitle(expanded)
+    val latin = convertBodyTitle(expanded, "Latin-ASCII").lowercase()
+    // Only normalize real Latin spelling/spacing and name order; never invent a CJK reading.
+    val words = latin.split(Regex("[^a-z]+")).filter(String::isNotBlank)
+    return if (words.isNotEmpty() && latin.all { it in 'a'..'z' || it.isWhitespace() || it in "-'’.," })
+        words.sorted().joinToString("")
+    else normalizedBodySourceTitle(expanded)
 }

@@ -15,29 +15,91 @@ data class SourceDiscoveryResult(
 internal object SourceDiscoveryIdentity {
     private val unknownAuthors = setOf("未知", "佚名", "暂无", "不详", "作者", "unknown", "anonymous", "null")
 
-    fun titleMatches(work: Manga, candidate: Manga, aliases: List<String>): Boolean {
-        val title = normalizedBodySourceTitle(candidate.title)
-        val primary = normalizedBodySourceTitle(work.title)
-        // A broad metadata alias cannot erase an explicit sequel/edition marker on the work.
-        fun markers(value: String): Set<String> = buildSet {
-            value.filter { it in "≡∞×+" }.forEach { add("symbol:$it") }
-            if (Regex("小说|novel").containsMatchIn(value)) add("novel")
-            if (Regex("公式书|公式集|公式fanbook|fanbook|officialguide").containsMatchIn(value)) add("guide")
-            if (Regex("续作|续篇|续集|后传|続編|sequel").containsMatchIn(value)) add("sequel")
-            Regex("第([0-9]+)(卷|部|季)").findAll(value).forEach { add(it.value) }
-        }
-        if (markers(primary) != markers(title)) return false
-        return title.isNotBlank() && (listOf(work.title) + aliases).any {
-            normalizedBodySourceTitle(it).takeIf(String::isNotBlank) == title
-        }
+    enum class AuthorEvidence { MATCH, UNKNOWN, CONFLICT }
+
+    private fun titleMarkers(value: String): Set<String> = buildSet {
+        value.filter { it in "≡∞×+" }.forEach { add("symbol:$it") }
+        if (Regex("小说|novel").containsMatchIn(value)) add("novel")
+        if (Regex("公式书|公式集|公式fanbook|fanbook|officialguide").containsMatchIn(value)) add("guide")
+        if (Regex("续作|续篇|续集|后传|続編|sequel").containsMatchIn(value)) add("sequel")
+        Regex("第([0-9]+)(卷|部|季)").findAll(value).forEach { add(it.value) }
     }
 
-    fun authorsMatch(work: Manga, candidate: Manga): Boolean {
-        fun authors(manga: Manga): Set<String> = manga.authors.flatMap {
-            it.split(Regex("[/、,，;；\\n]"))
-        }.map(::normalizedBodySourceAuthor).filter { it.isNotBlank() && it !in unknownAuthors }.toSet()
-        val known = authors(work)
-        return known.isNotEmpty() && authors(candidate).any { it in known }
+    private fun titles(manga: Manga, aliases: List<String> = emptyList()): Set<String> =
+        (listOf(manga.title) + manga.alternativeTitles + aliases)
+            .map(::normalizedBodySourceTitle).filter(String::isNotBlank).toSet()
+
+    private fun sharedTitles(work: Manga, candidate: Manga, aliases: List<String>): Set<String> {
+        // An alias cannot erase an explicit edition/sequel marker on either displayed work.
+        if (titleMarkers(normalizedBodySourceTitle(work.title)) !=
+            titleMarkers(normalizedBodySourceTitle(candidate.title))) return emptySet()
+        return titles(work, aliases).intersect(titles(candidate))
+    }
+
+    fun titleMatches(work: Manga, candidate: Manga, aliases: List<String>): Boolean =
+        sharedTitles(work, candidate, aliases).isNotEmpty()
+
+    private fun authors(manga: Manga): Set<String> =
+        (manga.authors + manga.authorAliases).flatMap { name ->
+            // Some upstream names explicitly contain another spelling in parentheses.
+            val parenthesized = Regex("[（(]([^()（）]+)[）)]").findAll(name).map { it.groupValues[1] }.toList()
+            (listOf(name.replace(Regex("[（(][^()（）]+[）)]"), " ")) + parenthesized)
+                .flatMap { it.split(Regex("[/、,，;；\\n]")) }
+        }.map(::normalizedBodySourceAuthor)
+            .filter { it.isNotBlank() && it !in unknownAuthors }.toSet()
+
+    private fun authorScript(name: String): String? = when {
+        name.all { it in 'a'..'z' } -> "latin"
+        name.all { it in '\u3400'..'\u9fff' || it in '\uf900'..'\ufaff' } -> "han"
+        name.any { it in '\u3040'..'\u30ff' } -> "kana"
+        name.any { it in '\uac00'..'\ud7af' } -> "hangul"
+        else -> null
+    }
+
+    fun authorEvidence(work: Manga, candidate: Manga): AuthorEvidence {
+        val primary = authors(work)
+        val target = authors(candidate)
+        if (primary.intersect(target).isNotEmpty()) return AuthorEvidence.MATCH
+        if (primary.isEmpty() || target.isEmpty()) return AuthorEvidence.UNKNOWN
+        val comparable = primary.mapNotNull(::authorScript).toSet()
+            .intersect(target.mapNotNull(::authorScript).toSet())
+        return if (comparable.isEmpty()) AuthorEvidence.UNKNOWN else AuthorEvidence.CONFLICT
+    }
+
+    fun authorsMatch(work: Manga, candidate: Manga): Boolean =
+        authorEvidence(work, candidate) == AuthorEvidence.MATCH
+
+    private fun identities(manga: Manga): Map<String, Set<String>> = manga.externalIds.entries
+        .mapNotNull { (provider, raw) ->
+            val key = when (provider.lowercase()) {
+                "al", "anilist" -> "anilist"
+                "mal", "myanimelist" -> "myanimelist"
+                "kt", "kitsu" -> "kitsu"
+                "mangadex", "bangumi", "mangabaka" -> provider.lowercase()
+                else -> return@mapNotNull null
+            }
+            val value = raw.trim().lowercase()
+            val valid = if (key == "mangadex")
+                value.matches(Regex("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"))
+            else value.matches(Regex("[1-9][0-9]*"))
+            if (!valid) null else key to value
+        }.groupBy({ it.first }, { it.second }).mapValues { it.value.toSet() }
+
+    /** Full-name evidence is mandatory; covers and candidate ordering are never identity proof. */
+    fun workMatches(work: Manga, candidate: Manga, aliases: List<String>, sameChapterSystem: Boolean): Boolean {
+        val names = sharedTitles(work, candidate, aliases)
+        if (names.isEmpty()) return false
+        val author = authorEvidence(work, candidate)
+        if (author == AuthorEvidence.CONFLICT) return false
+        val primaryIds = identities(work)
+        val targetIds = identities(candidate)
+        val common = primaryIds.keys.intersect(targetIds.keys)
+        if (common.any { primaryIds[it] != targetIds[it] }) return false
+        if (common.any { primaryIds[it]?.size == 1 }) return true
+        if (author == AuthorEvidence.MATCH) return true
+        // Different scripts are unknown, not a fabricated author mismatch. Independent
+        // native numbering can complement a distinctive complete upstream title alias.
+        return sameChapterSystem && names.any { it.length >= 6 && it.any(Char::isLetter) }
     }
 
     /** Three ordinary, unambiguous global chapter positions must agree, not just episode index. */
@@ -69,9 +131,11 @@ internal object SourceDiscoveryIdentity {
     }
 
     fun signature(work: Manga, aliases: List<String>, base: MangaDetail?): String = buildString {
-        append(normalizedBodySourceTitle(work.title)).append('\u0000')
-        append(work.authors.map(::normalizedBodySourceAuthor).sorted().joinToString("|")).append('\u0000')
-        append(aliases.map(::normalizedBodySourceTitle).distinct().sorted().joinToString("|")).append('\u0000')
+        append(titles(work, aliases).sorted().joinToString("|")).append('\u0000')
+        append(authors(work).sorted().joinToString("|")).append('\u0000')
+        append(identities(work).entries.sortedBy { it.key }.joinToString("|") { (id, values) ->
+            "$id:" + values.sorted().joinToString(",")
+        }).append('\u0000')
         append(base?.chapters?.size ?: 0).append(':')
         base?.chapters?.let { chapters ->
             (chapters.take(4) + chapters.takeLast(4)).forEach { append(it.id).append(':').append(it.title).append('|') }

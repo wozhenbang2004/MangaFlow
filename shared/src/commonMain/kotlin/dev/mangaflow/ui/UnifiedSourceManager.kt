@@ -93,8 +93,11 @@ internal fun UnifiedSourceManager(
                 result.status.name, result.chapters, result.message, result.candidates)
         }
         associated.forEach { manga ->
-            if (manga.sourceId !in rows) rows[manga.sourceId] =
+            val previous = rows[manga.sourceId]
+            if (previous == null) rows[manga.sourceId] =
                 SourceOverviewEntry(manga.sourceId, sourceDisplayName(manga.sourceId), "LINKED")
+            else if (previous.status in setOf("NEEDS_CONFIRMATION", "NO_MATCH", "NOT_CHECKED"))
+                rows[manga.sourceId] = previous.copy(status = "LINKED", message = "", candidates = emptyList())
         }
         state.sources.forEach { (id, name) ->
             if (id !in rows) rows[id] = SourceOverviewEntry(id, name,

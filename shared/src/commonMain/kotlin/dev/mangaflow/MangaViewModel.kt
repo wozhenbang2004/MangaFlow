@@ -821,6 +821,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 while (size > 240) remove(keys.first())
             }
         }
+        _detail.value?.takeIf { it.manga.id == mangaId &&
+            (_reading.value == null || _reading.value?.manga?.id == mangaId) }?.let {
+            discoverWorkSources(it.manga, metadataOnly = true)
+        }
     }
 
     suspend fun metadataCacheSize(): Long = metricsRepository.cacheSizeBytes() + readerCatalogs.sizeBytes()
@@ -942,7 +946,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         _detail.value = DetailState(initialManga,
             detail = initialChapters.takeIf { it.isNotEmpty() }?.let { MangaDetail(initialManga, it) },
             loading = !reuseCatalog)
-        repository.discoverSources(initialManga, sourceAliases(initialManga))
+        discoverWorkSources(initialManga)
         loadReviews(initialManga, requestId)
         if (reuseCatalog) {
             if (continueChapterId != null) {
@@ -986,7 +990,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 }
                 readerCatalogs.save(loaded)
                 if (requestId != detailRequestId) return@launch
-                repository.discoverSources(loaded.manga, sourceAliases(loaded.manga))
+                discoverWorkSources(loaded.manga)
                 recordDetailMetrics(manga.id, requestId)
                 if (continueChapterId != null) {
                     val chapter = findSourceChapter(loaded.chapters, continueChapterId)
@@ -1051,7 +1055,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     it.copy(reviewsLoading = false) else it }
                 _detail.value?.takeIf { it.manga.id == manga.id && requestId == detailRequestId &&
                     (_reading.value == null || _reading.value?.manga?.id == manga.id) }?.let {
-                    repository.discoverSources(it.manga, sourceAliases(it.manga))
+                    discoverWorkSources(it.manga, metadataOnly = true)
                 }
             }
         }
@@ -1065,6 +1069,12 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 .sortedBy { ReviewProviders.order(it.id) })
         }
         recordDetailMetrics(mangaId, requestId)
+        if (source.status == ReviewStatus.READY) {
+            _detail.value?.takeIf { it.manga.id == mangaId && requestId == detailRequestId &&
+                (_reading.value == null || _reading.value?.manga?.id == mangaId) }?.let {
+                discoverWorkSources(it.manga, metadataOnly = true)
+            }
+        }
     }
 
     private fun Manga.totalHeat(): Long? = totalPopularity ?: popularity.takeIf { rank == null }
@@ -1228,6 +1238,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val catalogRevision = repository.catalogRevision.value
         val workIds = listOfNotNull(detailWorkId, readingWorkId).distinct()
         val catalogs = withContext(Dispatchers.Default) {
+            workIds.forEach(repository::reconcileSourceDiscovery)
             workIds.associateWith { repository.cachedDetail(it) }
         }
         fun currentProjection(): Boolean = request == projectionRequestId &&
@@ -1276,17 +1287,39 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             work = work,
             sourceId = first,
             sources = available.map { it.id to it.name },
-            linked = unifiedChapters.linkedSources(work.id).map { it.manga },
+            linked = unifiedChapters.linkedSources(work.id).filter { it.confirmedAt > 0L }.map { it.manga },
             preferredSource = unifiedChapters.settings(work.id).preferredSources.firstOrNull() ?: work.sourceId,
             domainOptions = sourceDomainOptions(first), sourceDomain = sourceDomain(first),
         )
         refreshSourceOverview()
     }
 
+    private fun sourceIdentityReviews(work: Manga): List<ReviewSource> =
+        (_detail.value?.takeIf { it.manga.id == work.id }?.reviews.orEmpty() + reviews.cachedSources(work))
+            .filter { it.status == ReviewStatus.READY }.distinct()
+
     private fun sourceAliases(work: Manga): List<String> =
-        (reviews.cachedSources(work) + _detail.value?.takeIf { it.manga.id == work.id }?.reviews.orEmpty())
-            .filter { it.status == ReviewStatus.READY }
-            .flatMap { it.aliases + it.matchedTitle }.filter(String::isNotBlank).distinct()
+        (work.alternativeTitles + sourceIdentityReviews(work).flatMap { it.aliases + it.matchedTitle })
+            .filter(String::isNotBlank).distinct()
+
+    private fun discoverWorkSources(work: Manga, force: Boolean = false, metadataOnly: Boolean = false) {
+        val ready = sourceIdentityReviews(work)
+        val aliases = sourceAliases(work)
+        val ids = (work.externalIds.toList() + ready.flatMap { source ->
+            source.externalIds.toList() + listOf(source.id to source.subjectId)
+        }).filter { it.second.isNotBlank() }.groupBy({ (provider, _) ->
+            when (provider.lowercase()) {
+                "al" -> "anilist"; "mal" -> "myanimelist"; "kt" -> "kitsu"; else -> provider.lowercase()
+            }
+        }, { it.second.trim().lowercase() })
+        val conflicts = ids.filterValues { it.distinct().size > 1 }.keys
+        val unique = ids.mapNotNull { (provider, values) ->
+            values.distinct().singleOrNull()?.let { provider to it }
+        }.toMap()
+        val identity = work.copy(alternativeTitles = aliases, externalIds = unique)
+        if (metadataOnly) repository.reconsiderSourceCandidates(identity, aliases, conflicts)
+        else repository.discoverSources(identity, aliases, force, conflicts)
+    }
 
     private fun sourceDomainOptions(sourceId: String): List<String> =
         if (sourceId == "komiic") KomiicBodySource.BASE_URLS else emptyList()
@@ -1302,11 +1335,15 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val chapters = _detail.value?.takeIf { it.manga.id == work.id }?.detail?.chapters
             ?: _reading.value?.takeIf { it.manga.id == work.id }?.chapters.orEmpty()
         val results = repository.sources.map { source ->
-            val linked = source.id == work.sourceId || settings.links.any { it.manga.sourceId == source.id }
+            val linked = source.id == work.sourceId || settings.links.any {
+                it.manga.sourceId == source.id && it.confirmedAt > 0L
+            }
             val existingChapters = chapters.count { chapter -> chapter.variants.any { it.sourceId == source.id } ||
                 chapter.variants.isEmpty() && chapter.sourceId == source.id }
             val discovery = discovered[source.id]
-            val linkedFailure = settings.links.firstOrNull { it.manga.sourceId == source.id }?.let {
+            val linkedFailure = settings.links.firstOrNull {
+                it.manga.sourceId == source.id && it.confirmedAt > 0L
+            }?.let {
                 repository.sourceErrors.value[work.id]?.get(it.manga.id)
             }
             val primaryFailure = _detail.value?.takeIf { source.id == work.sourceId && it.manga.id == work.id }?.error
@@ -1325,7 +1362,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             }
         }
         _sourceManagement.update { if (it?.work?.id == work.id) it.copy(
-            linked = settings.links.map { link -> link.manga },
+            linked = settings.links.filter { it.confirmedAt > 0L }.map { link -> link.manga },
             preferredSource = settings.preferredSources.firstOrNull() ?: work.sourceId,
             discovery = results, scanning = discovered.values.any { result -> result.status == SourceDiscoveryStatus.SEARCHING },
             domainOptions = sourceDomainOptions(it.sourceId), sourceDomain = sourceDomain(it.sourceId)) else it }
@@ -1334,7 +1371,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     fun retrySourceDiscovery() {
         val work = _sourceManagement.value?.work ?: _detail.value?.manga ?: return
         if (_detail.value?.takeIf { it.manga.id == work.id }?.error != null) retryDetail()
-        repository.discoverSources(work, sourceAliases(work), force = true)
+        discoverWorkSources(work, force = true)
         viewModelScope.launch {
             try { repository.refreshLinked(work.id); refreshUnifiedProjection() }
             catch (cancel: CancellationException) { throw cancel }
@@ -1426,8 +1463,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 val catalog = foregroundRequest("来源目录") { repository.detailSource(manga.sourceId, manga.id) }
                 if (request != sourceManagementRequest) return@launch
                 require(catalog.chapters.isNotEmpty()) { "这个版本暂时没有可读章节。" }
-                val baseline = _detail.value?.takeIf { it.manga.id == workId }?.detail
-                    ?: _reading.value?.takeIf { it.manga.id == workId }?.let { MangaDetail(it.manga, it.chapters) }
+                val baseline = repository.loadedSourceDetail(workId)
                 withContext(Dispatchers.IO) {
                     // Choosing the row confirms the work, not its chapter numbering or edition.
                     val sameChapterSystem = dev.mangaflow.data.SourceDiscoveryIdentity.chapterSystemMatches(baseline, catalog)
@@ -1443,9 +1479,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                         edition = edition, sameChapterSystem = sameChapterSystem)
                 }
                 if (request != sourceManagementRequest) return@launch
+                withContext(Dispatchers.Default) { repository.reconcileSourceDiscovery(workId) }
                 refreshUnifiedProjection()
                 _sourceManagement.update { it?.copy(connecting = false,
-                    linked = unifiedChapters.linkedSources(state.work.id).map { link -> link.manga }) }
+                    linked = unifiedChapters.linkedSources(state.work.id).filter { it.confirmedAt > 0L }.map { link -> link.manga }) }
                 messages.send("已关联正文版本；原阅读记录与下载保留。")
             } catch (cancel: CancellationException) { throw cancel
             } catch (failure: Exception) {
@@ -1459,7 +1496,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val state = _sourceManagement.value ?: return
         changeUnified {
             unifiedChapters.detach(state.work.id, manga.id)
-            _sourceManagement.update { it?.copy(linked = unifiedChapters.linkedSources(state.work.id).map { link -> link.manga }) }
+            _sourceManagement.update { it?.copy(linked = unifiedChapters.linkedSources(state.work.id).filter { it.confirmedAt > 0L }.map { link -> link.manga }) }
         }
     }
 
@@ -1750,7 +1787,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (session.collection == null && session.manga.sourceUrl != LOCAL_SOURCE_URL) {
             if (repository.cachedSourceDetail(session.manga.id) == null)
                 repository.retainWork(MangaDetail(session.manga, session.chapters))
-            repository.discoverSources(session.manga, sourceAliases(session.manga))
+            discoverWorkSources(session.manga)
         }
     }
 
@@ -1840,7 +1877,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 // a complete directory for continuing into the next chapter.
                 val loaded = cached ?: repository.detail(session.manga.id)
                 if (requestId != readingRequestId) return@launch
-                repository.discoverSources(loaded.manga, sourceAliases(loaded.manga))
+                discoverWorkSources(loaded.manga)
                 _reading.update { current ->
                     if (current?.manga?.id != session.manga.id) current
                     else current.copy(

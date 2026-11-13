@@ -1021,6 +1021,13 @@ internal fun Manga.toJson(): JSONObject = JSONObject().apply {
     put("sourceId", sourceId)
     put("sourceMangaId", sourceMangaId)
     put("sourceName", sourceName)
+    if (alternativeTitles.isNotEmpty()) put("alternativeTitles", JSONArray(alternativeTitles))
+    if (authorAliases.isNotEmpty()) put("authorAliases", JSONArray(authorAliases))
+    val identities = externalIds.filter { (key, value) ->
+        key.isNotBlank() && key.length <= 80 && value.isNotBlank() && value.length <= 2048 &&
+            value.none { it < ' ' || it == '\u007f' }
+    }
+    if (identities.isNotEmpty()) put("externalIds", JSONObject(identities))
 }
 
 internal fun readManga(json: JSONObject): Manga = Manga(
@@ -1047,6 +1054,16 @@ internal fun readManga(json: JSONObject): Manga = Manga(
     },
     sourceMangaId = json.optString("sourceMangaId"),
     sourceName = json.optString("sourceName"),
+    alternativeTitles = json.optJSONArray("alternativeTitles").strings().distinct(),
+    authorAliases = json.optJSONArray("authorAliases").strings().distinct(),
+    externalIds = json.optJSONObject("externalIds")?.let { identities ->
+        identities.keys().asSequence().mapNotNull { key ->
+            (identities.opt(key) as? String)?.takeIf { value ->
+                key.isNotBlank() && key.length <= 80 && value.isNotBlank() && value.length <= 2048 &&
+                    value.none { it < ' ' || it == '\u007f' }
+            }?.let { key to it }
+        }.toMap()
+    }.orEmpty(),
 )
 
 internal fun Chapter.toJson(): JSONObject = JSONObject().apply {

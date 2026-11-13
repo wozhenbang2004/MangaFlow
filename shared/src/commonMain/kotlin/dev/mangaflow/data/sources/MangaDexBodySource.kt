@@ -1,7 +1,5 @@
 package dev.mangaflow.data.sources
 
-import dev.mangaflow.data.putIfAbsent
-
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
@@ -135,14 +133,32 @@ class MangaDexBodySource : BodySource {
     private fun manga(row: JSONObject): Manga {
         val id = uuid(row.bodyId("id"))
         val attributes = row.getJSONObject("attributes")
-        val titles = linkedMapOf<String, String>()
+        val titles = linkedMapOf<String, MutableList<String>>()
         fun addTitles(values: JSONObject?) {
-            values?.keys()?.asSequence()?.forEach { language -> values.bodyText(language).takeIf(String::isNotBlank)?.let { titles.putIfAbsent(language, it) } }
+            values?.keys()?.asSequence()?.forEach { language ->
+                values.bodyText(language).takeIf(String::isNotBlank)?.let { value ->
+                    val localized = titles.getOrPut(language) { mutableListOf() }
+                    if (value !in localized) localized.add(value)
+                }
+            }
         }
         addTitles(attributes.optJSONObject("title"))
         attributes.optJSONArray("altTitles")?.bodyObjects()?.forEach(::addTitles)
-        val title = listOf("zh", "zh-hk", "zh-tw", "en", "ja").firstNotNullOfOrNull { titles[it] }
-            ?: titles.values.firstOrNull() ?: throw SourceException("MangaDex 没有返回作品标题。", HOME)
+        // Display keeps its previous locale/first-title priority; identity retains every real alias.
+        val title = listOf("zh", "zh-hk", "zh-tw", "en", "ja").firstNotNullOfOrNull { titles[it]?.firstOrNull() }
+            ?: titles.values.firstOrNull()?.firstOrNull() ?: throw SourceException("MangaDex 没有返回作品标题。", HOME)
+        val links = attributes.optJSONObject("links")
+        val externalIds = buildMap {
+            put("mangadex", id)
+            mapOf("al" to "anilist", "mal" to "myanimelist", "kt" to "kitsu",
+                "mu" to "mangaupdates", "ap" to "animeplanet", "bw" to "bookwalker",
+                "nu" to "novelupdates", "amz" to "amazon", "ebj" to "ebookjapan",
+                "cdj" to "cdjapan").forEach { (field, provider) ->
+                (links?.opt(field) as? String)?.trim()?.takeIf {
+                    it.isNotEmpty() && it.length <= 2048 && it.none { character -> character < ' ' || character == '\u007f' }
+                }?.let { put(provider, it) }
+            }
+        }
         val relationships = row.optJSONArray("relationships")?.bodyObjects().orEmpty()
         val cover = relationships.firstOrNull { it.bodyText("type") == "cover_art" }?.optJSONObject("attributes")?.bodyText("fileName").orEmpty()
         val description = attributes.optJSONObject("description")
@@ -158,6 +174,8 @@ class MangaDexBodySource : BodySource {
                 it.optJSONObject("attributes")?.optJSONObject("name")?.let { name -> name.bodyText("zh").ifBlank { name.bodyText("en") } }?.takeIf(String::isNotBlank)
             }.orEmpty(),
             sourceUrl = "$HOME/title/$id", sourceId = info.id, sourceMangaId = id,
+            alternativeTitles = titles.values.flatten().distinct(),
+            externalIds = externalIds,
         )
     }
 
