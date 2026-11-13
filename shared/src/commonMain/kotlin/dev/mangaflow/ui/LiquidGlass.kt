@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
@@ -62,6 +63,7 @@ internal fun LiquidGlassSurface(
     softCard: Boolean = role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.DRAWER,
     materialExpansion: () -> Float = { 0f },
     groupKey: Any? = null,
+    surfaceShape: Shape? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -70,7 +72,7 @@ internal fun LiquidGlassSurface(
     val foreground = if (surfaceColor == null) colors.onSurface
         else if (light) Color(0xFF242426) else Color.White
     val tintColor = if (softCard && surfaceColor == null) lerp(colors.background, surface, .70f) else surface
-    val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
+    val shape = remember(cornerRadius, surfaceShape) { surfaceShape ?: RoundedCornerShape(cornerRadius) }
     val liquid = role !in setOf(GlassSurfaceRole.PANEL, GlassSurfaceRole.POPOVER, GlassSurfaceRole.DRAWER)
     val clear = role == GlassSurfaceRole.CONTROL || role == GlassSurfaceRole.ARTWORK || role == GlassSurfaceRole.THUMB
     val motion = LocalMotionEnabled.current

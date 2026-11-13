@@ -1,5 +1,8 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material.icons.outlined.ViewList
+
 import androidx.compose.foundation.layout.asPaddingValues
 
 import dev.mangaflow.ui.platform.*
@@ -7,10 +10,6 @@ import dev.mangaflow.ui.platform.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.rememberTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.stopScroll
@@ -37,7 +36,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -74,7 +72,6 @@ import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.snapshotFlow
@@ -83,7 +80,6 @@ import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -111,14 +107,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.network.NetworkHeaders
@@ -766,86 +755,75 @@ private fun DiscoveryLayoutControl(
 ) {
     var expanded by remember { mutableStateOf(false) }
     LaunchedEffect(enabled) { if (!enabled) expanded = false }
-    val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
-    val window = LocalMangaWindow.current
     val desktop = platformKind == PlatformKind.DESKTOP
     val choices = remember(desktop) { if (desktop) listOf(0, 1, 2, 3, 4, 6, 8) else listOf(1, 2, 3, 4) }
     val labels = remember(choices) { choices.map { if (it == 0) "自动" else if (it == 1) "列表" else "${it}列" } }
     val selected = choices.indexOf(columns).coerceAtLeast(0)
-    val presence = remember { MutableTransitionState(false) }
-    presence.targetState = expanded
-    val transition = rememberTransition(presence, label = "browse-layout-morph")
-    val expansion = transition.animateFloat(transitionSpec = {
-        if (motion) spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness) else snap()
-    }, label = "browse-layout-expansion") { if (it) 1f else 0f }
-    val progress = expansion.value.coerceIn(0f, 1f)
-    val present = presence.currentState || presence.targetState || !presence.isIdle
-    val reportPresence by rememberUpdatedState(onPresenceChange)
-    SideEffect { reportPresence(present) }
-    DisposableEffect(Unit) { onDispose { reportPresence(false) } }
-    val extendedWidth = ((if (desktop) 388.dp else 252.dp) * density.fontScale.coerceIn(1f, 1.6f))
-        .coerceAtMost((window.width - 24.dp).coerceAtLeast(44.dp))
-    val rowHeight = morphGlassTabHeight()
-    val extendedHeight = rowHeight + 12.dp
-    val width = 44.dp + (extendedWidth - 44.dp) * progress
-    val height = 44.dp + (extendedHeight - 44.dp) * progress
-    val position = remember(density, extendedHeight) {
-        val margin = with(density) { 12.dp.roundToPx() }
-        val fullHeight = with(density) { extendedHeight.roundToPx() }
-        object : PopupPositionProvider {
-            override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize,
-                layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
-                val x = if (layoutDirection == LayoutDirection.Ltr) anchorBounds.right - popupContentSize.width else anchorBounds.left
-                // Keep the trigger's center fixed while the shell grows around it.
-                // Measuring the animated shell as the popup window moved the centered
-                // icon by half of every height change.
-                val y = anchorBounds.top + (anchorBounds.height - fullHeight) / 2
-                return IntOffset(x.coerceIn(margin, (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)),
-                    y.coerceIn(margin, (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin)))
+    // The real trigger stays in the row. The retained popover has one fixed
+    // measured size; its existing opacity/scale reveal never relocates this icon.
+    Box(Modifier.size(44.dp)) {
+        MotionIconButton(
+            onClick = { expanded = !expanded },
+            modifier = Modifier.size(44.dp).semantics {
+                stateDescription = labels[selected] + "，当前${actualColumns}列" +
+                    if (expanded) "，已展开" else "，已收起"
+            },
+            enabled = enabled,
+        ) {
+            Box(Modifier.size(23.dp), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.ViewModule, "浏览布局：${labels[selected]}", Modifier.size(19.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(if (desktop && columns == 0) "自" else actualColumns.toString(),
+                    Modifier.align(Alignment.BottomEnd).clip(RoundedCornerShape(3.dp))
+                        .background(MaterialTheme.colorScheme.surface).padding(horizontal = 1.dp),
+                    fontSize = 9.sp, lineHeight = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-    }
-    // The same mounted icon/surface grows from its stationary 44dp slot and
-    // returns along that path; the four choices use the adopted Ovio indicator.
-    Box(Modifier.size(44.dp)) {
-        if (enabled || present) Popup(popupPositionProvider = position, onDismissRequest = { expanded = false },
-            properties = PopupProperties(focusable = expanded)) {
-            Box(Modifier.size(width, extendedHeight), contentAlignment = Alignment.CenterEnd) {
-                Box(Modifier.size(width, height)) {
-                    LiquidGlassSurface(backdrop, Modifier.matchParentSize().graphicsLayer { alpha = progress },
-                        cornerRadius = 22.dp - 4.dp * progress, role = GlassSurfaceRole.POPOVER,
-                        softCard = true, materialExpansion = { progress }) {}
-                    Box(Modifier.matchParentSize().padding(end = 44.dp).clipToBounds().motionInputGate(enabled && expanded)
-                        .graphicsLayer { alpha = ((progress - .18f) / .82f).coerceIn(0f, 1f) }) {
-                        Box(Modifier.align(Alignment.CenterEnd).wrapContentSize(Alignment.CenterEnd, unbounded = true)
-                            .width(extendedWidth - 44.dp).padding(horizontal = 6.dp)) {
-                            MotionTabs(selected, labels, onSelect = { index ->
-                                if (index != selected) onChange(choices[index])
-                                expanded = false
-                            }, modifier = Modifier.fillMaxWidth(), role = Role.RadioButton,
-                                controlHeight = rowHeight, indicatorHeight = rowHeight - 8.dp,
-                                fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
-                                fontSize = 12.sp, itemContent = { index, _, color ->
-                                    Text(if (desktop) { if (choices[index] == 0) "自" else choices[index].toString() } else if (index == 0) "列表" else choices[index].toString(), color = color,
-                                        fontSize = 12.sp, maxLines = 1,
-                                        modifier = Modifier.semantics { contentDescription = labels[index] })
-                                })
+        CompactGlassPopover(
+            visible = enabled && expanded,
+            backdrop = backdrop,
+            onDismiss = { expanded = false },
+            onPresenceChange = onPresenceChange,
+            maximumWidth = 164.dp * density.fontScale.coerceIn(1f, 1.6f),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                choices.chunked(2).forEach { row ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        row.forEach { choice ->
+                            val chosen = choice == columns
+                            val interaction = remember(choice) { MutableInteractionSource() }
+                            val label = labels[choices.indexOf(choice)]
+                            val color = if (chosen) MaterialTheme.colorScheme.onSurface
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            Box(
+                                Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(12.dp))
+                                    .background(if (chosen) MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)
+                                        else Color.Transparent)
+                                    .selectable(
+                                        selected = chosen, enabled = enabled && expanded,
+                                        interactionSource = interaction, indication = null, role = Role.RadioButton,
+                                        onClick = {
+                                            if (!chosen) onChange(choice)
+                                            expanded = false
+                                        },
+                                    )
+                                    .motionPress(interaction, enabled && expanded, pressedScale = .96f)
+                                    .semantics { contentDescription = label },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    modifier = Modifier.clearAndSetSemantics {}) {
+                                    Icon(if (choice == 1) Icons.Outlined.ViewList else Icons.Outlined.ViewModule,
+                                        null, Modifier.size(19.dp), tint = color)
+                                    if (choice != 1) Text(if (choice == 0) "自" else choice.toString(),
+                                        color = color, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                }
+                            }
                         }
-                    }
-                    MotionIconButton(onClick = { expanded = !expanded },
-                        modifier = Modifier.align(Alignment.CenterEnd).size(44.dp)
-                            .motionInputGate(enabled)
-                            .semantics { stateDescription = labels[selected] + "，当前${actualColumns}列" + if (expanded) "，已展开" else "，已收起" },
-                        enabled = enabled) {
-                        Box(Modifier.size(23.dp), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Outlined.ViewModule, "浏览布局：${labels[selected]}", Modifier.size(19.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(if (desktop && columns == 0) "自" else actualColumns.toString(), Modifier.align(Alignment.BottomEnd)
-                                .clip(RoundedCornerShape(3.dp)).background(MaterialTheme.colorScheme.surface)
-                                .padding(horizontal = 1.dp), fontSize = 9.sp, lineHeight = 10.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+                        if (row.size == 1) Spacer(Modifier.weight(1f))
                     }
                 }
             }

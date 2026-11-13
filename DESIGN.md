@@ -1,5 +1,18 @@
 # MangaFlow detail · 2026-11-12
 
+## Repeated browse motion / edge corrections · 2026-11-14 (78–81)
+
+Current user screenshots show the recommendation carousel and list/column disclosure. Their installed version and original image IDs are unavailable. The user repeats “列表 filter 每次点都要左右抖”, “长条展开…”, “轮播图…外面圆里面直角”, and rejects the history button's brief whole-icon shake as animation. These supersede the relevant parts of FILTER-35, CAROUSEL-48/65 and HISTORY-50/63. Keep the current density/artwork/settings changes71–77 and their actual updater ownership.
+
+| ID | Root cause, implemented correction and evidence boundary |
+| --- | --- |
+| FILTER-78 | DiscoveryLayoutControl kept its real trigger inside a Popup whose width changed every frame while the position provider reclamped it. Move the actual44dp trigger into the permanent row; reuse CompactGlassPopover with a fixed164dp two-column choice grid, existing opacity/scale transition, exact persisted choices and current-count badge. No animated window-width/position feedback or long strip. Desktop automatic/6/8 choices, dismiss/back, focus and reduced motion remain. |
+| CAROUSEL-79 | FeaturedCard used a separate inset cornerRadius0 information material inside the22dp outer card. Give artwork atmosphere, information material and feathered local gradient the same full-card rounded geometry, keep the actual fitted sharp poster above the material, and retain CoverCardSurface's soft shadow, centered manual pager, total height budget, real metrics and one image decode. No hard rectangular inner panel or added card height. |
+| HISTORY-80 | Replace whole-vector rotation -18°/recoil/scale with the existing Material History geometry split into a stationary ring and rotating clock hands. One560ms rewind returns to identical rest geometry; interrupted close/reopen completes the current turn, reduced motion stays still. Existing action/signature/semantics stay. Exact vector source: Google Material Icons commit d3d4aca5a7cf50bc68bbd401cefa708e364194e8, src/action/history/materialiconsoutlined/24px.svg, Apache-2.0. This is an adaptation of that actual path, not a new icon family. |
+| READER-EDGE-81 | Reader controls applied navigation safety and8dp outside the glass, leaving the entire painted panel above the screen bottom. Paint its full-width glass to the physical window bottom, round only the top corners, and move safety to the inner bounded/centered controls. LiquidGlassSurface gains only an optional surfaceShape; all existing callers retain their default appearance. Preserve reader source/resume/gestures and actual horizontal cutout protection. |
+
+Independent implementations were integrated by root from the latest remote main, retaining d044e8bc's empty-search44dp guard, compact transparent recent-reading rows, simplified settings and sharp-cover first-scroll fixes. No local filesystem, terminal, browser or device operations; no tests/local builds/probes or extra review gate. Source completion and normal CI trigger are engineering evidence only; these animations/edges remain awaiting actual artifact feedback.
+
 
 ## Current density / artwork / desktop correction · 2026-11-14 (71–77)
 

@@ -233,7 +233,7 @@ private fun FeaturedManga(
     val heroBackdrop = rememberHazeState()
     val atmosphereBlur = remember {
         HazeBlurStyle {
-            blurRadius(28.dp)
+            blurRadius(18.dp)
             backgroundColor(Color.Transparent)
             colorEffects(emptyList())
             noiseFactor(0f)
@@ -299,53 +299,62 @@ private fun FeaturedManga(
             val infoTop = if (inlineInformation) 6.dp else maxHeight - captionHeight
             val infoWidth = (maxWidth - infoLeft - if (inlineInformation) 8.dp else 0.dp).coerceAtLeast(1.dp)
             val infoHeight = if (inlineInformation) maxHeight - 12.dp else captionHeight
-            Box(Modifier.matchParentSize().mangaHazeSource(heroBackdrop).drawBehind { drawRect(atmosphere.value) }) {
+            val mergeStart = ((if (inlineInformation) infoLeft - 24.dp else infoTop - 4.dp) /
+                (if (inlineInformation) maxWidth else maxHeight)).coerceIn(0f, .94f)
+            val mergeEnd = ((if (inlineInformation) infoLeft + 8.dp else infoTop + 12.dp) /
+                (if (inlineInformation) maxWidth else maxHeight)).coerceIn(mergeStart + .01f, 1f)
+            val shape = remember { RoundedCornerShape(22.dp) }
+            // One rounded artwork field, including the entire trailing edge. The
+            // information material feathers across this field, never an inset rectangle.
+            Box(Modifier.matchParentSize().clip(shape).mangaHazeSource(heroBackdrop)
+                .drawBehind { drawRect(lerp(surface, atmosphere.value, .12f)) }) {
                 Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.matchParentSize().graphicsLayer {
                         scaleX = 1.16f; scaleY = 1.16f
                         translationX = offset() * 10.dp.toPx()
-                        alpha = if (modernPlatformBlur) .22f else .12f
+                        alpha = if (modernPlatformBlur) .48f else .18f
                     }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur))
-                // Neighbors keep recognizable original cover pixels inside the same mask.
                 Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
                     modifier = Modifier.matchParentSize().graphicsLayer { alpha = 1f - emphasis() })
-                if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
-                    tint = ink.copy(alpha = .22f), modifier = Modifier.offset(posterLeft, posterTop)
-                        .size(posterWidth, posterHeight).padding(20.dp))
-                // The portrait fills the card's height beside its own information,
-                // without cropping it or exposing a wide empty Fit container.
-                Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
-                    modifier = Modifier.offset(posterLeft, posterTop).size(posterWidth, posterHeight)
-                        .mangaSharedCover(manga.id, "discovery-featured")
-                        .graphicsLayer {
-                            translationX = offset() * 4.dp.toPx()
-                            alpha = emphasis()
-                        }.clip(RoundedCornerShape(16.dp)))
-                Box(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight).drawBehind {
+                Box(Modifier.matchParentSize().drawBehind {
+                    val startColor = surface.copy(alpha = .02f)
+                    val endColor = surface.copy(alpha = .70f * emphasis())
                     drawRect(if (inlineInformation)
-                        Brush.horizontalGradient(0f to Color.Transparent,
-                            .35f to surface.copy(alpha = .16f), 1f to surface.copy(alpha = .76f))
-                    else Brush.verticalGradient(0f to Color.Transparent,
-                        .34f to surface.copy(alpha = .16f), 1f to surface.copy(alpha = .76f)))
+                        Brush.horizontalGradient(0f to startColor, mergeStart to startColor,
+                            mergeEnd to surface.copy(alpha = .38f * emphasis()), 1f to endColor)
+                    else Brush.verticalGradient(0f to startColor, mergeStart to startColor,
+                        mergeEnd to surface.copy(alpha = .38f * emphasis()), 1f to endColor))
                 })
             }
-            // A single local information surface shares the artwork's cached pixels.
-            // Wide cards put it beside the full portrait; narrow/large-type cards
-            // keep the former readable footer within the same fixed gallery budget.
+            LiquidGlassSurface(heroBackdrop, Modifier.matchParentSize().graphicsLayer {
+                alpha = information()
+                compositingStrategy = CompositingStrategy.Offscreen
+            }.drawWithContent {
+                drawContent()
+                drawRect(if (inlineInformation)
+                    Brush.horizontalGradient(0f to Color.Transparent, mergeStart to Color.Transparent,
+                        mergeEnd to Color.Black, 1f to Color.Black)
+                else Brush.verticalGradient(0f to Color.Transparent, mergeStart to Color.Transparent,
+                    mergeEnd to Color.Black, 1f to Color.Black),
+                    blendMode = BlendMode.DstIn)
+            }, cornerRadius = 22.dp, role = GlassSurfaceRole.GALLERY,
+                softCard = false, surfaceColor = surface, elevation = 0.dp) {}
+            // Keep the full sharp poster above the feathered material. It shares
+            // the original painter/decode and clips at its real fitted image bounds.
+            if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+                tint = ink.copy(alpha = .22f), modifier = Modifier.offset(posterLeft, posterTop)
+                    .size(posterWidth, posterHeight).padding(20.dp))
+            Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
+                modifier = Modifier.offset(posterLeft, posterTop).size(posterWidth, posterHeight)
+                    .mangaSharedCover(manga.id, "discovery-featured")
+                    .graphicsLayer {
+                        translationX = offset() * 4.dp.toPx()
+                        alpha = emphasis()
+                    }.clip(RoundedCornerShape(16.dp)))
             Box(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight).graphicsLayer {
                 alpha = information()
                 translationY = if (motion) (1f - information()) * 4.dp.toPx() else 0f
             }) {
-                LiquidGlassSurface(heroBackdrop, Modifier.matchParentSize()
-                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                    .drawWithContent {
-                        drawContent()
-                        drawRect(if (inlineInformation)
-                            Brush.horizontalGradient(0f to Color.Transparent, .4f to Color.Black, 1f to Color.Black)
-                        else Brush.verticalGradient(0f to Color.Transparent, .3f to Color.Black, 1f to Color.Black),
-                            blendMode = BlendMode.DstIn)
-                    }, cornerRadius = 0.dp, role = GlassSurfaceRole.GALLERY,
-                    softCard = false, surfaceColor = surface, elevation = 0.dp) {}
                 Column(Modifier.fillMaxSize().padding(horizontal = if (inlineInformation) 2.dp else 12.dp)
                     .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
                     verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp,

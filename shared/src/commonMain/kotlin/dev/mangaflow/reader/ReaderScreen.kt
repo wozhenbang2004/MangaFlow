@@ -806,13 +806,16 @@ fun ReaderScreen(
                 role = GlassSurfaceRole.NAVIGATION,
                 trackPointer = true,
                 softCard = true,
-                modifier = Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxWidth()
+                // Paint through the navigation area. Only the controls consume safe
+                // insets; placing those outside the glass leaves a visible bottom gap.
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                cornerRadius = 20.dp,
+                surfaceShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+            ) {
+                Column(Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxWidth().align(Alignment.TopCenter)
                     .windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
                         .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-                    .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 8.dp),
-                cornerRadius = 20.dp,
-            ) {
-                Column(Modifier.fillMaxWidth().pointerInput(Unit) {}.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                    .pointerInput(Unit) {}.padding(horizontal = 24.dp, vertical = 4.dp)) {
                     if (pages.isNotEmpty()) key(chapterId) {
                         ReaderProgressSlider(
                             pageIndex = pageIndex, pageCount = pages.size, pendingPage = targetPage,

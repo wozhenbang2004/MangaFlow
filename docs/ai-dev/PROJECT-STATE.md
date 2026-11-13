@@ -3,6 +3,18 @@
 Updated: 2026-11-14. Route: DELIVERY with focused research branches. Execution: cloud-only GitHub connector and in-memory edits, per the latest explicit user instruction.
 
 
+## Repeated filter / carousel / history correction · 2026-11-14
+
+Latest active feedback and before-state screenshots map to DESIGN.md FILTER-78, CAROUSEL-79, HISTORY-80 and READER-EDGE-81. This checkpoint implements a truly stationary layout trigger with a compact fixed-size popover, unified carousel material corners and feathering, a stationary history-clock body with one hand rewind, and a screen-bottom reader surface with internal safety. Implementation agents own isolated modules; root alone integrates refs on the latest main.
+
+Integration parent d044e8bc5356b2084bf0f5568932956d7e018110 arrived while this batch was underway. Its density/empty-search/settings/artwork changes are retained; the obsolete settings/history implementations from the old c7bbecf base are not reapplied. Current source preserves empty title/author search at44dp and the recent list's explicit transparent swipe-row background.
+
+Execution remains cloud GitHub connector and in-memory Git objects only. No tests, local builds, product probes or added review gate. Normal compile/package CI is triggered by the commit; actual phone smoothness, physical screen edges and animation acceptance await user artifact feedback. Next action is to use concrete CI errors or user feedback against these same requirements, without describing compilation as visual acceptance.
+
+The existing DESKTOP-UPDATE-77 owner remains responsible for the separate updater slice; no competing incremental protocol is integrated here. An isolated installer-handoff reference tree475c7158cc524d71bad346008d4524176a726cf6 was prepared without ref changes: it demonstrates a possible saved-state/hidden-helper/exit/msiexec-result handoff, but has no installation evidence and must be reconciled with that owner's actual plan before adoption. Current181 clients need one full upgrade to acquire a new updater.
+
+Known follow-up after default FILL: portrait controls retain top/bottom safety and reader controls protect horizontal cutouts. Broader landscape header/list safety must consume residual horizontal insets locally and account for that reduced width in column/header predictions; do not restore a globally clipped viewport to solve it. This does not change the current screenshot scope or claim landscape acceptance.
+
 ## Active density / artwork / updater batch · 2026-11-14
 
 Current user evidence/acceptance is DESIGN.md71–77 plus all active61–70. Cloud baseline is c7bbecf5b9558efc2b7ccf959700b379636c5933 (Android181 completed/success; appearance remains explicitly rejected in the latest screenshots). User requests implementation agents, no local computer access, no tests/build/probe/review gate, direct main with expected-head lease and normal CI trigger.
