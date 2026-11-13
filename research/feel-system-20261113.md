@@ -76,3 +76,10 @@ Before PR creation, main advanced to `9fa02c0` through `7c9cc9a` (UI-CONTINUITY-
 ## Delivery authorization update
 
 User follow-up in this task: “为什么不直接和到 main？” This supersedes holding the work on a branch-only PR. Finish integration and the required build/Lint gates, merge to latest main, and observe its normal signed Release result without another confirmation. Device operation remains separately unverified.
+
+## Verification log
+
+- Source integration after latest main: independent read-only review of local `9ecc324` found no remaining blocker within the modified feedback/search/download integration. This is source review, not real-device evidence.
+- Functional remote head `a0d9d503cd17ffab685b511175019efa51ac3843`: branch run `43373980339` passed full Android Lint and uploaded both required HTML/XML reports (`mangaflow-lint-build-30-1`, artifact `14013642305`). Parsed XML: **0 errors, 218 warnings, 2 hints**. Leading warning families: 124 SyntheticAccessor, 37 UseKtx, 14 RequiresFeature; none are globally suppressed. The same run then passed :app:assembleDebug and :app:assembleRelease (R8 enabled), uploaded APKs and the release mapping, and completed successfully. Logs show Lint/build success at 05:47:50 UTC and packaging success at 05:51:19 UTC.
+- First feature run `43373568520` exposed a missing DownloadsScreen LaunchedEffect import and missing active route input. These were corrected by adding the import and passing root activity to the download pane; no check was disabled.
+- The final housekeeping removes four unused imports only. Normal signed main Release CI verifies the delivered tree after merging. The exact final CI/release URLs and outcomes are recorded on PR #2.

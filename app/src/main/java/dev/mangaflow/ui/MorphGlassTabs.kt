@@ -56,7 +56,6 @@ import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.rememberFeelFeedback
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
-import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 
 /** One stateful header control, not a second row of permanent tab chrome. */
