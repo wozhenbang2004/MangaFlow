@@ -82,6 +82,7 @@ private data class BottomPullLoadInputs(
 internal class BottomPullLoadState private constructor(
     private val thresholdPx: Float,
     private val orientation: Orientation,
+    internal val towardStart: Boolean,
     private val scope: CoroutineScope,
     private val inputs: () -> BottomPullLoadInputs,
 ) {
@@ -92,7 +93,8 @@ internal class BottomPullLoadState private constructor(
     internal val feedbackFraction: Float get() = feedback
     internal val horizontal: Boolean get() = orientation == Orientation.Horizontal
     internal val contentOffsetPx: Float
-        get() = if (inputs().motion) -thresholdPx * .42f * feedback.coerceIn(-.06f, 1.25f) else 0f
+        get() = if (inputs().motion) -direction * thresholdPx * .42f * feedback.coerceIn(-.06f, 1.25f) else 0f
+    private val direction: Float get() = if (towardStart) -1f else 1f
     val loading: Boolean get() = inputs().loading
     val actionLabel: String get() = inputs().actionLabel
 
@@ -126,7 +128,7 @@ internal class BottomPullLoadState private constructor(
                 if (distancePulled < thresholdPx * .88f) thresholdAnnounced = false
                 return axisOffset(consumed)
             }
-            if (horizontal && delta < 0f && !inputs().canScrollForward()) {
+            if ((horizontal || towardStart) && delta < 0f && !inputs().canScrollForward()) {
                 // The requested physical left-next gesture wins at the final image even
                 // for an RTL pager. Interior pages and zoomed images never enter this path.
                 pullBy(delta)
@@ -154,8 +156,8 @@ internal class BottomPullLoadState private constructor(
         }
     }
 
-    private fun component(offset: Offset): Float = if (horizontal) offset.x else offset.y
-    private fun axisOffset(value: Float): Offset = if (horizontal) Offset(value, 0f) else Offset(0f, value)
+    private fun component(offset: Offset): Float = (if (horizontal) offset.x else offset.y) * direction
+    private fun axisOffset(value: Float): Offset = if (horizontal) Offset(value * direction, 0f) else Offset(0f, value * direction)
 
     private fun pullBy(delta: Float): Float {
         settleJob?.cancel()
@@ -173,7 +175,7 @@ internal class BottomPullLoadState private constructor(
     internal fun beginGesture() {
         pointerDown = true
         // Reaching the final pager image in this gesture must not also skip that image.
-        gestureEligible = !horizontal || (canRequest && !inputs().canScrollForward())
+        gestureEligible = (!horizontal && !towardStart) || (canRequest && !inputs().canScrollForward())
         thresholdAnnounced = false
         consumeReleaseVelocity = false
         distancePulled = 0f
@@ -201,7 +203,7 @@ internal class BottomPullLoadState private constructor(
         val pointerVelocity = velocityTracker.calculateVelocity()
         // Presentation momentum cannot arm an action. The distance/release checks below own it.
         val releaseVelocity = if (released)
-            (-(if (horizontal) pointerVelocity.x else pointerVelocity.y) / thresholdPx).coerceIn(-8f, 8f)
+            (-direction * (if (horizontal) pointerVelocity.x else pointerVelocity.y) / thresholdPx).coerceIn(-8f, 8f)
             else feedbackVelocity
         val ready = released && gestureEligible && distancePulled >= thresholdPx && !inputs().canScrollForward()
         consumeReleaseVelocity = distancePulled > 0f
@@ -287,6 +289,7 @@ internal class BottomPullLoadState private constructor(
             onLoadMore: () -> Unit,
             actionLabel: String,
             orientation: Orientation,
+            towardStart: Boolean,
         ): BottomPullLoadState {
             val haptics = rememberFeelFeedback()
             val inputs = rememberUpdatedState(BottomPullLoadInputs(
@@ -302,8 +305,8 @@ internal class BottomPullLoadState private constructor(
             ))
             val threshold = with(LocalDensity.current) { 96.dp.toPx() }
             val scope = rememberCoroutineScope()
-            val state = remember(key, threshold, orientation) {
-                BottomPullLoadState(threshold, orientation, scope) { inputs.value }
+            val state = remember(key, threshold, orientation, towardStart) {
+                BottomPullLoadState(threshold, orientation, towardStart, scope) { inputs.value }
             }
             LaunchedEffect(state, loading, enabled, inputs.value.motion) { state.updatePresentation() }
             DisposableEffect(state) { onDispose { state.dispose() } }
@@ -321,8 +324,9 @@ internal fun rememberBottomPullLoadState(
     onLoadMore: () -> Unit,
     actionLabel: String = "加载更多",
     orientation: Orientation = Orientation.Vertical,
+    towardStart: Boolean = false,
 ): BottomPullLoadState = BottomPullLoadState.rememberState(
-    key, enabled, loading, canScrollForward, onLoadMore, actionLabel, orientation)
+    key, enabled, loading, canScrollForward, onLoadMore, actionLabel, orientation, towardStart)
 
 internal fun Modifier.bottomPullLoad(state: BottomPullLoadState): Modifier =
     nestedScroll(state.connection).pointerInput(state) {
@@ -393,7 +397,8 @@ internal fun BottomPullLoadIndicator(
             val checked = ready.value.coerceIn(0f, 1f)
             val unit = (size.minDimension * .16f).coerceAtLeast(1f)
             fun point(x: Float, y: Float) = center + Offset(x * unit, y * unit)
-            fun arrowPoint(x: Float, y: Float) = if (state.horizontal) point(y, -x) else point(x, y)
+            fun arrowPoint(x: Float, y: Float) = if (state.horizontal) point(y, -x)
+                else if (state.towardStart) point(x, -y) else point(x, y)
             fun morph(arrow: Offset, check: Offset) = arrow + (check - arrow) * checked
             val a = morph(arrowPoint(-.65f, -.05f), point(-.85f, -.05f))
             val b = morph(arrowPoint(0f, -.7f), point(-.2f, .55f))

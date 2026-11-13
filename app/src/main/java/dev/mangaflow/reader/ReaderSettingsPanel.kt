@@ -34,6 +34,7 @@ import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.storage.ReadingMode
 import dev.mangaflow.reader.panels.PanelSettings
 import dev.mangaflow.reader.panels.PanelEngine
+import dev.mangaflow.reader.panels.PanelReadingAvailable
 import dev.mangaflow.ui.PaperThemePicker
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
@@ -115,7 +116,7 @@ internal fun ReaderSettingsDialog(
                         )
                     }
 
-                    ReaderSettingsSection("分镜") {
+                    if (PanelReadingAvailable) ReaderSettingsSection("分镜") {
                         PanelSettings(preferences, update, onModels)
                     }
 

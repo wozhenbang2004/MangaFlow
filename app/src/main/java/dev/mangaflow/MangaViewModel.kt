@@ -1,5 +1,7 @@
 package dev.mangaflow
 
+import dev.mangaflow.data.chapterSourceMangaId
+
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -323,6 +325,22 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             mode = previous.mode, period = previous.period, audience = previous.audience))
     }
 
+    fun submitSearch() {
+        val previous = _browse.value
+        if (previous.searchTarget != SearchTarget.TAG || previous.query.isBlank()) {
+            refresh()
+            return
+        }
+        val tag = dev.mangaflow.data.copyTagForName(previous.query, knownSearchTags)
+        if (tag == null) {
+            _browse.update { it.copy(tagsLoading = false, tagsError = "请选择一个匹配的标签后搜索作品。") }
+            return
+        }
+        cancelTagLookup()
+        showBrowse(previous.copy(query = "", selectedTags = (previous.selectedTags + tag).distinctBy(MangaTag::path),
+            items = emptyList(), page = 0, error = null, tagsError = null, tagsLoading = false))
+    }
+
     fun toggleSearchTag(tag: MangaTag) {
         if (tag.name.isBlank() || tag.path.isBlank()) return
         cancelTagLookup()
@@ -343,9 +361,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun openTagSearch(manga: Manga, name: String) {
         cancelTagLookup()
         val previous = _browse.value
-        knownSearchTags = (knownSearchTags + manga.tagPaths.map { MangaTag(it.key, it.value) }).distinctBy(MangaTag::path)
-        val tag = manga.tagPaths[name]?.let { MangaTag(name, it) }
-            ?: knownSearchTags.firstOrNull { it.name == name }
+        if (manga.sourceId == "copy") knownSearchTags =
+            (knownSearchTags + manga.tagPaths.map { MangaTag(it.key, it.value) }).distinctBy(MangaTag::path)
+        val tag = manga.tagPaths[name]?.takeIf { manga.sourceId == "copy" }?.let { MangaTag(name, it) }
+            ?: dev.mangaflow.data.copyTagForName(name, knownSearchTags)
         val selection = BrowseState(query = if (tag == null) name else "",
             searchTarget = SearchTarget.TAG, selectedTags = listOfNotNull(tag),
             tagsLoading = tag == null,
@@ -357,10 +376,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val request = ++tagLookupRequest
         tagLookupJob = viewModelScope.launch {
             try {
-                val tags = repository.searchTagsFor(manga)
+                val tags = dev.mangaflow.data.foregroundRequest("标签索引") { repository.searchTagsFor(manga) }
                 if (request != tagLookupRequest) return@launch
                 knownSearchTags = (knownSearchTags + tags).distinctBy(MangaTag::path)
-                val resolved = tags.firstOrNull { it.name == name }
+                val resolved = dev.mangaflow.data.copyTagForName(name, tags)
                     ?: throw SourceException("来源没有返回这个标签的检索索引。")
                 pendingTagLookup = null
                 showBrowse(selection.copy(query = "", selectedTags = listOf(resolved)))
@@ -1409,7 +1428,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         sourceReadJob = viewModelScope.launch {
             try {
                 val pages = downloads.storedPages(work.id, selected.id) ?: foregroundRequest("准备本章来源") {
-                    repository.pages(work.id, selected.id)
+                    repository.pages(chapterSourceMangaId(work.id, selected), selected.id)
                 }
                 require(pages.isNotEmpty()) { "这个来源暂时没有可读图片。" }
                 if (request != sourceReadRequest) return@launch
@@ -1700,7 +1719,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         // whose job is to schedule a real reading transfer.
         val stored = downloads.coverPage(mangaId, chapter.id, preferLocal = !forceRefresh)
         if (stored != null && (!forceRefresh || stored.url.startsWith("file:"))) return stored
-        return repository.coverPage(mangaId, chapter.id, forceRefresh)
+        return repository.coverPage(chapterSourceMangaId(mangaId, chapter), chapter.id, forceRefresh)
     }
 
     /** Only a visible chapter can request its immediate same-group successor. */
@@ -1723,7 +1742,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         chapterPrefetchKey = key
         chapterPrefetchJob = viewModelScope.launch {
             try {
-                repository.pages(manga.id, chapter.id)
+                repository.pages(chapterSourceMangaId(manga.id, chapter), chapter.id)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: Exception) {
@@ -1748,9 +1767,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _refreshingDownloads.update { it + entry.id }
         viewModelScope.launch {
             try {
-                val pages = repository.pages(entry.manga.id, entry.chapter.id, forceRefresh = true)
+                val pages = repository.pages(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id, forceRefresh = true)
                 val refreshed = downloads.refreshReadingDownload(entry.manga, entry.chapter, pages,
-                    repository.imageHeaders(entry.manga.id, entry.chapter.id), expectedEntry = expected)
+                    repository.imageHeaders(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id), expectedEntry = expected)
                 if (refreshed) messages.send("图片地址已刷新，继续下载")
             } catch (cancel: CancellationException) {
                 throw cancel
@@ -2083,6 +2102,15 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun downloadChapter(chapter: Chapter) {
         val manga = _detail.value?.manga ?: return
+        enqueueChapterDownload(manga, chapter)
+    }
+
+    fun downloadChapterVariant(manga: Manga, chapter: Chapter, variant: ChapterVariant) {
+        if (chapter.variants.none { it == variant }) return
+        enqueueChapterDownload(manga, resolveChapter(chapter, variant))
+    }
+
+    private fun enqueueChapterDownload(manga: Manga, chapter: Chapter) {
         val key = "${manga.id}/${chapter.id}"
         if (!preparingDownloads.add(key)) return
         viewModelScope.launch {
@@ -2090,8 +2118,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 // A bulk selection still uses the ordinary queue, with bounded source preparation.
                 downloadPreparationSlots.withPermit {
                     messages.send("正在准备 ${chapter.title}")
-                    val pages = repository.pages(manga.id, chapter.id)
-                    downloads.enqueue(manga, chapter, pages, repository.imageHeaders(manga.id, chapter.id))
+                    val pages = dev.mangaflow.data.foregroundRequest("下载章节图片") {
+                        repository.pages(chapterSourceMangaId(manga.id, chapter), chapter.id)
+                    }
+                    downloads.enqueue(manga, chapter, pages, repository.imageHeaders(chapterSourceMangaId(manga.id, chapter), chapter.id))
                     messages.send("已加入下载，可在下载页查看进度")
                 }
             } catch (cancel: CancellationException) {

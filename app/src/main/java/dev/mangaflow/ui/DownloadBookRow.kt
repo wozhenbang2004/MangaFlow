@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.data.chapterSourceMangaId
+
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -167,7 +169,9 @@ internal fun DownloadChapterRow(
             Column(Modifier.weight(1f)) {
                 Text(entry.chapter.title, fontSize = 12.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
                     color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(if (entry.status == DownloadStatus.COMPLETED) "${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
+                val source = dev.mangaflow.data.sourceDisplayName(
+                    dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id).sourceId)
+                Text(source + " · " + if (entry.status == DownloadStatus.COMPLETED) "${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
                     else "${downloadStateLabel(entry)} · ${entry.completedPages}/${entry.totalPages} 页",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,

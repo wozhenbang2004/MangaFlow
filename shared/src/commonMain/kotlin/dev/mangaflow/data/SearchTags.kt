@@ -4,6 +4,28 @@ enum class SearchTarget { TITLE, AUTHOR, TAG }
 
 data class MangaTag(val name: String, val path: String)
 
+/** Map display names to real Copy identifiers; another source's native path is never reused. */
+fun copyTagForName(name: String, tags: List<MangaTag> = CopySearchTags): MangaTag? {
+    fun key(value: String): String = value.trim().lowercase().map { character ->
+        val traditional = "愛歡樂嚮險園鬥輕懸職癒條節艦競偽熱勵轉換後偵戰歷異驚機無俠場戀"
+        val simplified = "爱欢乐向险园斗轻悬职愈条节舰竞伪热励转换后侦战历异惊机无侠场恋"
+        val index = traditional.indexOf(character)
+        if (index >= 0) simplified[index] else character
+    }.filterNot(Char::isWhitespace).joinToString("")
+    val requested = when (val value = key(name)) {
+        "romance", "恋爱" -> "爱情"
+        "comedy" -> "搞笑"
+        "fantasy" -> "奇幻"
+        "schoollife" -> "校园"
+        "sliceoflife" -> "生活"
+        "horror" -> "恐怖"
+        "mystery" -> "悬疑"
+        "sci-fi", "scifi", "sciencefiction" -> "科幻"
+        else -> value
+    }
+    return tags.firstOrNull { key(it.name) == requested }
+}
+
 /**
  * Copy theme paths from Venera's public source configuration, pinned to
  * a04e05591f7832f7166d6660546613c114d6738a / copy_manga.js category_param_dict.

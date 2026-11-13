@@ -1,5 +1,7 @@
 package dev.mangaflow.reader
 
+import dev.mangaflow.data.chapterSourceMangaId
+
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.MangaLayout
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -169,6 +171,7 @@ import dev.mangaflow.storage.PageCollection
 import dev.mangaflow.storage.ReaderPreferences
 import dev.mangaflow.reader.panels.GuidedPanelReader
 import dev.mangaflow.reader.panels.PanelEngine
+import dev.mangaflow.reader.panels.PanelReadingAvailable
 import dev.mangaflow.reader.panels.PanelModelsDialog
 import dev.mangaflow.reader.panels.panelLayoutKey
 import dev.mangaflow.storage.ReaderTheme
@@ -231,6 +234,7 @@ fun ReaderScreen(
     active: Boolean = true,
     startAtBeginning: Boolean = false,
     onReadVariant: (Chapter, ChapterVariant, Int) -> Unit = { _, _, _ -> },
+    onDownloadVariant: ((Chapter, ChapterVariant) -> Unit)? = null,
     onSetPreferredSource: (String) -> Unit = {},
     onClearChapterSource: (Chapter) -> Unit = {},
     onCancelSourceSelection: () -> Unit = {},
@@ -257,11 +261,12 @@ fun ReaderScreen(
     }
     var collectionLayout by remember(manga.id, initialCollection?.key) { mutableStateOf<ReaderPreferences?>(null) }
     val preferences = remember(savedPreferences, presentedCollection, collectionLayout) {
-        presentedCollection?.let {
+        val layout = presentedCollection?.let {
             savedPreferences.copy(mode = collectionLayout?.mode ?: it.mode,
                 doublePage = collectionLayout?.doublePage ?: it.spread,
                 coverAlone = collectionLayout?.coverAlone ?: it.coverAlone)
         } ?: savedPreferences
+        if (PanelReadingAvailable) layout else layout.copy(panelEngine = PanelEngine.OFF, panelLearnedOrder = false)
     }
     val pageCollections by libraryStore.pageCollections.collectAsStateWithLifecycle()
     val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
@@ -306,6 +311,7 @@ fun ReaderScreen(
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showPanelModels by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) { if (!PanelReadingAvailable) showPanelModels = false }
     var showComments by remember(chapterId) { mutableStateOf(false) }
     var showSpreadAdjustment by remember(chapterId) { mutableStateOf(false) }
     var manualSingles by remember(manga.id, chapterId, presentedCollection?.key) {
@@ -315,7 +321,7 @@ fun ReaderScreen(
         preferences.panelLayoutKey) {
         mutableStateOf(false)
     }
-    var nextRequested by remember(chapterId) { mutableStateOf(false) }
+    var chapterChangeRequested by remember(chapterId) { mutableStateOf(false) }
     var showChapters by rememberSaveable { mutableStateOf(false) }
     var downloadMessage by remember(chapterId) { mutableStateOf<String?>(null) }
     var displayedDownloadMessage by remember(chapterId) { mutableStateOf("") }
@@ -327,10 +333,20 @@ fun ReaderScreen(
     var nextChapterPrefetched by remember(manga.id, chapterId) { mutableStateOf(false) }
     var leavingReader by remember { mutableStateOf(false) }
     val nextChapter = siblings.getOrNull(chapterIndex + 1).takeIf { chapterIndex >= 0 }
+    val previousChapter = siblings.getOrNull(chapterIndex - 1).takeIf { chapterIndex > 0 }
+    val openPreviousChapter: (() -> Unit)? = previousChapter?.let { previous ->
+        {
+            if (active && !leavingReader && !sourcePickerBlocking && !chapterChangeRequested && chapterId == chapter.id) {
+                chapterChangeRequested = true
+                chapterId = previous.id
+                controlsVisible = true
+            }
+        }
+    }
     val openNextChapter: (() -> Unit)? = nextChapter?.let { next ->
         {
-            if (active && !leavingReader && !sourcePickerBlocking && !nextRequested && chapterId == chapter.id) {
-                nextRequested = true
+            if (active && !leavingReader && !sourcePickerBlocking && !chapterChangeRequested && chapterId == chapter.id) {
+                chapterChangeRequested = true
                 chapterId = next.id
                 controlsVisible = true
             }
@@ -339,8 +355,8 @@ fun ReaderScreen(
     val chapterVisible by rememberUpdatedState(onChapterVisible)
     val nearChapterEnd by rememberUpdatedState(onNearChapterEnd)
     val scope = rememberCoroutineScope()
-    val headers = remember(manga.id, chapterId, repository, localImport) {
-        if (localImport) emptyMap() else repository.imageHeaders(manga.id, chapterId)
+    val headers = remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, repository, localImport) {
+        if (localImport) emptyMap() else repository.imageHeaders(chapterSourceMangaId(manga.id, chapter), chapterId)
     }
     val chapterDownload = remember(downloadStore, manga.id, chapterId) { downloadStore.observeChapter(manga.id, chapterId) }
     val initialDownload = remember(downloadStore, manga.id, chapterId) {
@@ -355,12 +371,12 @@ fun ReaderScreen(
     val resolvePage: suspend (Page) -> Page = remember(manga.id, chapterId, downloadStore) {
         { page -> downloadStore.resolveReaderPage(manga.id, readingChapterId, page) }
     }
-    val retryPage: suspend (Page) -> Page = remember(manga.id, chapterId, repository, downloadStore) {
+    val retryPage: suspend (Page) -> Page = remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, repository, downloadStore) {
         { sourcePage ->
             if (localImport) throw IllegalStateException("本地文件已损坏，请删除后重新导入")
             val expectedEntry = downloadStore.entryFor(manga.id, readingChapterId)
             if (expectedEntry?.needsSourceRefresh == true) {
-                val refreshed = repository.pages(manga.id, readingChapterId, forceRefresh = true)
+                val refreshed = repository.pages(chapterSourceMangaId(manga.id, chapter), readingChapterId, forceRefresh = true)
                 val replacement = refreshed.firstOrNull { it.index == sourcePage.index }
                     ?: throw IllegalStateException("刷新后没有找到这一页，请重新打开章节")
                 downloadStore.refreshReadingDownload(manga, chapter, refreshed, headers, expectedEntry)
@@ -449,7 +465,7 @@ fun ReaderScreen(
         }
     }
 
-    LaunchedEffect(chapterId, retry, initialCollection?.key, initialPageIndex) {
+    LaunchedEffect(chapterId, chapter.sourceId, chapter.sourceMangaId, retry, initialCollection?.key, initialPageIndex) {
         val requestedChapterId = chapterId
         val requestedChapter = chapter
         loading = true
@@ -461,7 +477,7 @@ fun ReaderScreen(
             val loaded = stored ?: if (localImport) {
                 throw IllegalStateException("本地章节不存在，请重新导入")
             } else dev.mangaflow.data.foregroundRequest("章节图片") {
-                repository.pages(manga.id, requestedChapterId, forceRefresh = retry > 0)
+                repository.pages(chapterSourceMangaId(manga.id, requestedChapter), requestedChapterId, forceRefresh = retry > 0)
             }
             currentCoroutineContext().ensureActive()
             if (chapterId != requestedChapterId) return@LaunchedEffect
@@ -574,7 +590,7 @@ fun ReaderScreen(
                         onTap = { controlsVisible = !controlsVisible }, onNext = openNextChapter,
                         onDisable = { updatePreferences(preferences.copy(panelEngine = PanelEngine.OFF)) },
                         active = readerForeground && !leavingReader && !showSettings && !showPanelModels && !showChapters &&
-                            !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking && !nextRequested,
+                            !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking && !chapterChangeRequested,
                         backdrop = readerBackdrop,
                         bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
                     ) else ChapterPages(
@@ -613,9 +629,14 @@ fun ReaderScreen(
                         },
                         onTap = { controlsVisible = !controlsVisible },
                         active = readerForeground && !leavingReader && !showSettings && !showChapters &&
-                            !showSpreadAdjustment && !showComments && !sourcePickerBlocking && !nextRequested,
+                            !showSpreadAdjustment && !showComments && !sourcePickerBlocking && !chapterChangeRequested,
                         onAtEndChanged = { atChapterEnd = it },
                         onNext = openNextChapter,
+                        onPrevious = openPreviousChapter,
+                        startContent = { pull ->
+                            ChapterEndFooter(pull, previousChapter?.title, "已到第一话", colors.onSurface,
+                                openPreviousChapter, null, previous = true)
+                        },
                         endContent = { pull ->
                             if (!controlsVisible && !showComments && !showSettings && !showChapters && !showSpreadAdjustment) {
                                 ChapterEndFooter(
@@ -769,7 +790,7 @@ fun ReaderScreen(
                                 }
                                 ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = controlsVisible) { showChapters = true }
                                 ReaderIcon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
-                                    enabled = openNextChapter != null && !nextRequested, interactive = controlsVisible) {
+                                    enabled = openNextChapter != null && !chapterChangeRequested, interactive = controlsVisible) {
                                     openNextChapter?.invoke()
                                 }
                             }
@@ -806,7 +827,7 @@ fun ReaderScreen(
                                             scope.launch {
                                                 try {
                                                     val sourcePages = if (expectedEntry?.needsSourceRefresh == true)
-                                                        repository.pages(manga.id, chapterToSave.id, forceRefresh = true) else pagesToSave
+                                                        repository.pages(chapterSourceMangaId(manga.id, chapterToSave), chapterToSave.id, forceRefresh = true) else pagesToSave
                                                     val saved = if (expectedEntry != null)
                                                         downloadStore.refreshReadingDownload(manga, chapterToSave, sourcePages, headers, expectedEntry)
                                                     else { downloadStore.enqueue(manga, chapterToSave, sourcePages, headers); true }
@@ -990,6 +1011,7 @@ fun ReaderScreen(
             }
         },
         onSetPreferredSource = onSetPreferredSource,
+        onDownloadVariant = onDownloadVariant,
         onClearChapterSource = onClearChapterSource,
         chapters = chapters,
         allowCorrections = false,
@@ -1028,6 +1050,8 @@ private fun ChapterPages(
     active: Boolean,
     onAtEndChanged: (Boolean) -> Unit,
     onNext: (() -> Unit)?,
+    onPrevious: (() -> Unit)?,
+    startContent: @Composable (BottomPullLoadState) -> Unit,
     endContent: @Composable (BottomPullLoadState) -> Unit,
 ) {
     val save by rememberUpdatedState(onSave)
@@ -1062,6 +1086,15 @@ private fun ChapterPages(
             canScrollForward = { list.canScrollForward || !endLayoutReady() },
             onLoadMore = { onNext?.invoke() },
             actionLabel = "进入下一话",
+        )
+        val previousPull = rememberBottomPullLoadState(
+            key = list,
+            enabled = active && !restoring && onPrevious != null,
+            loading = false,
+            canScrollForward = { list.canScrollBackward || pageLayoutReady[0] != true || loadedPages[0] != true },
+            onLoadMore = { onPrevious?.invoke() },
+            actionLabel = "返回上一话",
+            towardStart = true,
         )
         val atEnd by remember(list) {
             derivedStateOf {
@@ -1150,7 +1183,7 @@ private fun ChapterPages(
             (visible.firstOrNull()?.index ?: anchor) to (visible.lastOrNull()?.index ?: anchor)
         }
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
-            .bottomPullLoad(pull)) {
+            .bottomPullLoad(pull).bottomPullLoad(previousPull)) {
             LazyColumn(state = list, modifier = Modifier.widthIn(max = MangaLayout.ReaderPageWidth)
                 .fillMaxSize().align(Alignment.TopCenter),
                 verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
@@ -1179,6 +1212,9 @@ private fun ChapterPages(
                 .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility.union(WindowInsets.displayCutout)
                     .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(start = 72.dp, end = 16.dp, bottom = 12.dp)) { endContent(pull) }
+            if (previousPull.progress > 0f) Box(Modifier.align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                .padding(start = 16.dp, end = 16.dp, top = 64.dp)) { startContent(previousPull) }
         }
     } else {
         val groups = remember(pages, preferences.doublePage, preferences.coverAlone, manualSingles) {

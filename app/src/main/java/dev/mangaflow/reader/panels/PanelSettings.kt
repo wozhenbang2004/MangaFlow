@@ -39,6 +39,9 @@ import dev.mangaflow.ui.motion.MotionTabTreatment
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+/** Temporarily withdrawn from the product; retained settings/models are not deleted. */
+internal val PanelReadingAvailable: Boolean = false
+
 internal val ReaderPreferences.panelLayoutKey: String
     get() = "${panelEngine.name}:${panelDirection.name}:$panelLearnedOrder:${PanelModelRuntime.VERSION}"
 
@@ -49,6 +52,7 @@ internal fun PanelSettings(
     update: (ReaderPreferences) -> Unit,
     onModels: () -> Unit,
 ) {
+    if (!PanelReadingAvailable) return
     val colors = MaterialTheme.colorScheme
     val engines = listOf(PanelEngine.CLASSIC, PanelEngine.NANO, PanelEngine.HIGH_QUALITY)
     val store = PanelModelStore.get(LocalContext.current)
@@ -113,6 +117,7 @@ internal fun PanelSettings(
 
 @Composable
 internal fun PanelModelsDialog(visible: Boolean, backdrop: HazeState, onDismiss: () -> Unit) {
+    if (!PanelReadingAvailable) return
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val store = remember(context) { PanelModelStore.get(context) }

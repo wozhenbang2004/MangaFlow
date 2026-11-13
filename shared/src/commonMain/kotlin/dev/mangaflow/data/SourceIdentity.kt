@@ -68,6 +68,10 @@ data class ChapterVariant(
     val storageId: String get() = SourceKeys.chapter(sourceId, mangaId, chapterId)
 }
 
+/** Network ownership can differ from the canonical work; storage/history keys remain unchanged. */
+fun chapterSourceMangaId(workId: String, chapter: Chapter): String =
+    if (chapter.sourceMangaId.isBlank()) workId else SourceKeys.manga(chapter.sourceId, chapter.sourceMangaId)
+
 fun resolveChapter(chapter: Chapter, variant: ChapterVariant): Chapter = chapter.copy(
     id = variant.storageId,
     logicalId = chapter.logicalId.ifBlank { chapter.id },

@@ -138,9 +138,10 @@ private fun PageCollectionRow(collection: PageCollection, repository: MangaRepos
 @Composable
 private fun CollectionPreview(collection: PageCollection, repository: MangaRepository, modifier: Modifier) {
     val context = LocalContext.current
-    val headers = remember(repository, collection.manga.id, collection.manga.sourceUrl, collection.chapter.id) {
+    val headers = remember(repository, collection.manga.id, collection.manga.sourceUrl, collection.chapter.id,
+        collection.chapter.sourceId, collection.chapter.sourceMangaId) {
         if (collection.manga.sourceUrl == LOCAL_SOURCE_URL) emptyMap()
-        else repository.imageHeaders(collection.manga.id, collection.chapter.id)
+        else repository.imageHeaders(dev.mangaflow.data.chapterSourceMangaId(collection.manga.id, collection.chapter), collection.chapter.id)
     }
     val slots = if (collection.spread) listOf(0, 1) else listOf(0)
     val order = if (collection.spread && collection.mode == ReadingMode.RIGHT_TO_LEFT) slots.reversed() else slots

@@ -131,6 +131,7 @@ internal fun DetailCatalog(
     onRetry: () -> Unit,
     onRead: (Chapter) -> Unit,
     onDownload: (Chapter) -> Unit,
+    onDownloadVariant: ((Chapter, ChapterVariant) -> Unit)? = null,
     loadVolumeCover: suspend (Chapter, Boolean) -> Page,
     volumeImageHeaders: (Chapter) -> Map<String, String>,
     bottomPadding: Dp = 16.dp,
@@ -366,7 +367,7 @@ internal fun DetailCatalog(
                                     }
                                 } else ChapterTile(
                                     chapter = chapter,
-                                    entry = chapterDownload(chapter, downloaded),
+                                    entry = if (downloadMode) downloaded[chapter.id] else chapterDownload(chapter, downloaded),
                                     progress = logicalChapterProgress(chapter, chapterPositions, progress),
                                     current = chapterContainsProgress(chapter, progress),
                                     progressKnown = chapterPositions != null,
@@ -413,6 +414,7 @@ internal fun DetailCatalog(
         chapter = sourceChapter, backdrop = backdrop,
         onDismiss = { sourceChapter = null; sourceAnchor = null; sourceCloseRequested = false },
         onReadVariant = onReadVariant, onSetPreferredSource = onSetPreferredSource,
+        onDownloadVariant = onDownloadVariant,
         onClearChapterSource = onClearChapterSource, onSplitVariant = onSplitVariant,
         onRelinkVariant = onRelinkVariant, chapters = chapters, downloaded = downloaded,
         chapterPositions = chapterPositions, anchor = sourceAnchor,
@@ -422,6 +424,7 @@ internal fun DetailCatalog(
     )
     (chapters.firstOrNull { it.logicalId.ifBlank { it.id } == selectedChapterId } ?: closingChapter)?.let { chapter ->
         val entry = chapterDownload(chapter, downloaded)
+        val selectedDownload = downloaded[chapter.id]
         MotionBottomSheet(
             onDismissRequest = {
                 selectedChapterId = null
@@ -462,10 +465,10 @@ internal fun DetailCatalog(
                     Text("选择本章来源", color = DetailForeground)
                 }
                 TextButton(onClick = { dismissActions(); onDownload(chapter) },
-                    enabled = canDownload(entry), modifier = Modifier.fillMaxWidth()) {
-                    Text(if (entry?.status == DownloadStatus.COMPLETED) "已下载" else
+                    enabled = canDownload(selectedDownload), modifier = Modifier.fillMaxWidth()) {
+                    Text(if (selectedDownload?.status == DownloadStatus.COMPLETED) "已下载" else
                         if (isVolumeChapter(chapter)) "下载这一卷" else "下载这一章",
-                        color = if (canDownload(entry)) DetailForeground else DetailMuted)
+                        color = if (canDownload(selectedDownload)) DetailForeground else DetailMuted)
                 }
             }
         }

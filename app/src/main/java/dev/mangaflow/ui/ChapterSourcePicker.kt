@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -226,6 +227,7 @@ internal fun ChapterSourcePicker(
     loading: Boolean = false,
     error: String? = null,
     onPresenceChange: (Boolean) -> Unit = {},
+    onDownloadVariant: ((Chapter, ChapterVariant) -> Unit)? = null,
 ) {
     if (chapter == null) return
     val key = chapter.logicalId.ifBlank { chapter.id }
@@ -245,7 +247,7 @@ internal fun ChapterSourcePicker(
     val useSheet = sourceAnchor == null || density.fontScale > 1.35f ||
         window.height < 520.dp
     val content: @Composable (() -> Unit) -> Unit = { dismiss ->
-        ChapterSourceContent(frozen, downloaded, chapterPositions, loading, error, onReadVariant, dismiss)
+        ChapterSourceContent(frozen, downloaded, chapterPositions, loading, error, onReadVariant, dismiss, onDownloadVariant)
     }
     if (useSheet) {
         MotionBottomSheet(onDismissRequest = { if (!closeRequested) cancelSelection(); onClosed() }, backdrop = backdrop,
@@ -321,6 +323,7 @@ private fun ChapterSourceContent(
     error: String?,
     onRead: (Chapter, ChapterVariant) -> Unit,
     dismiss: () -> Unit,
+    onDownload: ((Chapter, ChapterVariant) -> Unit)?,
 ) {
     var requestedVariant by remember(chapter.logicalId, chapter.id) { mutableStateOf<ChapterVariant?>(null) }
     val variants = remember(chapter.id, chapter.variants) {
@@ -373,6 +376,10 @@ private fun ChapterSourceContent(
                     ).joinToString(" · ")
                     if (location.isNotEmpty()) Text(location, color = DetailMuted, fontSize = 10.sp)
                 }
+                if (onDownload != null) DetailAction(Icons.Outlined.Download, "下载${variant.sourceName}的本章",
+                    enabled = !loading && entry?.status !in setOf(DownloadStatus.COMPLETED, DownloadStatus.RUNNING,
+                        DownloadStatus.QUEUED, DownloadStatus.WAITING),
+                    onClick = { onDownload(chapter, variant) })
             }
         }
         if (loading) Row(Modifier.fillMaxWidth().padding(8.dp),

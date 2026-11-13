@@ -169,9 +169,10 @@ internal fun SearchScopeBar(
                 }
                 val matches = remember(availableTags, query) {
                     val term = simplifiedTagQuery(query.trim())
+                    val resolvedPath = dev.mangaflow.data.copyTagForName(query, availableTags)?.path
                     availableTags.distinctBy { it.path }.filter {
                         term.isEmpty() || simplifiedTagQuery(it.name).contains(term, ignoreCase = true) ||
-                            it.path.contains(term, ignoreCase = true)
+                            it.path.contains(term, ignoreCase = true) || it.path == resolvedPath
                     }
                 }
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {

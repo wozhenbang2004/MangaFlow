@@ -71,6 +71,7 @@ internal fun ChapterEndFooter(
     foreground: Color,
     onNext: (() -> Unit)?,
     onRetry: (() -> Unit)?,
+    previous: Boolean = false,
 ) {
     Row(
         Modifier.fillMaxWidth().heightIn(min = 44.dp)
@@ -85,8 +86,9 @@ internal fun ChapterEndFooter(
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
             Text(when {
                 onNext == null -> unavailableMessage
-                pull.loading -> "正在打开下一话"
-                pull.progress >= 1f -> "松手进入下一话"
+                pull.loading -> if (previous) "正在打开上一话" else "正在打开下一话"
+                pull.progress >= 1f -> if (previous) "松手返回上一话" else "松手进入下一话"
+                previous -> "下拉返回上一话"
                 pull.horizontal -> "左滑进入下一话"
                 else -> "上拉进入下一话"
             },
@@ -96,7 +98,7 @@ internal fun ChapterEndFooter(
                 fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (onNext != null) TextButton(onClick = onNext) {
-            Text("下一话", color = foreground.copy(alpha = .8f), fontSize = 12.sp)
+            Text(if (previous) "上一话" else "下一话", color = foreground.copy(alpha = .8f), fontSize = 12.sp)
         } else if (onRetry != null) TextButton(onClick = onRetry) {
             Text("重试", color = foreground.copy(alpha = .8f), fontSize = 12.sp)
         }

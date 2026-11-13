@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.data.chapterSourceMangaId
+
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.first
@@ -608,6 +610,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         onRetryChapters = model::retryReadingChapters,
                         active = current.key == frame.key && sourceManagement == null && sourceResumeChoice == null,
                         onReadVariant = model::readReaderChapterVariant,
+                        onDownloadVariant = { chapter, variant ->
+                            onRequestNotifications()
+                            model.downloadChapterVariant(current.session.manga, chapter, variant)
+                        },
                         onSetPreferredSource = model::preferBodySource,
                         onClearChapterSource = model::clearChapterSource,
                         onCancelSourceSelection = model::cancelSourceSelection,
@@ -633,7 +639,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 chapterPositions = chapterPositions,
                                 downloadEntries = downloads,
                                 loadVolumeCover = { chapter, refresh -> model.volumeCover(current.state.manga.id, chapter, refresh) },
-                                volumeImageHeaders = { chapter -> model.repository.imageHeaders(current.state.manga.id, chapter.id) },
+                                volumeImageHeaders = { chapter -> model.repository.imageHeaders(chapterSourceMangaId(current.state.manga.id, chapter), chapter.id) },
                                 onBack = model::closeDetail, onRetry = model::retryDetail,
                                 onToggleFavorite = { model.toggleFavorite(current.state.manga) },
                                 onRead = model::readChapter, onAuthor = model::openAuthor,
@@ -654,6 +660,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onRestart = model::restartChapter,
                                 onContinue = model::continueReading,
                                 onDownload = { onRequestNotifications(); model.downloadChapter(it) },
+                                onDownloadVariant = { chapter, variant ->
+                                    onRequestNotifications()
+                                    model.downloadChapterVariant(current.state.manga, chapter, variant)
+                                },
                                 onReviewMore = model::moreReviews, onReviewRetry = model::retryReviews,
                                 onReviewMatch = model::matchReviews, onReviewRelink = model::relinkReviews,
                                 loadReplies = model::reviewReplies,
@@ -878,7 +888,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             onPresenceChange = { searchPresent = it },
                             onForegroundState = { searchForeground = it },
                             onQuery = model::setQuery,
-                            onSearch = model::refresh,
+                            onSearch = model::submitSearch,
                             modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 2.dp),
                         ) { maxHeight, searchActive ->
                             DiscoverySearchResults(
