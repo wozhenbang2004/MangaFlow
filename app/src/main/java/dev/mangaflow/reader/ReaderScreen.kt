@@ -168,7 +168,6 @@ import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.CompactMenuAction
 import dev.mangaflow.ui.rememberChapterPositions
 import dev.mangaflow.ui.GlassSurfaceRole
-import dev.mangaflow.ui.GlassSkinPicker
 import dev.mangaflow.ui.motion.BottomPullLoadState
 import dev.mangaflow.ui.motion.bottomPullLoad
 import dev.mangaflow.ui.motion.rememberBottomPullLoadState
@@ -231,7 +230,7 @@ fun ReaderScreen(
     val globalPreferences by libraryStore.preferences.collectAsStateWithLifecycle()
     val mangaPreferences by libraryStore.mangaPreferences.collectAsStateWithLifecycle()
     val savedPreferences = remember(globalPreferences, mangaPreferences, manga.id) {
-        (mangaPreferences[manga.id] ?: globalPreferences).copy(glassSkin = globalPreferences.glassSkin)
+        mangaPreferences[manga.id] ?: globalPreferences
     }
     var collectionLayout by remember(manga.id, initialCollection?.key) { mutableStateOf<ReaderPreferences?>(null) }
     val preferences = remember(savedPreferences, presentedCollection, collectionLayout) {
@@ -364,7 +363,6 @@ fun ReaderScreen(
             doublePage = if (next.doublePage != preferences.doublePage) next.doublePage else savedPreferences.doublePage,
             coverAlone = if (next.coverAlone != preferences.coverAlone) next.coverAlone else savedPreferences.coverAlone,
             dimAmount = if (next.dimAmount != preferences.dimAmount) next.dimAmount else savedPreferences.dimAmount,
-            glassSkin = if (next.glassSkin != preferences.glassSkin) next.glassSkin else savedPreferences.glassSkin,
         )
         if (presentedCollection != null) collectionLayout = next
         libraryStore.updateMangaPreferences(manga.id, saved)

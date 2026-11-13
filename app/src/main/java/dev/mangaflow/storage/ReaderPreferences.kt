@@ -4,8 +4,6 @@ enum class ReadingMode { VERTICAL, LEFT_TO_RIGHT, RIGHT_TO_LEFT }
 
 enum class ReaderTheme { INK, PAPER, SEPIA }
 
-enum class GlassSkin { FROSTED, LIQUID }
-
 data class ReaderPreferences(
     val mode: ReadingMode = ReadingMode.VERTICAL,
     val theme: ReaderTheme = ReaderTheme.PAPER,
@@ -14,7 +12,6 @@ data class ReaderPreferences(
     val doublePage: Boolean = false,
     val coverAlone: Boolean = true,
     val dimAmount: Float = 0f,
-    val glassSkin: GlassSkin = GlassSkin.LIQUID,
     // App-wide browse presentation: 1 is a list; 2–4 are cover columns.
     val discoverColumns: Int = 3,
     val updateColumns: Int = 3,

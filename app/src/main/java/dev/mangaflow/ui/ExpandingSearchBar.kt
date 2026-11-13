@@ -219,7 +219,7 @@ internal fun ExpandingSearchBar(
                     compositingStrategy = CompositingStrategy.ModulateAlpha
                 },
             cornerRadius = 22.dp + 2.dp * progress,
-            role = if (present) GlassSurfaceRole.PANEL else GlassSurfaceRole.CONTROL,
+            role = if (present) GlassSurfaceRole.NAVIGATION else GlassSurfaceRole.CONTROL,
             interactionSource = searchInteraction,
             softCard = true,
         ) {}

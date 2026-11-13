@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.widget.Toast
 import android.text.format.DateUtils
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -59,7 +58,6 @@ import androidx.compose.material.icons.outlined.ViewDay
 import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.SwapVert
-import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.OpenInNew
@@ -111,7 +109,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.BuildConfig
-import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingMode
@@ -378,18 +375,6 @@ fun SettingsScreen(
                         SettingsChoices(settingsLayoutChoices, preferences.updateColumns) { columns ->
                             libraryStore.updatePreferences(libraryStore.preferences.value.copy(updateColumns = columns))
                         }
-                    }
-                    SettingsDisclosure("玻璃材质", if (preferences.glassSkin == GlassSkin.FROSTED) "毛玻璃" else "液态玻璃",
-                        Icons.Outlined.Layers, expandedSetting == "glass", { toggleSetting("glass") }) {
-                        GlassSkinPicker(
-                            selected = preferences.glassSkin,
-                            onSelected = { skin ->
-                                val current = libraryStore.preferences.value
-                                if (skin != current.glassSkin) libraryStore.updatePreferences(current.copy(glassSkin = skin))
-                            },
-                        )
-                        if (Build.VERSION.SDK_INT < 33 && preferences.glassSkin == GlassSkin.LIQUID)
-                            Text("此设备使用毛玻璃效果", style = MaterialTheme.typography.bodySmall, color = secondary)
                     }
                     SettingsDisclosure("壁纸", if (wallpaper.mediaPath == null) "默认" else wallpaper.name.ifBlank { "本地壁纸" }, Icons.Outlined.Image,
                         expandedSetting == "wallpaper", { toggleSetting("wallpaper") }) {

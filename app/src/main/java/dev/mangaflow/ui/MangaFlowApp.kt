@@ -217,7 +217,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     if (tagSearchVisible) {
-        CompositionLocalProvider(LocalMangaMetrics provides metricState, LocalGlassSkin provides preferences.glassSkin) {
+        CompositionLocalProvider(LocalMangaMetrics provides metricState) {
         val panelHeight = (LocalConfiguration.current.screenHeightDp.dp * .72f - 60.dp).coerceAtLeast(120.dp)
         val closeTags: () -> Unit = { tagSearchVisible = false; model.clearSearch() }
         MotionBottomSheet(onDismissRequest = closeTags) { dismiss ->
@@ -278,7 +278,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val routeTravel = with(density) { 24.dp.roundToPx() }
     CompositionLocalProvider(
         LocalMangaMetrics provides metricState,
-        LocalGlassSkin provides preferences.glassSkin,
         LocalWallpaperActive provides (frame is Frame.Root && wallpaper.mediaPath != null),
     ) {
     ModalNavigationDrawer(

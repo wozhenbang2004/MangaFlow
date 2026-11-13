@@ -17,7 +17,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,7 +50,6 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeStyle
 import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
-import dev.mangaflow.storage.GlassSkin
 import dev.mangaflow.ui.glass.HazeGlassOptics
 import dev.mangaflow.ui.glass.glassMaterial
 import dev.mangaflow.ui.glass.softSurfaceShadow
@@ -59,8 +57,6 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlin.math.min
 import kotlin.math.roundToInt
-
-internal val LocalGlassSkin = compositionLocalOf { GlassSkin.LIQUID }
 
 internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER, DRAWER, GALLERY }
 
@@ -72,7 +68,6 @@ internal fun LiquidGlassSurface(
     modifier: Modifier = Modifier,
     cornerRadius: Dp = 22.dp,
     role: GlassSurfaceRole = GlassSurfaceRole.CONTROL,
-    skin: GlassSkin = LocalGlassSkin.current,
     interactionSource: MutableInteractionSource? = null,
     trackPointer: Boolean = false,
     elevation: Dp? = null,
@@ -87,13 +82,21 @@ internal fun LiquidGlassSurface(
     val surfaceTint = if (softCard && surfaceColor == null) lerp(baseColors.background, colors.surface, .70f)
         else colors.surface
     val shape = remember(cornerRadius) { RoundedCornerShape(cornerRadius) }
-    val optics = remember(skin) {
-        if (skin == GlassSkin.LIQUID && Build.VERSION.SDK_INT >= 33) runCatching { HazeGlassOptics() }.getOrElse {
+    // Material selection belongs to the UI role, not a user-controlled app skin.
+    val wantsLiquid = when (role) {
+        GlassSurfaceRole.CONTROL, GlassSurfaceRole.ARTWORK,
+        GlassSurfaceRole.NAVIGATION, GlassSurfaceRole.THUMB,
+        GlassSurfaceRole.READING_DOCK, GlassSurfaceRole.GALLERY -> true
+        GlassSurfaceRole.PANEL, GlassSurfaceRole.POPOVER,
+        GlassSurfaceRole.DRAWER -> false
+    }
+    val optics = remember(wantsLiquid) {
+        if (wantsLiquid && Build.VERSION.SDK_INT >= 33) runCatching { HazeGlassOptics() }.getOrElse {
             Log.w("MangaFlowGlass", "Glass optics unavailable; using the frosted surface", it)
             null
         } else null
     }
-    val liquid = skin == GlassSkin.LIQUID && Build.VERSION.SDK_INT >= 33 &&
+    val liquid = wantsLiquid && Build.VERSION.SDK_INT >= 33 &&
         optics?.available == true && state.blurEnabled
     val interactions = interactionSource ?: remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
@@ -140,7 +143,7 @@ internal fun LiquidGlassSurface(
     }
     // Decorative surfaces must stay outside hit testing so touches reach artwork beneath them.
     val pointerTracking = if (trackPointer && liquid && motion && role != GlassSurfaceRole.PANEL) {
-        Modifier.pointerInput(skin, role, motion) {
+        Modifier.pointerInput(role, motion) {
             awaitEachGesture {
                 try {
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)

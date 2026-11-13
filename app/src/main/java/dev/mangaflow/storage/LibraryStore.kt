@@ -722,18 +722,13 @@ class LibraryStore(context: Context) {
     }
 
     /**
-     * Reading layout is remembered per work. Glass remains a single app-wide skin so opening
-     * another manga never changes the navigation/search material behind the reader.
+     * Reading layout is remembered per work; glass material follows the component's role,
+     * not a global or per-manga preference.
      */
     fun updateMangaPreferences(mangaId: String, preferences: ReaderPreferences): Unit = synchronized(lock) {
         if (deferUntilReady { updateMangaPreferences(mangaId, preferences) }) return@synchronized
         if (mangaId.isBlank()) return@synchronized
         val next = preferences.sanitized()
-        if (next.glassSkin != _preferences.value.glassSkin) {
-            val global = _preferences.value.copy(glassSkin = next.glassSkin)
-            _preferences.value = global
-            disk.edit().putString("reader_preferences", global.toJson().toString()).apply()
-        }
         val updated = LinkedHashMap(_mangaPreferences.value)
         updated[mangaId] = next
         _mangaPreferences.value = updated
@@ -771,7 +766,6 @@ class LibraryStore(context: Context) {
             doublePage = optBoolean("doublePage", false),
             coverAlone = optBoolean("coverAlone", true),
             dimAmount = optDouble("dimAmount", 0.0).toFloat().coerceIn(0f, 0.65f),
-            glassSkin = GlassSkin.entries.firstOrNull { it.name == optString("glassSkin") } ?: GlassSkin.LIQUID,
             discoverColumns = optInt("discoverColumns", 3).coerceIn(1, 4),
             updateColumns = optInt("updateColumns", 3).coerceIn(1, 4),
         )
@@ -789,7 +783,6 @@ class LibraryStore(context: Context) {
         put("doublePage", doublePage)
         put("coverAlone", coverAlone)
         put("dimAmount", dimAmount.toDouble())
-        put("glassSkin", glassSkin.name)
         put("discoverColumns", discoverColumns)
         put("updateColumns", updateColumns)
     }
