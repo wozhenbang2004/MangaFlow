@@ -97,8 +97,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -369,19 +367,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             modifier = Modifier
                 // Keep the source node stable. The visible-only drawer effect owns capture demand;
                 // Haze 2.1 releases the layer and draws directly when that demand disappears.
-                .mangaHazeSource(drawerBackdrop)
-                .graphicsLayer {
-                // Vaul's backdrop relationship follows the actual drag, without a second spring.
-                val offset = drawer.currentOffset
-                val progress = if (motion && frame is Frame.Root && offset.isFinite())
-                    (1f + offset / drawerWidthPx).coerceIn(0f, 1f) else 0f
-                transformOrigin = TransformOrigin(1f, .5f)
-                scaleX = 1f - .035f * progress
-                scaleY = scaleX
-                translationX = 8.dp.toPx() * progress
-                shape = RoundedCornerShape((20f * progress).dp)
-                clip = progress > 0f
-            },
+                .mangaHazeSource(drawerBackdrop),
             containerColor = MaterialTheme.colorScheme.background,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
@@ -391,7 +377,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             val coverScope = this
             AnimatedContent(
                 targetState = frame,
-                contentKey = { it.key },
+                // Root destinations share the shell; only their body owns a section save-state key.
+                contentKey = { if (it is Frame.Root) "root-shell" else it.key },
                 transitionSpec = {
                     if (!motion || (initialState is Frame.Root && targetState is Frame.Root &&
                         (targetState as Frame.Root).section == drawerRootTransition))
@@ -505,20 +492,16 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             )
                         }
                     }
-                    is Frame.Root -> savedState.SaveableStateProvider(current.key) {
+                    is Frame.Root -> {
                         val searchBackdrop = rememberHazeState()
-                        val backdropWallpaper: @Composable () -> Unit = {
-                            if (wallpaper.mediaPath != null) {
-                                AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
-                                    active = !drawerVisible && !recentReadingOpen && !tagSearchVisible)
-                            }
-                        }
+                        val rootWallpaperActive = current.key == frame.key &&
+                            !drawerVisible && !recentReadingOpen && !tagSearchVisible
                         val chromeDensity = LocalDensity.current
                         val discoveryBackground = model.browseBackground(browse)
                         val displayedDiscovery = if (!browse.isSearch) browse else discoveryBackground
                         val rankingExpanded = displayedDiscovery.mode == DiscoveryMode.RANKING
                         var rankingAnchor by remember { mutableStateOf(Rect.Zero) }
-                        var chromeHeightPx by remember {
+                        var chromeHeightPx by remember(current.section) {
                             mutableIntStateOf(with(chromeDensity) {
                                 (if (current.section == Section.DISCOVER && rankingExpanded) 88.dp else 44.dp).toPx().toInt()
                             })
@@ -543,6 +526,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             model.clearSearch()
                         }
                         Box(Modifier.fillMaxSize().statusBarsPadding()) {
+                        // The persistent lower source holds the real media; foreground page
+                        // sources and headers sample it without owning the player lifecycle.
+                        Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop, zIndex = -1f)
+                            .background(MaterialTheme.colorScheme.background)) {
+                            AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = rootWallpaperActive)
+                        }
                         Box(Modifier.fillMaxSize()) {
                             val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
                             val navigation: @Composable () -> Unit = {
@@ -577,12 +566,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             }
                             val rootCapturesBackground = current.section in setOf(Section.ACCOUNT, Section.SETTINGS)
                             Box(Modifier.fillMaxSize().then(if (rootCapturesBackground)
-                                Modifier.mangaHazeSource(searchBackdrop).background(MaterialTheme.colorScheme.background)
+                                Modifier.mangaHazeSource(searchBackdrop)
                                 else Modifier)) {
                                 // The full backdrop includes the pixels beneath the menu button.
                                 // Content clearance belongs to the foreground, outside this capture's bounds.
-                                if (rootCapturesBackground) backdropWallpaper()
                                 Box(Modifier.fillMaxSize().padding(top = if (rootCapturesBackground) chromePadding else 0.dp)) {
+                                savedState.SaveableStateProvider(current.key) {
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
@@ -591,7 +580,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         backgroundState = discoveryBackground,
                                         searchExpanded = searchVisible,
                                         searchBackdrop = searchBackdrop,
-                                        wallpaper = backdropWallpaper,
+                                        backgroundInParent = true,
                                         contentTopPadding = chromePadding,
                                         active = rootActive,
                                         canAutoAdvance = rootActive && !searchVisible,
@@ -606,7 +595,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
                                         repository = model.repository, opening = libraryOpening, active = rootActive,
                                         backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
-                                        wallpaper = backdropWallpaper,
+                                        backgroundInParent = true,
                                         onOpen = model::readFromLibrary, onDetails = { model.openManga(it) },
                                         onContinue = model::continueReading,
                                         onRemoveFavorite = model::removeFavorite,
@@ -616,7 +605,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     )
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, repository = model.repository, onRead = model::openDownload,
                                         onRetry = model::retryDownload, backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
-                                        wallpaper = backdropWallpaper,
+                                        backgroundInParent = true,
                                         active = rootActive && !searchVisible, refreshingIds = refreshingDownloads, history = history)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
@@ -635,6 +624,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications,
                                         readBrowseCacheBytes = model::browseCacheSize, clearBrowseCache = model::clearBrowseCache,
                                         readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache)
+                                }
                                 }
                                 }
                             }

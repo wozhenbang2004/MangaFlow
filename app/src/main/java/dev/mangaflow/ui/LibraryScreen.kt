@@ -1,5 +1,6 @@
 package dev.mangaflow.ui
 
+import androidx.compose.ui.graphics.Color
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -116,6 +117,7 @@ fun LibraryScreen(
     onRemoveFavorite: (Manga) -> Unit, onRemoveHistory: (String) -> Unit,
     backdrop: HazeState, navigation: @Composable () -> Unit, toolbar: @Composable (@Composable () -> Unit) -> Unit,
     wallpaper: @Composable () -> Unit = {},
+    backgroundInParent: Boolean = false,
 ) {
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
@@ -213,7 +215,7 @@ fun LibraryScreen(
     }
     Box(Modifier.fillMaxSize()) {
     Box(Modifier.fillMaxSize().navigationBarsPadding().mangaHazeSource(backdrop)
-        .background(MaterialTheme.colorScheme.background)) {
+        .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
         wallpaper()
         Column(Modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -438,4 +440,3 @@ private fun LibraryOpeningNotice(
         }
     }
 }
-

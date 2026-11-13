@@ -7,6 +7,7 @@
 package dev.mangaflow.ui.glass
 
 import android.graphics.BlurMaskFilter
+import android.util.LruCache
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
@@ -15,6 +16,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.ImageBitmapConfig
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Shape
@@ -57,6 +59,21 @@ private data class SoftShadowElement(
     override fun InspectorInfo.inspectableProperties() { name = "softSurfaceShadow" }
 }
 
+/** Geometry only: no captured scene, colors, callbacks or user content enters this cache. */
+private data class ShadowMaskKey(
+    val shape: Shape, val size: Size, val radius: Float, val offsetY: Float,
+    val density: Float, val fontScale: Float, val direction: LayoutDirection,
+)
+
+private data class CachedShadowMask(val image: ImageBitmap, val scale: Float)
+
+// Shared by cold navigation surfaces. Nodes may still hold an evicted image until detached;
+// never recycle a bitmap which an existing draw node can still be using.
+private val SharedShadowMasks = object : LruCache<ShadowMaskKey, CachedShadowMask>(4 * 1024 * 1024) {
+    override fun sizeOf(key: ShadowMaskKey, value: CachedShadowMask): Int =
+        value.image.asAndroidBitmap().allocationByteCount.coerceAtLeast(1)
+}
+
 private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Modifier.Node() {
     override val shouldAutoInvalidate = false
     private var mask: ImageBitmap? = null
@@ -74,27 +91,35 @@ private class SoftShadowNode(var spec: SoftShadowElement) : DrawModifierNode, Mo
         if (mask == null || cachedSpec?.shape != spec.shape || cachedSpec?.radius != spec.radius ||
             cachedSpec?.offsetY != spec.offsetY || cachedSize != size || cachedDensity != density ||
             cachedFontScale != fontScale || cachedDirection != layoutDirection) {
-            val fullWidth = size.width + radius * 4f
-            val fullHeight = size.height + radius * 4f + offsetY
-            // Shadows have no fine content. Bound their cached A8 mask even for long expanded notes.
-            maskScale = minOf(1f, 1.5f / density, 2048f / maxOf(fullWidth, fullHeight))
-            val scale = maskScale
-            val image = ImageBitmap(ceil(fullWidth * scale).toInt().coerceAtLeast(1),
-                ceil(fullHeight * scale).toInt().coerceAtLeast(1), ImageBitmapConfig.Alpha8)
-            val outline = spec.shape.createOutline(Size(size.width * scale, size.height * scale),
-                layoutDirection, Density(density * scale, fontScale))
-            val paint = Paint().apply {
-                color = Color.White
-                asFrameworkPaint().maskFilter = BlurMaskFilter(radius * scale, BlurMaskFilter.Blur.NORMAL)
+            val key = ShadowMaskKey(spec.shape, size, radius, offsetY, density, fontScale, layoutDirection)
+            val shared = SharedShadowMasks.get(key)
+            if (shared != null) {
+                mask = shared.image
+                maskScale = shared.scale
+            } else {
+                val fullWidth = size.width + radius * 4f
+                val fullHeight = size.height + radius * 4f + offsetY
+                // Shadows have no fine content. Bound their cached A8 mask even for long expanded notes.
+                maskScale = minOf(1f, 1.5f / density, 2048f / maxOf(fullWidth, fullHeight))
+                val scale = maskScale
+                val image = ImageBitmap(ceil(fullWidth * scale).toInt().coerceAtLeast(1),
+                    ceil(fullHeight * scale).toInt().coerceAtLeast(1), ImageBitmapConfig.Alpha8)
+                val outline = spec.shape.createOutline(Size(size.width * scale, size.height * scale),
+                    layoutDirection, Density(density * scale, fontScale))
+                val paint = Paint().apply {
+                    color = Color.White
+                    asFrameworkPaint().maskFilter = BlurMaskFilter(radius * scale, BlurMaskFilter.Blur.NORMAL)
+                }
+                // Canvas(ImageBitmap) is software: hardware Canvas does not support BlurMaskFilter.
+                // Only this cached shadow mask uses software; the glass and artwork remain accelerated.
+                val canvas = Canvas(image)
+                canvas.translate(radius * 2f * scale, (radius * 2f + offsetY) * scale)
+                canvas.drawOutline(outline, paint)
+                canvas.translate(0f, -offsetY * scale)
+                canvas.drawOutline(outline, ShadowMaskPaint)
+                mask = image
+                mask?.let { SharedShadowMasks.put(key, CachedShadowMask(it, maskScale)) }
             }
-            // Canvas(ImageBitmap) is software: hardware Canvas does not support BlurMaskFilter.
-            // Only this cached shadow mask uses software; the glass and artwork remain accelerated.
-            val canvas = Canvas(image)
-            canvas.translate(radius * 2f * scale, (radius * 2f + offsetY) * scale)
-            canvas.drawOutline(outline, paint)
-            canvas.translate(0f, -offsetY * scale)
-            canvas.drawOutline(outline, ShadowMaskPaint)
-            mask = image
             cachedSpec = spec
             cachedSize = size
             cachedDensity = density

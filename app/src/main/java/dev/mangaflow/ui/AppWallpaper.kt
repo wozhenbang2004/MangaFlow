@@ -62,13 +62,13 @@ internal fun AppWallpaper(store: WallpaperStore, modifier: Modifier = Modifier, 
                     onError = { store.reportError(path, "壁纸图片读取失败，请重试或重新选择。", revision) })
             }
         }
-        if (selected.kind == WallpaperKind.VIDEO && active && motion && selected.error == null && selected.strength > 0f) {
+        if (selected.kind == WallpaperKind.VIDEO && motion && selected.error == null && selected.strength > 0f) {
             key(path, selected.revision) {
                 val context = LocalContext.current
                 val video = remember { WallpaperVideoView(context) }
                 DisposableEffect(video) { onDispose { video.release() } }
                 AndroidView(factory = { video }, modifier = Modifier.fillMaxSize(), update = { view ->
-                    view.bind(path, resumed) { store.reportError(path, it, revision) }
+                    view.bind(path, resumed && active) { store.reportError(path, it, revision) }
                 })
             }
         }

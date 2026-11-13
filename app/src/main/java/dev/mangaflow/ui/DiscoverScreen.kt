@@ -139,6 +139,7 @@ fun DiscoverScreen(
     searchExpanded: Boolean,
     searchBackdrop: HazeState,
     wallpaper: @Composable () -> Unit = {},
+    backgroundInParent: Boolean = false,
     contentTopPadding: Dp,
     canAutoAdvance: Boolean,
     repository: MangaRepository,
@@ -174,7 +175,7 @@ fun DiscoverScreen(
         if (motion) tween(MangaMotion.Content) else snap(), label = "browse-pending-content")
     CompositionLocalProvider(LocalMetricSourceFan provides sourceFan) {
     Box(Modifier.fillMaxSize().navigationBarsPadding().mangaHazeSource(searchBackdrop)
-        .background(MaterialTheme.colorScheme.background)
+        .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)
         .motionInputGate(active && !searchExpanded)) {
         // Wallpaper and scroll content are one captured scene. The header remains a foreground sibling.
         wallpaper()

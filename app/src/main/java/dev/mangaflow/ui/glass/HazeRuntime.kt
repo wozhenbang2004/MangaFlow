@@ -22,11 +22,13 @@ internal object MangaHazeRuntime {
         HazeFeatureFlags.isPlatformBackdropEnabled = true
     }
 
-    fun source(modifier: Modifier, state: HazeState): Modifier = modifier.hazeSource(
+    fun source(modifier: Modifier, state: HazeState, zIndex: Float = 0f): Modifier = modifier.hazeSource(
         state = state,
+        zIndex = zIndex,
         inputSharing = if (isLowRamDevice) HazeInputSharing.Never else HazeInputSharing.Auto,
         inputSharingOutsets = LayerOutsets(left = 32.dp, top = 32.dp, right = 32.dp, bottom = 32.dp),
     )
 }
 
-internal fun Modifier.mangaHazeSource(state: HazeState): Modifier = MangaHazeRuntime.source(this, state)
+internal fun Modifier.mangaHazeSource(state: HazeState, zIndex: Float = 0f): Modifier =
+    MangaHazeRuntime.source(this, state, zIndex)

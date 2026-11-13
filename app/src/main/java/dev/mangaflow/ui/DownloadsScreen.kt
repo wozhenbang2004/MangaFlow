@@ -101,6 +101,7 @@ import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
@@ -134,6 +135,7 @@ fun DownloadsScreen(
     refreshingIds: Set<String> = emptySet(),
     history: List<ReadingProgress> = emptyList(),
     wallpaper: @Composable () -> Unit = {},
+    backgroundInParent: Boolean = false,
 ) {
     val context = LocalContext.current
     val entries by store.entries.collectAsStateWithLifecycle()
@@ -173,7 +175,10 @@ fun DownloadsScreen(
     }
     val completedEntries = manageableEntries.filter { it.status == DownloadStatus.COMPLETED }
     val usedBytes = entries.sumOf { it.downloadedBytes }
-    val availableBytes = remember(entries, loading) { store.availableStorageBytes() }
+    var availableBytes by remember(store) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(showQueueActions, store) {
+        if (showQueueActions) availableBytes = withContext(Dispatchers.IO) { store.availableStorageBytes() }
+    }
 
     BackHandler(enabled = managing) { managing = false; selectedIds = emptySet() }
 
@@ -255,7 +260,7 @@ fun DownloadsScreen(
         val downloadChapterColumns = ((maxWidth.value - 40f) /
             (96f * LocalDensity.current.fontScale.coerceAtLeast(1f))).toInt().coerceIn(1, 4)
         // The captured scene contains the wallpaper and scrolling list, never the header itself.
-        Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).background(MaterialTheme.colorScheme.background)) {
+        Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
             wallpaper()
             // The filter owns the transition; progress updates keep the existing list in place.
             MotionTabContent(filter.ordinal, Modifier.fillMaxSize()) { index ->
@@ -405,7 +410,8 @@ fun DownloadsScreen(
                                         Text(downloadBytes(usedBytes), fontSize = 14.sp,
                                             fontWeight = FontWeight.Medium, color = foreground)
                                     }
-                                    Text("${downloadBytes(availableBytes)} 可用", fontSize = 11.sp, color = secondary)
+                                    Text(availableBytes?.let { "${downloadBytes(it)} 可用" } ?: "正在读取可用空间…",
+                                        fontSize = 11.sp, color = secondary)
                                 }
                                 HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                                     color = foreground.copy(alpha = .07f))
