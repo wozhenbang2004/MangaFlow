@@ -48,7 +48,8 @@ android {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
         // Compress multi-ABI inference libraries in the directly distributed APK.
         jniLibs.useLegacyPackaging = true
-        jniLibs.excludes += setOf("**/libtensorflowlite_jni.so", "**/libonnxruntime.so", "**/libonnxruntime4j_jni.so")
+        jniLibs.excludes += setOf("**/libtensorflowlite_jni.so", "**/libonnxruntime.so",
+            "**/libonnxruntime4j_jni.so", "**/libquickjs.so")
     }
 }
 

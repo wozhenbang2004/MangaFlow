@@ -19,6 +19,8 @@ data class Manga(
     val sourceId: String = "copy",
     /** Opaque upstream identity; empty retains the legacy Copy identity in [id]. */
     val sourceMangaId: String = "",
+    /** Persisted user-facing identity for an imported source, even after it is uninstalled. */
+    val sourceName: String = "",
 )
 
 data class Chapter(

@@ -109,6 +109,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
@@ -149,6 +150,7 @@ fun SettingsScreen(
     contentTopPadding: Dp = 0.dp,
     sourceBackdrop: HazeState? = null,
     sourceRegistry: BodySourceRegistry? = null,
+    sourcePlugins: SourcePluginStore? = null,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -572,7 +574,8 @@ fun SettingsScreen(
     }
 
     if (showBodySources && sourceRegistry != null) {
-        BodySourceSettingsSheet(sourceRegistry, sourceBackdrop, onDismiss = { showBodySources = false })
+        BodySourceSettingsSheet(sourceRegistry, sourceBackdrop, plugins = sourcePlugins,
+            onDismiss = { showBodySources = false })
     }
 
     BackupRestoreDialog(

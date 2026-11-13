@@ -85,7 +85,8 @@ internal fun ReadingStatsSheet(
     onDismiss: () -> Unit,
     onOpenManga: (Manga) -> Unit,
 ) {
-    var periodIndex by remember { mutableIntStateOf(ReadingPeriod.MONTH.ordinal) }
+    // This sheet is removed on dismissal, so every new opening starts with this year's data.
+    var periodIndex by remember { mutableIntStateOf(ReadingPeriod.YEAR.ordinal) }
     val period = ReadingPeriod.entries[periodIndex]
     val today = localToday()
     val earliest = remember(activity, today) {

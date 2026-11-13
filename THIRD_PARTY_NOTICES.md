@@ -515,6 +515,39 @@ core-before-JNI absolute loading. The original loader class is excluded from the
 all other upstream API classes/native signatures remain. See third_party/onnxruntime/ADAPTATION.md.
 There is no downloaded Java/Dex code or new runtime license claim. This source adaptation and
 packaging inspection do not establish Android runtime execution or on-device verification.
+
+## Optional QuickJS manga-source script engine
+
+The compiled Android host uses dokar3's **quickjs-kt 1.0.18** Kotlin/JNI API from
+`io.github.dokar3:quickjs-kt:1.0.18`. The unmodified Android native library comes from
+`io.github.dokar3:quickjs-kt-android:1.0.18` on Maven Central. Its consumer ProGuard
+rules remain part of the dependency; `libquickjs.so` is excluded from the base APK
+and is packaged separately for arm64-v8a, armeabi-v7a, x86 and x86_64. The existing
+permanent APK certificate signs the runtime catalog; installation verifies the
+archive, ABI and each native member, then seals a private directory before loading.
+No Java/Dex implementation is downloaded. Ordinary reading does not download or
+load the optional engine, and source import does not imply runtime consent.
+
+The official v1.0.18 Android loader supports
+`com.dokar.quickjs.library.path` / `com.dokar.quickjs.library.name`; MangaFlow sets
+them only to its verified private installation and loads that absolute file before
+creating a QuickJS instance. The loader is not replaced. This packaging/source
+inspection does not establish a successful Android execution or support for every
+third-party source dialect.
+
+Upstream sources and license materials (also included in every component ZIP):
+
+- Wrapper: https://github.com/dokar3/quickjs-kt/tree/v1.0.18;
+  its complete upstream Apache-2.0 text is bundled as
+  `licenses/QuickJS-kt-APACHE-2.0.txt`.
+- Engine: https://github.com/bellard/quickjs/tree/04be246001599f5995fa2f2d8c91a0f198d3f34c,
+  the v1.0.18 wrapper's pinned submodule. Copyright 2017–2021 Fabrice Bellard and
+  Charlie Gordon; the complete MIT text is `licenses/QuickJS-MIT.txt`.
+- Native vector utility:
+  https://github.com/eteran/c-vector/tree/774773d4cb1e66dd736e90e7f482d4f22af464c6,
+  the wrapper's pinned submodule. Its complete upstream MIT copyright and license
+  are bundled as `licenses/c-vector-MIT.txt`.
+
 ## Unified Chapters / additional body sources
 
 The logical-parent/source-variant and priority-view mechanism is adapted from the
@@ -528,8 +561,8 @@ Komiic's public GraphQL and image protocol is adapted from Keiyoushi at
 `c3bc55d548b0a5f1b316a323bde9e6e2516e4bea`. Its Apache-2.0 license and precise
 source/modification record are in `third_party/multi-source/`. MangaDex uses its
 public manga/feed/chapter/At-home API; no Venera script or runtime is bundled.
-Source favicon images are requested from the corresponding official site and are
-not claimed to be MangaFlow artwork. Refer to ADAPTATION.md for the unverified
+Body-source marks are local MangaFlow vector artwork rather than downloaded
+source favicons; provider names and original source attribution remain visible. Refer to ADAPTATION.md for the unverified
 source-access and implementation boundaries.
 
 Baozi / Manhuagui public reader adapters, Packer/LZString decoder adaptations and

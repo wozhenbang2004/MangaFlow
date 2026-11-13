@@ -745,23 +745,24 @@ fun ReaderScreen(
                             },
                             onOpenNavigator = { showPageNavigator = true },
                             onInteractionChanged = { progressInteracting = it },
-                        )
-
-                    }
-                    if (!localImport && chapter.variants.size > 1) Row(
-                        Modifier.fillMaxWidth().padding(start = 5.dp, end = 5.dp, top = 1.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        ReaderSourceStack(
-                            chapter = chapter,
-                            enabled = controlsVisible && !sourceLoading && active && !leavingReader,
-                            onOpen = {
-                                sourceCloseRequested = false
-                                sourceChapter = chapter
+                            sourceContent = {
+                                if (canChooseSource || sourceLoading) Box(
+                                    Modifier.width(48.dp).heightIn(min = 44.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    if (sourceLoading) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
+                                    else ReaderSourceStack(
+                                        chapter = chapter,
+                                        enabled = controlsVisible && active && !leavingReader,
+                                        onOpen = {
+                                            sourceCloseRequested = false
+                                            sourceChapter = chapter
+                                        },
+                                    )
+                                }
                             },
                         )
-                        Spacer(Modifier.weight(1f))
-                        if (sourceLoading) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.2.dp)
+
                     }
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
                         val actionsScroll = rememberScrollState()
@@ -1775,6 +1776,7 @@ private fun ReaderProgressSlider(
     onSeek: (Int) -> Unit,
     onOpenNavigator: () -> Unit,
     onInteractionChanged: (Boolean) -> Unit,
+    sourceContent: (@Composable () -> Unit)? = null,
 ) {
     val interactions = remember { MutableInteractionSource() }
     val pressed by interactions.collectIsPressedAsState()
@@ -1797,6 +1799,7 @@ private fun ReaderProgressSlider(
 
     val colors = MaterialTheme.colorScheme
     Row(Modifier.fillMaxWidth().padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        sourceContent?.invoke()
         ReaderSeekBar(
             value = shown,
             onValueChange = { preview = it },

@@ -17,6 +17,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +35,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -71,7 +73,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInRoot
@@ -79,6 +83,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -104,11 +109,14 @@ import dev.mangaflow.ui.motion.rememberFeelFeedback
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.rememberDelayedBusy
+import dev.mangaflow.ui.motion.motionPress
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.glass.mangaHazeSource
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private enum class LibraryToolDestination { COLLECTIONS, STATS }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -133,6 +141,7 @@ fun LibraryScreen(
     var showStats by rememberSaveable { mutableStateOf(false) }
     var shelfMenuExpanded by remember { mutableStateOf(false) }
     var libraryActionsOpen by remember { mutableStateOf(false) }
+    var pendingLibraryTool by remember { mutableStateOf<LibraryToolDestination?>(null) }
     val shelfTabs = remember { listOf(GlassTabChoice("收藏", Icons.Outlined.Bookmarks), GlassTabChoice("最近阅读", Icons.Outlined.History)) }
     val preferredShelfWidth = morphGlassTabWidth(shelfTabs)
     val collections by libraryStore.pageCollections.collectAsStateWithLifecycle()
@@ -201,7 +210,7 @@ fun LibraryScreen(
         }
     }
     LaunchedEffect(active, showHistory) {
-        if (!active) { shelfMenuExpanded = false; libraryActionsOpen = false }
+        if (!active) { shelfMenuExpanded = false; libraryActionsOpen = false; pendingLibraryTool = null }
         managedId = null
         draggedFavorite = null
         dragPoint = Offset.Unspecified
@@ -357,17 +366,36 @@ fun LibraryScreen(
                 actions = {
                     toolbar {
                         Box {
-                            MotionIconButton(onClick = { libraryActionsOpen = !libraryActionsOpen; shelfMenuExpanded = false },
+                            MotionIconButton(onClick = {
+                                pendingLibraryTool = null
+                                libraryActionsOpen = !libraryActionsOpen
+                                shelfMenuExpanded = false
+                            },
                                 enabled = active, modifier = Modifier.size(44.dp)) {
                                 Icon(Icons.Outlined.MoreHoriz, "书架工具", Modifier.size(21.dp),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            CompactGlassPopover(libraryActionsOpen, backdrop, onDismiss = { libraryActionsOpen = false }) {
-                                CompactMenuAction(Icons.Outlined.Collections, "画面收藏 · " + collections.size) {
-                                    libraryActionsOpen = false; showCollections = true
+                            CompactGlassPopover(libraryActionsOpen, backdrop,
+                                onDismiss = { libraryActionsOpen = false },
+                                maximumWidth = (192.dp * density.fontScale.coerceAtLeast(1f)).coerceAtMost(208.dp),
+                                onPresenceChange = { present ->
+                                    if (!present) {
+                                        val destination = pendingLibraryTool
+                                        pendingLibraryTool = null
+                                        if (active) when (destination) {
+                                            LibraryToolDestination.COLLECTIONS -> showCollections = true
+                                            LibraryToolDestination.STATS -> showStats = true
+                                            null -> Unit
+                                        }
+                                    }
+                                }) {
+                                LibraryToolAction(Icons.Outlined.Collections, "画面收藏", collections.size.toString()) {
+                                    pendingLibraryTool = LibraryToolDestination.COLLECTIONS
+                                    libraryActionsOpen = false
                                 }
-                                CompactMenuAction(Icons.Outlined.BarChart, "阅读统计") {
-                                    libraryActionsOpen = false; showStats = true
+                                LibraryToolAction(Icons.Outlined.BarChart, "阅读统计") {
+                                    pendingLibraryTool = LibraryToolDestination.STATS
+                                    libraryActionsOpen = false
                                 }
                             }
                         }
@@ -411,6 +439,26 @@ fun LibraryScreen(
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
             .padding(horizontal = 20.dp, vertical = 12.dp))
+    }
+}
+
+
+/** Two quiet actions share the existing anchored glass shell, sized for their actual content. */
+@Composable
+private fun LibraryToolAction(icon: ImageVector, label: String, count: String? = null, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+        .motionPress(interaction, pressedScale = .98f)
+        .heightIn(min = 44.dp).padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Icon(icon, null, Modifier.size(17.dp), tint = colors.onSurface.copy(alpha = .86f))
+        Text(label, Modifier.weight(1f), fontSize = 13.sp, lineHeight = 18.sp,
+            color = colors.onSurface.copy(alpha = .86f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (count != null) Text(count, Modifier.widthIn(max = 44.dp), fontSize = 11.sp,
+            color = colors.onSurfaceVariant.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

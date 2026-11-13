@@ -11,6 +11,7 @@ import dev.mangaflow.data.sources.BodySource
 import dev.mangaflow.data.sources.BodySourceInfo
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
+import dev.mangaflow.data.plugins.ScriptBodySource
 import dev.mangaflow.storage.UnifiedChapterStore
 import dev.mangaflow.storage.ReaderCatalogStore
 import kotlinx.coroutines.CancellationException
@@ -45,10 +46,13 @@ class UnifiedMangaRepository(
     bodySources: List<BodySource> = listOf(KomiicBodySource(), MangaDexBodySource()),
     private val catalogStore: ReaderCatalogStore? = null,
 ) : MangaRepository {
-    private val adapters = bodySources.associateBy { it.info.id }
-    val sources: List<BodySourceInfo> = listOf(
-        BodySourceInfo("copy", "拷贝", "简中", "https://www.copy3000.com", ""),
-    ) + bodySources.map { it.info }
+    private val builtinAdapters = bodySources.associateBy { it.info.id }
+    private val copyInfo = BodySourceInfo("copy", "拷贝", "简中", "https://www.copy3000.com", "")
+    private data class SourceSnapshot(val adapters: Map<String, BodySource>, val infos: List<BodySourceInfo>,
+        val importedDigests: Map<String, String>)
+    @Volatile private var sourceSnapshot = SourceSnapshot(builtinAdapters, listOf(copyInfo) + bodySources.map { it.info }, emptyMap())
+    private val adapters: Map<String, BodySource> get() = sourceSnapshot.adapters
+    val sources: List<BodySourceInfo> get() = sourceSnapshot.infos
     private data class SourceEligibility(val ids: Set<String>, val generation: Long)
     @Volatile private var sourceEligibility = SourceEligibility(sources.map { it.id }.toSet(), 0L)
     private val rawCatalogs = LinkedHashMap<String, MangaDetail>()
@@ -86,11 +90,54 @@ class UnifiedMangaRepository(
     /** Installed sources remain readable; this eligibility controls search and automatic matching. */
     fun enabledSources(): Set<String> = sourceEligibility.ids.toSet()
 
-    fun setEnabledSources(ids: Set<String>) {
+    fun sourceConfigurationKey(): String {
+        val snapshot = sourceSnapshot
+        val value = sourceEligibility.ids.sorted().joinToString("|") { "$it:${snapshot.importedDigests[it].orEmpty()}" }
+        return sha256(value.encodeToByteArray())
+            .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
+    }
+
+    fun replaceImportedSources(adapters: List<BodySource>) {
+        require(adapters.size <= 64 && adapters.map { it.info.id }.distinct().size == adapters.size) { "导入源数量或身份无效。" }
+        require(adapters.all { it is ScriptBodySource && it.info.id.matches(Regex("js_[a-f0-9]{36}")) &&
+            it.info.id !in builtinAdapters && it.info.id != "copy" && it.info.id != "local" }) { "导入源不能覆盖内置来源。" }
+        val imported = adapters.associateBy { it.info.id }
+        val digests = adapters.associate { it.info.id to (it as ScriptBodySource).digest }
+        val next = SourceSnapshot(builtinAdapters + imported, listOf(copyInfo) + builtinAdapters.values.map { it.info } +
+            adapters.map { it.info }, digests)
+        val changed = synchronized(unifiedMangaRepositoryStateLock) {
+            val old = sourceSnapshot
+            if (old.importedDigests == digests) return
+            val changed = (old.importedDigests.keys + digests.keys).filter {
+                old.importedDigests[it] != digests[it]
+            }.toSet()
+            // Pair replacement with the content-generation fence before new calls can cache it.
+            synchronized(unifiedMangaRepositoryStateLock) {
+                sourceSnapshot = next
+                changed.forEach { id ->
+                    pageCacheGenerations[id] = (pageCacheGenerations[id] ?: 0L) + 1L
+                    pageCache.keys.removeAll { it.startsWith("@source/$id/") }
+                }
+            }
+            applyEnabledSources(sourceEligibility.ids, forceConfiguration = true)
+            changed
+        }
+        synchronized(unifiedMangaRepositoryStateLock) { sourceSearchCache.keys.removeAll { it.source in changed } }
+        synchronized(unifiedMangaRepositoryStateLock) { catalogFetchedAt.keys.removeAll { SourceKeys.decodeManga(it).sourceId in changed } }
+        synchronized(unifiedMangaRepositoryStateLock) {
+            searchTerms.values.forEach { terms -> changed.forEach(terms::remove) }
+            searchTerms.entries.removeAll { it.value.isEmpty() }
+        }
+        _catalogRevision.update { it + 1L }
+    }
+
+    fun setEnabledSources(ids: Set<String>) = applyEnabledSources(ids, false)
+
+    private fun applyEnabledSources(ids: Set<String>, forceConfiguration: Boolean) {
         val registered = sources.map { it.id }.toSet()
         val next = ids.intersect(registered)
         synchronized(unifiedMangaRepositoryStateLock) {
-            if (sourceEligibility.ids == next) return
+            if (!forceConfiguration && sourceEligibility.ids == next) return
             sourceEligibility = SourceEligibility(next, sourceEligibility.generation + 1L)
             val obsolete = discoveries.values.toList()
             discoveries.keys.forEach { workId ->
@@ -135,6 +182,8 @@ class UnifiedMangaRepository(
                     (!forceRefresh || it.storedAt >= requestedAt) }?.page
             }?.let { return@withLock it }
             val result = if (sourceId == "copy") copy.search(key.query, page) else adapter(sourceId).search(key.query, page)
+            if (sourceId.startsWith("js_") && synchronized(unifiedMangaRepositoryStateLock) { (pageCacheGenerations[sourceId] ?: 0L) != generation })
+                throw CancellationException("源包已更新或移除，请重新搜索。")
             if (synchronized(unifiedMangaRepositoryStateLock) { (pageCacheGenerations[sourceId] ?: 0L) == generation }) synchronized(unifiedMangaRepositoryStateLock) {
                 sourceSearchCache.remove(key)
                 if (result.items.size <= MAX_SEARCH_CACHE_HITS)
@@ -439,10 +488,13 @@ class UnifiedMangaRepository(
                 } == true }
             }?.let { return@withLock it }
             val loaded = if (sourceId == "copy") copy.detail(id) else adapter(sourceId).detail(id)
-            rememberRaw(loaded)
-            if (synchronized(unifiedMangaRepositoryStateLock) { (pageCacheGenerations[sourceId] ?: 0L) == generation })
+            synchronized(unifiedMangaRepositoryStateLock) {
+                if ((pageCacheGenerations[sourceId] ?: 0L) != generation)
+                    throw CancellationException("来源已更新或移除，请重新打开作品。")
+                rememberRaw(loaded)
                 synchronized(unifiedMangaRepositoryStateLock) { catalogFetchedAt[id] = CatalogStamp(generation, repositoryNanoTime()) }
-            catalogStore?.save(loaded)
+            }
+            catalogStore?.save(loaded) { synchronized(unifiedMangaRepositoryStateLock) { (pageCacheGenerations[sourceId] ?: 0L) == generation } }
             loaded
         }
     }
@@ -453,9 +505,14 @@ class UnifiedMangaRepository(
         // Linked catalogues refresh even when the primary source is unavailable.
         startRefresh(mangaId, force = false)
         val ref = SourceKeys.decodeManga(mangaId)
+        val generation = synchronized(unifiedMangaRepositoryStateLock) { pageCacheGenerations[ref.sourceId] ?: 0L }
         val loaded = if (ref.sourceId == "copy") copy.detail(ref.mangaId, onMetadata)
         else adapter(ref.sourceId).detail(mangaId).also { onMetadata(it.manga) }
-        rememberRaw(loaded)
+        synchronized(unifiedMangaRepositoryStateLock) {
+            if ((pageCacheGenerations[ref.sourceId] ?: 0L) != generation)
+                throw CancellationException("来源已更新或移除，请重新打开作品。")
+            rememberRaw(loaded)
+        }
         val result = withContext(Dispatchers.Default) { project(loaded) }
         // A slow/refused additional source cannot block the available base catalog.
         startRefresh(mangaId, force = false)
@@ -502,6 +559,8 @@ class UnifiedMangaRepository(
             val loaded = adapter(ref.sourceId).pages(
                 SourceKeys.manga(ref.sourceId, ref.mangaId), key, forceRefresh,
             ).toList()
+            if (ref.sourceId.startsWith("js_") && synchronized(unifiedMangaRepositoryStateLock) { (pageCacheGenerations[ref.sourceId] ?: 0L) != generation })
+                throw CancellationException("源包已更新或移除，请重新打开章节。")
             if (loaded.isEmpty()) throw SourceException("这个来源没有返回本章图片，请重试或选择其他来源。")
             currentCoroutineContext().ensureActive()
             synchronized(unifiedMangaRepositoryStateLock) {
@@ -520,15 +579,17 @@ class UnifiedMangaRepository(
         if (chapterId.isBlank()) {
             val cover = SourceKeys.decodeManga(mangaId)
             if (cover.sourceId == "copy") return copy.imageHeaders(cover.mangaId, "")
+            val installed = adapters[cover.sourceId] ?: return emptyMap()
+            (installed as? ScriptBodySource)?.let { return it.imageHeaders(mangaId, "") }
             return mapOf(
                 "User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36",
-                "Referer" to adapter(cover.sourceId).info.homeUrl.trimEnd('/') + "/",
+                "Referer" to installed.info.homeUrl.trimEnd('/') + "/",
                 "Accept" to "image/avif,image/webp,image/*,*/*;q=0.8",
             )
         }
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         return if (ref.sourceId == "copy") copy.imageHeaders(ref.mangaId, ref.chapterId)
-        else adapter(ref.sourceId).imageHeaders(SourceKeys.manga(ref.sourceId, ref.mangaId), chapterId)
+        else adapters[ref.sourceId]?.imageHeaders(SourceKeys.manga(ref.sourceId, ref.mangaId), chapterId).orEmpty()
     }
 
     suspend fun coverPage(mangaId: String, chapterId: String, forceRefresh: Boolean = false): Page {
@@ -555,7 +616,7 @@ class UnifiedMangaRepository(
     fun close() = scope.cancel()
 
     private fun adapter(id: String): BodySource = adapters[id]
-        ?: throw SourceException("这个正文来源尚未安装或当前版本不兼容。")
+        ?: throw SourceException(if (id.startsWith("js_")) "此来源已移除，请重新导入该源。" else "这个正文来源尚未安装或当前版本不兼容。")
 
     private fun rememberRaw(detail: MangaDetail) {
         synchronized(unifiedMangaRepositoryStateLock) {

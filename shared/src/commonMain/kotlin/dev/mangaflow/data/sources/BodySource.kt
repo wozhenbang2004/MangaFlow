@@ -15,6 +15,8 @@ data class BodySourceInfo(
     val language: String,
     val homeUrl: String,
     val iconUrl: String,
+    /** Applied adapter revision; imported sources use the installed code/metadata digest. */
+    val revision: String = "",
 )
 
 interface BodySource : MangaRepository {

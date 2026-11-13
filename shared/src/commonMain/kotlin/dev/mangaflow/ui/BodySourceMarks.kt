@@ -1,30 +1,27 @@
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.absoluteOffset
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
@@ -67,30 +64,30 @@ internal fun ReaderSourceStack(chapter: Chapter, modifier: Modifier = Modifier, 
         if (current == null) unique else listOf(current) + unique.filter { it.sourceId != current.sourceId }
     }
     if (sources.isEmpty()) return
+    val displayed = sources.take(3)
+    val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     val description = "当前来源：${sources.first().sourceName}，${sources.size}个来源，展开选择"
-    Row(modifier.heightIn(min = 44.dp)
+    Box(modifier.width(48.dp).heightIn(min = 44.dp)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "选择本章来源", onClick = onOpen)
         .motionPress(interaction, enabled = enabled, pressedScale = .97f)
-        .semantics(mergeDescendants = true) { contentDescription = description }
-        .padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        val mark = 24.dp
-        val step = 12.dp
-        Box(Modifier.width(mark + step * (sources.size - 1)).heightIn(min = 24.dp)) {
-            // Rear glyphs reveal their uncovered right half. This prevents transparent
-            // outline artwork showing through the front glyph without adding a tile.
-            sources.indices.reversed().forEach { index ->
-                val source = sources[index]
-                val overlap = if (index == 0) Modifier else Modifier.drawWithContent {
-                    clipRect(left = size.width * .5f) { this@drawWithContent.drawContent() }
+        .semantics(mergeDescendants = true) { contentDescription = description },
+        contentAlignment = Alignment.Center) {
+        val badge = 22.dp
+        val step = 10.dp
+        Box(Modifier.width(badge + step * (displayed.size - 1)).height(badge)) {
+            // Opaque neutral badges physically occlude the rear artwork. The selected
+            // source is drawn last, with every centre kept on the same X-axis baseline.
+            displayed.indices.reversed().forEach { index ->
+                val source = displayed[index]
+                val surface = lerp(colors.surface, colors.onSurface, .055f + .025f * index).copy(alpha = 1f)
+                Box(Modifier.absoluteOffset(x = step * index).size(badge).background(surface, CircleShape),
+                    contentAlignment = Alignment.Center) {
+                    ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(15.dp), muted = index != 0)
                 }
-                ChapterSourceLogo(source.sourceId, source.sourceName,
-                    Modifier.absoluteOffset(x = step * index).size(mark).then(overlap), muted = index != 0)
             }
         }
-        Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

@@ -799,7 +799,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         readBrowseCacheBytes = model::browseCacheSize, clearBrowseCache = model::clearBrowseCache,
                                         readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache,
                                         contentTopPadding = chromePadding,
-                                        sourceBackdrop = searchBackdrop, sourceRegistry = model.bodySources)
+                                        sourceBackdrop = searchBackdrop, sourceRegistry = model.bodySources,
+                                        sourcePlugins = model.sourcePlugins)
                                 }
                                 }
                                 }

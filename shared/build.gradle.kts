@@ -7,7 +7,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// Keep inference Java APIs small in the base APK; native engines are signed optional assets.
+// Keep Java/Kotlin APIs in the base APK; native engines are signed optional assets.
 val inferenceRuntimeAars = configurations.create("inferenceRuntimeAars") {
     isCanBeConsumed = false
     isCanBeResolved = true
@@ -36,7 +36,8 @@ tasks.register("stageInferenceAars") {
     outputs.dir(output)
     doLast {
         val expected = mapOf("litert" to "litert-1.4.2.aar",
-            "onnxruntime-android" to "onnxruntime-android-1.31.1.aar")
+            "onnxruntime-android" to "onnxruntime-android-1.31.1.aar",
+            "quickjs-kt-android" to "quickjs-kt-android-1.0.18.aar")
         val artifacts = inferenceRuntimeAars.resolvedConfiguration.resolvedArtifacts
         for ((name, fileName) in expected) {
             val source = artifacts.single { it.name == name }.file
@@ -116,10 +117,12 @@ kotlin {
             implementation("io.ktor:ktor-client-okhttp:3.6.1")
             implementation("io.coil-kt.coil3:coil-network-okhttp:3.2.0")
             implementation("com.squareup.okhttp3:okhttp:4.12.0")
+            implementation("org.jsoup:jsoup:1.18.3")
             implementation("me.saket.telephoto:zoomable-image-coil3:0.16.0")
             implementation("me.saket.telephoto:sub-sampling-image:0.16.0")
             implementation("com.google.ai.edge.litert:litert:1.4.2")
             implementation(files(optionalOnnxApi.flatMap { it.archiveFile }))
+            implementation("io.github.dokar3:quickjs-kt:1.0.18")
         }
         desktopMain.dependencies {
             implementation(compose.desktop.currentOs)
@@ -145,6 +148,7 @@ kotlin {
 
 inferenceRuntimeAars.dependencies.add(dependencies.create("com.google.ai.edge.litert:litert:1.4.2@aar"))
 inferenceRuntimeAars.dependencies.add(dependencies.create("com.microsoft.onnxruntime:onnxruntime-android:1.31.1@aar"))
+inferenceRuntimeAars.dependencies.add(dependencies.create("io.github.dokar3:quickjs-kt-android:1.0.18@aar"))
 
 // This repository's delivery policy permits compilation/packaging, not executable tests.
 tasks.configureEach {

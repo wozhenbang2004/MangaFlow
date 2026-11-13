@@ -9,6 +9,7 @@ import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.plugins.SourcePluginStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
@@ -16,12 +17,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -74,10 +80,13 @@ class LibraryStore(context: Context) {
     private val application = context.applicationContext
     private val disk by lazy { application.getSharedPreferences("mangaflow_library", PRIVATE_STORAGE) }
     private val lock = StorageLock()
+    private val backupLock = Mutex()
     private var restoreLegacyLongImages = false
     private val _favorites = MutableStateFlow<List<Manga>>(emptyList())
     private val _history = MutableStateFlow<List<ReadingProgress>>(emptyList())
     private val _chapterHistoryRevision = MutableStateFlow(0L)
+    private val _backupRestored = MutableStateFlow(0L)
+    val backupRestored: StateFlow<Long> = _backupRestored.asStateFlow()
     private val _shelfStates = MutableStateFlow<Map<String, ShelfState>>(emptyMap())
     private val _pageCollections = MutableStateFlow<List<PageCollection>>(emptyList())
     private val _readingActivity = MutableStateFlow<List<ReadingActivity>>(emptyList())
@@ -240,30 +249,37 @@ class LibraryStore(context: Context) {
     }.getOrDefault(emptyMap())
 
     suspend fun exportBackup(): String = withContext(Dispatchers.IO) {
-        awaitReady()
-        waitForProgressWriter()
-        synchronized(lock) {
-            val entries = JSONArray()
-            disk.all.entries.sortedBy { it.key }.forEach { (key, value) ->
-                val entry = JSONObject().put("key", key)
-                when (value) {
-                    is String -> entry.put("type", "string").put("value", value)
-                    is Boolean -> entry.put("type", "boolean").put("value", value)
-                    is Int -> entry.put("type", "int").put("value", value)
-                    is Long -> entry.put("type", "long").put("value", value)
-                    is Float -> entry.put("type", "float").put("value", value.toDouble())
-                    is Set<*> -> entry.put("type", "stringSet").put("value",
-                        JSONArray(value.filterIsInstance<String>().sorted()))
-                    else -> error("无法备份字段 $key")
+        backupLock.withLock {
+            awaitReady()
+            val sourceStore = SourcePluginStore.get(application)
+            sourceStore.ready.await()
+            val sourcePackages = sourceStore.exportBackup()
+            waitForProgressWriter()
+            val root = synchronized(lock) {
+                val entries = JSONArray()
+                disk.all.entries.sortedBy { it.key }.forEach { (key, value) ->
+                    val entry = JSONObject().put("key", key)
+                    when (value) {
+                        is String -> entry.put("type", "string").put("value", value)
+                        is Boolean -> entry.put("type", "boolean").put("value", value)
+                        is Int -> entry.put("type", "int").put("value", value)
+                        is Long -> entry.put("type", "long").put("value", value)
+                        is Float -> entry.put("type", "float").put("value", value.toDouble())
+                        is Set<*> -> entry.put("type", "stringSet").put("value",
+                            JSONArray(value.filterIsInstance<String>().sorted()))
+                        else -> error("无法备份字段 $key")
+                    }
+                    entries.put(entry)
                 }
-                entries.put(entry)
+                JSONObject()
+                    .put("format", BACKUP_FORMAT)
+                    .put("version", BACKUP_VERSION)
+                    .put("createdAt", wallTimeMillis())
+                    .put("entries", entries)
             }
-            JSONObject()
-                .put("format", BACKUP_FORMAT)
-                .put("version", BACKUP_VERSION)
-                .put("createdAt", wallTimeMillis())
-                .put("entries", entries)
-                .toString()
+            root.put("sourcePackages", sourcePackages).toString().also {
+                requireBackupSize(it, "阅读备份（含漫画源代码）超过 8 MiB，已停止导出。")
+            }
         }
     }
 
@@ -272,41 +288,78 @@ class LibraryStore(context: Context) {
     }
 
     suspend fun restoreBackup(encoded: String): LibraryBackupInfo = withContext(Dispatchers.IO) {
-        awaitReady()
-        val decoded = decodeBackup(encoded)
-        waitForProgressWriter()
-        synchronized(lock) {
-            val editor = disk.edit().clear()
-            decoded.values.forEach { (key, value) ->
-                when (value) {
-                    is String -> editor.putString(key, value)
-                    is Boolean -> editor.putBoolean(key, value)
-                    is Int -> editor.putInt(key, value)
-                    is Long -> editor.putLong(key, value)
-                    is Float -> editor.putFloat(key, value)
-                    is Set<*> -> editor.putStringSet(key, value.filterIsInstance<String>().toSet())
+        backupLock.withLock {
+            awaitReady()
+            // Validate every source package before either store changes. Validation never runs JS.
+            val decoded = decodeBackup(encoded)
+            val info = backupInfo(decoded)
+            waitForProgressWriter()
+            currentCoroutineContext().ensureActive()
+            // Once the validated disk writes start, leaving the screen must not cancel
+            // between the source index and library preferences.
+            withContext(NonCancellable) {
+                decoded.sourcePackages?.let { packages ->
+                    try {
+                        SourcePluginStore.get(application).restoreBackup(packages)
+                    } catch (failure: Exception) {
+                        throw IllegalStateException("漫画源恢复未完成，书架与阅读设置未替换。" +
+                            failure.message.orEmpty(), failure)
+                    }
+                }
+                waitForProgressWriter()
+                synchronized(lock) {
+                    val previous = disk.all.toMap()
+                    val writeFailure = try {
+                        if (writeBackupValues(decoded.values)) null
+                        else IllegalStateException("无法写入备份，请检查存储空间。")
+                    } catch (failure: Exception) { failure }
+                    if (writeFailure != null) {
+                        // SharedPreferences can update memory even when its disk commit fails.
+                        // Put back the original snapshot and report the source store separately.
+                        val restored = runCatching { writeBackupValues(previous) }.getOrDefault(false)
+                        val libraryState = if (restored) "书架与阅读设置未替换，原数据已保留。"
+                            else "书架与阅读设置未能完整写入，状态可能部分更新，请检查存储空间后重试。"
+                        throw IllegalStateException(if (decoded.sourcePackages != null)
+                            "漫画源已恢复；$libraryState" else libraryState, writeFailure)
+                    }
+
+                    progressEpoch++
+                    readingActivityRevision++
+                    progressWrite = null
+                    pendingChapterPositions.clear()
+                    pendingLongImagePositions.clear()
+                    pendingProgressRemovals.clear()
+                    ignoreStoredProgress = false
+                    restoreLegacyLongImages = readLegacyLongImageMigration()
+                    _favorites.value = readArray("favorites") { readManga(it) }.distinctBy(Manga::id)
+                    _history.value = readArray("history", ::readProgress).distinctBy { it.manga.id }
+                    _chapterHistoryRevision.value++
+                    _shelfStates.value = readShelfStates()
+                    _pageCollections.value = readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key)
+                    _readingActivity.value = readArray(READING_ACTIVITY_KEY, ::readReadingActivity).distinctBy { it.manga.id }
+                    _preferences.value = readPreferences()
+                    _mangaPreferences.value = readMangaPreferences()
+                    _backupRestored.value++
+                    info
                 }
             }
-            check(UnifiedChapterStore.withLibraryRestore { editor.commit() }) { "无法写入备份，请检查存储空间" }
-
-            progressEpoch++
-            readingActivityRevision++
-            progressWrite = null
-            pendingChapterPositions.clear()
-            pendingLongImagePositions.clear()
-            pendingProgressRemovals.clear()
-            ignoreStoredProgress = false
-            restoreLegacyLongImages = readLegacyLongImageMigration()
-            _favorites.value = readArray("favorites") { readManga(it) }.distinctBy(Manga::id)
-            _history.value = readArray("history", ::readProgress).distinctBy { it.manga.id }
-            _chapterHistoryRevision.value++
-            _shelfStates.value = readShelfStates()
-            _pageCollections.value = readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key)
-            _readingActivity.value = readArray(READING_ACTIVITY_KEY, ::readReadingActivity).distinctBy { it.manga.id }
-            _preferences.value = readPreferences()
-            _mangaPreferences.value = readMangaPreferences()
-            backupInfo(decoded)
         }
+    }
+
+    private fun writeBackupValues(values: Map<String, Any?>): Boolean {
+        val editor = disk.edit().clear()
+        values.forEach { (key, value) ->
+            when (value) {
+                is String -> editor.putString(key, value)
+                is Boolean -> editor.putBoolean(key, value)
+                is Int -> editor.putInt(key, value)
+                is Long -> editor.putLong(key, value)
+                is Float -> editor.putFloat(key, value)
+                is Set<*> -> editor.putStringSet(key, value.filterIsInstance<String>().toSet())
+                else -> error("备份字段 $key 的值不支持")
+            }
+        }
+        return UnifiedChapterStore.withLibraryRestore { editor.commit() }
     }
 
     private suspend fun waitForProgressWriter() {
@@ -330,9 +383,11 @@ class LibraryStore(context: Context) {
     private data class DecodedBackup(
         val createdAt: Long,
         val values: Map<String, Any>,
+        val sourcePackages: JSONArray?,
     )
 
-    private fun decodeBackup(encoded: String): DecodedBackup {
+    private suspend fun decodeBackup(encoded: String): DecodedBackup {
+        requireBackupSize(encoded, "阅读备份超过 8 MiB，已停止读取。")
         val root = JSONObject(encoded)
         require(root.optString("format") == BACKUP_FORMAT) { "这不是 MangaFlow 备份文件" }
         require(root.optInt("version") == BACKUP_VERSION) { "备份版本暂不支持" }
@@ -358,7 +413,27 @@ class LibraryStore(context: Context) {
         }
         (values[UnifiedChapterStore.KEY] as? String)?.let { UnifiedChapterStore.validateBackup(it) }
         (values[UnifiedChapterStore.ANCHOR_KEY] as? String)?.let { UnifiedChapterStore.validateAnchors(it) }
-        return DecodedBackup(root.optLong("createdAt").coerceAtLeast(0L), values)
+        val sourcePackages = if (root.has("sourcePackages")) {
+            val packages = root.optJSONArray("sourcePackages") ?: error("备份中的漫画源列表格式无效。")
+            require(packages.length() <= MAX_BACKUP_SOURCE_PACKAGES) { "备份中的漫画源超过 64 个。" }
+            var packageBytes = 0L
+            repeat(packages.length()) { index ->
+                val item = packages.optJSONObject(index) ?: error("备份中的第 ${index + 1} 个漫画源格式无效。")
+                packageBytes += item.toString().encodeToByteArray().size
+                require(packageBytes <= MAX_BACKUP_BYTES) { "备份中的漫画源内容超过 8 MiB。" }
+            }
+            val sourceStore = SourcePluginStore.get(application)
+            sourceStore.ready.await()
+            sourceStore.validateBackup(packages)
+            packages
+        } else null
+        return DecodedBackup(root.optLong("createdAt").coerceAtLeast(0L), values, sourcePackages)
+    }
+
+    private fun requireBackupSize(encoded: String, message: String) {
+        require(encoded.length <= MAX_BACKUP_BYTES && encoded.encodeToByteArray().size <= MAX_BACKUP_BYTES) {
+            message
+        }
     }
 
     private fun backupInfo(decoded: DecodedBackup): LibraryBackupInfo {
@@ -899,6 +974,8 @@ class LibraryStore(context: Context) {
     private companion object {
         const val BACKUP_FORMAT = "MangaFlowLibraryBackup"
         const val BACKUP_VERSION = 1
+        const val MAX_BACKUP_BYTES = 8 * 1024 * 1024
+        const val MAX_BACKUP_SOURCE_PACKAGES = 64
         const val SHELF_STATES_KEY = "shelf_states"
         const val PAGE_COLLECTIONS_KEY = "page_collections"
         const val READING_ACTIVITY_KEY = "reading_activity"
@@ -937,6 +1014,7 @@ internal fun Manga.toJson(): JSONObject = JSONObject().apply {
     put("sourceUuid", sourceUuid)
     put("sourceId", sourceId)
     put("sourceMangaId", sourceMangaId)
+    put("sourceName", sourceName)
 }
 
 internal fun readManga(json: JSONObject): Manga = Manga(
@@ -962,6 +1040,7 @@ internal fun readManga(json: JSONObject): Manga = Manga(
         else "copy"
     },
     sourceMangaId = json.optString("sourceMangaId"),
+    sourceName = json.optString("sourceName"),
 )
 
 internal fun Chapter.toJson(): JSONObject = JSONObject().apply {

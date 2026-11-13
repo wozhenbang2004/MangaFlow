@@ -68,7 +68,7 @@ internal fun SearchSourceMarks(
                 verticalAlignment = Alignment.CenterVertically) {
                 grouped.forEach { sourceMatches ->
                     val source = sourceMatches.first()
-                    val name = sourceDisplayName(source.sourceId)
+                    val name = source.sourceName.ifBlank { sourceDisplayName(source.sourceId) }
                     val interaction = remember(source.sourceId) { MutableInteractionSource() }
                     val description = if (sourceMatches.size == 1) "打开${name}的搜索结果"
                         else "$name，${sourceMatches.size}条搜索结果，选择条目"
@@ -89,7 +89,7 @@ internal fun SearchSourceMarks(
         return
     }
     BoxWithConstraints(modifier.height(18.dp).semantics {
-        contentDescription = "正文来源：" + sources.joinToString("、") { sourceDisplayName(it.sourceId) }
+        contentDescription = "正文来源：" + sources.joinToString("、") { it.sourceName.ifBlank { sourceDisplayName(it.sourceId) } }
     }) {
         val mark = 13.dp
         val flat = maxWidth >= mark * sources.size + 5.dp * (sources.size - 1)
@@ -98,7 +98,7 @@ internal fun SearchSourceMarks(
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
             sources.indices.reversed().forEach { index ->
                 val source = sources[index]
-                ChapterSourceLogo(source.sourceId, sourceDisplayName(source.sourceId),
+                ChapterSourceLogo(source.sourceId, source.sourceName.ifBlank { sourceDisplayName(source.sourceId) },
                     Modifier.absoluteOffset(x = step * index).size(mark), muted = true)
             }
         }
@@ -183,7 +183,7 @@ internal fun FederatedSearchChoices(
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 items(frozen, key = { federatedMangaIdentity(it) }) { manga ->
                     val sourceMatches = bySource.getValue(manga.sourceId)
-                    val sourceName = sourceDisplayName(manga.sourceId)
+                    val sourceName = manga.sourceName.ifBlank { sourceDisplayName(manga.sourceId) }
                     val entryNumber = sourceMatches.indexOf(manga) + 1
                     val authors = manga.authors.filter { it.isNotBlank() }.joinToString(" · ")
                     val details = listOfNotNull(

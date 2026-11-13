@@ -77,7 +77,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         it in ABIS && (it in ABIS_64) == Process.is64Bit()
     }
     private val mutableStates = MutableStateFlow(PanelRuntimeId.entries.associateWith {
-        PanelRuntimeState(error = if (abi == null) "当前应用进程的架构暂不支持 AI 运行库" else null)
+        PanelRuntimeState(error = if (abi == null) "当前应用进程的架构暂不支持可选运行库" else null)
     })
     actual val states: StateFlow<Map<PanelRuntimeId, PanelRuntimeState>> = mutableStates.asStateFlow()
     private val client = OkHttpClient.Builder()
@@ -138,7 +138,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             if (states.value.getValue(id).pendingRemoval) { updateError(id, "运行库已安排在重启后删除"); return }
             if (id in touched) { updateError(id, "运行库已在本次启动中使用，请完全退出应用后再管理"); return }
             if (installed.containsKey(id)) return
-            if (abi == null) { updateError(id, "当前应用进程的架构暂不支持 AI 运行库"); return }
+            if (abi == null) { updateError(id, "当前应用进程的架构暂不支持可选运行库"); return }
             val job = scope.launch(start = CoroutineStart.LAZY) { downloadRuntime(id) }
             downloads[id] = job
             job.invokeOnCompletion {
@@ -195,7 +195,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         } finally { synchronized(control) { removing.remove(id) } }
     }
 
-    /** Must finish before the caller initializes any TensorFlow Lite / ONNX inference API. */
+    /** Must finish before the caller initializes any inference or QuickJS native API. */
     suspend fun ensureLoaded(id: PanelRuntimeId): Unit = withContext(Dispatchers.IO) {
         ready.await()
         loadGate.withLock {
@@ -231,6 +231,12 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                             System.setProperty("mangaflow.onnx.native.dir", root.absolutePath)
                             System.load(File(root, "libonnxruntime.so").absolutePath)
                             System.load(File(root, "libonnxruntime4j_jni.so").absolutePath)
+                        }
+                        PanelRuntimeId.QUICKJS -> {
+                            // The upstream Android loader reads this trusted path before create().
+                            System.setProperty("com.dokar.quickjs.library.path", root.absolutePath)
+                            System.setProperty("com.dokar.quickjs.library.name", "libquickjs.so")
+                            System.load(File(root, "libquickjs.so").absolutePath)
                         }
                     }
                     mutableStates.update { old -> old + (id to old.getValue(id).copy(loaded = true, error = null)) }
@@ -414,7 +420,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         require(code in 1..2_100_000_000L && name.matches(SIMPLE_NAME) && root.getString("sourceCommit").matches(COMMIT)) { "运行库发布身份无效" }
         if (currentRelease) require(code == appVersionCode.toLong() && name == appVersionName) { "运行库版本与当前应用不匹配" }
         val values = root.getJSONArray("runtimes")
-        require(values.length() == PanelRuntimeId.entries.size * ABIS.size) { "运行库目录条目不完整" }
+        require(values.length() in ABIS.size..PanelRuntimeId.entries.size * ABIS.size) { "运行库目录条目不完整" }
         val entries = (0 until values.length()).map { index ->
             val value = values.getJSONObject(index)
             val id = PanelRuntimeId.valueOf(value.getString("id"))
@@ -448,6 +454,14 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             Entry(id, version, runtimeAbi, archiveUrl, archiveBytes, archiveHash, files)
         }
         require(entries.map { it.id to it.abi }.toSet().size == entries.size) { "运行库目录包含重复架构" }
+        val runtimeIds = entries.map { it.id }.toSet()
+        // Existing, same-signer LiteRT/ONNX receipts predate the optional script engine.
+        // New release catalogs must contain every engine; only local legacy receipts may omit it.
+        require(runtimeIds == PanelRuntimeId.entries.toSet() || !currentRelease &&
+            runtimeIds == setOf(PanelRuntimeId.LITERT, PanelRuntimeId.ONNX)) { "运行库目录缺少必要引擎" }
+        require(entries.map { it.id to it.abi }.toSet() == runtimeIds.flatMap { id -> ABIS.map { id to it } }.toSet()) {
+            "运行库目录条目不完整"
+        }
         return entries
     }
 
@@ -622,9 +636,14 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         private val SPECS = mapOf(
             PanelRuntimeId.LITERT to PanelRuntimeSpec(PanelRuntimeId.LITERT, "轻量 AI 运行库", "1.4.2", "运行 YOLO26 Nano，仅下载当前应用架构所需组件", "Apache-2.0"),
             PanelRuntimeId.ONNX to PanelRuntimeSpec(PanelRuntimeId.ONNX, "高精度与排序运行库", "1.31.1", "运行 Koharu 和 Inkwell，两个模型共用此运行库", "MIT"),
+            PanelRuntimeId.QUICKJS to PanelRuntimeSpec(PanelRuntimeId.QUICKJS, "漫画源脚本引擎", "1.0.18",
+                "供你导入的第三方漫画源脚本使用，仅下载当前应用架构所需组件", "Apache-2.0 / MIT"),
         )
-        private fun libraryNames(id: PanelRuntimeId): Set<String> = if (id == PanelRuntimeId.LITERT)
-            setOf("libtensorflowlite_jni.so") else setOf("libonnxruntime.so", "libonnxruntime4j_jni.so")
+        private fun libraryNames(id: PanelRuntimeId): Set<String> = when (id) {
+            PanelRuntimeId.LITERT -> setOf("libtensorflowlite_jni.so")
+            PanelRuntimeId.ONNX -> setOf("libonnxruntime.so", "libonnxruntime4j_jni.so")
+            PanelRuntimeId.QUICKJS -> setOf("libquickjs.so")
+        }
         @Volatile private var instance: PanelRuntimeStore? = null
         actual fun get(context: Context): PanelRuntimeStore = instance ?: synchronized(this) {
             instance ?: PanelRuntimeStore(context).also { instance = it }

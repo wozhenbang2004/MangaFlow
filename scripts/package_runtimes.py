@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package pinned native inference libraries as optional, architecture-specific release assets."""
+"""Package pinned native engines as optional, architecture-specific release assets."""
 
 import argparse
 import hashlib
@@ -25,6 +25,11 @@ SPECS = (
         "libraries": ("libonnxruntime.so", "libonnxruntime4j_jni.so"),
         "licenses": ("ONNX-Runtime-MIT.txt", "ONNX-Runtime-ThirdPartyNotices.txt"),
     },
+    {
+        "id": "QUICKJS", "version": "1.0.18", "aar": "quickjs-kt-android-1.0.18.aar",
+        "libraries": ("libquickjs.so",),
+        "licenses": ("QuickJS-kt-APACHE-2.0.txt", "QuickJS-MIT.txt", "c-vector-MIT.txt"),
+    },
 )
 LIBRARY_NAMES = {name for spec in SPECS for name in spec["libraries"]}
 MAX_LIBRARY_BYTES = 128 * 1024 * 1024
@@ -49,10 +54,10 @@ def require_small_apk(apk):
         models = [entry.filename for entry in archive.infolist()
                   if entry.filename.lower().endswith((".onnx", ".tflite", ".safetensors", ".pt"))]
     if bundled:
-        raise RuntimeError("Optional inference libraries are still bundled in the APK: " + ", ".join(bundled))
+        raise RuntimeError("Optional native libraries are still bundled in the APK: " + ", ".join(bundled))
     if models:
         raise RuntimeError("Optional model weights are still bundled in the APK: " + ", ".join(models))
-    print(f"Confirmed optional inference libraries and model weights are absent from {apk.name}")
+    print(f"Confirmed optional native libraries and model weights are absent from {apk.name}")
 
 
 def require_elf(data, abi, name):

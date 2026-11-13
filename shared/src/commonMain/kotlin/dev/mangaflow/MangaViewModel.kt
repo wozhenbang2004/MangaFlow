@@ -41,6 +41,8 @@ import dev.mangaflow.data.SourceDiscoveryStatus
 import dev.mangaflow.data.FederatedSearchSource
 import dev.mangaflow.data.FederatedSearchGroup
 import dev.mangaflow.data.FederatedSearchGrouper
+import dev.mangaflow.data.plugins.ScriptBodySource
+import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.data.sources.BaoziBodySource
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
@@ -218,6 +220,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(), komiicSource, MangaDexBodySource()),
         catalogStore = ReaderCatalogStore(application))
     val bodySources = BodySourceRegistry(application, repository.sources)
+    val sourcePlugins = SourcePluginStore.get(application)
+    private val pluginSourceSync = Mutex()
     val library = LibraryStore(application)
     val downloads = DownloadStore.get(application)
     val updates = UpdateManager.get(application)
@@ -312,6 +316,48 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         repository.setEnabledSources(bodySources.enabledSourceIds)
         showBrowse(_browse.value)
         restoreAccount()
+        viewModelScope.launch {
+            try {
+                sourcePlugins.ready.await()
+                sourcePlugins.installed.collect { packages ->
+                    try {
+                        val scope = withContext(Dispatchers.Default) {
+                            pluginSourceSync.withLock {
+                                repository.replaceImportedSources(packages.map { ScriptBodySource(it, sourcePlugins.runtime) })
+                                bodySources.updateInstalledSources(repository.sources)
+                                repository.setEnabledSources(bodySources.enabledSourceIds)
+                                repository.sourceConfigurationKey()
+                            }
+                        }
+                        val current = _browse.value
+                        if (current.isFederatedSearch && current.sourceScope != scope) showBrowse(current.copy(
+                            items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
+                            searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
+                            loading = true, loadingMore = false, refreshing = false, error = null,
+                            failedPage = null, page = 0, updatedAt = 0,
+                        ))
+                    } catch (cancel: CancellationException) { throw cancel
+                    } catch (failure: Exception) {
+                        messages.send(failure.message ?: "第三方源已保存，但暂未接入，请在源设置中重试导入。")
+                    }
+                }
+            } catch (cancel: CancellationException) { throw cancel
+            } catch (failure: Exception) {
+                messages.send(failure.message ?: "第三方源未能加载，可在漫画源设置中重新导入。")
+            }
+        }
+        viewModelScope.launch {
+            library.backupRestored.drop(1).collect {
+                try {
+                    bodySources.reload()
+                    _sourceResumePolicy.value = sourcePreferences.getString("source_resume_policy", "ask")
+                        ?.takeIf { it in setOf("ask", "same_page", "source_record") } ?: "ask"
+                } catch (cancel: CancellationException) { throw cancel
+                } catch (failure: Exception) {
+                    messages.send(failure.message ?: "漫画源设置未能刷新，请重新打开应用。")
+                }
+            }
+        }
         viewModelScope.launch {
             bodySources.entries.collect {
                 val enabled = bodySources.enabledSourceIds
@@ -474,7 +520,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val requestId = ++browseRequestId
         val generation = browseCache.generation
         val configured = selection.copy(availableTags = knownSearchTags,
-            sourceScope = repository.enabledSources().sorted().joinToString(","))
+            sourceScope = repository.sourceConfigurationKey())
         val memory = browseCache.cached(configured.cacheKey)
         _browse.value = memory?.restore(configured) ?: configured
         browseJob = viewModelScope.launch {

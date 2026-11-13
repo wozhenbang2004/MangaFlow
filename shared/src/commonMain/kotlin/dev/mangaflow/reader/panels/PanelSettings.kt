@@ -140,7 +140,7 @@ internal fun PanelModelsDialog(visible: Boolean, backdrop: HazeState, onDismiss:
                         color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
                     Text("运行组件", color = colors.onSurfaceVariant, fontSize = 12.sp,
                         fontWeight = FontWeight.Medium)
-                    PanelRuntimeId.entries.forEach { id ->
+                    listOf(PanelRuntimeId.LITERT, PanelRuntimeId.ONNX).forEach { id ->
                         val spec = runtimes.spec(id)
                         val state = components[id] ?: PanelRuntimeState()
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

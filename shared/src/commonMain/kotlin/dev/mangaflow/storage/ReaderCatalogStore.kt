@@ -34,9 +34,10 @@ class ReaderCatalogStore(context: Context) {
         }
     }
 
-    suspend fun save(detail: MangaDetail) = withContext(Dispatchers.IO) {
+    suspend fun save(detail: MangaDetail, isCurrent: () -> Boolean = { true }) = withContext(Dispatchers.IO) {
         if (detail.chapters.isEmpty()) return@withContext
         synchronized(lock) {
+            if (!isCurrent()) return@synchronized
             // A full disk may prevent caching, but must not stop a readable online chapter.
             runCatching {
                 check(root.isDirectory || root.mkdirs())
@@ -45,6 +46,7 @@ class ReaderCatalogStore(context: Context) {
                     put("chapters", JSONArray(detail.chapters.map { it.toJson() }))
                 }.toString().encodeToByteArray()
                 val file = AtomicFile(fileFor(detail.manga.id))
+                if (!isCurrent()) return@runCatching
                 val stream = file.startWrite()
                 try {
                     stream.write(bytes)

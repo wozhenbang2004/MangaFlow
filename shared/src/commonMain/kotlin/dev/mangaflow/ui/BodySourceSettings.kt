@@ -1,5 +1,8 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -46,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.storage.BodySourceRegistryEntry
 import dev.mangaflow.ui.motion.MotionBottomSheet
@@ -62,14 +66,26 @@ import kotlinx.coroutines.launch
 internal fun BodySourceSettingsSheet(
     registry: BodySourceRegistry,
     backdrop: HazeState?,
+    plugins: SourcePluginStore? = null,
     onDismiss: () -> Unit,
 ) {
+    val scriptImportSupported = platformKind == PlatformKind.ANDROID
     val entries by registry.entries.collectAsStateWithLifecycle()
-    val added = entries.filterNot { it.removed }
-    val removed = entries.filter { it.removed }
+    val packages = if (plugins != null) {
+        val installed by plugins.installed.collectAsStateWithLifecycle()
+        installed
+    } else emptyList()
+    val sourceLoadError = if (plugins != null) {
+        val error by plugins.loadError.collectAsStateWithLifecycle()
+        error
+    } else null
+    val scriptPackages = packages.associateBy { it.sourceId }
+    val added = entries.filter { !it.removed || it.source.id in scriptPackages }
+    val removed = entries.filter { it.removed && !it.source.id.startsWith("js_") }
     val colors = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
     var adding by remember { mutableStateOf(false) }
+    var importing by remember { mutableStateOf(false) }
     var busyId by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var failed by remember { mutableStateOf(false) }
@@ -125,10 +141,39 @@ internal fun BodySourceSettingsSheet(
             LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false),
                 contentPadding = PaddingValues(start = 20.dp, end = 12.dp, bottom = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                sourceLoadError?.let { message -> item(key = "source-storage-error") {
+                    Text(message, fontSize = 11.sp, lineHeight = 16.sp, color = colors.error,
+                        modifier = Modifier.padding(end = 8.dp, bottom = 6.dp)
+                            .semantics { liveRegion = LiveRegionMode.Polite })
+                } }
                 items(added, key = { "added:${it.source.id}" }) { entry ->
                     BodySourceSettingsRow(entry, enabled = busyId == null, busy = busyId == entry.source.id,
-                        onToggle = { value -> change(entry, "toggle") { registry.setEnabled(entry.source.id, value) } },
-                        onRemove = { change(entry, "remove") { registry.remove(entry.source.id) } })
+                        kind = scriptPackages[entry.source.id]?.let {
+                            "JS" + it.metadata.optString("version").takeIf(String::isNotBlank)?.let { version -> " · $version" }.orEmpty()
+                        },
+                        onToggle = { value -> change(entry, "toggle") {
+                            if (value && entry.removed) registry.restore(entry.source.id)
+                            else registry.setEnabled(entry.source.id, value)
+                        } },
+                        onRemove = { change(entry, "remove") {
+                            registry.remove(entry.source.id)
+                            if (entry.source.id in scriptPackages) plugins?.remove(entry.source.id)
+                        } })
+                }
+                if (plugins != null && scriptImportSupported) item(key = "import-script-source") {
+                    val interaction = remember { MutableInteractionSource() }
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
+                        .clickable(enabled = busyId == null, interactionSource = interaction, indication = null,
+                            role = Role.Button, onClickLabel = "导入第三方 JS 漫画源",
+                            onClick = { importing = true })
+                        .motionPress(interaction, enabled = busyId == null, pressedScale = .99f).padding(end = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Add, null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("导入第三方源", fontSize = 13.sp)
+                            Text("JS 文件或 HTTPS 源库链接", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                        }
+                    }
                 }
                 item(key = "add-sources") {
                     val interaction = remember { MutableInteractionSource() }
@@ -168,13 +213,22 @@ internal fun BodySourceSettingsSheet(
                     }
                 }
                 item(key = "builtin-source-note") {
-                    Text("当前为内置源；扩展导入尚未接入。移除仅停用并隐藏该源，不删除阅读记录与下载。",
+                    Text(when {
+                        !scriptImportSupported -> "第三方脚本源暂仅 Android 支持。阅读记录与下载保留。"
+                        plugins == null -> "当前为内置源。移除仅停用并隐藏该源，记录与下载保留。"
+                        else -> "内置源移除后可在此恢复；JS 源移除后需重新导入。阅读记录与下载均保留。"
+                    },
                         fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant,
                         modifier = Modifier.padding(top = 4.dp, end = 8.dp))
                 }
             }
         }
     }
+    if (importing && plugins != null && scriptImportSupported) SourceImportSheet(plugins, registry, backdrop,
+        onDismiss = { importing = false }, onImported = { name ->
+            notice = "已导入并启用$name。"
+            failed = false
+        })
 }
 
 @Composable
@@ -182,6 +236,7 @@ private fun BodySourceSettingsRow(
     entry: BodySourceRegistryEntry,
     enabled: Boolean,
     busy: Boolean,
+    kind: String? = null,
     onToggle: (Boolean) -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -193,7 +248,7 @@ private fun BodySourceSettingsRow(
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(entry.source.name, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(listOf(entry.source.language, if (entry.enabled) "已启用" else "已关闭",
-                if (entry.isProtected) "核心" else "内置").filter { it.isNotBlank() }.joinToString(" · "),
+                if (entry.isProtected) "核心" else kind ?: "内置").filter { it.isNotBlank() }.joinToString(" · "),
                 fontSize = 11.sp, color = colors.onSurfaceVariant)
         }
         Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp))
