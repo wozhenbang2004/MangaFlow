@@ -529,10 +529,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 actions()
                             }
                             }
-                            Box(Modifier.fillMaxSize()
-                                .then(if (current.section !in setOf(Section.DISCOVER, Section.DOWNLOADS, Section.LIBRARY))
-                                    Modifier.hazeSource(searchBackdrop) else Modifier)
-                                .padding(top = if (current.section in setOf(Section.DISCOVER, Section.DOWNLOADS, Section.LIBRARY)) 0.dp else chromePadding)) {
+                            val rootCapturesBackground = current.section in setOf(Section.ACCOUNT, Section.SETTINGS)
+                            Box(Modifier.fillMaxSize().then(if (rootCapturesBackground)
+                                Modifier.hazeSource(searchBackdrop).background(MaterialTheme.colorScheme.background)
+                                else Modifier)) {
+                                // The full backdrop includes the pixels beneath the menu button.
+                                // Content clearance belongs to the foreground, outside this capture's bounds.
+                                if (rootCapturesBackground) backdropWallpaper()
+                                Box(Modifier.fillMaxSize().padding(top = if (rootCapturesBackground) chromePadding else 0.dp)) {
                                 when (current.section) {
                                     Section.DISCOVER -> DiscoverScreen(
                                         state = browse, repository = model.repository,
@@ -581,6 +585,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications,
                                         readBrowseCacheBytes = model::browseCacheSize, clearBrowseCache = model::clearBrowseCache,
                                         readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache)
+                                }
                                 }
                             }
                             if (current.section in setOf(Section.ACCOUNT, Section.SETTINGS)) {

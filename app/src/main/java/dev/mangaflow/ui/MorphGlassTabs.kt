@@ -29,22 +29,18 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -95,54 +91,25 @@ private fun GlassTabLabel(choice: GlassTabChoice, modifier: Modifier = Modifier,
     }
 }
 
-@Composable
-internal fun MorphGlassTabTrigger(
-    backdrop: HazeState,
-    choices: List<GlassTabChoice>,
-    selected: Int,
-    collapsedWidth: Dp,
-    expanded: Boolean,
-    covered: Boolean = false,
-    enabled: Boolean = true,
-    onToggle: () -> Unit,
-) {
-    val interaction = remember { MutableInteractionSource() }
-    LiquidGlassSurface(backdrop, Modifier.graphicsLayer {
-        alpha = if (covered) 0f else 1f
-        compositingStrategy = CompositingStrategy.ModulateAlpha
-    }, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-        trackPointer = !covered && enabled) {
-        GlassTabLabel(choices[selected], Modifier.width(collapsedWidth).clip(RoundedCornerShape(22.dp))
-            .motionInputGate(!covered)
-            .clickable(interactionSource = interaction, indication = null, role = Role.Button,
-                enabled = enabled && !covered, onClickLabel = if (expanded) "收起分类" else "展开分类",
-                onClick = onToggle)
-            .motionPress(interaction, enabled && !covered, .985f)
-            .semantics {
-                contentDescription = "切换分类，当前" + choices[selected].label
-                stateDescription = if (expanded) "已展开" else "已收起"
-            })
-    }
-}
-
 /**
- * The menu lives in the SAME window and Haze scene as the scrolling wallpaper.
- * Opening grows the capsule from its original top-row anchor without remeasuring the list.
- * A separate Popup window would lose the original backdrop capture on some devices.
+ * One permanently mounted surface owns the closed capsule, expansion and return.
+ * The header reserves a layout slot only: no second glass/label is swapped in at rest.
  */
 @Composable
-internal fun BoxScope.MorphGlassTabOverlay(
+internal fun BoxScope.MorphGlassTabSelector(
     backdrop: HazeState,
     choices: List<GlassTabChoice>,
     selected: Int,
     collapsedWidth: Dp,
     expanded: Boolean,
+    onToggle: () -> Unit,
     onDismiss: () -> Unit,
-    onPresenceChange: (Boolean) -> Unit = {},
+    enabled: Boolean = true,
     onSelect: (Int) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
     val haptic = LocalHapticFeedback.current
+    val interaction = remember { MutableInteractionSource() }
     val presence = remember { MutableTransitionState(false) }
     presence.targetState = expanded
     val transition = updateTransition(presence, label = "header-tab-morph")
@@ -150,12 +117,8 @@ internal fun BoxScope.MorphGlassTabOverlay(
         if (motion) spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness)
         else snap()
     }, label = "header-tab-expansion") { if (it) 1f else 0f }
-    BackHandler(expanded) { onDismiss() }
+    BackHandler(enabled && expanded) { onDismiss() }
     val present = presence.currentState || presence.targetState || !presence.isIdle
-    val reportPresence by rememberUpdatedState(onPresenceChange)
-    SideEffect { reportPresence(present) }
-    DisposableEffect(Unit) { onDispose { reportPresence(false) } }
-    if (!present) return
     val progress = animation.value.coerceIn(0f, 1f)
     if (expanded) {
         Box(Modifier.fillMaxSize().zIndex(40f).clickable(
@@ -169,17 +132,14 @@ internal fun BoxScope.MorphGlassTabOverlay(
     val height = 44.dp + (extendedHeight - 44.dp) * progress
     LiquidGlassSurface(backdrop,
         modifier = Modifier.align(Alignment.TopStart).zIndex(41f)
-            .padding(start = 62.dp, top = 2.dp).width(width).height(height).motionInputGate(expanded),
+            .padding(start = 62.dp, top = 2.dp).width(width).height(height),
         cornerRadius = 22.dp - 4.dp * progress, role = GlassSurfaceRole.NAVIGATION,
-        trackPointer = false) {
-        GlassTabLabel(choices[selected], Modifier.width(collapsedWidth).graphicsLayer {
-            alpha = (1f - progress * 2.4f).coerceIn(0f, 1f)
-        }, expansion = { progress })
+        interactionSource = interaction, materialReferenceSize = 44.dp, trackPointer = false) {
         // Lay out menu labels once at their final size; only the surface clips/reveals them.
-        Column(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true)
+        if (present) Column(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true)
             .size(width = extendedWidth, height = extendedHeight).graphicsLayer {
             alpha = ((progress - .25f) / .65f).coerceIn(0f, 1f)
-        }.motionInputGate(expanded && progress >= .7f)
+        }.motionInputGate(enabled && expanded && progress >= .7f)
             .padding(4.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
             choices.forEachIndexed { index, choice ->
                 val interaction = remember(index) { MutableInteractionSource() }
@@ -187,14 +147,14 @@ internal fun BoxScope.MorphGlassTabOverlay(
                 val selectionTint = MaterialTheme.colorScheme.onSurface.copy(alpha = .075f)
                 Row(Modifier.fillMaxWidth().height(rowHeight).clip(RoundedCornerShape(12.dp))
                     .background(if (active) selectionTint else Color.Transparent)
-                    .clickable(enabled = expanded && progress >= .7f,
+                    .clickable(enabled = enabled && expanded && progress >= .7f,
                         interactionSource = interaction, indication = null,
                         role = Role.Tab, onClickLabel = "显示" + choice.label,
                         onClick = {
                             if (index != selected) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             onSelect(index)
                         })
-                    .motionPress(interaction, expanded, .985f)
+                    .motionPress(interaction, enabled && expanded, .985f)
                     .padding(horizontal = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -210,5 +170,17 @@ internal fun BoxScope.MorphGlassTabOverlay(
                 }
             }
         }
+        // At the end this IS the trigger, not a replica handed to another render node.
+        // Remove its pointer node while hidden so it cannot cover the menu's first row.
+        val labelInteractive = enabled && !expanded && progress <= .4f
+        GlassTabLabel(choices[selected], Modifier.width(collapsedWidth).graphicsLayer {
+            alpha = (1f - progress * 2.4f).coerceIn(0f, 1f)
+        }.then(if (labelInteractive) Modifier.clickable(interactionSource = interaction,
+            indication = null, role = Role.Button, onClickLabel = "展开分类", onClick = onToggle)
+            .semantics {
+                contentDescription = "切换分类，当前" + choices[selected].label
+                stateDescription = "已收起"
+            } else Modifier.clearAndSetSemantics { })
+            .motionPress(interaction, labelInteractive, .985f), expansion = { progress })
     }
 }

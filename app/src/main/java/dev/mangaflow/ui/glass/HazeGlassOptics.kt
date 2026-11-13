@@ -26,7 +26,12 @@ import android.graphics.RenderEffect as AndroidEffect
 /** Haze 1.6 transports a padded sharp backdrop; this owns its optical response. */
 @RequiresApi(33)
 internal class HazeGlassOptics {
-    private val programs = GlassPrograms.value
+    // RuntimeShader uniforms and ShaderBrush are mutable. Each remembered surface owns
+    // its programs, so another panel's size/interaction cannot alter a cached draw.
+    private val programs = try { GlassPrograms() } catch (failure: RuntimeException) {
+        Log.w("MangaFlowGlass", "Glass shader unavailable; using the frosted surface", failure)
+        null
+    }
     private var previous: OpticalFrame? = null
     private var cached: RenderEffect? = null
     private var previousDepth: Pair<Float, Float>? = null
@@ -142,18 +147,10 @@ internal class HazeGlassOptics {
     )
 }
 
-/** Compile once. Effect creation and immediate rim drawing snapshot the shared uniforms. */
+/** Created once per remembered optical surface, never inside a frame or resize callback. */
 @RequiresApi(33)
-private object GlassPrograms {
-    class Programs {
-        val optical = RuntimeShader(HazeOpticalShader)
-        val rim = RuntimeShader(HazeRimShader)
-        val rimBrush = ShaderBrush(rim)
-    }
-    val value: Programs? by lazy(LazyThreadSafetyMode.NONE) {
-        try { Programs() } catch (failure: RuntimeException) {
-            Log.w("MangaFlowGlass", "Glass shader unavailable; using the frosted surface", failure)
-            null
-        }
-    }
+private class GlassPrograms {
+    val optical = RuntimeShader(HazeOpticalShader)
+    val rim = RuntimeShader(HazeRimShader)
+    val rimBrush = ShaderBrush(rim)
 }

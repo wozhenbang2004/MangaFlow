@@ -73,6 +73,7 @@ internal fun LiquidGlassSurface(
     elevation: Dp? = null,
     surfaceColor: Color? = null,
     softCard: Boolean = role == GlassSurfaceRole.NAVIGATION || role == GlassSurfaceRole.DRAWER,
+    materialReferenceSize: Dp? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val baseColors = MaterialTheme.colorScheme
@@ -111,7 +112,7 @@ internal fun LiquidGlassSurface(
     }
     var surfaceSize by remember { mutableStateOf(IntSize.Zero) }
     val displayDensity = LocalDensity.current
-    val shortestSide = if (surfaceSize.width > 0 && surfaceSize.height > 0) with(displayDensity) {
+    val shortestSide = materialReferenceSize ?: if (surfaceSize.width > 0 && surfaceSize.height > 0) with(displayDensity) {
         min(surfaceSize.width, surfaceSize.height).toDp()
     } else 64.dp
     val motion = LocalMotionEnabled.current
@@ -125,8 +126,11 @@ internal fun LiquidGlassSurface(
     // Native Gaussian blur needs its source outside the visible silhouette. Reserve its
     // three-sigma kernel plus the bounded ray displacement on the background child only.
     val opticalPadding = if (liquid) with(displayDensity) {
-        val displacement = min(material.displacement.toPx() * material.refractionStrength,
-            shortestSide.toPx() * .5f)
+        val maximumDisplacement = material.displacement.toPx() * material.refractionStrength
+        // A resizing selector reserves its full travel once; no delayed measurement may
+        // change its capture origin or blur material halfway through the same morph.
+        val displacement = if (materialReferenceSize != null) maximumDisplacement
+            else min(maximumDisplacement, shortestSide.toPx() * .5f)
         (3f * material.blurRadius.toPx() + displacement + material.edgeSoftness.toPx()).roundToInt()
     } else 0
     val style = remember(surfaceTint, material, liquid) {
@@ -181,7 +185,8 @@ internal fun LiquidGlassSurface(
         else Modifier.shadow(elevation ?: if (liquid) 4.dp else 2.dp, shape, clip = false,
             ambientColor = Color.Black.copy(alpha = .04f), spotColor = Color.Black.copy(alpha = .065f))
         Box(modifier.then(shadow)
-            .clip(shape).onSizeChanged { surfaceSize = it }.then(pointerTracking)) {
+            .clip(shape).then(if (materialReferenceSize == null)
+                Modifier.onSizeChanged { surfaceSize = it } else Modifier).then(pointerTracking)) {
             Box(Modifier.matchParentSize()
                 .drawWithContent {
                     // Do not put an opaque card beneath a successfully captured backdrop.

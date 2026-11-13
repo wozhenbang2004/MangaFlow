@@ -25,6 +25,14 @@ import dev.chrisbanes.haze.HazeState
 
 internal val HeaderContentGap = 2.dp
 
+/** Every root menu button uses the same liquid role and fixed optical geometry. */
+@Composable
+private fun HeaderNavigationGlass(backdrop: HazeState, navigation: @Composable () -> Unit) {
+    LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
+        role = GlassSurfaceRole.NAVIGATION, materialReferenceSize = 44.dp,
+        trackPointer = true) { navigation() }
+}
+
 /** Root identity is already in the drawer; the header holds navigation and actual actions. */
 @Composable
 internal fun PageTitleHeader(
@@ -38,8 +46,7 @@ internal fun PageTitleHeader(
 ) {
     Row(modifier.fillMaxWidth().heightIn(min = 44.dp).semantics { paneTitle = title }, verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
-            role = GlassSurfaceRole.NAVIGATION, trackPointer = true) { navigation() }
+        HeaderNavigationGlass(backdrop, navigation)
         if (leading != null) leading()
         if (summary != null) Box(Modifier.weight(1f)) { summary() }
         else Spacer(Modifier.weight(1f))
@@ -64,8 +71,7 @@ internal fun SegmentedGlassHeader(
     Column(modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.Top) {
-            LiquidGlassSurface(backdrop, Modifier.size(44.dp), cornerRadius = 22.dp,
-                role = GlassSurfaceRole.NAVIGATION, trackPointer = true) { navigation() }
+            HeaderNavigationGlass(backdrop, navigation)
             BoxWithConstraints(Modifier.weight(1f), contentAlignment = Alignment.TopStart) {
                 LiquidGlassSurface(backdrop, Modifier.width(controlsWidth.coerceAtMost(maxWidth)).graphicsLayer {
                     alpha = controlsAlpha()
