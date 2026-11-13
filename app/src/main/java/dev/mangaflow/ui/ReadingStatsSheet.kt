@@ -69,6 +69,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
+import kotlin.math.roundToInt
 
 /** The chosen date range owns the time summary, actual daily heatmap and work ranking. */
 @Composable
