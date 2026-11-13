@@ -3,6 +3,16 @@
 Updated: 2026-11-14. Route: DELIVERY with focused research branches. Execution: cloud-only GitHub connector and in-memory edits, per the latest explicit user instruction.
 
 
+
+## Source controls / startup correction · 2026-11-14
+
+Active raw feedback and acceptance are DESIGN.md STARTUP-82/SOURCE-ORBIT-83/SOURCE-ROW-84/SOURCE-SETTINGS-85. This batch removes the first-screen QuietLoading spinner, replaces the source popup's bright glass discs with curved wheel reveal, restores the source overview's44dp row with right-side count/status, and simplifies source settings to one add entry, fixed switches without trash/lock slots, enabled-first ordering and collapsed help. Existing records, downloads, actual imports and legacy built-in restoration stay intact.
+
+Integration parent is68b621604ffcd7df584fec3845df357eb845fd16. The separate desktop updater owner and all unrelated source/account/platform/artwork work remain as recorded below. Independent cloud implementation agents returned isolated source blobs; root owns BodySourceSettings, docs and the only commit/ref update.
+
+All current implementation is cloud GitHub connector plus in-memory Git objects. No tests/local builds/device or API probes/additional review gate. Next exact action: publish with expected-head protection and confirm existing Android/applications CI triggers. Code/CI trigger is not phone visual acceptance; use the user's actual artifact feedback against82–85. Preserve earlier71–81 except where these explicit corrections supersede source orbit/row behavior. User raw batch is covered through the latest message and attached screenshot1000121618; exact chat/message IDs are unavailable.
+
+
 ## Repeated filter / carousel / history correction · 2026-11-14
 
 Latest active feedback and before-state screenshots map to DESIGN.md FILTER-78, CAROUSEL-79, HISTORY-80 and READER-EDGE-81. This checkpoint implements a truly stationary layout trigger with a compact fixed-size popover, unified carousel material corners and feathering, a stationary history-clock body with one hand rewind, and a screen-bottom reader surface with internal safety. Implementation agents own isolated modules; root alone integrates refs on the latest main.

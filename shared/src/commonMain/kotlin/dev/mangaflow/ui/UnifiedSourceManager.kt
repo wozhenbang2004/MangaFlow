@@ -33,6 +33,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -199,26 +200,35 @@ internal fun UnifiedSourceManager(
                                 verticalAlignment = Alignment.CenterVertically) {
                                 ChapterSourceLogo(row.id, row.name, Modifier.size(21.dp))
                                 Spacer(Modifier.width(12.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(row.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                                    val description = when {
-                                        row.status == "LINKED" && row.chapters > 0 -> "${row.chapters} 话"
-                                        row.status == "NEEDS_CONFIRMATION" -> "${row.candidates.size} 个候选版本"
-                                        row.status == "FAILED" -> row.message
+                                Text(row.name, Modifier.weight(1f), fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.width(8.dp))
+                                Row(Modifier.widthIn(max = 140.dp).semantics(mergeDescendants = true) {
+                                    stateDescription = listOfNotNull(
+                                        "${row.chapters}话".takeIf { row.chapters > 0 },
+                                        "${row.candidates.size}个候选".takeIf { row.status == "NEEDS_CONFIRMATION" },
+                                        sourceStatusLabel(row.status),
+                                        row.message.takeIf { row.status == "FAILED" && it.isNotBlank() },
+                                    ).joinToString("，")
+                                }, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    val count = when {
+                                        row.status == "LINKED" && row.chapters > 0 -> "${row.chapters}话"
+                                        row.status == "NEEDS_CONFIRMATION" -> "${row.candidates.size}个"
                                         else -> ""
                                     }
-                                    if (description.isNotBlank()) Text(description, fontSize = 11.sp,
-                                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (count.isNotBlank()) Text(count, fontSize = 11.sp,
+                                        color = colors.onSurfaceVariant, maxLines = 1)
+                                    if (row.status == "SEARCHING") MotionBusyIndicator(Modifier.size(13.dp),
+                                        strokeWidth = 1.3.dp, color = colors.onSurfaceVariant)
+                                    else Text(if (row.message == "尚未检查") "尚未检查" else sourceStatusLabel(row.status),
+                                        fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        color = when (row.status) {
+                                            "FAILED" -> colors.error
+                                            "NEEDS_CONFIRMATION" -> colors.primary
+                                            else -> colors.onSurfaceVariant
+                                        })
                                 }
-                                Spacer(Modifier.width(8.dp))
-                                if (row.status == "SEARCHING") MotionBusyIndicator(Modifier.size(13.dp),
-                                    strokeWidth = 1.3.dp, color = colors.onSurfaceVariant)
-                                else Text(if (row.message == "尚未检查") "尚未检查" else sourceStatusLabel(row.status),
-                                    fontSize = 11.sp, color = when (row.status) {
-                                        "FAILED" -> colors.error
-                                        "NEEDS_CONFIRMATION" -> colors.primary
-                                        else -> colors.onSurfaceVariant
-                                    })
                             }
                         }
                         item(key = "manual-entry") {

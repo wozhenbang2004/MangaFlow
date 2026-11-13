@@ -3,6 +3,13 @@ package dev.mangaflow.ui
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -17,15 +24,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
-import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -52,6 +59,8 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.storage.BodySourceRegistryEntry
+import dev.mangaflow.ui.motion.LocalMotionEnabled
+import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -81,11 +90,16 @@ internal fun BodySourceSettingsSheet(
     } else null
     val scriptPackages = packages.associateBy { it.sourceId }
     val added = entries.filter { !it.removed || it.source.id in scriptPackages }
-    val removed = entries.filter { it.removed && !it.source.id.startsWith("js_") }
+        .sortedBy { if (it.enabled) 0 else 1 }
+    val removed = entries.filter { it.removed && it.isInstalled && !it.source.id.startsWith("js_") }
+    val canImport = plugins != null && scriptImportSupported
+    val motion = LocalMotionEnabled.current
     val colors = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
     var adding by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
+    var showHelp by remember { mutableStateOf(false) }
     var busyId by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     var failed by remember { mutableStateOf(false) }
@@ -95,11 +109,13 @@ internal fun BodySourceSettingsSheet(
         busyId = entry.source.id
         notice = null
         failed = false
+        val firstVisibleIndex = listState.firstVisibleItemIndex
+        val firstVisibleOffset = listState.firstVisibleItemScrollOffset
         scope.launch {
             try {
                 operation()
+                if (action == "toggle") listState.scrollToItem(firstVisibleIndex, firstVisibleOffset)
                 notice = when (action) {
-                    "remove" -> "已移除${entry.source.name}，阅读记录和下载保留。"
                     "restore" -> "已添加${entry.source.name}。"
                     else -> null
                 }
@@ -125,20 +141,31 @@ internal fun BodySourceSettingsSheet(
                     Text("已启用 ${added.count { it.enabled }} · 已添加 ${added.size}", fontSize = 11.sp,
                         color = colors.onSurfaceVariant)
                 }
+                MotionIconButton(onClick = { showHelp = !showHelp }) {
+                    Icon(Icons.Outlined.Info, if (showHelp) "收起漫画源说明" else "漫画源使用说明",
+                        Modifier.size(19.dp), tint = colors.onSurfaceVariant)
+                }
                 MotionIconButton(onClick = dismiss) {
                     Icon(Icons.Outlined.Close, "关闭漫画源设置", Modifier.size(20.dp))
                 }
             }
-            Text("关闭后不参与搜索与自动匹配，阅读记录和下载保留。核心拷贝可以关闭，不能移除。",
-                fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant,
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 8.dp))
+            AnimatedVisibility(showHelp,
+                enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +
+                    expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+                exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
+                    shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
+                Text("关闭后不参与搜索与自动匹配，并排在列表末尾；阅读记录和下载保留。" +
+                    if (!scriptImportSupported) "\n第三方脚本源暂仅 Android 支持。" else "",
+                    fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 8.dp))
+            }
             notice?.let { message ->
                 Text(message, fontSize = 11.sp, lineHeight = 17.sp,
                     color = if (failed) colors.error else colors.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
                         .semantics { liveRegion = LiveRegionMode.Polite })
             }
-            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false),
+            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false), state = listState,
                 contentPadding = PaddingValues(start = 20.dp, end = 12.dp, bottom = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 sourceLoadError?.let { message -> item(key = "source-storage-error") {
@@ -147,53 +174,42 @@ internal fun BodySourceSettingsSheet(
                             .semantics { liveRegion = LiveRegionMode.Polite })
                 } }
                 items(added, key = { "added:${it.source.id}" }) { entry ->
-                    BodySourceSettingsRow(entry, enabled = busyId == null, busy = busyId == entry.source.id,
+                    BodySourceSettingsRow(entry, enabled = busyId == null,
+                        modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
+                            placementSpec = if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap()),
                         kind = scriptPackages[entry.source.id]?.let {
                             "JS" + it.metadata.optString("version").takeIf(String::isNotBlank)?.let { version -> " · $version" }.orEmpty()
                         },
                         onToggle = { value -> change(entry, "toggle") {
                             if (value && entry.removed) registry.restore(entry.source.id)
                             else registry.setEnabled(entry.source.id, value)
-                        } },
-                        onRemove = { change(entry, "remove") {
-                            registry.remove(entry.source.id)
-                            if (entry.source.id in scriptPackages) plugins?.remove(entry.source.id)
                         } })
                 }
-                if (plugins != null && scriptImportSupported) item(key = "import-script-source") {
+                if (canImport || removed.isNotEmpty()) item(key = "add-sources") {
                     val interaction = remember { MutableInteractionSource() }
                     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
                         .clickable(enabled = busyId == null, interactionSource = interaction, indication = null,
-                            role = Role.Button, onClickLabel = "导入第三方 JS 漫画源",
-                            onClick = { importing = true })
+                            role = Role.Button, onClickLabel = "添加漫画源",
+                            onClick = {
+                                if (removed.isEmpty()) importing = true else adding = !adding
+                            })
                         .motionPress(interaction, enabled = busyId == null, pressedScale = .99f).padding(end = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.Add, null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text("导入第三方源", fontSize = 13.sp)
-                            Text("JS 文件或 HTTPS 源库链接", fontSize = 11.sp, color = colors.onSurfaceVariant)
-                        }
-                    }
-                }
-                item(key = "add-sources") {
-                    val interaction = remember { MutableInteractionSource() }
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
-                        .clickable(interactionSource = interaction, indication = null, role = Role.Button,
-                            onClickLabel = if (adding) "收起可添加漫画源" else "添加内置漫画源",
-                            onClick = { adding = !adding })
-                        .motionPress(interaction, pressedScale = .99f).padding(end = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Icon(Icons.Outlined.Add, null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
-                        Text("添加内置源", Modifier.weight(1f), fontSize = 13.sp)
-                        Icon(if (adding) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        Text("添加源", Modifier.weight(1f), fontSize = 13.sp)
+                        if (removed.isNotEmpty()) Icon(if (adding) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
                             null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                     }
                 }
-                if (adding) {
-                    if (removed.isEmpty()) item(key = "no-removed-sources") {
-                        Text("所有内置源均已添加。", fontSize = 11.sp, color = colors.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 36.dp, bottom = 8.dp))
+                if (adding && removed.isNotEmpty()) {
+                    if (canImport) item(key = "import-script-source") {
+                        MotionTextButton(enabled = busyId == null, onClick = {
+                            adding = false
+                            importing = true
+                        }, modifier = Modifier.padding(start = 28.dp)) {
+                            Text("导入文件或源库链接", fontSize = 12.sp)
+                        }
                     }
                     items(removed, key = { "removed:${it.source.id}" }) { entry ->
                         Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically,
@@ -212,15 +228,6 @@ internal fun BodySourceSettingsSheet(
                         }
                     }
                 }
-                item(key = "builtin-source-note") {
-                    Text(when {
-                        !scriptImportSupported -> "第三方脚本源暂仅 Android 支持。阅读记录与下载保留。"
-                        plugins == null -> "当前为内置源。移除仅停用并隐藏该源，记录与下载保留。"
-                        else -> "内置源移除后可在此恢复；JS 源移除后需重新导入。阅读记录与下载均保留。"
-                    },
-                        fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp, end = 8.dp))
-                }
             }
         }
     }
@@ -235,34 +242,28 @@ internal fun BodySourceSettingsSheet(
 private fun BodySourceSettingsRow(
     entry: BodySourceRegistryEntry,
     enabled: Boolean,
-    busy: Boolean,
+    modifier: Modifier = Modifier,
     kind: String? = null,
     onToggle: (Boolean) -> Unit,
-    onRemove: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember(entry.source.id) { MutableInteractionSource() }
-    Row(Modifier.fillMaxWidth().heightIn(min = 64.dp), verticalAlignment = Alignment.CenterVertically,
+    Row(modifier.fillMaxWidth().heightIn(min = 64.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         ChapterSourceLogo(entry.source.id, entry.source.name, Modifier.size(24.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(entry.source.name, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(listOf(entry.source.language, if (entry.enabled) "已启用" else "已关闭",
-                if (entry.isProtected) "核心" else kind ?: "内置").filter { it.isNotBlank() }.joinToString(" · "),
-                fontSize = 11.sp, color = colors.onSurfaceVariant)
+            Text(entry.source.name, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(listOf(entry.source.language, kind ?: "内置")
+                .filter { it.isNotBlank() }.joinToString(" · "),
+                fontSize = 11.sp, color = colors.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp))
             .toggleable(entry.enabled, enabled = enabled, interactionSource = interaction, indication = null,
                 role = Role.Switch, onValueChange = onToggle)
             .semantics { contentDescription = "${entry.source.name}参与搜索与自动匹配" },
             contentAlignment = Alignment.Center) {
-            if (busy) MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
-            else MotionSwitchThumb(entry.enabled, interaction)
-        }
-        if (entry.isProtected) Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
-            Icon(Icons.Outlined.Lock, "核心源不可移除", Modifier.size(17.dp), tint = colors.onSurfaceVariant.copy(alpha = .65f))
-        } else MotionIconButton(onClick = onRemove, enabled = enabled, modifier = Modifier.size(44.dp)) {
-            Icon(Icons.Outlined.DeleteOutline, "移除${entry.source.name}", Modifier.size(19.dp), tint = colors.onSurfaceVariant)
+            MotionSwitchThumb(entry.enabled, interaction)
         }
     }
 }

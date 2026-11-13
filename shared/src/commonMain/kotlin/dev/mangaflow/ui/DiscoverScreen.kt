@@ -138,7 +138,6 @@ import dev.mangaflow.ui.motion.bottomPullLoad
 import dev.mangaflow.ui.motion.rememberBottomPullLoadState
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
-import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlinx.coroutines.flow.collect
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.chrisbanes.haze.HazeState
@@ -1057,14 +1056,12 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
 
 @Composable
 internal fun QuietLoading(message: String) {
-    val visible = rememberDelayedBusy(true)
-    Column(Modifier.fillMaxWidth().padding(vertical = 64.dp), horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(18.dp)) {
-        Box(Modifier.size(25.dp)) {
-            if (visible) CircularProgressIndicator(Modifier.fillMaxSize(), strokeWidth = 1.5.dp)
-        }
-        Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
+    Text(message,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp)
+            .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center)
 }
 
 @Composable

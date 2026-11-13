@@ -1,5 +1,19 @@
 # MangaFlow detail · 2026-11-12
 
+## Source controls / startup feedback · 2026-11-14 (82–85)
+
+Current source-management before-state screenshots1000121617/1000121618 have no identified installed build. The user's current corrections are “还有这个弄两个加号干嘛呢” and “开关后垃圾桶还会抖。。。垃圾桶按钮别留了。。关了后自动排到最后以及已启用下面那段文字可以收起来吧。。。渐进式披露，最小信息原则”. Earlier active feedback in the same turn is “开屏进去有给个黑圈搁那转…点击图标后出来的这个不行啊用轮盘转出动画就行了搞什么白晕” and “这个没必要把高度增大吧保持原高度新信息放右边就行了啊”. Those earlier screenshots are not available in this context; their installed build is also unknown. These are implementation corrections, not acceptance of the prior orbit or list.
+
+| ID | Current correction and evidence boundary |
+| --- | --- |
+| STARTUP-82 | DiscoverScreen's QuietLoading, used by the empty loading carousel, retains a quiet text/loading semantic and removes the25dp circular indicator and its reserved spacer. Keep real loading, errors, retry, explicit refresh/search/pagination and global tool busy feedback. Other existing QuietLoading callers receive the same text treatment. |
+| SOURCE-ORBIT-83 | ChapterSourceOrbit removes the full-window tint and the source/more discs' CONTROL glass shells. Keep transparent circular44dp targets, actual marks, selected/download/busy status and error content. Positions interpolate radius and polar angle for a genuine curved wheel reveal and reverse close; interrupted close and reduced motion remain. Source completion is not observed phone animation. |
+| SOURCE-ROW-84 | UnifiedSourceManager overview keeps the original44dp single row, the name on the left and chapter count/short status on the right. No new subtitle/error line increases height. Full failure remains accessible and available on the existing source detail/retry path; identity/association/variant semantics stay. |
+| SOURCE-SETTINGS-85 | BodySourceSettings exposes one add entry and removes every trash/lock removal slot. Toggle keeps its existing switch in a fixed44dp slot during persistence rather than replacing it with a spinner. Enabled entries precede disabled entries in stable registry order, with finite placement motion and scroll-position preservation; reenabling returns to the enabled section. The two long explanations become a default-collapsed information disclosure. Metadata omits the enabled text already represented by the switch. Adding opens the existing real file/repository importer directly when no built-in source needs restoring; legacy removed built-ins remain recoverable in the same add disclosure, without a second plus or an empty “all added” section. No source package, reading record or download is deleted. |
+
+Scope is the four named UI files only, plus these existing project entry/state records. Cloud GitHub connector/in-memory edits; root alone integrates the expected latest main. No tests, local builds, device/service probes or added review gate. Existing normal compile/package CI is triggered; physical layout, row movement, wheel feel and startup appearance await actual artifact feedback.
+
+
 ## Repeated browse motion / edge corrections · 2026-11-14 (78–81)
 
 Current user screenshots show the recommendation carousel and list/column disclosure. Their installed version and original image IDs are unavailable. The user repeats “列表 filter 每次点都要左右抖”, “长条展开…”, “轮播图…外面圆里面直角”, and rejects the history button's brief whole-icon shake as animation. These supersede the relevant parts of FILTER-35, CAROUSEL-48/65 and HISTORY-50/63. Keep the current density/artwork/settings changes71–77 and their actual updater ownership.

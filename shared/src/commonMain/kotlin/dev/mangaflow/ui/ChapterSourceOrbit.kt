@@ -43,7 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.isSpecified
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -82,8 +82,8 @@ private object SourceOrbitWindowOrigin : PopupPositionProvider {
 }
 
 /**
- * Bounded adaptation of the existing beUI screen-anchor morph.
- * Only the actual source discs own material: there is no enclosing panel.
+ * Bounded adaptation of the existing screen-anchor source disclosure.
+ * The source marks turn out along an arc without an enclosing material or halo.
  */
 @Composable
 internal fun ChapterSourceOrbit(
@@ -161,7 +161,6 @@ internal fun ChapterSourceOrbit(
                 (if (upwards) statusRoom else radiusY + statusRoom)).coerceAtLeast(minCenterY)
             val centerY = start.y.coerceIn(minCenterY, maxCenterY)
             Box(Modifier.fillMaxSize()
-                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .025f * progress.value.coerceIn(0f, 1f)))
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
                     onClickLabel = "收起来源", onClick = close))
             repeat(slots) { slot ->
@@ -180,23 +179,25 @@ internal fun ChapterSourceOrbit(
                     .graphicsLayer {
                         val delay = slot * .025f
                         val p = ((progress.value - delay) / (1f - delay)).coerceIn(0f, 1.04f)
-                        translationX = (start.x - targetX) * (1f - p)
-                        translationY = (start.y - targetY) * (1f - p)
-                        scaleX = .68f + .32f * p; scaleY = scaleX
-                        rotationZ = (slot - (slots - 1) / 2f) * 7f * (1f - p)
+                        val turn = (angle - (1f - p.coerceAtMost(1f)) * PI * .48).coerceIn(0.0, PI)
+                        val wheelX = start.x + (centerX - start.x) * p +
+                            radiusX * cos(turn).toFloat() * p
+                        val wheelY = start.y + (centerY - start.y) * p +
+                            radiusY * sin(turn).toFloat() * p * if (upwards) -1f else 1f
+                        translationX = wheelX - targetX
+                        translationY = wheelY - targetY
+                        scaleX = .84f + .16f * p; scaleY = scaleX
                         alpha = if (origin == null) 0f else p.coerceIn(0f, 1f)
                     }
                 if (slot < visibleCount) item(first + slot, modifier, close)
                 else {
                     val interaction = remember { MutableInteractionSource() }
                     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-                        LiquidGlassSurface(backdrop, Modifier.size(44.dp)
+                        Box(Modifier.size(44.dp).clip(CircleShape)
                             .clickable(enabled = !closing, interactionSource = interaction, indication = null,
                                 role = Role.Button, onClickLabel = "下一组来源",
                                 onClick = { page = (currentPage + 1) % pages })
-                            .motionPress(interaction, enabled = !closing, pressedScale = .94f),
-                            cornerRadius = 22.dp, role = GlassSurfaceRole.CONTROL,
-                            interactionSource = interaction, trackPointer = true) {
+                            .motionPress(interaction, enabled = !closing, pressedScale = .94f)) {
                             Icon(Icons.Outlined.MoreHoriz, "下一组来源", Modifier.align(Alignment.Center).size(23.dp))
                         }
                         Text("${currentPage + 1}/$pages", Modifier.padding(top = 3.dp),
@@ -243,14 +244,12 @@ internal fun ChapterSourceDisc(
             "暂不可选".takeIf { !enabled && !busy }).joinToString("，")
     }, horizontalAlignment = Alignment.CenterHorizontally) {
         Box(Modifier.size(44.dp)) {
-            LiquidGlassSurface(backdrop, Modifier.fillMaxSize()
+            Box(Modifier.fillMaxSize().clip(CircleShape)
                 .combinedClickable(enabled = enabled || onInspect != null,
                     interactionSource = interaction, indication = null, role = Role.Button,
                     onClickLabel = actionLabel, onClick = { if (enabled) onClick() },
                     onLongClickLabel = "查看来源详情", onLongClick = onInspect)
-                .motionPress(interaction, enabled = enabled, pressedScale = .92f),
-                cornerRadius = 22.dp, role = GlassSurfaceRole.CONTROL,
-                interactionSource = interaction, trackPointer = true) {
+                .motionPress(interaction, enabled = enabled, pressedScale = .92f)) {
                 ChapterSourceLogo(variant.sourceId, variant.sourceName,
                     Modifier.align(Alignment.Center).size(24.dp).graphicsLayer { alpha = if (enabled || busy) 1f else .5f })
             }
