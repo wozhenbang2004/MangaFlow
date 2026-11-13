@@ -21,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -65,7 +66,8 @@ internal fun DetailRatingSheet(manga: Manga, backdrop: HazeState? = null, onDism
                     contentDescription = "${if (manga.rank != null) "榜期热度" else "拷贝热度"} $value"
                 }, verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ReviewSourceMark("copy", size = 24.dp, heat = true)
+                    MangaHeatFlame(value, Modifier.size(width = 21.dp * LocalDensity.current.fontScale.coerceAtLeast(1f),
+                        height = 24.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)))
                     Text(if (manga.rank != null) "榜期热度" else "拷贝热度", Modifier.weight(1f),
                         color = DetailForeground, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                     Text(detailMetricCount(value), color = DetailForeground,

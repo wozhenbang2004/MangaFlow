@@ -57,7 +57,8 @@ internal fun RankingMetrics(manga: Manga, heatLabel: String, onExpand: () -> Uni
         Row(Modifier.heightIn(min = with(density) { 16.sp.toDp() }),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             manga.popularity?.let { heat ->
-                ReviewSourceMark("copy", size = 16.dp, onDark = onDark, heat = true)
+                MangaHeatFlame(heat, Modifier.size(width = 14.dp * density.fontScale.coerceAtLeast(1f),
+                    height = 16.dp * density.fontScale.coerceAtLeast(1f)), onDark = onDark)
                 Text(detailMetricCount(heat), style = valueStyle,
                     color = foreground.copy(alpha = .78f), maxLines = 1)
             }

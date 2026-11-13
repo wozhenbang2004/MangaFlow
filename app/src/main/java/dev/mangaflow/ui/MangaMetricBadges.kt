@@ -13,9 +13,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.LocalFireDepartment
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -103,6 +100,7 @@ private data class MetricToken(
     val fullValue: String,
     val description: String,
     val sourceId: String,
+    val popularity: Long? = null,
 )
 
 private data class StackedMetric(val token: MetricToken, val leftPx: Int, val widthPx: Int,
@@ -131,7 +129,7 @@ internal fun MangaMetricBadges(
     val metrics = fan?.request?.takeIf { it.key === anchorKey }?.metrics ?: liveMetrics
     val heat = if (manga.rank != null) manga.popularity
         else manga.totalPopularity ?: metrics.firstOrNull { it.sourceId == "copy" }?.popularity ?: manga.popularity
-    val heatToken = heat?.let { MetricToken(metricCount(it), metricCount(it), "$heatLabel $it", "copy") }
+    val heatToken = heat?.let { MetricToken(metricCount(it), metricCount(it), "$heatLabel $it", "copy", popularity = it) }
     val scores = metrics.filter { it.score?.let { value -> value.isFinite() && value > 0 } == true }
         .sortedBy { ReviewProviders.order(it.sourceId) }.map { metric ->
             val score = requireNotNull(metric.score)
@@ -152,7 +150,7 @@ internal fun MangaMetricBadges(
     val fontScale = density.fontScale.coerceAtLeast(1f)
     val markSlot = reviewSourceMarkWidth(15.dp, density.fontScale)
     val markWidth = with(density) { markSlot.roundToPx().toFloat() }
-    val heatMarkSize = (if (compact) 10.dp else 15.dp) * fontScale
+    val heatMarkSize = 14.dp * fontScale
     val heatMarkWidth = with(density) { heatMarkSize.roundToPx().toFloat() }
     val lineHeight = 22.dp * fontScale
     val markStyle = MaterialTheme.typography.labelSmall.copy(
@@ -197,7 +195,7 @@ internal fun MangaMetricBadges(
             val hidden = scores.drop(start).distinctBy { it.sourceId }
             if (hidden.isEmpty() || room < with(density) { (8.dp * fontScale).toPx() }) return emptyList()
             val peek = with(density) { (3.5.dp * fontScale).toPx() }
-            if (!narrow && room < baseStackWidth * .8f + peek * (hidden.size - 1)) return emptyList()
+            if (room < baseStackWidth * .8f + peek * (hidden.size - 1)) return emptyList()
             // Reserve a visible edge for every rear mark before sizing the front mark.
             val rearSpace = minOf(peek * (hidden.size - 1), room * .45f)
             val width = minOf(baseStackWidth, (room - rearSpace).toInt()).coerceAtLeast(1)
@@ -314,11 +312,9 @@ private fun MetricBadge(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 3.dp)) {
         if (token.sourceId == "copy") {
-            val size = heatIconSize ?: (if (compact) 10.dp else 15.dp) * LocalDensity.current.fontScale.coerceAtLeast(1f)
-            Box(Modifier.size(size), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.LocalFireDepartment, null, Modifier.size(size * .88f),
-                    tint = reviewSourceAccent("copy", onDark))
-            }
+            val size = heatIconSize ?: 14.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
+            MangaHeatFlame(token.popularity ?: 0L,
+                Modifier.size(width = size, height = size * (16f / 14f)), onDark = onDark)
         } else ReviewSourceMark(token.sourceId, size = 15.dp, onDark = onDark)
         Text(token.value, color = foreground.copy(alpha = foreground.alpha * .86f), style = textStyle,
             maxLines = 1, softWrap = false)
