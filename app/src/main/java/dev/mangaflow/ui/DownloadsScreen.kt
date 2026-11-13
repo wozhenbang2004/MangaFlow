@@ -58,6 +58,7 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -129,6 +130,7 @@ fun DownloadsScreen(
     backdrop: HazeState,
     navigation: @Composable () -> Unit,
     toolbar: @Composable (@Composable () -> Unit) -> Unit,
+    active: Boolean = true,
     refreshingIds: Set<String> = emptySet(),
     history: List<ReadingProgress> = emptyList(),
     wallpaper: @Composable () -> Unit = {},

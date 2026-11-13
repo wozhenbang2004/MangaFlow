@@ -609,7 +609,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, repository = model.repository, onRead = model::openDownload,
                                         onRetry = model::retryDownload, backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         wallpaper = backdropWallpaper,
-                                        refreshingIds = refreshingDownloads, history = history)
+                                        active = rootActive && !searchVisible, refreshingIds = refreshingDownloads, history = history)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
                                         active = current.key == frame.key,
