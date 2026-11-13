@@ -3,44 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// Keep inference Java APIs small in the base APK; native engines are signed optional assets.
-val inferenceRuntimeAars = configurations.create("inferenceRuntimeAars") {
-    isCanBeConsumed = false
-    isCanBeResolved = true
-    isTransitive = false
-}
-
-val optionalOnnxApi = tasks.register<org.gradle.api.tasks.bundling.Jar>("prepareOptionalOnnxApi") {
-    archiveFileName.set("onnxruntime-android-1.31.1-api.jar")
-    destinationDirectory.set(layout.buildDirectory.dir("generated/optional-inference-api"))
-    inputs.files(inferenceRuntimeAars)
-    from({
-        val aar = inferenceRuntimeAars.resolvedConfiguration.resolvedArtifacts.single {
-            it.moduleVersion.id.group == "com.microsoft.onnxruntime" && it.name == "onnxruntime-android"
-        }.file
-        val classes = zipTree(aar).matching { include("classes.jar") }.singleFile
-        zipTree(classes)
-    }) {
-        // The compiled-in source adaptation supports verified absolute native paths on Android.
-        exclude("ai/onnxruntime/OnnxRuntime.class", "ai/onnxruntime/OnnxRuntime\$*.class")
-    }
-}
-
-tasks.register("stageInferenceAars") {
-    val output = layout.buildDirectory.dir("outputs/inference-aars")
-    inputs.files(inferenceRuntimeAars)
-    outputs.dir(output)
-    doLast {
-        val expected = mapOf("litert" to "litert-1.4.2.aar",
-            "onnxruntime-android" to "onnxruntime-android-1.31.1.aar")
-        val artifacts = inferenceRuntimeAars.resolvedConfiguration.resolvedArtifacts
-        for ((name, fileName) in expected) {
-            val source = artifacts.single { it.name == name }.file
-            val destination = output.get().file(fileName).asFile
-            destination.parentFile.mkdirs()
-            source.copyTo(destination, overwrite = true)
-        }
-    }
+// CI retains its established output directory; Android runtime sources now live in shared.
+tasks.register<Sync>("stageInferenceAars") {
+    dependsOn(":shared:stageInferenceAars")
+    from(project(":shared").layout.buildDirectory.dir("outputs/inference-aars"))
+    into(layout.buildDirectory.dir("outputs/inference-aars"))
 }
 
 android {
@@ -122,9 +89,5 @@ dependencies {
     implementation("dev.chrisbanes.haze:haze-glass-material3:2.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // Optional panel models run locally; weights are explicitly downloaded by the user.
-    implementation("com.google.ai.edge.litert:litert:1.4.2")
-    implementation(files(optionalOnnxApi.flatMap { it.archiveFile }))
-    add(inferenceRuntimeAars.name, "com.google.ai.edge.litert:litert:1.4.2@aar")
-    add(inferenceRuntimeAars.name, "com.microsoft.onnxruntime:onnxruntime-android:1.31.1@aar")
     implementation("org.jsoup:jsoup:1.18.3")
 }

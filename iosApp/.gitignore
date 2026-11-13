@@ -1,0 +1,4 @@
+MangaFlow.xcodeproj/
+build/
+*.xcarchive/
+*.ipa

@@ -1,5 +1,32 @@
 # Third-party notices
 
+## Multiplatform dependencies
+
+Author-script classification retains the original per-UTF16-character contract
+using a bounded BMP range table derived from Unicode 15.0.0 Scripts.txt:
+https://www.unicode.org/Public/15.0.0/ucd/Scripts.txt . The Unicode data license
+is included at `third_party/unicode/LICENSE.txt`; Common, Inherited and Unknown
+are excluded from script-conflict evidence, as in the original implementation.
+
+The production shared module uses JetBrains Compose Multiplatform 1.12.2, Kotlin
+2.4.21, kotlinx.coroutines 1.11.0, atomicfu 0.29.0, kotlinx.datetime 0.7.1,
+kotlinx.serialization JSON 1.13.0, Ktor 3.6.1 and Okio 3.16.2 (Apache-2.0).
+Ksoup 0.2.6 is Fleeksoft's MIT-licensed multiplatform HTML parser:
+https://github.com/fleeksoft/ksoup . Provider business/parsing rules remain
+MangaFlow code; the JSON/request facades are application adapters, not modified
+copies presented as org.json or OkHttp.
+
+Windows embeds OpenJFX 21.0.9 WebView/Media/Swing (GPLv2 with Classpath Exception;
+https://github.com/openjdk/jfx/blob/jfx21/LICENSE and bundled upstream legal notices),
+ICU4J 77.1 (Unicode License; https://github.com/unicode-org/icu), and
+`io.github.darkxanter:webp-imageio:0.3.3` (Apache-2.0;
+https://github.com/darkxanter/webp-imageio). The WebP reader uses the provider's
+real crop/scale parameters, not an ignored generic source-region hint. Its
+libwebp submodule is the 1.3.2 security-fix line. iOS uses system ImageIO,
+UIKit, WebKit, Keychain and AVFoundation; no Android native executable is
+downloaded or represented as an iOS engine. Existing upstream motion, Haze,
+Telephoto and panel-algorithm notices below remain in force.
+
 ## Author and tag search contracts
 
 Public search option names and actual category identifiers were checked against
@@ -136,6 +163,8 @@ and `ui/BrowseTabs.kt` are adapted from the same fixed Ovio version:
 `components/ovio/liquid-tabs/worlds/minimal.tsx`.
 The Compose port preserves independently animated indicator edges and stationary labels,
 uses Android's animation clock and system duration scale, and omits the web deployment demo.
+The sidebar's MotionNavigationColumn also adapts these independent edges vertically over measured
+native row bounds, keeping labels and hit regions fixed and bounding long-jump stretch.
 
 MIT License
 
@@ -282,30 +311,30 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## Haze Glass optical material
+## Haze 2.1 runtime
 
-The shared optical material adapts Haze Glass 2.1.0, fixed commit
-`ca21ff2060e52e1882afdb94f9b055f7fc834bd9`:
-`https://github.com/chrisbanes/haze/tree/ca21ff2060e52e1882afdb94f9b055f7fc834bd9`.
+MangaFlow uses the complete official Haze 2.1.0 runtime from Maven Central:
+core, Blur, Glass, both Material3 adapters and the material-preset module.
+Upstream: `https://github.com/chrisbanes/haze/tree/2.1.0`, source commit
+`ca21ff2060e52e1882afdb94f9b055f7fc834bd9`.
 
-Copyright 2025, Christopher Banes and the Haze project contributors.
-Licensed under Apache-2.0; the complete upstream license is bundled as
+Christopher Banes and the Haze project contributors, Apache-2.0.
+The complete license remains bundled as
 `app/src/main/assets/licenses/Haze-APACHE-2.0.txt`.
 
-`ui/glass/HazeGlassShaders.kt` adapts the actual `GlassShaders.kt` edge refraction,
-SDF/surface normals, Fresnel response, gamut-bounded colour grading, localized
-interaction light and rim. `GlassMaterial.kt` adapts Regular/Clear values from
-`GlassOptics.kt`, `GlassDefaults.kt` and `GlassStyle.kt`.
-`HazeGlassOptics.kt` adapts the alpha-only sharp/blur depth composition in
-`GlassRenderEffectFactory.android.kt`; Android's native blur substitutes for
-Haze 2.1's semantic blur. The existing Haze 1.6 transport captures a padded sharp
-backdrop, with content labels/icons kept separate. Source map and exact differences:
-`third_party/haze-glass/ADAPTATION.md`.
+The official library owns source transport, typed inputs/retention/sharing,
+semantic blur and progressive effects, full Glass optics, detail/rim stages,
+container fields and member transitions, interaction, accessibility, fidelity,
+native-window eligibility and supported-platform fallback. Application wrappers
+provide role/style/layout and interaction-source policies. The copied 1.6-backed
+optical renderer and limited two-member field have been removed; the former
+adaptation record is historical at `third_party/haze-glass/ADAPTATION.md`.
+The separately attributed soft-shadow adaptation below remains.
 
-This replaces the former Backdrop edge-only optical adaptation. It is not the
-full Haze 2.1 framework or Apple's renderer. Merged glass bridges and a separate
-sharp edge-detail overlay are not included. Compilation and source reuse do not
-establish device visual equivalence, performance or user acceptance.
+This is Haze's renderer, not Apple's renderer. Native window-backdrop eligibility
+requires a supported Android 37.2+ hardware window; other supported devices use
+Haze's official source renderer. Source integration and CI are separate from
+measured device appearance/performance and user acceptance.
 
 ## Backdrop soft shadows
 
@@ -433,6 +462,45 @@ to two inference threads; GPU, NNAPI and NPU delegates are not enabled.
 Sources: https://github.com/google-ai-edge/LiteRT and https://github.com/microsoft/onnxruntime/tree/v1.31.1
 
 
+## Daily reading activity calendar
+
+The date padding/week-column/block geometry in `ui/ReadingStatsSheet.kt` adapts
+`src/lib/calendar.ts` (`groupByWeeks`, continuous missing-date handling) and
+`src/components/ActivityCalendar.tsx` from react-activity-calendar,
+`https://github.com/grubersjoe/react-activity-calendar/tree/4931c8f7d85c98de10358f6f5a841c50bd4ff228`.
+The Android adaptation uses the existing Canvas, Monday-first dates, foreground-reading
+milliseconds, fixed time levels and local date selection. It includes no React runtime,
+source test generator or synthetic activity data.
+
+MIT License
+
+Copyright (c) 2021 Jonathan Gruber
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+The beUI measured-trigger morph already credited above also informs
+`ui/SegmentedGlassHeader.kt`'s `RankingsFromTab`: one retained surface grows from the
+measured ranking tab, final-size labels are revealed separately, and the same progress
+retraces the path. This is an Android adaptation within the existing header, not the
+upstream web popover or an assertion of visual equivalence.
+
+
 ## Optional native inference loading
 
 MangaFlow now distributes the pinned native LiteRT and ONNX Runtime libraries as optional,
@@ -447,16 +515,25 @@ core-before-JNI absolute loading. The original loader class is excluded from the
 all other upstream API classes/native signatures remain. See third_party/onnxruntime/ADAPTATION.md.
 There is no downloaded Java/Dex code or new runtime license claim. This source adaptation and
 packaging inspection do not establish Android runtime execution or on-device verification.
-Unified Chapters / additional body sources
+## Unified Chapters / additional body sources
 
-Komikku/TachiyomiSY merge mechanism (Komikku 383ffaa81667f45fc6c2975edb1760a7606531d3),
-and Keiyoushi Komiic protocol (c3bc55d548b0a5f1b316a323bde9e6e2516e4bea):
-Apache License 2.0. Modified for MangaFlow source identities, semantic safeguards,
-storage, reader and shared motion. Original source and modifications are recorded
-in third_party/multi-source/ADAPTATION.md in the project repository.
-MangaDex uses its public API; no third-party source script/runtime is bundled.
-Additional modified Keiyoushi Apache-2.0 integrations: Baozi/Manhuagui public
-reader protocols, bounded Packer/LZString decoding and Komiic origin routing
-(fc7a827769f612dfa6dccb51e819f5b4eecaeab5); MangaBZ reader protocol
-(535ffdbdd84eadab593d515283cb82aa9bf177f5). No remote JavaScript is executed.
-Precise source paths and modifications: third_party/multi-source/ADAPTATION.md.
+The logical-parent/source-variant and priority-view mechanism is adapted from the
+Apache-2.0 Komikku/TachiyomiSY implementation, reviewed at Komikku
+`383ffaa81667f45fc6c2975edb1760a7606531d3` (SmartSearchMerge,
+GetMergedChaptersByMangaId, merged.sq and ChapterLoader). MangaFlow's storage,
+semantic safeguards, explicit identities and retained source selector are modified
+integrations of that mechanism with its existing reader and motion components.
+
+Komiic's public GraphQL and image protocol is adapted from Keiyoushi at
+`c3bc55d548b0a5f1b316a323bde9e6e2516e4bea`. Its Apache-2.0 license and precise
+source/modification record are in `third_party/multi-source/`. MangaDex uses its
+public manga/feed/chapter/At-home API; no Venera script or runtime is bundled.
+Source favicon images are requested from the corresponding official site and are
+not claimed to be MangaFlow artwork. Refer to ADAPTATION.md for the unverified
+source-access and implementation boundaries.
+
+Baozi / Manhuagui public reader adapters, Packer/LZString decoder adaptations and
+Komiic origin configuration use Keiyoushi `fc7a827769f612dfa6dccb51e819f5b4eecaeab5`;
+MangaBZ uses `535ffdbdd84eadab593d515283cb82aa9bf177f5`, all Apache-2.0.
+The exact upstream paths, modified local files and omitted runtime/account/image
+rewriting features are recorded in `third_party/multi-source/ADAPTATION.md`.

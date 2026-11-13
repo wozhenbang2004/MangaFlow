@@ -1,73 +1,169 @@
-name: Shared platform builds
-run-name: MangaFlow shared · ${{ github.sha }}
+name: Multiplatform applications
+run-name: MangaFlow applications · ${{ github.sha }}
 
 on:
   push:
     branches: [main]
     paths:
       - 'shared/**'
+      - 'desktopApp/**'
+      - 'iosApp/**'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
       - 'gradle.properties'
       - 'gradle/**'
+      - 'scripts/native_release.py'
       - '.github/workflows/multiplatform-build.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: mangaflow-shared-${{ github.ref }}
+  group: mangaflow-applications-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  compile:
-    name: ${{ matrix.target }} library
+  desktop:
+    name: ${{ matrix.target }} application
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: desktop-jvm
-            os: ubuntu-24.04
-            tasks: ':shared:desktopJar'
-            output: 'shared/build/libs/*.jar'
-          - target: ios-arm64
-            os: macos-latest
-            tasks: ':shared:linkDebugFrameworkIosArm64 :shared:linkDebugFrameworkIosSimulatorArm64'
-            output: 'shared/build/bin/ios*/debugFramework/'
+          - target: windows-x64
+            os: windows-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
     steps:
-      - name: Check out this source version
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - name: Set up Java 17
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
           cache: gradle
           cache-dependency-path: |
             **/*.gradle.kts
             gradle/wrapper/gradle-wrapper.properties
-      - name: Install Android SDK for project configuration
+      - name: Install Android SDK for shared project configuration
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           packages: 'platform-tools platforms;android-37.0 build-tools;36.0.0'
           log-accepted-android-sdk-licenses: false
-      - name: Compile and package the shared production library
+      - name: Set up Windows installer tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command light.exe -ErrorAction SilentlyContinue)) {
+            choco install wixtoolset --version=3.14.1 --yes --no-progress
+            if ($LASTEXITCODE -notin @(0, 1641, 3010)) { exit $LASTEXITCODE }
+            $wixBin = Get-ChildItem 'C:\Program Files (x86)' -Directory -Filter 'WiX Toolset*' | Select-Object -First 1
+            if ($wixBin) { "$($wixBin.FullName)\bin" | Out-File -FilePath $env:GITHUB_PATH -Append }
+          }
+      - name: Select the matching main release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/native_release.py plan
+      - name: Compile and package the complete desktop application
         run: |
           set -euo pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon --console=plain --max-workers=2 ${{ matrix.tasks }}
-      - name: Preserve platform library
+          ./gradlew --no-daemon --console=plain --max-workers=2 -PmangaVersionName="$MANGA_VERSION" :desktopApp:packageDistributionForCurrentOS
+          python scripts/native_release.py stage
+      - name: Preserve desktop installers
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: mangaflow-shared-${{ matrix.target }}-${{ github.run_number }}-${{ github.run_attempt }}
-          path: ${{ matrix.output }}
+          name: mangaflow-native-${{ matrix.target }}-${{ github.run_number }}-${{ github.run_attempt }}
+          path: dist/native/
           if-no-files-found: error
           retention-days: 14
+
+  ios:
+    name: iOS application (unsigned)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: |
+            **/*.gradle.kts
+            gradle/wrapper/gradle-wrapper.properties
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'platform-tools platforms;android-37.0 build-tools;36.0.0'
+          log-accepted-android-sdk-licenses: false
+      - name: Select the matching main release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/native_release.py plan
+      - name: Generate the native Xcode application project
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          command -v xcodegen >/dev/null || brew install xcodegen
+          (cd iosApp && xcodegen generate)
+      - name: Compile the complete simulator application
+        run: |
+          set -euo pipefail
+          xcodebuild -project iosApp/MangaFlow.xcodeproj -scheme MangaFlow -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/MangaFlow-simulator" CODE_SIGNING_ALLOWED=NO MARKETING_VERSION="$MANGA_VERSION" CURRENT_PROJECT_VERSION="$MANGA_BUILD_NUMBER" build
+      - name: Archive the unsigned device application
+        run: |
+          set -euo pipefail
+          xcodebuild -project iosApp/MangaFlow.xcodeproj -scheme MangaFlow -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/MangaFlow.xcarchive" CODE_SIGNING_ALLOWED=NO MARKETING_VERSION="$MANGA_VERSION" CURRENT_PROJECT_VERSION="$MANGA_BUILD_NUMBER" archive
+          mkdir -p dist
+          tar -czf dist/MangaFlow-ios-simulator.tar.gz \
+            -C "$RUNNER_TEMP/MangaFlow-simulator/Build/Products/Debug-iphonesimulator" MangaFlow.app
+          ditto -c -k --keepParent "$RUNNER_TEMP/MangaFlow.xcarchive" dist/MangaFlow-ios-unsigned.xcarchive.zip
+      - name: Preserve iOS applications
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mangaflow-ios-unsigned-${{ github.run_number }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-windows:
+    name: Publish Windows installers to the matching release
+    needs: desktop
+    if: github.repository == 'wozhenbang2004/MangaFlow' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: mangaflow-native-*
+          path: dist/native
+          merge-multiple: true
+      - name: Resolve exact source version and publish immutable installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/native_release.py plan
+      - name: Attach Windows assets after the signed Android release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/native_release.py publish

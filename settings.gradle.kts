@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "MangaFlow"
-include(":app", ":shared")
+include(":app", ":shared", ":desktopApp")

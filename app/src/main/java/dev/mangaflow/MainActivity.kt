@@ -13,11 +13,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
-import dev.mangaflow.ui.AppLaunchReveal
-import dev.mangaflow.ui.MangaFlowApp
+import dev.mangaflow.MangaFlowHost
+import dev.mangaflow.initializeMangaFlow
+import androidx.compose.runtime.CompositionLocalProvider
+import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.ui.MangaFlowTheme
-import dev.mangaflow.ui.MangaAdaptiveLayout
-import dev.mangaflow.ui.motion.MangaMotionProvider
 
 class MainActivity : ComponentActivity() {
     private var openUpdatesRequest by mutableIntStateOf(0)
@@ -28,12 +28,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         LaunchFailure.recoveryReport?.let { report ->
             setContent {
-                MangaFlowTheme {
+                CompositionLocalProvider(LocalMangaContext provides this@MainActivity) {
+                  MangaFlowTheme {
                     dev.mangaflow.ui.LaunchFailureMessage(report) {
                         LaunchFailure.retry()
                         (application as MangaFlowApplication).initializeServices()
                         recreate()
                     }
+                  }
                 }
             }
             return
@@ -42,18 +44,10 @@ class MainActivity : ComponentActivity() {
         val animateLaunch = savedInstanceState == null &&
             !intent.getBooleanExtra("open_updates", false) && !intent.getBooleanExtra("open_downloads", false)
         consumeNavigationIntent(intent)
+        initializeMangaFlow(this)
         setContent {
-            MangaFlowTheme {
-                MangaMotionProvider {
-                    dev.mangaflow.ui.glass.HazeProviders {
-                        MangaAdaptiveLayout {
-                            AppLaunchReveal(play = animateLaunch) {
-                                MangaFlowApp(openUpdatesRequest, openDownloadsRequest, ::requestNotificationPermission)
-                            }
-                        }
-                    }
-                }
-            }
+            MangaFlowHost(this@MainActivity, openUpdatesRequest, openDownloadsRequest,
+                ::requestNotificationPermission, animateLaunch)
         }
     }
 

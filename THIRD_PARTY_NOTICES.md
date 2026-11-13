@@ -1,5 +1,32 @@
 # Third-party notices
 
+## Multiplatform dependencies
+
+Author-script classification retains the original per-UTF16-character contract
+using a bounded BMP range table derived from Unicode 15.0.0 Scripts.txt:
+https://www.unicode.org/Public/15.0.0/ucd/Scripts.txt . The Unicode data license
+is included at `third_party/unicode/LICENSE.txt`; Common, Inherited and Unknown
+are excluded from script-conflict evidence, as in the original implementation.
+
+The production shared module uses JetBrains Compose Multiplatform 1.12.2, Kotlin
+2.4.21, kotlinx.coroutines 1.11.0, atomicfu 0.29.0, kotlinx.datetime 0.7.1,
+kotlinx.serialization JSON 1.13.0, Ktor 3.6.1 and Okio 3.16.2 (Apache-2.0).
+Ksoup 0.2.6 is Fleeksoft's MIT-licensed multiplatform HTML parser:
+https://github.com/fleeksoft/ksoup . Provider business/parsing rules remain
+MangaFlow code; the JSON/request facades are application adapters, not modified
+copies presented as org.json or OkHttp.
+
+Windows embeds OpenJFX 21.0.9 WebView/Media/Swing (GPLv2 with Classpath Exception;
+https://github.com/openjdk/jfx/blob/jfx21/LICENSE and bundled upstream legal notices),
+ICU4J 77.1 (Unicode License; https://github.com/unicode-org/icu), and
+`io.github.darkxanter:webp-imageio:0.3.3` (Apache-2.0;
+https://github.com/darkxanter/webp-imageio). The WebP reader uses the provider's
+real crop/scale parameters, not an ignored generic source-region hint. Its
+libwebp submodule is the 1.3.2 security-fix line. iOS uses system ImageIO,
+UIKit, WebKit, Keychain and AVFoundation; no Android native executable is
+downloaded or represented as an iOS engine. Existing upstream motion, Haze,
+Telephoto and panel-algorithm notices below remain in force.
+
 ## Author and tag search contracts
 
 Public search option names and actual category identifiers were checked against

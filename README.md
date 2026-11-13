@@ -2,9 +2,11 @@
 
 Current 2026-11-12 interface: an ordinary flat full-cover collection grid, without 3D shelves or follow/hoard/pause groups; picture/spread hearts and image collection (replacing bookmark/notes controls); a reading-edge clock outside the console and actual foreground reading statistics; task-grouped settings, full-segment selections and shared paper-color previews; compact heat/native-score bands with real remaining-source counts; a floating glass discovery/ranking header over the original scrolling content; softer ranking transitions; finger-driven pull and curved swipe removal; glass search that hides underlying history chrome during its full presence; a matching glass downloads header with summary/import/queue/filter actions over the retained lists; immediate short cold-start reveal; local image/silent-video wallpaper; user-selected comic-window icon B. Settings → 外观 → 壁纸 imports ordinary image/video files. Wallpaper Engine scene/project/mobile packages are not generic videos. Build and device behavior remain pending the main CI/user feedback path.
 
-一个专注于阅读的 Android 漫画客户端。使用 Kotlin 和 Jetpack Compose，支持 Android 8.0 及以上。
+一个专注于阅读的漫画客户端，使用 Kotlin Multiplatform 和 Compose Multiplatform，共享页面与业务代码。
 
-正在原仓库中迁移至 Kotlin Multiplatform + Compose Multiplatform。现有 Android 应用已接入 `:shared`，共用主题、窗口适配、动效参数、漫画数据与阅读几何。GitHub Actions 新增桌面 JVM 库和 iOS 设备／模拟器框架构建；目前仍是共享代码迁移阶段，尚未提供完整桌面 EXE 或 iOS 安装包。后续沿用现有界面与功能继续迁移。
+本次源码迁移面向 Android 手机／平板、iPhone／iPad 和 Windows 电脑。`shared` 复用现有发现、搜索、详情、阅读、书架、下载、账号、设置、玻璃和动效；`app`、`desktopApp`、`iosApp` 提供各平台正式入口。GitHub Actions 构建 APK、Windows EXE／MSI 和未签名的 Apple 设备／模拟器应用；源码迁移与原生接线不代表已经通过构建或设备验收。macOS 只用于编译 Apple 移动应用，不交付 Mac／Linux 客户端。
+
+Android 保留 8.0 及以上支持和原有签名升级、记录与备份。Windows 安装包内含所需运行时。iOS／iPadOS 最低 14，正式安装需要开发者签名或已配置的分发渠道；在 macOS 安装 XcodeGen 后从 `iosApp` 执行 `xcodegen generate`，用 Xcode 打开生成的 `MangaFlow.xcodeproj`。本仓库不含签名私钥或苹果账号。分镜入口目前按最新产品决定关闭并隐藏，现有实现保留；可选 AI 推理引擎仍只有 Android 资产，不宣称苹果或 Windows 已有对应引擎。
 
 [项目主页](https://github.com/wozhenbang2004/MangaFlow)
 
