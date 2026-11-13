@@ -296,6 +296,7 @@ fun DetailScreen(
             .navigationBarsPadding().imePadding(),
     ) {
         val density = LocalDensity.current
+        val viewportWidth = maxWidth
         val fontScale = density.fontScale.coerceAtLeast(1f)
         // Retain the largest real dock clearance: condensing must not move the last chapter rows.
         val readingInset = maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
@@ -305,7 +306,7 @@ fun DetailScreen(
         val compactHero = availableHeight < 600.dp
         val collapsedHero = availableHeight < 420.dp
         val seamHeight = 16.dp
-        var naturalHeroHeight by remember(current.id, maxWidth, density) { mutableIntStateOf(0) }
+        var naturalHeroHeight by remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
         val heroHeight = if (collapsedHero) 0.dp else with(density) { naturalHeroHeight.toDp() }
         val heroPixels = with(density) { heroHeight.toPx() }
         val header = rememberTopAppBarState(initialHeightOffsetLimit = -heroPixels)
@@ -428,7 +429,7 @@ fun DetailScreen(
                         },
                 ) {
                     if (!collapsedHero) {
-                        key(current.id, maxWidth, density) {
+                        key(current.id, viewportWidth, density) {
                             HeroBookInformation(current, coverPainter, informationTone,
                                 compact = compactHero, onIntroduction = { fullIntroduction = true },
                                 onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
@@ -629,9 +630,10 @@ private fun HeroBookInformation(
         .onSizeChanged { onNaturalHeight(it.height) }
         .padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 8.dp)
         .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })) {
-        val posterWidth = minOf(maxWidth * if (density.fontScale >= 1.4f) .36f else .42f, 220.dp)
+        val contentWidth = maxWidth
+        val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .36f else .42f, 220.dp)
         val infoWidth = with(density) {
-            (maxWidth.roundToPx() - posterWidth.roundToPx() - 18.dp.roundToPx()).coerceAtLeast(1).toDp()
+            (contentWidth.roundToPx() - posterWidth.roundToPx() - 18.dp.roundToPx()).coerceAtLeast(1).toDp()
         }
         val titleLayout = remember(manga.title, titleStyle, infoWidth, density) {
             measurer.measure(manga.title, style = titleStyle,
@@ -653,7 +655,7 @@ private fun HeroBookInformation(
                     Image(cover, contentDescription = null, contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize())
                 }
-                Column(Modifier.width(if (stacked) maxWidth else infoWidth),
+                Column(Modifier.width(if (stacked) contentWidth else infoWidth),
                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(manga.title, color = ink, style = titleStyle,
                         modifier = Modifier.fillMaxWidth().clickable(enabled = infoVisible,
