@@ -103,11 +103,16 @@ internal actual fun VerticalReaderTiles(
     val visibleBands by remember(file, sourceBandHeight, bandCount, displayBandHeight) {
         derivedStateOf {
             val visible = window()
-            if (visible == null || visible.bottom <= visible.top) IntRange.EMPTY
+            if (visible == null || visible.bottom <= visible.top) emptyList()
             else {
-                val first = (floor(visible.top / displayBandHeight).toInt() - 1).coerceIn(0, bandCount - 1)
-                val last = (floor((visible.bottom - 1) / displayBandHeight).toInt() + 1).coerceIn(first, bandCount - 1)
-                first..last
+                val first = floor(visible.top / displayBandHeight).toInt().coerceIn(0, bandCount - 1)
+                val last = floor((visible.bottom - 1) / displayBandHeight).toInt().coerceIn(first, bandCount - 1)
+                // Visible detail starts decoding before either offscreen neighboring band.
+                buildList {
+                    addAll(first..last)
+                    if (last < bandCount - 1) add(last + 1)
+                    if (first > 0) add(first - 1)
+                }
             }
         }
     }

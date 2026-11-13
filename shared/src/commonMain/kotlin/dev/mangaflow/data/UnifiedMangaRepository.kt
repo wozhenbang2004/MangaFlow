@@ -19,6 +19,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -65,8 +66,9 @@ class UnifiedMangaRepository(
     private val searchLocks = Array(16) { Mutex() }
     private data class CachedChapterPages(val storedAtNanos: Long, val pages: List<Page>)
     private val pageCache = LinkedHashMap<String, CachedChapterPages>()
-    // Fixed stripes keep the lock set bounded while coalescing prepare/reader requests.
-    private val pageLocks = Array(16) { Mutex() }
+    private class ChapterPageRequest(val generation: Long, val result: Deferred<List<Page>>, var readers: Int = 0)
+    // Only an identical chapter shares work; unrelated chapter/cover requests never share a stripe.
+    private val pageRequests = mutableMapOf<String, ChapterPageRequest>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private data class RefreshRun(val eligibilityGeneration: Long, val job: Deferred<Unit>)
     private val refreshes = mutableMapOf<String, RefreshRun>()
@@ -117,6 +119,9 @@ class UnifiedMangaRepository(
                 changed.forEach { id ->
                     pageCacheGenerations[id] = (pageCacheGenerations[id] ?: 0L) + 1L
                     pageCache.keys.removeAll { it.startsWith("@source/$id/") }
+                    val obsolete = pageRequests.filterKeys { it.startsWith("@source/$id/") }
+                    obsolete.keys.forEach(pageRequests::remove)
+                    obsolete.values.forEach { it.result.cancel() }
                 }
             }
             applyEnabledSources(sourceEligibility.ids, forceConfiguration = true)
@@ -338,6 +343,9 @@ class UnifiedMangaRepository(
         synchronized(unifiedMangaRepositoryStateLock) {
             pageCacheGenerations[sourceId] = (pageCacheGenerations[sourceId] ?: 0L) + 1L
             pageCache.keys.removeAll { it.startsWith("@source/$sourceId/") }
+            val obsolete = pageRequests.filterKeys { it.startsWith("@source/$sourceId/") }
+            obsolete.keys.forEach(pageRequests::remove)
+            obsolete.values.forEach { it.result.cancel() }
         }
         synchronized(unifiedMangaRepositoryStateLock) { catalogFetchedAt.keys.removeAll { SourceKeys.decodeManga(it).sourceId == sourceId } }
         synchronized(unifiedMangaRepositoryStateLock) { sourceSearchCache.keys.removeAll { it.source == sourceId } }
@@ -541,37 +549,55 @@ class UnifiedMangaRepository(
     fun rebuild(workId: String): MangaDetail? = cachedDetail(workId)
 
     override suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
+        currentCoroutineContext().ensureActive()
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         if (ref.sourceId == "copy") return copy.pages(ref.mangaId, ref.chapterId, forceRefresh)
         val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId)
-        if (forceRefresh) synchronized(unifiedMangaRepositoryStateLock) { pageCache.remove(key) }
-        val lock = pageLocks[(key.hashCode() and Int.MAX_VALUE) % pageLocks.size]
-        return lock.withLock {
-            currentCoroutineContext().ensureActive()
-            val generation = synchronized(unifiedMangaRepositoryStateLock) { pageCacheGenerations[ref.sourceId] ?: 0L }
-            if (!forceRefresh) {
-                val now = repositoryNanoTime()
-                synchronized(unifiedMangaRepositoryStateLock) {
-                    pageCache[key]?.takeIf { now - it.storedAtNanos in 0L until PAGE_CACHE_NANOS }
-                        ?.pages
-                }?.let { return@withLock it }
+        val request = synchronized(unifiedMangaRepositoryStateLock) {
+            val generation = pageCacheGenerations[ref.sourceId] ?: 0L
+            val now = repositoryNanoTime()
+            pageCache.entries.removeAll { now - it.value.storedAtNanos !in 0L until PAGE_CACHE_NANOS }
+            if (forceRefresh) pageCache.remove(key)
+            else pageCache.remove(key)?.let { cached ->
+                pageCache[key] = cached
+                return cached.pages
             }
-            val loaded = adapter(ref.sourceId).pages(
-                SourceKeys.manga(ref.sourceId, ref.mangaId), key, forceRefresh,
-            ).toList()
-            if (ref.sourceId.startsWith("js_") && synchronized(unifiedMangaRepositoryStateLock) { (pageCacheGenerations[ref.sourceId] ?: 0L) != generation })
-                throw CancellationException("源包已更新或移除，请重新打开章节。")
-            if (loaded.isEmpty()) throw SourceException("这个来源没有返回本章图片，请重试或选择其他来源。")
-            currentCoroutineContext().ensureActive()
+            // Match Copy's reader/download handoff: refresh may join a live fetch, never a completed one.
+            val shared = pageRequests[key]?.takeIf { it.generation == generation && !it.result.isCompleted }
+                ?: ChapterPageRequest(generation, scope.async(start = CoroutineStart.LAZY) {
+                    val loaded = adapter(ref.sourceId).pages(
+                        SourceKeys.manga(ref.sourceId, ref.mangaId), key, forceRefresh,
+                    ).toList()
+                    if (loaded.isEmpty()) throw SourceException("这个来源没有返回本章图片，请重试或选择其他来源。")
+                    val requestContext = currentCoroutineContext()
+                    requestContext.ensureActive()
+                    synchronized(unifiedMangaRepositoryStateLock) {
+                        requestContext.ensureActive()
+                        if ((pageCacheGenerations[ref.sourceId] ?: 0L) != generation)
+                            throw CancellationException("来源已更新或移除，请重新打开章节。")
+                        if (pageRequests[key]?.result === requestContext[Job]) {
+                            pageCache.remove(key)
+                            pageCache[key] = CachedChapterPages(repositoryNanoTime(), loaded)
+                            while (pageCache.size > 32) pageCache.remove(pageCache.keys.first())
+                        }
+                    }
+                    loaded
+                }).also { pageRequests[key] = it }
+            shared.readers++
+            shared
+        }
+        try {
+            request.result.start()
+            return request.result.await()
+        } finally {
             synchronized(unifiedMangaRepositoryStateLock) {
-                val now = repositoryNanoTime()
-                pageCache.entries.removeAll { now - it.value.storedAtNanos !in 0L until PAGE_CACHE_NANOS }
-                pageCache.remove(key)
-                if ((pageCacheGenerations[ref.sourceId] ?: 0L) == generation)
-                    pageCache[key] = CachedChapterPages(now, loaded)
-                while (pageCache.size > 32) pageCache.remove(pageCache.keys.first())
+                request.readers--
+                if (request.readers == 0) {
+                    if (pageRequests[key] === request) pageRequests.remove(key)
+                    // A disappearing preview must not cancel a reader/download that adopted this fetch.
+                    if (!request.result.isCompleted) request.result.cancel()
+                }
             }
-            loaded
         }
     }
 

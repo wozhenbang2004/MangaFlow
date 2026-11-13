@@ -1,5 +1,14 @@
 # MangaFlow · current work
 
+## Foreground loading / reading · 2026-11-14
+
+Current raw request and acceptance are DESIGN.md LOAD-SPEED-112–115: “去优化现在的加载速度和阅读体验，主要是现在感觉加载慢慢的”. Source work removes auxiliary IO from manifest/image publication, gates speculative adjacent images on real visible-image success, schedules actual visible tiles first, reuses cached/header dimensions and shares only identical live foreign chapter manifests. ViewModel's reader catalogue projection runs on Default and usable state appears before the directory save. Original pixels, source ownership/variant/storage IDs, progress, errors, offline handling and latest font/UI work remain.
+
+ReaderScreen is integrated by reader_load_speed with reader_image_speed's isolated ReaderPage patch; image writer supplies Dimensions/Portable/Android bands; root owns UnifiedMangaRepository/MangaViewModel and the only docs/ref update. Complete source plus these records is one batch initially based on df2cda7c669560dee0323533ad9c2f17c64aab86 and rebased onto bf2ad7582fec5011cfa4a3d6917246edff11aa83, preserving the real reader download progress, filter exit/selection, modern fonts and native build repairs, not an incremental/doc-only push. Existing GitHub workflows were read: normal compilation/packaging with manual-only Lint and no tests. No local operations, builds, probes, benchmarks or added review gate.
+
+Baseline Android192/run43482236028 completed/success, applications43482235920 completed/failure; the latter's cause was not established in this slice. These are prior-build observations, not verification of the new code or phone speed. Next exact action: wait for parent Android193/run43485113361 publication to finish, then submit the whole ready batch with expected-head protection, confirm matching normal Android/native CI identities, leave main stable and use concrete compile failures or real user reading feedback. Loading causes outside these source-visible waits, and the actual acceleration, remain unmeasured.
+
+
 ## Modern fonts, download feedback and filter finishing · 2026-11-14
 
 Active correction/raw batch: DESIGN.md FONT-CANDIDATES-108 / DOWNLOAD-FEEDBACK-109 / FILTER-SETTLE-110 / BUILD-NATIVE-111, covered through1000121653 and the preceding rejection of classic Chinese fonts. These supersede the Noto/WenKai catalog, keep independent optional scene downloads and extend the current reader/filter work.

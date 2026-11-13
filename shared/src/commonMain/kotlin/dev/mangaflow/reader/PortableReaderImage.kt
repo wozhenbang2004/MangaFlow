@@ -232,11 +232,17 @@ internal fun PortableVerticalReaderTiles(
             val window = liveWindow()
             if (window == null || window.bottom <= window.top) emptyList()
             else {
-                val first = (floor(window.top * scale / sourceBand).toInt() - 1).coerceIn(0, count - 1)
-                val last = (floor((window.bottom - 1) * scale / sourceBand).toInt() + 1).coerceIn(first, count - 1)
+                val first = floor(window.top * scale / sourceBand).toInt().coerceIn(0, count - 1)
+                val last = floor((window.bottom - 1) * scale / sourceBand).toInt().coerceIn(first, count - 1)
                 var sample = 1
                 while (sample < 128 && sample * 2 <= imageSize.width.toFloat() / displayWidth.coerceAtLeast(1)) sample *= 2
-                (first..last).map { band -> ReaderTile(IntRect(0, band * sourceBand, imageSize.width,
+                // Decode the area being read before warming either neighboring band.
+                val bands = buildList {
+                    addAll(first..last)
+                    if (last < count - 1) add(last + 1)
+                    if (first > 0) add(first - 1)
+                }
+                bands.map { band -> ReaderTile(IntRect(0, band * sourceBand, imageSize.width,
                     minOf((band + 1) * sourceBand, imageSize.height)), sample) }
             }
         }.distinctUntilChanged().collectLatest { requested ->

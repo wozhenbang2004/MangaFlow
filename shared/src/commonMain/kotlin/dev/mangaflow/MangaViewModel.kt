@@ -1695,7 +1695,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     beginReading(ReadingSession(manga, chapters, first.id))
                     return@launch
                 }
-                val memory = repository.cachedDetail(manga.id)?.takeIf { it.chapters.isNotEmpty() }
+                val memory = withContext(Dispatchers.Default) {
+                    repository.cachedDetail(manga.id)?.takeIf { it.chapters.isNotEmpty() }
+                }
                 val saved = if (memory == null) readerCatalogs.read(manga.id) else null
                 if (requestId != libraryOpenRequestId) return@launch
                 // Only a full directory establishes the first chapter; a download may start midway.
@@ -1703,7 +1705,6 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 if (requestId != libraryOpenRequestId) return@launch
                 val first = catalog.chapters.minByOrNull(Chapter::index)?.takeIf { it.id.isNotBlank() }
                     ?: throw IllegalStateException("暂时没有可读章节，请稍后重试。")
-                if (memory == null && saved == null) readerCatalogs.save(catalog)
                 if (requestId != libraryOpenRequestId) return@launch
                 // Detach before beginReading invalidates other navigation intents; do not cancel this job.
                 libraryOpenJob = null
@@ -1712,6 +1713,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 beginReading(ReadingSession(catalog.manga, catalog.chapters, first.id,
                     chaptersLoading = saved != null))
                 if (saved != null) loadReadingCatalog()
+                // The reader can draw while this valid directory is persisted.
+                if (memory == null && saved == null) readerCatalogs.save(catalog)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
@@ -1829,12 +1832,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                         throw IllegalStateException(failure)
                     }
                 }
-                val cached = if (forceRefresh) null else repository.cachedDetail(session.manga.id)
-                    ?.takeIf { findSourceChapter(it.chapters, session.chapterId) != null }
+                val cached = if (forceRefresh) null else withContext(Dispatchers.Default) {
+                    repository.cachedDetail(session.manga.id)
+                        ?.takeIf { findSourceChapter(it.chapters, session.chapterId) != null }
+                }
                 // Downloaded chapters are immediately usable, but they are not
                 // a complete directory for continuing into the next chapter.
                 val loaded = cached ?: repository.detail(session.manga.id)
-                readerCatalogs.save(loaded)
                 if (requestId != readingRequestId) return@launch
                 repository.discoverSources(loaded.manga, sourceAliases(loaded.manga))
                 _reading.update { current ->
@@ -1848,6 +1852,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                         chaptersLoading = false, chaptersError = null,
                     )
                 }
+                // Adjacent chapters are usable before the background directory write completes.
+                readerCatalogs.save(loaded)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {

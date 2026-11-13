@@ -535,7 +535,6 @@ fun ReaderScreen(
                 saved.panelIndex.coerceAtLeast(0) else 0
             if (collection != null) collectionPositionApplied = true
             libraryStore.migratePageBookmarks(manga, requestedChapter, loaded)
-            downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
             pages = loaded
             if (sourcePage != null) sourcePagePending = false
             if (restarting) libraryStore.saveProgress(manga, requestedChapter, 0, loaded.size,
@@ -548,8 +547,8 @@ fun ReaderScreen(
         } finally { if (chapterId == requestedChapterId) loading = false }
     }
 
-    LaunchedEffect(chapterId, pageIndex) {
-        downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
+    LaunchedEffect(chapterId, pageIndex, pages.isNotEmpty()) {
+        if (pages.isNotEmpty()) downloadStore.prioritizeReadingPage(manga.id, chapterId, pageIndex)
     }
 
     LaunchedEffect(controlsVisible, showSettings, showChapters, showSpreadAdjustment, showComments,
@@ -1335,7 +1334,7 @@ private fun ChapterPages(
                     if (list.firstVisibleItemIndex <= pages.lastIndex) list.firstVisibleItemScrollOffset else 0)
             }
         }
-        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests, resolvePage,
+        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, resolvePage,
             enabled = active,
             onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size }) {
             val visible = list.layoutInfo.visibleItemsInfo.filter { it.index in pages.indices }
@@ -1462,7 +1461,7 @@ private fun ChapterPages(
                 save(groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex, 0)
             }
         }
-        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, prefetchRequests, resolvePage,
+        AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, resolvePage,
             enabled = active) {
             val shown = groups.getOrNull(pager.currentPage)
             (shown?.first ?: pages.lastIndex) to (shown?.last ?: pages.lastIndex)
@@ -1532,6 +1531,7 @@ private class ReaderCursor(var scrollOffset: Int = 0, var panelIndex: Int = 0)
 
 private data class PrefetchWindow(
     val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>, val enabled: Boolean,
+    val visibleReady: Boolean,
 )
 
 private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize)
@@ -1546,6 +1546,7 @@ private fun AdjacentPagePrefetch(
     headers: Map<String, String>,
     mode: ReadingMode,
     composedPages: Map<Int, Boolean>,
+    loadedPages: Map<Int, Boolean>,
     requests: MutableMap<Int, Disposable>,
     resolvePage: suspend (Page) -> Page,
     enabled: Boolean,
@@ -1564,7 +1565,8 @@ private fun AdjacentPagePrefetch(
         try {
             snapshotFlow {
                 val (first, last) = visible()
-                PrefetchWindow(first, last, composedPages.keys.toSet(), requests.keys.toSet(), prefetchEnabled)
+                PrefetchWindow(first, last, composedPages.keys.toSet(), requests.keys.toSet(), prefetchEnabled,
+                    (first..last).all { it !in pages.indices || loadedPages[it] == true })
             }.distinctUntilChanged().collectLatest { window ->
                 val active = window.composed + (window.first..window.last)
                 val nextDirection = when {
@@ -1583,7 +1585,9 @@ private fun AdjacentPagePrefetch(
                 val candidates = if (direction > 0) listOf(window.last + 1, window.last + 2, window.last + 3, window.first - 1)
                     else listOf(window.first - 1, window.first - 2, window.first - 3, window.last + 1)
                 val desired = candidates.filter { index ->
-                    window.enabled && index in pages.indices && index !in window.composed && pages[index].url.startsWith("https:")
+                    // Visible pages own the connection first; speculative bytes begin after they are displayed.
+                    window.enabled && window.visibleReady && index in pages.indices &&
+                        index !in window.composed && pages[index].url.startsWith("https:")
                 }.toSet()
                 val retained = desired + active
                 requests.keys.filter { it !in retained }.forEach { index -> requests.remove(index)?.dispose() }
@@ -1696,13 +1700,14 @@ private fun ReaderPage(
         resolvedPage = null
         try {
             val resource = if (reload > 0) retrySource(page) else resolve(page)
+            // Start the image immediately; original-size IO can finish alongside its decode.
+            resolvedPage = resource
             if (!paged && knownDimensions == null) {
                 readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource)?.let {
                     observedDimensions = it
                     dimensionsMeasured(it)
                 }
             }
-            resolvedPage = resource
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {
             // A failed persistent fetch must not immediately repeat the same HTTP request in Coil.

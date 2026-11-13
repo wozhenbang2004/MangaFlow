@@ -9,6 +9,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** Header-only dimensions are bounded and survive chapter navigation without retaining pixels. */
 internal object ReaderDimensionCache {
@@ -27,22 +29,30 @@ internal object ReaderDimensionCache {
     }
 }
 
+// Serialize only colliding header reads; unrelated pages keep their existing IO concurrency.
+private val dimensionReads = Array(16) { Mutex() }
+
 /** Read bytes already present locally; never fetch an image simply to measure it. */
 internal suspend fun readerImageDimensions(
     imageLoader: ImageLoader,
     page: Page,
     diskCacheKey: String? = page.url,
-): IntSize? = withContext(Dispatchers.IO) {
-    ReaderDimensionCache.get(page.url)?.let { return@withContext it }
-    val dimensions = try {
-        val file = readerFilePath(page.url)
-        if (file != null) readNativeReaderSize(file)
-        else diskCacheKey?.let { key ->
-            imageLoader.diskCache?.openSnapshot(key)?.use { snapshot ->
-                readNativeReaderSize(snapshot.data.toString())
-            }
+): IntSize? {
+    ReaderDimensionCache.get(page.url)?.let { return it }
+    return withContext(Dispatchers.IO) {
+        dimensionReads[(page.url.hashCode() and Int.MAX_VALUE) % dimensionReads.size].withLock {
+            ReaderDimensionCache.get(page.url)?.let { return@withLock it }
+            val dimensions = try {
+                val file = readerFilePath(page.url)
+                if (file != null) readNativeReaderSize(file)
+                else diskCacheKey?.let { key ->
+                    imageLoader.diskCache?.openSnapshot(key)?.use { snapshot ->
+                        readNativeReaderSize(snapshot.data.toString())
+                    }
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { null }
+            dimensions?.also { ReaderDimensionCache.put(page.url, it) }
         }
-    } catch (cancelled: CancellationException) { throw cancelled }
-    catch (_: Exception) { null }
-    dimensions?.also { ReaderDimensionCache.put(page.url, it) }
+    }
 }
