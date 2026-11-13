@@ -73,8 +73,9 @@ kotlin {
 
     applyDefaultHierarchyTemplate()
     sourceSets {
-        val nonAndroidMain by creating { dependsOn(commonMain.get()) }
-        desktopMain.get().dependsOn(nonAndroidMain)
+        val nonAndroidMain = create("nonAndroidMain") { dependsOn(commonMain.get()) }
+        val desktopMain = getByName("desktopMain")
+        desktopMain.dependsOn(nonAndroidMain)
         iosMain.get().dependsOn(nonAndroidMain)
         commonMain.dependencies {
             api(compose.runtime)
