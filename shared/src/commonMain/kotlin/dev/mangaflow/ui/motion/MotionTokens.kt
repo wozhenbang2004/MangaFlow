@@ -15,6 +15,7 @@ object MangaMotion {
     const val PressStiffness = 833f
     const val PressDamping = .866f
     const val PressAttackStiffness = 1_600f
+    const val PressMinimumDuration = 75L
     const val IconPressScale = .94f
     const val SurfacePressScale = .985f
     const val HapticInterval = 70L

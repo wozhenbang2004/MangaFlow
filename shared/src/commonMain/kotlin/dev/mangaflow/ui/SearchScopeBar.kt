@@ -34,7 +34,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -56,7 +56,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -112,15 +111,11 @@ internal fun SearchScopeBar(
             if (targets[it] == SearchTarget.TAG) releaseInput()
             onTarget(targets[it])
         },
-            modifier = Modifier.widthIn(max = 228.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
+            modifier = Modifier.width(132.dp),
             controlHeight = 36.dp, indicatorHeight = 28.dp, indicatorCornerRadius = 8.dp,
             fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
             fontSize = 11.sp, itemContent = { index, _, color ->
-                Row(verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Icon(icons[index], null, Modifier.size(14.dp), tint = color)
-                    Text(labels[index], color = color, fontSize = 11.sp, maxLines = 1)
-                }
+                Icon(icons[index], labels[index], Modifier.size(17.dp), tint = color)
             })
         if (target != SearchTarget.TITLE) BodySourceMark("copy", "拷贝", Modifier.size(18.dp))
         }
@@ -129,15 +124,21 @@ internal fun SearchScopeBar(
                 Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("已选 ${selectedPaths.size}", fontSize = 11.sp, color = colors.onSurfaceVariant,
-                        maxLines = 1)
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        modifier = Modifier.semantics(mergeDescendants = true) {
+                            contentDescription = "已选 ${selectedPaths.size} 个标签"
+                        }) {
+                        Icon(Icons.Outlined.Check, null, Modifier.size(12.dp), tint = colors.onSurfaceVariant)
+                        Text(selectedPaths.size.toString(), fontSize = 10.sp, color = colors.onSurfaceVariant)
+                    }
                     selectedTags.distinctBy { it.path }.forEach { tag ->
                         SearchTagChoice(tag, selected = true, remove = true) { chooseTag(tag) }
                     }
                 }
                 if (target == SearchTarget.TAG) {
                     val action = remember { MutableInteractionSource() }
-                    Row(Modifier.heightIn(min = 36.dp)
+                    Row(Modifier.size(36.dp)
                         .clickable(interactionSource = action, indication = null, role = Role.Button,
                             onClickLabel = if (showChoices) "收起标签选择" else "添加筛选标签",
                             onClick = {
@@ -145,11 +146,10 @@ internal fun SearchScopeBar(
                                 tagsExpanded = !showChoices
                             })
                         .motionPress(action, pressedScale = .97f)
-                        .padding(start = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        .semantics { contentDescription = if (showChoices) "收起标签选择" else "添加筛选标签" },
+                        horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                         Icon(if (showChoices) Icons.Outlined.ExpandLess else Icons.Outlined.Add, null,
                             Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-                        Text(if (showChoices) "收起" else "添加标签", fontSize = 11.sp, color = colors.onSurfaceVariant)
                     }
                 }
             }
@@ -182,11 +182,6 @@ internal fun SearchScopeBar(
                         term.isEmpty() || simplifiedTagQuery(it.name).contains(term, ignoreCase = true) ||
                             it.path.contains(term, ignoreCase = true) || it.path == resolvedPath
                     }
-                }
-                Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("可选标签", fontSize = 11.sp, color = colors.onSurfaceVariant)
-                    Spacer(Modifier.weight(1f))
-                    Text(matches.size.toString(), fontSize = 10.sp, color = colors.onSurfaceVariant.copy(alpha = .7f))
                 }
                 if (tagsError != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(tagsError, color = colors.onSurfaceVariant, fontSize = 11.sp, maxLines = 2,

@@ -1,6 +1,16 @@
 # MangaFlow · current work
 
-Updated: 2026-11-13. Route: DELIVERY with focused research branches. Workspace: `C:/Users/Administrator/Documents/ChatGPT/uiux/MangaFlow`.
+Updated: 2026-11-13. Route: DELIVERY with focused research branches. Execution: cloud-only GitHub connector and in-memory edits, per the latest explicit user instruction.
+
+## Current repair checkpoint · 2026-11-13
+
+Authoritative active scope: DESIGN.md BUGFIX-45 / CHAPTER-DENSITY-46 / WALLPAPER-47. User feedback reports recommendation/filter jitter, Copy heat order and excessive search text, missing press feel, wallpaper loss, comment translation spacing, detail gaps and oversized three-column chapters. Latest correction explicitly rejects whole-screen background blur. User separately requests wallpaper UX redesign, and forbids local computer operations.
+
+Cloud baseline is d9b21abe53bcf6fae77c8f4c4366eda7e9fbfc9b (tree f16d047112ba1bcb550d0ad88a8405f568bee2e2), preserving its Android16 ReaderScreen VerifyError protection and all prior account/KMP/source changes. Earlier writer/batch notes below are historical handoff evidence; they do not override this narrower correction.
+
+Implementation in this checkpoint: stable same-composition discovery header clearance and centered layout Popup; Copy-priority heat sort/cache with icon-led search; brief valid-tap pressure and tab feedback; translation in comment header; natural-height/local-atmosphere detail; compact four-column chapters and volume caption/status grouping; wallpaper legacy/list preservation. Current-preview/thumbnail wallpaper management is the separately active continuation. No tests, local builds or product probes are run; CI and actual user artifact feedback remain separate evidence. All subagent implementation is cloud-only and root alone controls commits/refs.
+
+Next exact action: publish the finished correction to latest main with an expected-head update and confirm its normal CI trigger, then integrate the explicitly requested wallpaper management UX. Do not reopen unrelated source/auth/desktop work or claim phone validation.
 
 ## Entry and current authorization
 

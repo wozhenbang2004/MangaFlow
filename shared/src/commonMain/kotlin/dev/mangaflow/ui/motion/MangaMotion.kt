@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.widthIn
 import dev.mangaflow.ui.MangaWindowSize
 import dev.mangaflow.ui.MangaLayout
 import dev.mangaflow.ui.LocalMangaWindow
+import dev.mangaflow.platform.monotonicTimeMillis
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibilityScope
@@ -82,6 +83,7 @@ import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -122,8 +124,18 @@ internal fun Modifier.motionPress(
     val interactionPressed by interaction.collectIsPressedAsState()
     var down by remember(interaction) { mutableStateOf(false) }
     var directPress by remember(interaction) { mutableStateOf(false) }
-    val pressed = enabled && if (down) directPress else interactionPressed
+    var release by remember(interaction) { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
+    val pressed = enabled && (directPress || (!down && interactionPressed))
     val motion = LocalMotionEnabled.current
+    LaunchedEffect(enabled) {
+        if (!enabled) {
+            release?.cancel()
+            release = null
+            directPress = false
+            down = false
+        }
+    }
     val scale = animateFloatAsState(
         if (pressed && motion) pressedScale else 1f,
         if (!motion) snap() else if (pressed) spring(1f, MangaMotion.PressAttackStiffness)
@@ -135,22 +147,39 @@ internal fun Modifier.motionPress(
     val input = if (enabled) Modifier.pointerInput(interaction) {
         awaitEachGesture {
             val first = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            release?.cancel()
+            release = null
+            val startedAt = monotonicTimeMillis()
+            var released = false
             down = true
             directPress = true
             try {
                 do {
                     val event = awaitPointerEvent(PointerEventPass.Final)
-                    val change = event.changes.firstOrNull { it.id == first.id }
-                    if (change == null || !change.pressed) break
+                    val change = event.changes.firstOrNull { it.id == first.id } ?: break
                     if (event.changes.count { it.pressed } > 1 ||
                         (change.position - first.position).getDistance() > viewConfiguration.touchSlop ||
-                        (change.isConsumed && change.position != change.previousPosition) ||
+                        (change.pressed && change.isConsumed && change.position != change.previousPosition) ||
                         change.position.x !in 0f..size.width.toFloat() ||
                         change.position.y !in 0f..size.height.toFloat()) directPress = false
+                    if (!change.pressed) {
+                        released = change.previousPressed
+                        break
+                    }
                 } while (true)
             } finally {
-                directPress = false
                 down = false
+                // A quick valid UP can precede the next draw. Keep only its visual attack
+                // alive briefly; clickable still commits immediately and owns semantics.
+                // Scroll, pointer cancellation and leaving the target never get this hold.
+                val remaining = MangaMotion.PressMinimumDuration - (monotonicTimeMillis() - startedAt)
+                if (released && directPress && remaining > 0L) {
+                    release = scope.launch {
+                        delay(remaining)
+                        directPress = false
+                        release = null
+                    }
+                } else directPress = false
             }
         }
     } else Modifier

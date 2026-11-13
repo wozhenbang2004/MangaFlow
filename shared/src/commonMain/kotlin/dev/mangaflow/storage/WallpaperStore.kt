@@ -104,7 +104,10 @@ class WallpaperStore private constructor(context: Context) {
                 if (intent.get() != request) throw CancellationException("Wallpaper selection changed")
                 val previous = _state.value
                 val added = WallpaperItem(media.path, poster.path.takeIf { kind == WallpaperKind.VIDEO }, kind, name.take(180))
-                publishLocked(current(previous.copy(items = previous.items + added), added))
+                val retained = previous.items + listOfNotNull(previous.mediaPath?.let { path ->
+                    WallpaperItem(path, previous.posterPath, previous.kind, previous.name)
+                })
+                publishLocked(current(previous.copy(items = (retained + added).distinctBy(WallpaperItem::mediaPath)), added))
                 updateRotationLocked(restart = true)
                 published = true
             }
@@ -233,11 +236,14 @@ class WallpaperStore private constructor(context: Context) {
                     runCatching { WallpaperKind.valueOf(item.optString("kind")) }.getOrDefault(WallpaperKind.IMAGE),
                     item.optString("name").take(180))
             }.distinctBy(WallpaperItem::mediaPath)
-        }.getOrDefault(emptyList()).ifEmpty {
-            if (path == null || !owned(path)) emptyList() else listOf(WallpaperItem(path,
-                prefs.getString("poster", null)?.takeIf(::owned),
-                runCatching { WallpaperKind.valueOf(prefs.getString("kind", "IMAGE").orEmpty()) }.getOrDefault(WallpaperKind.IMAGE),
-                prefs.getString("name", "").orEmpty().take(180)))
+        }.getOrDefault(emptyList()).let { saved ->
+            // Older builds update only the single selection keys; keep that image alongside the saved list.
+            val legacy = path?.takeIf(::owned)?.let { media ->
+                WallpaperItem(media, prefs.getString("poster", null)?.takeIf(::owned),
+                    runCatching { WallpaperKind.valueOf(prefs.getString("kind", "IMAGE").orEmpty()) }.getOrDefault(WallpaperKind.IMAGE),
+                    prefs.getString("name", "").orEmpty().take(180))
+            }
+            (saved + listOfNotNull(legacy)).distinctBy(WallpaperItem::mediaPath)
         }
         val selected = items.firstOrNull { it.mediaPath == path } ?: items.firstOrNull()
         val minutes = prefs.getInt("rotation_minutes", 10).takeIf { it in ROTATION_INTERVALS } ?: 10

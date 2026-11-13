@@ -60,6 +60,7 @@ internal class FederatedSearchGrouper(query: String) {
     /** Visual grouping never persists a work association or merges chapter identities. */
     fun group(hits: List<Manga>, previous: Map<String, List<Manga>> = emptyMap()): List<FederatedSearchGroup> {
         val previousOrder = previous.keys.withIndex().associate { it.value to it.index }
+        val sourceOrder = hits.withIndex().associate { federatedMangaIdentity(it.value) to it.index }
         return hits.distinctBy(::federatedMangaIdentity).groupBy { manga ->
             // Keep sequel symbols, numbers and edition words in the complete title.
             normalizedTitle(manga.title).ifBlank { "identity:${federatedMangaIdentity(manga)}" }
@@ -82,11 +83,15 @@ internal class FederatedSearchGrouper(query: String) {
                 )
             FederatedSearchGroup(canonical, ordered, needsChoice)
         }.sortedWith(compareByDescending<FederatedSearchGroup> { group -> group.matches.any(::isCopy) }
-            .thenByDescending { group -> group.matches.maxOf { relevance(it.title) } }
-            // Copy heat is comparable within its own tier; providers' native heat scales are not.
+            // Copy's search endpoint already orders by heat. Do not let title relevance
+            // override that order, including responses without explicit popularity fields.
             .thenByDescending { group -> group.matches.firstOrNull(::isCopy)
                 ?.let { it.totalPopularity ?: it.popularity ?: -1L } ?: -1L }
-            .thenBy { group -> group.matches.mapNotNull { previousOrder[it.id] }.minOrNull() ?: Int.MAX_VALUE })
+            .thenByDescending { group -> if (group.matches.any(::isCopy)) 0
+                else group.matches.maxOf { relevance(it.title) } }
+            .thenBy { group -> group.matches.firstOrNull(::isCopy)?.let {
+                sourceOrder[federatedMangaIdentity(it)]
+            } ?: group.matches.mapNotNull { previousOrder[it.id] }.minOrNull() ?: Int.MAX_VALUE })
     }
 
     private fun isCopy(manga: Manga): Boolean = federatedMangaIdentity(manga).first == "copy"

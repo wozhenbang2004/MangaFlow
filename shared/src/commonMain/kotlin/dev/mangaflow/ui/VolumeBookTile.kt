@@ -131,8 +131,8 @@ internal fun VolumeBookTile(
                 fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
                 modifier = Modifier.weight(1f))
-            ChapterDownloadMark(entry, downloadMode)
+            ChapterReadMark(progress, progressKnown, size = 12.dp)
+            ChapterDownloadMark(entry, downloadMode, size = 12.dp)
         }
-        ChapterReadingStatus(progress, progressKnown)
     }
 }

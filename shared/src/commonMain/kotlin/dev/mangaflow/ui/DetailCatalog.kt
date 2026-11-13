@@ -217,7 +217,10 @@ internal fun DetailCatalog(
                     color = DetailMuted, fontSize = 11.sp, modifier = Modifier.weight(1f))
             }
             TextButton(onClick = onManageSources) {
-                if (sourcesChecking || sourceLoading) MotionBusyIndicator(Modifier.size(11.dp), color = DetailMuted, strokeWidth = 1.2.dp)
+                if (sourcesChecking || sourceLoading) {
+                    MotionBusyIndicator(Modifier.size(11.dp), color = DetailMuted, strokeWidth = 1.2.dp)
+                    Spacer(Modifier.width(6.dp))
+                }
                 Text(if (sourceCount > 1) "$sourceCount 源" else sourceDisplayName(primarySourceId),
                     color = DetailMuted, fontSize = 11.sp)
                 Icon(Icons.Outlined.ExpandMore, "查看自动合并的漫画来源", Modifier.size(17.dp), tint = DetailSecondary)
@@ -271,7 +274,7 @@ internal fun DetailCatalog(
             } else {
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val showGroup = targetGroup == null && groups.size > 1
-                val tileHeight = (20f * fontScale + 56f).dp
+                val tileHeight = (40f * fontScale + 8f).dp
                 // Source groups are consecutive. Keep that exact order and give each run
                 // its own grid row so a book cover never stretches a normal chapter row.
                 val runs = remember(visibleChapters) {
@@ -284,19 +287,16 @@ internal fun DetailCatalog(
                     }
                 }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
-                    val chapterWidth = (maxWidth - 32.dp).coerceAtLeast(0.dp)
-                    val chapterColumns = MangaLayout.columns(maxWidth, 4, 96.dp * fontScale, 6.dp, 16.dp)
-                    val volumeColumns = ((chapterWidth.value + 6f) / (96f * fontScale + 6f))
-                        .toInt().coerceIn(1, 4)
-                    // Common slots give both explicit and title-detected volumes the same columns.
+                    // Four compact columns on ordinary phones; only narrow windows or
+                    // larger type reduce the count. Covers and chapter cells use the same slots.
+                    val chapterColumns = MangaLayout.columns(maxWidth, 4, 64.dp * fontScale, 6.dp, 16.dp)
                     LazyVerticalGrid(
-                        columns = GridCells.Fixed(chapterColumns * volumeColumns),
+                        columns = GridCells.Fixed(chapterColumns),
                         state = grid, userScrollEnabled = paneActive,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        // Titles and the secondary control/status row have separate
-                        // space; all source choices keep a real 48dp target.
+                        // Reading and source marks share the compact secondary line.
                         verticalArrangement = Arrangement.spacedBy(0.dp),
                     ) {
                         runs.forEachIndexed { runIndex, run ->
@@ -308,7 +308,6 @@ internal fun DetailCatalog(
                             if (!showGroup && runIndex > 0) item(key = "run-break:$runIndex",
                                 span = { GridItemSpan(maxLineSpan) }, contentType = "run-break") { Spacer(Modifier.height(4.dp)) }
                             items(run, key = { it.logicalId.ifBlank { it.id } },
-                                span = { GridItemSpan(if (isVolumeChapter(it)) chapterColumns else volumeColumns) },
                                 contentType = { if (isVolumeChapter(it)) "volume" else "chapter" }) { chapter ->
                                 val showSources = chapter.variants.size > 1 ||
                                     (chapter.variants.isNotEmpty() && chapter.sourceId != primarySourceId)
@@ -344,7 +343,7 @@ internal fun DetailCatalog(
                                                 volumeCovers[chapter.id] = VolumeCoverState(attempt = pending.attempt, automaticRetries = pending.automaticRetries)
                                         }
                                     }
-                                    Column(Modifier.padding(horizontal = 3.dp).padding(bottom = 10.dp)) {
+                                    Column(Modifier.padding(bottom = 6.dp)) {
                                         VolumeBookTile(
                                             mangaId = mangaId, chapter = chapter, cover = cover,
                                             imageHeaders = { volumeImageHeaders(chapter) },
@@ -568,7 +567,7 @@ private fun ChapterTile(
     val readingColor = MaterialTheme.colorScheme.primary
     val hasDownloadMark = downloadMode || entry != null
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-    val markSize = 12.dp * fontScale
+    val markSize = 10.dp * fontScale
     Box(
         Modifier.fillMaxWidth().height(height.coerceAtLeast(48.dp))
             .combinedClickable(
@@ -589,7 +588,7 @@ private fun ChapterTile(
             .motionPress(interaction, pressedScale = .98f)
             .clip(RoundedCornerShape(10.dp))
             .background(if (current) readingColor.copy(alpha = .055f) else Color.Transparent)
-            .padding(horizontal = 8.dp)) {
+            .padding(horizontal = 6.dp)) {
             Box(Modifier.fillMaxWidth().height(20.dp * fontScale), contentAlignment = Alignment.CenterStart) {
                 Text(
                     chapter.title, color = when {
@@ -603,13 +602,13 @@ private fun ChapterTile(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().height(20.dp * fontScale), verticalAlignment = Alignment.CenterVertically) {
                 if (showSources) CatalogSourceEntry(chapter,
                     enabled = sourceEnabled,
                     onOpen = { anchor -> if (downloadMode) onDownload() else onSources(anchor) })
                 Spacer(Modifier.weight(1f))
-                Row(Modifier.width(markSize * 2f + 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.width(markSize * 2f + 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(markSize), contentAlignment = Alignment.Center) {
                         if (progress != null) ChapterReadMark(progress, progressKnown, size = markSize)
                     }
@@ -630,7 +629,7 @@ private fun CatalogSourceEntry(chapter: Chapter, modifier: Modifier = Modifier,
     if (sources.isEmpty()) return
     var anchor by remember(chapter.logicalId, chapter.id) { mutableStateOf<Rect?>(null) }
     val interaction = remember { MutableInteractionSource() }
-    Row(modifier.heightIn(min = 48.dp).widthIn(min = 48.dp).onGloballyPositioned { coordinates ->
+    Row(modifier.heightIn(min = 20.dp).widthIn(min = 28.dp).onGloballyPositioned { coordinates ->
         val origin = coordinates.localToScreen(Offset.Zero)
         if (origin.isSpecified) anchor = Rect(origin, androidx.compose.ui.geometry.Size(
             coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))

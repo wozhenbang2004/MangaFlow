@@ -13,6 +13,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -41,7 +44,6 @@ import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionPress
 
 /** The search hit's actual body sources, kept separate from rating-site marks. */
@@ -112,19 +114,29 @@ internal fun SearchSourceSummary(sources: Map<String, FederatedSearchSource>, on
     val colors = MaterialTheme.colorScheme
     val loading = sources.values.count { it.loading }
     val failed = sources.values.count { !it.loading && it.error != null }
-    val completed = sources.size - loading - failed
     var expanded by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 30.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (loading > 0) {
-                MotionBusyIndicator(Modifier.size(11.dp), color = colors.onSurfaceVariant, strokeWidth = 1.2.dp)
-                Spacer(Modifier.width(6.dp))
+            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                sources.values.forEach { source ->
+                    Box(Modifier.size(24.dp).semantics(mergeDescendants = true) {
+                        contentDescription = source.sourceName + if (source.loading) "，查询中"
+                            else if (source.error != null) "，查询失败" else "，已完成"
+                    }, contentAlignment = Alignment.Center) {
+                        ChapterSourceLogo(source.sourceId, source.sourceName, Modifier.size(14.dp), muted = source.loading)
+                        if (source.loading) MotionBusyIndicator(Modifier.align(Alignment.BottomEnd).size(7.dp),
+                            color = colors.onSurfaceVariant, strokeWidth = 1.dp)
+                        else if (source.error != null) Icon(Icons.Outlined.ErrorOutline, null,
+                            Modifier.align(Alignment.BottomEnd).size(9.dp), tint = colors.error)
+                    }
+                }
             }
-            Text(if (loading > 0) "正在检查 · $completed/${sources.size} 源已完成" else "$completed 源已完成",
-                modifier = Modifier.weight(1f), fontSize = 11.sp, maxLines = 1,
-                overflow = TextOverflow.Ellipsis, color = colors.onSurfaceVariant)
-            if (failed > 0) MotionTextButton(onClick = onRetry, enabled = loading == 0) {
-                Text("$failed 源失败 · 重试", fontSize = 11.sp, color = colors.onSurfaceVariant)
+            if (failed > 0) MotionIconButton(onClick = onRetry, enabled = loading == 0,
+                modifier = Modifier.size(30.dp)) {
+                Icon(Icons.Outlined.Refresh, "重试${failed}个失败来源", Modifier.size(16.dp),
+                    tint = colors.onSurfaceVariant)
             }
             MotionIconButton(onClick = { expanded = !expanded }, modifier = Modifier.size(30.dp)) {
                 Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
@@ -170,12 +182,10 @@ internal fun FederatedSearchChoices(
         Column(Modifier.fillMaxWidth().heightIn(max = maximumHeight).navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp).heightIn(min = 44.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("搜索结果", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                    if (heading.isNotBlank()) Text(heading, color = colors.onSurfaceVariant,
-                        fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 3.dp))
-                }
+                Icon(Icons.Outlined.Search, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+                Text(heading, modifier = Modifier.weight(1f).padding(start = 8.dp),
+                    fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
                 MotionIconButton(onClick = dismiss) { Icon(Icons.Outlined.Close, "关闭搜索结果选择", Modifier.size(20.dp)) }
             }
             LazyColumn(Modifier.weight(1f, fill = false).fillMaxWidth(),
@@ -191,7 +201,6 @@ internal fun FederatedSearchChoices(
                         manga.latestChapter.takeIf { it.isNotBlank() },
                         manga.status.takeIf { it.isNotBlank() },
                     ).joinToString(" · ")
-                    val missingDetails = authors.isBlank() && manga.latestChapter.isBlank()
                     val entryPath = if (sourceMatches.size > 1) searchEntryPath(manga) else null
                     val interaction = remember(manga.id) { MutableInteractionSource() }
                     Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(12.dp))
@@ -209,12 +218,11 @@ internal fun FederatedSearchChoices(
                             Row(verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                                 if (sourceMatches.size > 1) ChapterSourceLogo(manga.sourceId, sourceName, Modifier.size(14.dp))
-                                Text(if (sourceMatches.size > 1) "$sourceName · 条目 $entryNumber" else sourceName,
+                                Text(if (sourceMatches.size > 1) "$sourceName · $entryNumber" else sourceName,
                                     fontSize = 13.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            Text(if (missingDetails) "来源未提供作者/章节信息" +
-                                    manga.status.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty() else details,
+                            if (details.isNotBlank()) Text(details,
                                 fontSize = 11.sp, lineHeight = 14.sp, color = colors.onSurfaceVariant,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                             if (entryPath != null) Text(entryPath, fontSize = 10.sp, lineHeight = 12.sp,

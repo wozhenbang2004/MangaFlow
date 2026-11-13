@@ -38,6 +38,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -671,12 +672,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val displayedDiscovery = if (!browse.isSearch) browse else discoveryBackground
                         val rankingExpanded = displayedDiscovery.mode == DiscoveryMode.RANKING
                         var rankingAnchor by remember { mutableStateOf(Rect.Zero) }
-                        var chromeHeightPx by remember(current.section) {
-                            mutableIntStateOf(with(chromeDensity) {
-                                (if (current.section == Section.DISCOVER && rankingExpanded) 88.dp else 44.dp).toPx().toInt()
-                            })
+                        var chromeHeightPx by remember(current.section, chromeDensity) {
+                            mutableIntStateOf(with(chromeDensity) { 48.dp.roundToPx() })
                         }
-                        val chromePadding = with(chromeDensity) { chromeHeightPx.toDp() } + HeaderContentGap
                         val discoveryTabsWidth = with(chromeDensity) {
                             val labelSlot = maxOf(52.dp, 14.sp.toDp() * 2 + 24.dp)
                             labelSlot * DiscoveryMode.entries.size + 8.dp
@@ -709,12 +707,21 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             Section.DOWNLOADS -> MangaLayout.ListWidth
                             else -> MangaLayout.BrowseWidth
                         }
-                        Box(Modifier.widthIn(max = contentWidth).fillMaxSize().align(Alignment.TopCenter).graphicsLayer {
+                        BoxWithConstraints(Modifier.widthIn(max = contentWidth).fillMaxSize().align(Alignment.TopCenter).graphicsLayer {
                             // Only the incoming foreground settles; the real backdrop never disappears.
                             alpha = rootOpacity.value
                             translationY = ((1f - rootOpacity.value) / (1f - MangaMotion.RootEntryAlpha))
                                 .coerceIn(0f, 1f) * 6.dp.toPx()
                         }.motionInputGate(!rootHandoff)) {
+                            val discoveryActionsWidth = (if (history.isEmpty()) 44.dp else 88.dp) + 16.dp
+                            val discoveryStacked = maxWidth - 16.dp < 44.dp + 12.dp + discoveryTabsWidth + discoveryActionsWidth
+                            val discoveryChromeBase = if (discoveryStacked) 92.dp else 48.dp
+                            val chromePadding = (if (current.section == Section.DISCOVER) {
+                                // Recommendation/update content must not follow the old ranking
+                                // subbar's exit measurement or a first-frame header estimate.
+                                if (rankingExpanded) maxOf(discoveryChromeBase, with(chromeDensity) { chromeHeightPx.toDp() })
+                                else discoveryChromeBase
+                            } else with(chromeDensity) { chromeHeightPx.toDp() }) + HeaderContentGap
                             val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
                             val navigation: @Composable () -> Unit = {
                                 Box {
@@ -821,7 +828,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             } else if (current.section == Section.DISCOVER) {
                                 SegmentedGlassHeader(searchBackdrop, navigation,
                                     controlsWidth = discoveryTabsWidth,
-                                    actionsWidth = (if (history.isEmpty()) 44.dp else 88.dp) + 16.dp,
+                                    actionsWidth = discoveryActionsWidth,
                                     modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 8.dp, vertical = 2.dp)
                                         .onSizeChanged { chromeHeightPx = it.height },
                                     controlsAlpha = {
@@ -869,11 +876,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         if (current.section == Section.DISCOVER) ExpandingSearchBar(
                             expanded = searchExpanded,
                             query = browse.query,
-                            placeholder = when (browse.searchTarget) {
-                                SearchTarget.TITLE -> "搜索作品"
-                                SearchTarget.AUTHOR -> "搜索作者"
-                                SearchTarget.TAG -> "筛选标签"
-                            },
+                            placeholder = "搜索",
                             active = rootActive,
                             backdrop = searchBackdrop,
                             onExpandedChange = { if (it) searchExpanded = true else closeSearch() },

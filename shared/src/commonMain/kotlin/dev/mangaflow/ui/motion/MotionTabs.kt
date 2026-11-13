@@ -273,7 +273,7 @@ internal fun MotionTabs(
             Box(tab.height(height).selectable(
                 selected = i == index, role = role, interactionSource = interaction, indication = null,
                 onClick = { if (i != index) feedback.perform(FeelEvent.Selection); onSelect(i) },
-            ).drawBehind {
+            ).motionPress(interaction).drawBehind {
                 drawRoundRect(foreground.copy(alpha = pressAlpha.value), cornerRadius = CornerRadius(10.dp.toPx()))
             }.then(if (compact) Modifier.widthIn(min = labelWidth + 6.dp).padding(horizontal = 3.dp) else Modifier),
                 contentAlignment = Alignment.Center) {

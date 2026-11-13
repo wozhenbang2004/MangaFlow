@@ -105,7 +105,7 @@ internal fun ExpandingSearchBar(
     onQuery: (String) -> Unit,
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
-    placeholder: String = "搜索作品、作者或标签",
+    placeholder: String = "搜索",
     results: @Composable (maxHeight: Dp, active: Boolean) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current

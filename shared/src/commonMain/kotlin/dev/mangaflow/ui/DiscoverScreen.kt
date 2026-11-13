@@ -798,8 +798,10 @@ private fun DiscoveryLayoutControl(
             override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize,
                 layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
                 val x = if (layoutDirection == LayoutDirection.Ltr) anchorBounds.right - popupContentSize.width else anchorBounds.left
-                val y = if (anchorBounds.top + fullHeight > windowSize.height - margin)
-                    anchorBounds.bottom - popupContentSize.height else anchorBounds.top
+                // Keep the trigger's center fixed while the shell grows around it.
+                // Measuring the animated shell as the popup window moved the centered
+                // icon by half of every height change.
+                val y = anchorBounds.top + (anchorBounds.height - fullHeight) / 2
                 return IntOffset(x.coerceIn(margin, (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)),
                     y.coerceIn(margin, (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin)))
             }
@@ -810,39 +812,41 @@ private fun DiscoveryLayoutControl(
     Box(Modifier.size(44.dp)) {
         if (enabled || present) Popup(popupPositionProvider = position, onDismissRequest = { expanded = false },
             properties = PopupProperties(focusable = expanded)) {
-            Box(Modifier.size(width, height)) {
-                LiquidGlassSurface(backdrop, Modifier.matchParentSize().graphicsLayer { alpha = progress },
-                    cornerRadius = 22.dp - 4.dp * progress, role = GlassSurfaceRole.POPOVER,
-                    softCard = true, materialExpansion = { progress }) {}
-                Box(Modifier.matchParentSize().padding(end = 44.dp).clipToBounds().motionInputGate(enabled && expanded)
-                    .graphicsLayer { alpha = ((progress - .18f) / .82f).coerceIn(0f, 1f) }) {
-                    Box(Modifier.align(Alignment.CenterEnd).wrapContentSize(Alignment.CenterEnd, unbounded = true)
-                        .width(extendedWidth - 44.dp).padding(horizontal = 6.dp)) {
-                        MotionTabs(selected, labels, onSelect = { index ->
-                            if (index != selected) onChange(index + 1)
-                            expanded = false
-                        }, modifier = Modifier.fillMaxWidth(), role = Role.RadioButton,
-                            controlHeight = rowHeight, indicatorHeight = rowHeight - 8.dp,
-                            fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
-                            fontSize = 12.sp, itemContent = { index, _, color ->
-                                Text(if (index == 0) "列表" else (index + 1).toString(), color = color,
-                                    fontSize = 12.sp, maxLines = 1,
-                                    modifier = Modifier.semantics { contentDescription = labels[index] })
-                            })
+            Box(Modifier.size(width, extendedHeight), contentAlignment = Alignment.CenterEnd) {
+                Box(Modifier.size(width, height)) {
+                    LiquidGlassSurface(backdrop, Modifier.matchParentSize().graphicsLayer { alpha = progress },
+                        cornerRadius = 22.dp - 4.dp * progress, role = GlassSurfaceRole.POPOVER,
+                        softCard = true, materialExpansion = { progress }) {}
+                    Box(Modifier.matchParentSize().padding(end = 44.dp).clipToBounds().motionInputGate(enabled && expanded)
+                        .graphicsLayer { alpha = ((progress - .18f) / .82f).coerceIn(0f, 1f) }) {
+                        Box(Modifier.align(Alignment.CenterEnd).wrapContentSize(Alignment.CenterEnd, unbounded = true)
+                            .width(extendedWidth - 44.dp).padding(horizontal = 6.dp)) {
+                            MotionTabs(selected, labels, onSelect = { index ->
+                                if (index != selected) onChange(index + 1)
+                                expanded = false
+                            }, modifier = Modifier.fillMaxWidth(), role = Role.RadioButton,
+                                controlHeight = rowHeight, indicatorHeight = rowHeight - 8.dp,
+                                fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
+                                fontSize = 12.sp, itemContent = { index, _, color ->
+                                    Text(if (index == 0) "列表" else (index + 1).toString(), color = color,
+                                        fontSize = 12.sp, maxLines = 1,
+                                        modifier = Modifier.semantics { contentDescription = labels[index] })
+                                })
+                        }
                     }
-                }
-                MotionIconButton(onClick = { expanded = !expanded },
-                    modifier = Modifier.align(Alignment.CenterEnd).size(44.dp)
-                        .motionInputGate(enabled)
-                        .semantics { stateDescription = labels[selected] + if (expanded) "，已展开" else "，已收起" },
-                    enabled = enabled) {
-                    Box(Modifier.size(23.dp), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Outlined.ViewModule, "浏览布局：${labels[selected]}", Modifier.size(19.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(columns.coerceIn(1, 4).toString(), Modifier.align(Alignment.BottomEnd)
-                            .clip(RoundedCornerShape(3.dp)).background(MaterialTheme.colorScheme.surface)
-                            .padding(horizontal = 1.dp), fontSize = 9.sp, lineHeight = 10.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    MotionIconButton(onClick = { expanded = !expanded },
+                        modifier = Modifier.align(Alignment.CenterEnd).size(44.dp)
+                            .motionInputGate(enabled)
+                            .semantics { stateDescription = labels[selected] + if (expanded) "，已展开" else "，已收起" },
+                        enabled = enabled) {
+                        Box(Modifier.size(23.dp), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.ViewModule, "浏览布局：${labels[selected]}", Modifier.size(19.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(columns.coerceIn(1, 4).toString(), Modifier.align(Alignment.BottomEnd)
+                                .clip(RoundedCornerShape(3.dp)).background(MaterialTheme.colorScheme.surface)
+                                .padding(horizontal = 1.dp), fontSize = 9.sp, lineHeight = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 }
             }

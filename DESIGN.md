@@ -1,5 +1,21 @@
 # MangaFlow detail · 2026-11-12
 
+## Current corrections · 2026-11-13 (BUGFIX-45 / CHAPTER-DENSITY-46 / WALLPAPER-47)
+
+The user's latest feedback supersedes DETAIL-COVER-32's full-page blur and screen-percentage height, GRID-34's 76dp cells and SEARCH-RESULTS-13's relevance-first Copy ordering. Current source baseline: d9b21abe53bcf6fae77c8f4c4366eda7e9fbfc9b. Implement only these repairs and the separately requested wallpaper management UX; preserve concurrent account, source, download and platform work.
+
+| ID | User evidence and concrete repair |
+| --- | --- |
+| BUGFIX-45A | “点进推荐界面那个轮播图会上下抖动” / “列表数量的filter点了也…抖动”. The root's initial header estimate omits padding/stacked rows and old ranking exit measurements move the next recommendation list. Derive discovery's base clearance in the same constrained composition as its real header; recommendation/update ignore outgoing ranking height. The layout Popup keeps a fixed vertical envelope and expands around its trigger center. Preserve pager, springs, selection and saved layouts. |
+| BUGFIX-45B | “拷贝的按热度…最前面” / “各种搜索的减少文字”. Keep actual Copy requests' -popular ordering; Copy groups precede other sources and heat wins inside Copy. Bump disposable search cache; scope tabs use named icons, selected tags retain color and count, repetitive headings/status prose are removed. Real identity, unsupported author/tag scope, errors/retry and uncertainty remain truthful. |
+| BUGFIX-45C | “点击的各种手感怎么也没了”. A fast UP could clear visual pressure before drawing; retain a brief 75ms attack for a valid tap without delaying its action. Tabs and newly added detail/comment affordances reuse existing motionPress. Scroll, cancellation, multipointer, reduced-motion and platform feedback preferences remain respected. |
+| BUGFIX-45D | “评论的翻译占了特别特别大的上下空间”. The translation action becomes a named compact icon in the existing author/date row; a foreign comment no longer receives an extra 28dp footer merely for translation. The original text and actual device translation behavior stay intact. |
+| BUGFIX-45E | “漫画详情页标签和章节评论那些中间一大堆空白” / “背景虚化不是整屏”. The sharp poster keeps its actual aspect and narrow glass surround. Natural metadata height alone determines the header, with a short seam; current-cover blur is clipped to the artwork header and collapses with it. Catalogue/comments have a clean theme-linked tone, with no full-page blurred image. Keep real scroll/cover identity and content access. |
+| CHAPTER-DENSITY-46 | “章节也回归成三列和更大的了”. Restore four columns on normal 320dp+ phone widths at default type; only genuinely narrow/large-type constraints reduce the count. Both regular/volume items use the same direct grid slots, removing compounded gaps. Ordinary rows return to 48dp at default type, with title/status/source fitting compactly. Source loading gets a 6dp gap before its label; volume reading/download marks share the caption line and no separate 48dp source lane remains. |
+| WALLPAPER-47 | “选了第二张壁纸图片后第一张就不见了” and “壁纸那个好好设计下uiux吧”. Preserve current/legacy managed items when appending. Current main already appends ordinary imports; a confirmed legacy/list migration omission is fixed separately from the unverified phone cause. Keep a persistent current preview plus selectable thumbnails/add, with selection marked; disclose rotation/interval and removal management as needed. Reuse existing PANEL/press components and actual image/video support. |
+
+User execution correction: “别弄我本地电脑你自己在你的云端工作”. All implementation after that instruction uses only cloud connector reads, in-memory edits and GitHub blobs/commits. No local files, builds, devices or terminal operations. FAST-ITERATE-29 remains: submit to latest main, confirm CI trigger, user validates the real artifact; source changes are not visual/device acceptance.
+
 ## Active follow-ups and source evidence · 2026-11-13 (31–42; see PROJECT-STATE for live delivery)
 
 These incremental user messages supplement the previous batches; installed screenshots/versions were not supplied for these later comments. Do not mark a requirement closed merely because it was added here.

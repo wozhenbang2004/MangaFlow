@@ -431,10 +431,12 @@ private fun CommentContent(
     }
     val hasForeignText = remember(translationText) { hasForeignCommentText(translationText) }
     val canTranslate = revealed && hasForeignText
+    val contentInteraction = remember(review.id, sourceId) { MutableInteractionSource() }
     Row(modifier.fillMaxWidth().animateContentSize(
         animationSpec = if (LocalMotionEnabled.current) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap())
-        .then(if (expandable) Modifier.clickable(role = Role.Button,
-            onClickLabel = if (expanded) "收起评论" else "展开评论", onClick = toggleContent) else Modifier),
+        .then(if (expandable) Modifier.clickable(interactionSource = contentInteraction, indication = null,
+            role = Role.Button, onClickLabel = if (expanded) "收起评论" else "展开评论", onClick = toggleContent)
+            .motionPress(contentInteraction, pressedScale = .99f) else Modifier),
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         CommentAvatar(review, foreground, size = if (compactReply) 24.dp else if (comfortable) 30.dp else 28.dp)
         Column(Modifier.weight(1f)) {
@@ -447,6 +449,7 @@ private fun CommentContent(
                 if (review.date.isNotBlank()) Text(compactCommentDate(review.date), color = muted, fontSize = if (comfortable) 11.sp else 10.sp,
                     modifier = Modifier.widthIn(max = 76.dp).semantics { contentDescription = review.date },
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (canTranslate) CommentTranslationAction(translationText, muted)
                 if (expandable) Icon(
                     if (expanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
                     null, tint = muted, modifier = Modifier.size(14.dp))
@@ -484,7 +487,7 @@ private fun CommentContent(
             val hasFeedback = (review.upVotes ?: 0) > 0 || (review.downVotes ?: 0) > 0 ||
                 (revealed && conceal) ||
                 (showReplyCount && (review.replyCount ?: 0) > 0)
-            if (hasFeedback || canTranslate) Row(Modifier.fillMaxWidth().padding(top = 2.dp),
+            if (hasFeedback) Row(Modifier.fillMaxWidth().padding(top = 2.dp),
                 verticalAlignment = Alignment.Bottom) {
                 if (hasFeedback) FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (conceal && revealed) TextButton(onClick = toggleContent,
@@ -504,8 +507,6 @@ private fun CommentContent(
                             modifier = Modifier.align(Alignment.CenterVertically).padding(vertical = 4.dp))
                     }
                 }
-                else Spacer(Modifier.weight(1f))
-                if (canTranslate) CommentTranslationAction(translationText, muted)
             }
         }
     }

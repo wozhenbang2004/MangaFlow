@@ -10,9 +10,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Translate
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -35,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.ui.motion.MotionDialog
+import dev.mangaflow.ui.motion.motionPress
 
 private val commentNonLanguageTokens = Regex("""https?://\S+|(?<!\S)@[\p{L}\p{N}_.-]+""", RegexOption.IGNORE_CASE)
 
@@ -72,7 +76,7 @@ internal fun CommentTranslationAction(text: String, color: Color, modifier: Modi
     }
 
     val interaction = remember { MutableInteractionSource() }
-    Box(modifier.heightIn(min = 28.dp)
+    Box(modifier.size(24.dp)
         .semantics { contentDescription = "用设备上的翻译应用翻译评论" }
         .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = {
             // Stay well below Binder's transaction limit; never silently translate a truncated review.
@@ -86,8 +90,8 @@ internal fun CommentTranslationAction(text: String, color: Color, modifier: Modi
                         showFallback("暂时无法打开翻译应用。", allowTools = true)
                 }
             }
-        }).padding(horizontal = 4.dp, vertical = 2.dp), contentAlignment = Alignment.Center) {
-        Text("翻译", color = color, fontSize = 11.sp, lineHeight = 16.sp)
+        }).motionPress(interaction, pressedScale = .94f), contentAlignment = Alignment.Center) {
+        Icon(Icons.Outlined.Translate, null, tint = color, modifier = Modifier.size(14.dp))
     }
 
     MotionDialog(visible = fallbackVisible, onDismissRequest = { fallbackVisible = false }) {

@@ -305,12 +305,11 @@ fun DetailScreen(
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
         val compactHero = availableHeight < 600.dp
         val collapsedHero = availableHeight < 420.dp
-        val seamHeight = 16.dp
+        val seamHeight = 8.dp
         var naturalHeroHeight by remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
-        val displayHeight = (availableHeight * (if (compactHero) .60f else .72f) - 56.dp - seamHeight)
-            .coerceAtLeast(0.dp)
-        val heroHeight = if (collapsedHero) 0.dp else maxOf(displayHeight,
-            with(density) { naturalHeroHeight.toDp() })
+        // The book information owns its height; never reserve a percentage of
+        // the screen below short metadata.
+        val heroHeight = if (collapsedHero) 0.dp else with(density) { naturalHeroHeight.toDp() }
         val heroPixels = with(density) { heroHeight.toPx() }
         val header = rememberTopAppBarState(initialHeightOffsetLimit = -heroPixels)
         val dockScrollTravel = with(density) { 96.dp.toPx() }
@@ -369,11 +368,12 @@ fun DetailScreen(
                 }
             }
         }
-        // The current cover is the stationary page background and the dock's real source.
-        // Keep the dock outside this captured scene so it cannot sample itself.
-        Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(DetailBackground)) {
+        // Capture the local artwork and clean body together for floating controls.
+        // The cover atmosphere ends with the book header, above chapters/comments.
+        Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(informationTone)) {
             Box(
-                Modifier.fillMaxSize()
+                Modifier.fillMaxWidth().height(heroHeight + statusInset + 56.dp + seamHeight)
+                    .graphicsLayer { translationY = header.heightOffset; clip = true }
                     .mangaHazeSource(artworkBackdrop).background(atmosphereColor),
                 contentAlignment = Alignment.TopCenter,
             ) {
@@ -387,12 +387,10 @@ fun DetailScreen(
                     }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur),
                     contentScale = ContentScale.Crop,
                 )
-                // A translucent theme veil protects text without replacing the cover
-                // under the catalogue/comments, even after the header has collapsed.
                 Box(Modifier.matchParentSize().background(Brush.verticalGradient(
-                    0f to DetailBackground.copy(alpha = if (lightDetail) .58f else .62f),
-                    .35f to DetailBackground.copy(alpha = if (lightDetail) .66f else .70f),
-                    1f to DetailBackground.copy(alpha = if (lightDetail) .70f else .74f),
+                    0f to informationTone.copy(alpha = if (lightDetail) .58f else .62f),
+                    .65f to informationTone.copy(alpha = if (lightDetail) .80f else .84f),
+                    1f to informationTone,
                 )))
             }
             Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
@@ -420,8 +418,7 @@ fun DetailScreen(
                             val foreground = measurable.measure(
                                 constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity),
                             )
-                            val expanded = if (collapsedHero) 0 else maxOf(foreground.height,
-                                with(density) { displayHeight.roundToPx() })
+                            val expanded = if (collapsedHero) 0 else foreground.height
                             val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
                             layout(foreground.width, (expanded + offset).coerceIn(constraints.minHeight, constraints.maxHeight)) {
                                 foreground.placeRelative(0, offset)
@@ -630,6 +627,7 @@ private fun HeroBookInformation(
     val posterAspect = if (coverSize.width.isFinite() && coverSize.height.isFinite() &&
         coverSize.width > 0f && coverSize.height > 0f) coverSize.width / coverSize.height else 2f / 3f
     val ink = if (informationTone.luminance() > .5f) Color(0xFF242426) else Color.White
+    val titleInteraction = remember(manga.id) { MutableInteractionSource() }
     val titleStyle = MaterialTheme.typography.headlineSmall.copy(
         fontSize = if (compact) 22.sp else 24.sp,
         lineHeight = if (compact) 29.sp else 31.sp,
@@ -673,7 +671,9 @@ private fun HeroBookInformation(
                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(manga.title, color = ink, style = titleStyle,
                         modifier = Modifier.fillMaxWidth().clickable(enabled = infoVisible,
-                            role = Role.Button, onClickLabel = "查看完整作品信息", onClick = onIntroduction))
+                            interactionSource = titleInteraction, indication = null,
+                            role = Role.Button, onClickLabel = "查看完整作品信息", onClick = onIntroduction)
+                            .motionPress(titleInteraction, enabled = infoVisible, pressedScale = .985f))
                     AuthorNames(manga.authors, ink.copy(alpha = .82f), enabled = infoVisible, onAuthor = onAuthor)
                     val state = listOf(manga.status, manga.latestChapter.takeIf(String::isNotBlank)
                         ?.let { "更新 · $it" }.orEmpty()).filter(String::isNotBlank).joinToString(" · ")
@@ -692,8 +692,11 @@ private fun HeroBookInformation(
 
 @Composable
 private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduction: () -> Unit) {
+    val interaction = remember(manga.id) { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clickable(enabled = enabled, role = Role.Button,
-        onClickLabel = "展开简介与作品信息", onClick = onIntroduction).padding(vertical = 4.dp),
+        interactionSource = interaction, indication = null,
+        onClickLabel = "展开简介与作品信息", onClick = onIntroduction)
+        .motionPress(interaction, enabled = enabled, pressedScale = .985f).padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(manga.description.ifBlank { "作品信息" }, color = ink.copy(alpha = .82f),
             fontSize = 13.sp, lineHeight = 21.sp, maxLines = 3, overflow = TextOverflow.Ellipsis,
@@ -777,7 +780,7 @@ private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
         return
     }
     Box(
-        modifier = if (onClick != null) Modifier.heightIn(min = 44.dp).widthIn(min = 44.dp)
+        modifier = if (onClick != null) Modifier.heightIn(min = 32.dp).widthIn(min = 32.dp)
             .clickable(interactionSource = interaction, indication = null, enabled = enabled,
                 role = Role.Button, onClickLabel = "搜索${label}漫画", onClick = onClick)
             .motionPress(interaction, enabled = enabled)
@@ -800,9 +803,12 @@ private fun AuthorNames(authors: List<String>, color: Color, enabled: Boolean = 
     if (authors.isEmpty()) return
     FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         authors.filter(String::isNotBlank).distinct().forEach { name ->
+            val interaction = remember(name) { MutableInteractionSource() }
             Text(name, color = color, fontSize = 12.sp, lineHeight = 18.sp,
                 modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                    .clickable(enabled = enabled, role = Role.Button, onClickLabel = "查看${name}的漫画") { onAuthor(name) }
+                    .clickable(enabled = enabled, role = Role.Button, interactionSource = interaction,
+                        indication = null, onClickLabel = "查看${name}的漫画") { onAuthor(name) }
+                    .motionPress(interaction, enabled = enabled)
                     .padding(vertical = 4.dp))
         }
     }
