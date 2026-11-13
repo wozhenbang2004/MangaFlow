@@ -431,3 +431,42 @@ notice is preserved as `licenses/ONNX-Runtime-ThirdPartyNotices.txt`; its inclus
 does not imply every optional upstream component is used. CPU execution is limited
 to two inference threads; GPU, NNAPI and NPU delegates are not enabled.
 Sources: https://github.com/google-ai-edge/LiteRT and https://github.com/microsoft/onnxruntime/tree/v1.31.1
+
+
+## Daily reading activity calendar
+
+The date padding/week-column/block geometry in `ui/ReadingStatsSheet.kt` adapts
+`src/lib/calendar.ts` (`groupByWeeks`, continuous missing-date handling) and
+`src/components/ActivityCalendar.tsx` from react-activity-calendar,
+`https://github.com/grubersjoe/react-activity-calendar/tree/4931c8f7d85c98de10358f6f5a841c50bd4ff228`.
+The Android adaptation uses the existing Canvas, Monday-first dates, foreground-reading
+milliseconds, fixed time levels and local date selection. It includes no React runtime,
+source test generator or synthetic activity data.
+
+MIT License
+
+Copyright (c) 2021 Jonathan Gruber
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+The beUI measured-trigger morph already credited above also informs
+`ui/SegmentedGlassHeader.kt`'s `RankingsFromTab`: one retained surface grows from the
+measured ranking tab, final-size labels are revealed separately, and the same progress
+retraces the path. This is an Android adaptation within the existing header, not the
+upstream web popover or an assertion of visual equivalence.

@@ -1,5 +1,14 @@
 package dev.mangaflow.ui
 
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -60,9 +69,8 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
-import kotlin.math.roundToInt
 
-/** The chosen range owns both the time summary and ranking; the chart is always fourteen days. */
+/** The chosen date range owns the time summary, actual daily heatmap and work ranking. */
 @Composable
 internal fun ReadingStatsSheet(
     activity: List<ReadingActivity>,
@@ -72,16 +80,23 @@ internal fun ReadingStatsSheet(
 ) {
     var period by remember { mutableIntStateOf(0) }
     val today = LocalDate.now()
-    val dates = remember(today) { (13L downTo 0L).map(today::minusDays) }
-    val since = dates.first().toString()
+    val earliest = remember(activity, today) {
+        activity.flatMap { it.days.keys }.mapNotNull { runCatching { LocalDate.parse(it) }.getOrNull() }
+            .filter { !it.isAfter(today) }.minOrNull() ?: today.minusDays(364)
+    }
+    val recentPeriod = period == 0
+    val rangeStart = if (recentPeriod) today.minusDays(90) else minOf(earliest, today.minusDays(364))
+    val dates = remember(rangeStart, today) {
+        (0L..ChronoUnit.DAYS.between(rangeStart, today)).map(rangeStart::plusDays)
+    }
+    val since = rangeStart.toString()
     val until = today.toString()
     fun recent(item: ReadingActivity): Long = item.days.entries
         .filter { it.key >= since && it.key <= until }.sumOf { it.value }
     val total = activity.sumOf { it.totalMillis }
-    val fortnight = activity.sumOf(::recent)
+    val recentTotal = activity.sumOf(::recent)
     val daily = dates.map { day -> activity.sumOf { it.days[day.toString()] ?: 0L } }
-    val recentPeriod = period == 0
-    val visibleTotal = if (recentPeriod) fortnight else total
+    val visibleTotal = if (recentPeriod) recentTotal else total
     val activeDays = if (recentPeriod) daily.count { it > 0L } else activity
         .flatMap { it.days.filterValues { millis -> millis > 0L }.keys }.distinct().size
     val ordered = activity.filter { if (recentPeriod) recent(it) > 0L else it.totalMillis > 0L }
@@ -94,7 +109,7 @@ internal fun ReadingStatsSheet(
             verticalAlignment = Alignment.CenterVertically) {
             Text("阅读统计", color = colors.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            MotionTabs(period, listOf("近两周", "累计"), { period = it },
+            MotionTabs(period, listOf("近三月", "累计"), { period = it },
                 modifier = Modifier.width(156.dp), compact = true, controlHeight = 40.dp,
                 fontSize = 12.sp, muted = colors.onSurfaceVariant,
                 selectedFontWeight = FontWeight.SemiBold, unselectedFontWeight = FontWeight.Normal)
@@ -108,9 +123,10 @@ internal fun ReadingStatsSheet(
         ) {
             item(key = "summary") {
                 ReadingTimeSummary(visibleTotal, activeDays, ordered.size,
-                    if (recentPeriod) "近两周" else "累计")
+                    if (recentPeriod) "近三月" else "累计",
+                    average = if (recentPeriod) visibleTotal / dates.size.coerceAtLeast(1) else null)
             }
-            item(key = "daily-time") { DailyReadingChart(dates, daily) }
+            item(key = "daily-time") { ReadingHeatmap(activity, rangeStart, today) }
             if (ordered.isNotEmpty()) item(key = "ranking-heading") {
                 Text("阅读排行", color = colors.onSurfaceVariant, fontSize = 11.sp,
                     modifier = Modifier.padding(top = 18.dp, bottom = 4.dp))
@@ -122,7 +138,7 @@ internal fun ReadingStatsSheet(
                     Icon(Icons.Outlined.Schedule, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                     Text(when {
                         activity.isEmpty() -> "从下一次阅读开始记录"
-                        recentPeriod -> "近两周暂无阅读记录"
+                        recentPeriod -> "近三月暂无阅读记录"
                         else -> "暂无阅读时长"
                     }, color = colors.onSurfaceVariant, fontSize = 13.sp)
                 }
@@ -140,16 +156,19 @@ internal fun ReadingStatsSheet(
 }
 
 @Composable
-private fun ReadingTimeSummary(millis: Long, activeDays: Int, books: Int, range: String) {
+private fun ReadingTimeSummary(millis: Long, activeDays: Int, books: Int, range: String, average: Long? = null) {
     val colors = MaterialTheme.colorScheme
     Row(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 16.dp).clearAndSetSemantics {
         contentDescription = "${range}阅读 ${readingDuration(millis)}，活跃 $activeDays 天，$books 部作品。仅累计前台阅读时间。"
     }, verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Outlined.Schedule, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
         Spacer(Modifier.width(8.dp))
-        Text(readingDuration(millis), color = colors.onSurface,
-            fontSize = 25.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.weight(1f))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(readingDuration(millis), color = colors.onSurface,
+                fontSize = 25.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold)
+            if (average != null) Text("日均 " + readingDuration(average),
+                color = colors.onSurfaceVariant, fontSize = 11.sp)
+        }
         Column(Modifier.padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 Icon(Icons.Outlined.CalendarToday, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
@@ -163,65 +182,136 @@ private fun ReadingTimeSummary(millis: Long, activeDays: Int, books: Int, range:
     }
 }
 
-/** Adapt the original daily plot, retaining real zero days and an accessible date selection. */
+/**
+ * Adapt react-activity-calendar's continuous dates, weekday padding and week-column layout.
+ * The foreground-time store supplies every value; fixed time levels never fabricate activity.
+ */
 @Composable
-private fun DailyReadingChart(dates: List<LocalDate>, values: List<Long>) {
+private fun ReadingHeatmap(activity: List<ReadingActivity>, firstDay: LocalDate, today: LocalDate) {
     val colors = MaterialTheme.colorScheme
-    val ink = colors.onSurface
-    val peak = values.maxOrNull()?.coerceAtLeast(0L) ?: 0L
-    var selectedDay by remember(dates) {
-        mutableIntStateOf(values.indexOfLast { it > 0L }.takeIf { it >= 0 } ?: dates.lastIndex)
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val fontScale = density.fontScale.coerceAtLeast(1f)
+    val measurer = rememberTextMeasurer()
+    val daily = remember(activity) {
+        buildMap<String, Long> {
+            activity.forEach { entry -> entry.days.forEach { (date, millis) ->
+                put(date, (get(date) ?: 0L) + millis.coerceAtLeast(0L))
+            } }
+        }
     }
-    val selected = selectedDay.coerceIn(dates.indices)
-    val day = dates[selected]
-    val dayLabel = if (selected == dates.lastIndex) "今天" else "${day.monthValue}/${day.dayOfMonth}"
-    Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("近14天", fontSize = 11.sp, color = colors.onSurfaceVariant, modifier = Modifier.weight(1f))
-        Text("$dayLabel · ${readingDuration(values[selected])}",
-            fontSize = 11.sp, color = colors.onSurface, fontWeight = FontWeight.Medium)
-    }
-    Canvas(Modifier.fillMaxWidth().height(44.dp)
-        .pointerInput(dates, values) {
-            detectTapGestures { position ->
-                selectedDay = (position.x / size.width.coerceAtLeast(1) * values.size).toInt()
-                    .coerceIn(0, values.lastIndex)
+    // Monday-first, with missing dates at level zero and out-of-range padding left blank.
+    val calendarStart = remember(firstDay) { firstDay.minusDays(firstDay.dayOfWeek.value - 1L) }
+    val dayCount = ChronoUnit.DAYS.between(calendarStart, today).toInt() + 1
+    val weeks = (dayCount + 6) / 7
+    val monthLabels = remember(calendarStart, firstDay, weeks) {
+        buildList {
+            var previousMonth = -1
+            repeat(weeks) { week ->
+                val date = maxOf(firstDay, calendarStart.plusWeeks(week.toLong()))
+                if (date.monthValue != previousMonth) {
+                    add(week to ("${date.monthValue}月"))
+                    previousMonth = date.monthValue
+                }
             }
         }
-        .semantics {
-            contentDescription = "近14天每日阅读时长"
-            stateDescription = "${day.monthValue}月${day.dayOfMonth}日 ${readingDuration(values[selected])}"
-            onClick(label = "查看今天") { selectedDay = dates.lastIndex; true }
-            customActions = listOf(
-                CustomAccessibilityAction("前一天") {
-                    if (selectedDay > 0) { selectedDay--; true } else false
-                },
-                CustomAccessibilityAction("后一天") {
-                    if (selectedDay < dates.lastIndex) { selectedDay++; true } else false
-                },
-            )
-        }) {
-        val slot = size.width / values.size
-        val width = (slot * .55f).coerceAtMost(12.dp.toPx())
-        val floor = size.height - 3.dp.toPx()
-        values.forEachIndexed { index, value ->
-            val x = slot * index + (slot - width) / 2f
-            if (index == selected) drawRoundRect(ink.copy(alpha = .035f),
-                topLeft = Offset(slot * index + 1.dp.toPx(), 0f),
-                size = Size((slot - 2.dp.toPx()).coerceAtLeast(0f), size.height),
-                cornerRadius = CornerRadius(4.dp.toPx()))
-            if (value > 0L && peak > 0L) {
-                val height = (floor * (value.toDouble() / peak).toFloat()).coerceAtLeast(.8.dp.toPx())
-                drawRoundRect(if (index == selected) colors.primary.copy(alpha = .9f) else ink.copy(alpha = .3f),
-                    topLeft = Offset(x, floor - height), size = Size(width, height),
-                    cornerRadius = CornerRadius(2.dp.toPx()))
-            } else drawCircle(if (index == selected) colors.primary.copy(alpha = .75f) else ink.copy(alpha = .13f),
-                radius = 1.dp.toPx(), center = Offset(slot * (index + .5f), floor))
+    }
+    var selectedDay by remember(firstDay, today) { mutableStateOf(today) }
+    val selectedMillis = daily[selectedDay.toString()] ?: 0L
+    val selectedBooks = activity.count { (it.days[selectedDay.toString()] ?: 0L) > 0L }
+    val scroll = rememberScrollState()
+    val levels = listOf(colors.onSurface.copy(alpha = .055f), colors.primary.copy(alpha = .20f),
+        colors.primary.copy(alpha = .38f), colors.primary.copy(alpha = .62f), colors.primary.copy(alpha = .90f))
+    fun level(millis: Long): Int = when {
+        millis <= 0L -> 0
+        millis < 15 * 60_000L -> 1
+        millis < 30 * 60_000L -> 2
+        millis < 60 * 60_000L -> 3
+        else -> 4
+    }
+    val labelHeight = 20.dp * fontScale
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val weekdayWidth = 22.dp * fontScale
+        val viewport = (maxWidth - weekdayWidth).coerceAtLeast(1.dp)
+        val block = if (weeks > 16) 14.dp else
+            (viewport / weeks.coerceAtLeast(1).toFloat() - 3.dp).coerceIn(12.dp, 22.dp)
+        val step = block + 3.dp
+        val chartWidth = step * weeks - 3.dp
+        val chartHeight = labelHeight + step * 7 - 3.dp
+        LaunchedEffect(firstDay, today, scroll.maxValue) { scroll.scrollTo(scroll.maxValue) }
+        Row(Modifier.fillMaxWidth()) {
+            Canvas(Modifier.width(weekdayWidth).height(chartHeight)) {
+                listOf(0 to "一", 2 to "三", 4 to "五").forEach { (row, label) ->
+                    drawText(measurer.measure(label, TextStyle(fontSize = 10.sp, color = colors.onSurfaceVariant)),
+                        topLeft = Offset(0f, labelHeight.toPx() + row * step.toPx() + (block.toPx() - 10.sp.toPx()) / 2f))
+                }
+            }
+            Row(Modifier.weight(1f).horizontalScroll(scroll)) {
+                Canvas(Modifier.width(chartWidth).height(chartHeight)
+                    .pointerInput(calendarStart, firstDay, today, step, labelHeight) {
+                        detectTapGestures { position ->
+                            val column = (position.x / step.toPx()).toInt()
+                            val row = ((position.y - labelHeight.toPx()) / step.toPx()).toInt()
+                            if (position.y >= labelHeight.toPx() && column in 0 until weeks && row in 0..6) {
+                                val date = calendarStart.plusDays(column * 7L + row)
+                                if (!date.isBefore(firstDay) && !date.isAfter(today)) selectedDay = date
+                            }
+                        }
+                    }.semantics {
+                        contentDescription = "每日阅读时长热力图。颜色由少至多：0、少于15分钟、15至30分钟、30至60分钟、至少60分钟。"
+                        stateDescription = "${selectedDay.year}年${selectedDay.monthValue}月${selectedDay.dayOfMonth}日 ${readingDuration(selectedMillis)}"
+                        onClick("查看今天") { selectedDay = today; true }
+                        customActions = listOf(
+                            CustomAccessibilityAction("前一天") {
+                                if (selectedDay.isAfter(firstDay)) { selectedDay = selectedDay.minusDays(1); true } else false
+                            },
+                            CustomAccessibilityAction("后一天") {
+                                if (selectedDay.isBefore(today)) { selectedDay = selectedDay.plusDays(1); true } else false
+                            })
+                    }) {
+                    monthLabels.forEach { (column, label) ->
+                        drawText(measurer.measure(label, TextStyle(fontSize = 10.sp, color = colors.onSurfaceVariant)),
+                            topLeft = Offset(column * step.toPx(), 0f))
+                    }
+                    repeat(dayCount) { index ->
+                        val date = calendarStart.plusDays(index.toLong())
+                        if (!date.isBefore(firstDay)) {
+                            val point = Offset(index / 7 * step.toPx(), labelHeight.toPx() + index % 7 * step.toPx())
+                            drawRoundRect(levels[level(daily[date.toString()] ?: 0L)], point,
+                                Size(block.toPx(), block.toPx()), CornerRadius(2.dp.toPx()))
+                            if (date == selectedDay) drawRoundRect(colors.onSurface.copy(alpha = .85f), point,
+                                Size(block.toPx(), block.toPx()), CornerRadius(2.dp.toPx()),
+                                style = Stroke(1.2.dp.toPx()))
+                        }
+                    }
+                }
+            }
         }
     }
-    val shortDate = DateTimeFormatter.ofPattern("M/d")
-    Row(Modifier.fillMaxWidth().padding(top = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(dates.first().format(shortDate), fontSize = 10.sp, color = colors.onSurfaceVariant)
-        Text("今天", fontSize = 10.sp, color = colors.onSurfaceVariant)
+    Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        val dayLabel = when {
+            selectedDay == today -> "今天"
+            selectedDay.year != today.year -> selectedDay.format(DateTimeFormatter.ofPattern("yyyy/M/d"))
+            else -> "${selectedDay.monthValue}月${selectedDay.dayOfMonth}日"
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(dayLabel, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
+            Text(if (selectedBooks > 0) "$selectedBooks 部作品" else "暂无记录", fontSize = 10.sp, color = colors.onSurfaceVariant)
+        }
+        Text(readingDuration(selectedMillis), fontSize = 12.sp, fontWeight = FontWeight.Medium, color = colors.onSurface)
+    }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        if (firstDay.isBefore(today.minusDays(112))) Text("左右滑动查看", fontSize = 10.sp, color = colors.onSurfaceVariant)
+        Spacer(Modifier.weight(1f))
+        Text("少", fontSize = 10.sp, color = colors.onSurfaceVariant)
+        Canvas(Modifier.width(62.dp).height(10.dp).clearAndSetSemantics { }) {
+            levels.forEachIndexed { index, color ->
+                drawRoundRect(color, Offset(index * 13.dp.toPx(), 0f),
+                    Size(10.dp.toPx(), 10.dp.toPx()), CornerRadius(2.dp.toPx()))
+            }
+        }
+        Text("多", fontSize = 10.sp, color = colors.onSurfaceVariant)
     }
 }
 

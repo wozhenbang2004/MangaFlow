@@ -269,6 +269,7 @@ internal fun DiscoverySearchResults(
     onTag: (MangaTag) -> Unit,
     onRetryTags: () -> Unit,
     tagsOnly: Boolean = false,
+    onTagQuery: ((String) -> Unit)? = null,
 ) {
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
@@ -282,20 +283,21 @@ internal fun DiscoverySearchResults(
         saved
     }
     LaunchedEffect(active, retainedResults) { if (!active) retainedResults.stopScroll() }
-    Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).padding(8.dp)
+    Column(Modifier.fillMaxWidth().heightIn(max = maxHeight).padding(if (tagsOnly) 0.dp else 8.dp)
         .motionInputGate(active)) {
         SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
-            search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly)
+            search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly, onTagQuery = onTagQuery)
         val selectingTags = search.searchTarget == SearchTarget.TAG && search.selectedTags.isEmpty()
         val awaitingKeyword = search.query.isBlank() && search.selectedTags.isEmpty()
-        if (search.isSearch && !selectingTags && !awaitingKeyword) Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 5.dp),
+        if (search.isSearch && !selectingTags && !awaitingKeyword) Row(Modifier.fillMaxWidth().padding(start = if (tagsOnly) 0.dp else 6.dp,
+            end = if (tagsOnly) 0.dp else 6.dp, top = if (tagsOnly) 16.dp else 6.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Text("搜索结果", style = MaterialTheme.typography.titleSmall)
+            Text(if (tagsOnly) "匹配作品" else "搜索结果", fontSize = 13.sp, fontWeight = FontWeight.Medium)
             Spacer(Modifier.weight(1f))
             if (search.loading && search.items.isEmpty()) {
                 CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
             } else if (search.items.isNotEmpty()) {
-                Text("${search.items.size} 条", style = MaterialTheme.typography.labelSmall,
+                Text((if (search.hasMore) "已显示 " else "") + "${search.items.size} 本", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -330,7 +332,7 @@ internal fun DiscoverySearchResults(
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 items(search.items, key = Manga::id) { manga ->
-                    SearchResultRow(manga, repository, "search-${search.cacheKey}") { onOpen(manga) }
+                    SearchResultRow(manga, repository, "search-${search.cacheKey}", horizontalInset = if (tagsOnly) 0.dp else 6.dp) { onOpen(manga) }
                 }
                 if (search.hasMore || search.loadingMore) {
                     item(key = "search-more") {
@@ -586,7 +588,7 @@ private fun DiscoveryPane(
 }
 
 @Composable
-private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement: String, onOpen: () -> Unit) {
+private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement: String, horizontalInset: Dp = 6.dp, onOpen: () -> Unit) {
     val transition = LocalMangaCoverTransition.current
     val interaction = remember { MutableInteractionSource() }
     Row(
@@ -596,7 +598,7 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
                 onOpen()
             })
             .motionPress(interaction, pressedScale = .985f)
-            .padding(horizontal = 6.dp, vertical = 5.dp),
+            .padding(horizontal = horizontalInset, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).mangaSharedCover(manga.id, placement).mangaCoverCard(7.dp))

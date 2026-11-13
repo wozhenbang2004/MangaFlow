@@ -133,7 +133,7 @@ internal fun DetailReadingDock(
                         contentDescription = listOf(actionTitle, chapterTitle, subtitle)
                             .filter(String::isNotBlank).joinToString("，")
                     }, verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center) {
+                    horizontalArrangement = Arrangement.Start) {
                     val progressColor = MaterialTheme.colorScheme.primary
                     Box(Modifier.size(lerp(28.dp, 20.dp, collapse)), contentAlignment = Alignment.Center) {
                         if (fraction != null) Canvas(Modifier.matchParentSize().padding(1.dp)) {
@@ -145,7 +145,7 @@ internal fun DetailReadingDock(
                             modifier = Modifier.size(lerp(20.dp, 16.dp, collapse)))
                     }
                     Spacer(Modifier.width(lerp(10.dp, 6.dp, collapse)))
-                    Column(Modifier.weight(1f, fill = false),
+                    Column(Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(2.dp * (1f - collapse))) {
                         Text(chapterTitle.ifBlank { if (loading) "正在读取章节" else "暂无可读章节" },
                             color = DetailForeground, fontSize = (15f - 3f * collapse).sp,
@@ -155,10 +155,18 @@ internal fun DetailReadingDock(
                             val lineHeight = with(density) { 16.sp.toDp() }
                             Box(Modifier.height(lineHeight * (1f - collapse)).clipToBounds()
                                 .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) }) {
-                                Text(listOf(actionTitle, percent?.let { "$it%" }).filterNotNull().joinToString(" · "),
+                                Text(actionTitle,
                                     color = DetailSecondary, fontSize = 11.sp, lineHeight = 16.sp,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
+                        }
+                    }
+                    if (percent != null && collapse < 1f) {
+                        Box(Modifier.width(52.dp * fontScale * (1f - collapse)).clipToBounds()
+                            .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) },
+                            contentAlignment = Alignment.CenterEnd) {
+                            Text("$percent%", color = DetailSecondary, fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
                         }
                     }
                 }

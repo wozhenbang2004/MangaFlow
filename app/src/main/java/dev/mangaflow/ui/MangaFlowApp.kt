@@ -1,5 +1,8 @@
 package dev.mangaflow.ui
 
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.geometry.Rect
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -10,22 +13,17 @@ import dev.mangaflow.ui.motion.LocalMotionBackState
 import dev.mangaflow.ui.motion.motionBackPreview
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.EnterExitState
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
-import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,7 +56,6 @@ import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -245,22 +242,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         val panelHeight = (LocalConfiguration.current.screenHeightDp.dp * .72f - 60.dp).coerceAtLeast(120.dp)
         val closeTags: () -> Unit = { tagSearchVisible = false; model.clearSearch() }
         MotionBottomSheet(onDismissRequest = closeTags) { dismiss ->
-            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).navigationBarsPadding()) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).navigationBarsPadding()) {
                 Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
-                    BasicTextField(value = browse.query, onValueChange = model::setQuery,
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
-                        modifier = Modifier.weight(1f).padding(horizontal = 12.dp)
-                            .semantics { contentDescription = "筛选漫画标签" },
-                        decorationBox = { input ->
-                            Box {
-                                if (browse.query.isEmpty()) Text("筛选标签", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                input()
-                            }
-                        })
+                    Text("标签筛选", Modifier.weight(1f), fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
                     MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.Close, "关闭标签搜索", Modifier.size(20.dp))
+                        Icon(Icons.Outlined.Close, "关闭标签筛选", Modifier.size(20.dp))
                     }
                 }
                 DiscoverySearchResults(browse, expanded = true, active = true,
@@ -268,7 +255,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     onRetry = model::retryBrowse, onMore = model::loadMore,
                     onOpen = { manga -> selectedCover = null; dismiss(); model.openManga(manga) },
                     onTarget = { model.setSearchTarget(SearchTarget.TAG) }, onTag = model::toggleSearchTag,
-                    onRetryTags = model::retrySearchTags, tagsOnly = true)
+                    onRetryTags = model::retrySearchTags, tagsOnly = true, onTagQuery = model::setQuery)
             }
         }
         }
@@ -506,13 +493,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         val chromeDensity = LocalDensity.current
                         val discoveryBackground = model.browseBackground(browse)
                         val displayedDiscovery = if (!browse.isSearch) browse else discoveryBackground
-                        val rankingPresence = remember {
-                            MutableTransitionState(displayedDiscovery.mode == DiscoveryMode.RANKING)
-                        }
-                        rankingPresence.targetState = displayedDiscovery.mode == DiscoveryMode.RANKING
+                        val rankingExpanded = displayedDiscovery.mode == DiscoveryMode.RANKING
+                        var rankingAnchor by remember { mutableStateOf(Rect.Zero) }
                         var chromeHeightPx by remember {
                             mutableIntStateOf(with(chromeDensity) {
-                                (if (current.section == Section.DISCOVER && rankingPresence.targetState) 88.dp else 44.dp).toPx().toInt()
+                                (if (current.section == Section.DISCOVER && rankingExpanded) 88.dp else 44.dp).toPx().toInt()
                             })
                         }
                         val chromePadding = with(chromeDensity) { chromeHeightPx.toDp() } + HeaderContentGap
@@ -662,27 +647,23 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         }
                                     },
                                     secondary = {
-                                        AnimatedVisibility(visibleState = rankingPresence,
-                                            enter = fadeIn(tween(if (motion) MangaMotion.Content else 0)) +
-                                                expandVertically(tween(if (motion) MangaMotion.Content else 0)),
-                                            exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
-                                                shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
-                                            LiquidGlassSurface(searchBackdrop,
-                                                Modifier.padding(start = 50.dp, top = 2.dp).fillMaxWidth(),
-                                                cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION,
-                                                trackPointer = true) {
-                                                RankingControls(displayedDiscovery,
-                                                    onPeriod = { model.selectDiscovery(displayedDiscovery.mode, period = it) },
-                                                    onAudience = { model.selectDiscovery(displayedDiscovery.mode, audience = it) },
-                                                    onRefresh = model::refresh,
-                                                    modifier = Modifier.motionInputGate(rootActive && chromeReady &&
-                                                        displayedDiscovery.mode == DiscoveryMode.RANKING))
-                                            }
+                                        RankingsFromTab(searchBackdrop, rankingExpanded, rankingAnchor,
+                                            enabled = rootActive && chromeReady && rankingExpanded) {
+                                            RankingControls(displayedDiscovery,
+                                                onPeriod = { model.selectDiscovery(displayedDiscovery.mode, period = it) },
+                                                onAudience = { model.selectDiscovery(displayedDiscovery.mode, audience = it) },
+                                                onRefresh = model::refresh)
                                         }
                                     }) {
                                     BrowseTabs(browse.mode.ordinal, DiscoveryMode.entries.map { it.label },
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp)
-                                            .motionInputGate(rootActive && chromeReady)) { index ->
+                                            .onGloballyPositioned { coordinates ->
+                                                // BrowseTabs uses equal, stationary hit cells; measure the actual middle cell.
+                                                val bounds = coordinates.boundsInRoot()
+                                                val slot = bounds.width / DiscoveryMode.entries.size
+                                                val left = bounds.left + slot * DiscoveryMode.RANKING.ordinal
+                                                rankingAnchor = Rect(left, bounds.top, left + slot, bounds.bottom)
+                                            }.motionInputGate(rootActive && chromeReady)) { index ->
                                         closeSearch()
                                         model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
                                     }

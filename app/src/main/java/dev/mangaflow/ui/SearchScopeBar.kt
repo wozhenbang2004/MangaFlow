@@ -1,7 +1,21 @@
 package dev.mangaflow.ui
 
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalFocusManager
+import dev.mangaflow.ui.motion.MotionTabContent
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,7 +35,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.FilterAlt
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.PersonOutline
@@ -65,13 +78,18 @@ internal fun SearchScopeBar(
     onTag: (MangaTag) -> Unit,
     onRetryTags: () -> Unit,
     tagsOnly: Boolean = false,
+    onTagQuery: ((String) -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     val targets = listOf(SearchTarget.TITLE, SearchTarget.AUTHOR, SearchTarget.TAG)
     val labels = listOf("作品", "作者", "标签")
     val icons = listOf(Icons.AutoMirrored.Outlined.MenuBook, Icons.Outlined.PersonOutline, Icons.AutoMirrored.Outlined.Label)
     val selectedPaths = remember(selectedTags) { selectedTags.mapTo(mutableSetOf()) { it.path } }
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    var tagsExpanded by rememberSaveable(target, tagsOnly) { mutableStateOf(selectedTags.isEmpty()) }
+    val showChoices = target == SearchTarget.TAG && (!tagsOnly || tagsExpanded || selectedTags.isEmpty())
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (!tagsOnly) MotionTabs(targets.indexOf(target).coerceAtLeast(0), labels, { onTarget(targets[it]) },
             modifier = Modifier.widthIn(max = 228.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
             controlHeight = 36.dp, indicatorHeight = 28.dp, indicatorCornerRadius = 8.dp,
@@ -84,47 +102,90 @@ internal fun SearchScopeBar(
                 }
             })
         if (selectedTags.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (selectedTags.size > 1) Row(verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Icon(Icons.Outlined.FilterAlt, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
-                    Text("同时匹配", fontSize = 11.sp, color = colors.onSurfaceVariant, maxLines = 1)
+            Row(Modifier.fillMaxWidth().heightIn(min = 36.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("已选 " + selectedPaths.size, fontSize = 11.sp, color = colors.onSurfaceVariant)
+                if (selectedPaths.size > 1) Text(" · 同时匹配", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                Spacer(Modifier.weight(1f))
+                if (tagsOnly) {
+                    val action = remember { MutableInteractionSource() }
+                    Row(Modifier.heightIn(min = 40.dp)
+                        .clickable(interactionSource = action, indication = null, role = Role.Button,
+                            onClickLabel = if (showChoices) "收起标签选择" else "添加筛选标签",
+                            onClick = {
+                                if (showChoices) { keyboard?.hide(); focus.clearFocus(force = true) }
+                                tagsExpanded = !showChoices
+                            })
+                        .motionPress(action, pressedScale = .97f)
+                        .padding(start = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(if (showChoices) Icons.Outlined.ExpandLess else Icons.Outlined.Add, null,
+                            Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                        Text(if (showChoices) "收起" else "添加标签", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                    }
                 }
+            }
+            FlowRow(Modifier.fillMaxWidth().heightIn(max = 84.dp).verticalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp)) {
                 selectedTags.distinctBy { it.path }.forEach { tag ->
                     SearchTagChoice(tag, selected = true, remove = true) { onTag(tag) }
                 }
             }
         }
-        if (target == SearchTarget.TAG) {
-            val matches = remember(availableTags, query) {
-                val term = simplifiedTagQuery(query.trim())
-                availableTags.distinctBy { it.path }.filter {
-                    term.isEmpty() || simplifiedTagQuery(it.name).contains(term, ignoreCase = true) || it.path.contains(term, ignoreCase = true)
+        MotionTabContent(showChoices, Modifier.fillMaxWidth(), contentKey = { it },
+            order = { if (it) 1 else 0 }, fillContent = false, soft = true) { visible ->
+            if (visible) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (tagsOnly && onTagQuery != null) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).clip(RoundedCornerShape(12.dp))
+                        .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Outlined.Search, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                        BasicTextField(value = query, onValueChange = onTagQuery, singleLine = true,
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, color = colors.onSurface),
+                            cursorBrush = SolidColor(colors.onSurface),
+                            modifier = Modifier.weight(1f).semantics { contentDescription = "查找可选标签" },
+                            decorationBox = { input -> Box {
+                                if (query.isEmpty()) Text("查找标签", color = colors.onSurfaceVariant, fontSize = 12.sp)
+                                input()
+                            } })
+                    }
                 }
-            }
-            if (tagsError != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                val matches = remember(availableTags, query) {
+                    val term = simplifiedTagQuery(query.trim())
+                    availableTags.distinctBy { it.path }.filter {
+                        term.isEmpty() || simplifiedTagQuery(it.name).contains(term, ignoreCase = true) ||
+                            it.path.contains(term, ignoreCase = true)
+                    }
+                }
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("可选标签", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                    Spacer(Modifier.weight(1f))
+                    Text(matches.size.toString(), fontSize = 10.sp, color = colors.onSurfaceVariant.copy(alpha = .7f))
+                }
+                if (tagsError != null) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(tagsError, color = colors.onSurfaceVariant, fontSize = 11.sp, maxLines = 2,
-                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = 6.dp))
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     MotionIconButton(onClick = onRetryTags, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.Outlined.Refresh, "重试加载标签", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                     }
-            }
-            when {
-                tagsLoading && matches.isEmpty() -> Row(Modifier.heightIn(min = 44.dp).padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    MotionBusyIndicator(Modifier.size(16.dp).semantics { contentDescription = "正在读取标签" },
-                        color = colors.onSurfaceVariant, strokeWidth = 1.5.dp)
                 }
-                matches.isEmpty() -> if (tagsError == null) Text(if (query.isBlank()) "暂无可选标签" else "没有匹配的标签",
-                    color = colors.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.padding(8.dp))
-                else -> FlowRow(Modifier.fillMaxWidth().heightIn(max = 120.dp).verticalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                    matches.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) { onTag(tag) } }
+                when {
+                    tagsLoading && matches.isEmpty() -> Row(Modifier.heightIn(min = 44.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        MotionBusyIndicator(Modifier.size(16.dp).semantics { contentDescription = "正在读取标签" },
+                            color = colors.onSurfaceVariant, strokeWidth = 1.5.dp)
+                    }
+                    matches.isEmpty() -> if (tagsError == null) Text(if (query.isBlank()) "暂无可选标签" else "没有匹配的标签",
+                        color = colors.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.padding(vertical = 8.dp))
+                    else -> FlowRow(Modifier.fillMaxWidth().heightIn(max = 144.dp).verticalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                        matches.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) {
+                            if (tagsOnly) tagsExpanded = true
+                            onTag(tag)
+                        } }
+                    }
                 }
-            }
+            } else Spacer(Modifier.height(0.dp))
         }
     }
 }
@@ -162,7 +223,7 @@ private fun SearchTagChoice(tag: MangaTag, selected: Boolean, remove: Boolean = 
             horizontalArrangement = Arrangement.spacedBy(3.dp)) {
             if (remove || selected) Icon(if (remove) Icons.Outlined.Close else Icons.Outlined.Check, null,
                 Modifier.size(10.dp), tint = accent)
-            Text(tag.name, fontSize = 10.sp, lineHeight = 14.sp,
+            Text(tag.name, fontSize = if (remove) 11.sp else 10.sp, lineHeight = 15.sp,
                 color = accent,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
