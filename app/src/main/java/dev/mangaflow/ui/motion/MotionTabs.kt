@@ -54,8 +54,6 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
-import dev.mangaflow.storage.GlassSkin
-import dev.mangaflow.ui.LocalGlassSkin
 
 internal enum class MotionTabTreatment { Capsule, Soft, Underline }
 
@@ -89,7 +87,8 @@ internal fun MotionTabs(
     val left = remember { Animatable(index.toFloat()) }
     val right = remember { Animatable(index + 1f) }
     val motion = LocalMotionEnabled.current
-    val liquid = LocalGlassSkin.current == GlassSkin.LIQUID
+    // Capsule treatment owns its restrained optical indicator; no user-selectable glass skin.
+    val liquid = treatment == MotionTabTreatment.Capsule
     val light = MaterialTheme.colorScheme.surface.luminance() > .5f
     val tabWidths = remember(labels.size) { mutableStateMapOf<Int, Int>() }
     val textMeasurer = rememberTextMeasurer()
