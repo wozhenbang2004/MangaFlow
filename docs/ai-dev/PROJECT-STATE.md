@@ -1,5 +1,9 @@
 # MangaFlow · current work
 
+## Shared glass compilation repair · 2026-11-14
+
+User feedback: “ci 失败了”. Android185 (run43467441560, job132030426162) and Windows for the same9219e75 commit (run43467441540, job132030393920) both fail at LiquidGlass.kt:95: Haze's shape setter requires RoundedCornerShape, while optional surfaceShape widened the inferred value to Shape. The only custom caller uses RoundedCornerShape(topStart=20.dp, topEnd=20.dp) for the reading dock. Narrow the parameter to RoundedCornerShape and remove the unused Shape import, keeping identical geometry for optics, clipping and shadow, including the dock's full-screen bottom. The repair is based on0739661b0eecf139c0f8c7c2d86406217981b744, retaining its direct PC-wallpaper batch and all UI/updater/source changes. Submit this bounded repair once with expected-head protection and confirm the normal CI triggers. Compilation, installation, incremental-update behavior and device appearance remain unverified until their actual evidence. Cloud-only; no tests, local builds or product probes.
+
 ## Direct Wallpaper Engine pairing · 2026-11-14
 
 Active PC-WALLPAPER-40 in DESIGN.md records the user's direct-PC static/dynamic-video requirement and explicit “去做啊”. The LocalSend/share substitute is historical. Raw-user batch/source pins are in DESIGN/research; exact message IDs unavailable.
