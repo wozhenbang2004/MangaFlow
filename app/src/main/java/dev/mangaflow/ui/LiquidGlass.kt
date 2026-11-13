@@ -41,7 +41,7 @@ import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 
-internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER, DRAWER, GALLERY }
+internal enum class GlassSurfaceRole { CONTROL, ARTWORK, NAVIGATION, PANEL, THUMB, READING_DOCK, POPOVER, DRAWER, GALLERY, DETAIL_HERO }
 
 /** Application role/layout glue; the complete Haze 2.1 runtime owns every material stage. */
 @Composable
@@ -121,6 +121,20 @@ internal fun LiquidGlassSurface(
                     ambientResponse(.05f)
                     edgeShadow(Color.Transparent)
                     contentNormalBlend(.04f)
+                }
+                GlassSurfaceRole.DETAIL_HERO -> {
+                    // One large passive lens. Keep the long-text interior stable and
+                    // concentrate the more visible optics at the rounded perimeter.
+                    optics { copy(refractionStrength = .22f, refractionHeightFraction = .10f,
+                        refractionDisplacement = 5.dp, refractionProfile = RefractionProfile.Edge(5.dp),
+                        blurRadius = OpticalSizeValue.Fixed(18.dp), depth = OpticalSizeValue.Fixed(1f)) }
+                    tint(tintColor.copy(alpha = if (light) .20f else .24f))
+                    whitePoint(if (light) .62f else -.62f)
+                    specularIntensity(.16f)
+                    ambientResponse(.035f)
+                    edgeShadow(Color.Transparent)
+                    chromaticAberrationStrength(0f)
+                    contentNormalBlend(.025f)
                 }
                 else -> Unit
             }

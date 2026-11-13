@@ -43,7 +43,7 @@ internal fun Modifier.mangaSharedCover(mangaId: String, placement: String? = nul
         val content = rememberSharedContentState(key)
         // Keep the moving cover in its route's drawing order. Lifting only the image
         // into the shared overlay hides detail's scrim, title and actions until landing.
-        // The carousel fits the whole artwork; the portrait detail uses a different crop.
+        // Carousel/ranking placements can have different bounds; detail fits the full poster.
         if (key.placement == "discovery-featured" || key.placement.startsWith("ranking-")) this@mangaSharedCover.sharedBounds(
             content, animatedVisibilityScope = host.visibility,
             renderInOverlayDuringTransition = false,
