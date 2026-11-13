@@ -107,7 +107,7 @@ data class BrowseState(
     val cacheKey: String get() = when {
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
-            "${if (isFederatedSearch) "search-v4-sources" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+            "${if (isFederatedSearch) "search-v5-source-state" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
         }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
@@ -532,11 +532,17 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun BrowseSnapshot.restore(selection: BrowseState) = selection.copy(
-        items = items, page = page, hasMore = hasMore, updatedAt = updatedAt,
-        loading = false, loadingMore = false, refreshing = false, error = null, failedPage = null,
-        sourceMatches = sourceMatches, sourceNextPages = sourceNextPages, sourceChoiceIds = sourceChoiceIds,
-    )
+    private fun BrowseSnapshot.restore(selection: BrowseState): BrowseState {
+        val incomplete = selection.isFederatedSearch && items.isEmpty() && searchSources.values.any { it.error != null }
+        return selection.copy(
+            items = items, page = page, hasMore = hasMore, updatedAt = updatedAt,
+            loading = false, loadingMore = false, refreshing = false,
+            error = if (incomplete) "部分来源暂时不可用，可重试；其他来源没有返回匹配作品。" else null,
+            failedPage = page.takeIf { incomplete },
+            sourceMatches = sourceMatches, sourceNextPages = sourceNextPages, sourceChoiceIds = sourceChoiceIds,
+            searchSources = searchSources,
+        )
+    }
 
     private suspend fun loadFederatedBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long,
         requestedPages: Map<String, Int>? = if (page == 0) null else state.sourceNextPages,
@@ -557,7 +563,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         current.copy(items = if (pending && groups.isEmpty()) current.items else groups.map { it.manga },
                             sourceMatches = if (pending && groups.isEmpty()) current.sourceMatches
                                 else groups.associate { it.manga.id to it.matches },
-                            sourceChoiceIds = groups.filter { it.needsChoice }.map { it.manga.id }.toSet(),
+                            sourceChoiceIds = if (pending && groups.isEmpty()) current.sourceChoiceIds
+                                else groups.filter { it.needsChoice }.map { it.manga.id }.toSet(),
                             searchSources = statuses, sourceNextPages = next, hasMore = next.isNotEmpty(),
                             loading = pending && groups.isEmpty() && current.items.isEmpty(),
                             refreshing = pending && page == 0 && current.items.isNotEmpty(),
@@ -573,7 +580,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             val current = _browse.value
             val snapshot = BrowseSnapshot(current.cacheKey, current.items, current.page, current.hasMore, current.updatedAt,
                 sourceMatches = current.sourceMatches, sourceNextPages = current.sourceNextPages,
-                sourceChoiceIds = current.sourceChoiceIds)
+                sourceChoiceIds = current.sourceChoiceIds, searchSources = current.searchSources)
             browseCache.remember(snapshot, generation)
             browseCache.write(snapshot, generation)
         } catch (cancel: CancellationException) { throw cancel

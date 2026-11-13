@@ -2,6 +2,7 @@ package dev.mangaflow.storage
 
 import android.content.Context
 import android.util.AtomicFile
+import dev.mangaflow.data.FederatedSearchSource
 import dev.mangaflow.data.Manga
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -22,6 +23,7 @@ data class BrowseSnapshot(
     val sourceMatches: Map<String, List<Manga>> = emptyMap(),
     val sourceNextPages: Map<String, Int> = emptyMap(),
     val sourceChoiceIds: Set<String> = emptySet(),
+    val searchSources: Map<String, FederatedSearchSource> = emptyMap(),
 )
 
 /** Disposable public lists only. Favorites, reading positions and downloads live elsewhere. */
@@ -85,7 +87,26 @@ class BrowseCache(context: Context) {
                     val choices = choiceJson?.let { array ->
                         (0 until array.length()).map { array.getString(it).also { id -> require(id.isNotBlank()) } }.toSet()
                     }.orEmpty()
-                    BrowseSnapshot(key, items, page, json.getBoolean("hasMore"), updatedAt, matches, nextPages, choices)
+                    val searchJson = json.optJSONObject("searchSources")
+                    require(!json.has("searchSources") || searchJson != null)
+                    if (searchJson != null && searchJson.length() > MAX_SOURCES) return@runCatching null
+                    val searchSources = searchJson?.let { sources ->
+                        sources.keys().asSequence().associateWith { id ->
+                            val value = sources.getJSONObject(id)
+                            fun page(name: String): Int? = if (value.has(name) && !value.isNull(name)) value.getInt(name) else null
+                            FederatedSearchSource(
+                                sourceId = value.getString("sourceId"),
+                                sourceName = value.getString("sourceName"),
+                                loading = value.optBoolean("loading", false),
+                                error = if (value.has("error") && !value.isNull("error")) value.getString("error") else null,
+                                hasMore = value.getBoolean("hasMore"),
+                                nextPage = page("nextPage"),
+                                failedPage = page("failedPage"),
+                            )
+                        }
+                    }.orEmpty()
+                    BrowseSnapshot(key, items, page, json.getBoolean("hasMore"), updatedAt,
+                        matches, nextPages, choices, searchSources).takeIf(::withinBounds)
                 }.getOrNull()
                 if (snapshot == null) {
                     AtomicFile(file).delete()
@@ -125,6 +146,17 @@ class BrowseCache(context: Context) {
             })
             if (snapshot.sourceNextPages.isNotEmpty()) put("sourceNextPages", JSONObject(snapshot.sourceNextPages))
             if (snapshot.sourceChoiceIds.isNotEmpty()) put("sourceChoiceIds", JSONArray(snapshot.sourceChoiceIds.toList()))
+            if (snapshot.searchSources.isNotEmpty()) put("searchSources", JSONObject().apply {
+                snapshot.searchSources.forEach { (id, source) -> put(id, JSONObject().apply {
+                    put("sourceId", source.sourceId)
+                    put("sourceName", source.sourceName)
+                    put("loading", false)
+                    put("hasMore", source.hasMore)
+                    source.error?.let { put("error", it) }
+                    source.nextPage?.let { put("nextPage", it) }
+                    source.failedPage?.let { put("failedPage", it) }
+                }) }
+            })
         }.toString().toByteArray(Charsets.UTF_8)
         if (encoded.size > MAX_FILE_BYTES) return@withContext
         diskLock.withLock {
@@ -185,7 +217,14 @@ class BrowseCache(context: Context) {
     private fun withinBounds(snapshot: BrowseSnapshot): Boolean = snapshot.items.size <= MAX_ITEMS &&
         snapshot.sourceMatches.size <= MAX_ITEMS && snapshot.sourceMatches.values.sumOf(List<Manga>::size) <= MAX_SOURCE_HITS &&
         snapshot.sourceNextPages.size <= MAX_SOURCES && snapshot.sourceNextPages.values.all { it in 0..MAX_PAGE } &&
-        snapshot.sourceChoiceIds.size <= MAX_ITEMS
+        snapshot.sourceChoiceIds.size <= MAX_ITEMS && snapshot.searchSources.size <= MAX_SOURCES &&
+        snapshot.searchSources.all { (id, source) ->
+            SOURCE_ID_PATTERN.matches(id) && source.sourceId == id &&
+                source.sourceName.isNotBlank() && source.sourceName.length <= MAX_SOURCE_NAME_LENGTH &&
+                !source.loading && (source.error?.length ?: 0) <= MAX_SOURCE_ERROR_LENGTH &&
+                (source.nextPage == null || source.nextPage in 0..MAX_PAGE) &&
+                (source.failedPage == null || source.failedPage in 0..MAX_PAGE)
+        }
 
     private companion object {
         const val VERSION = 1
@@ -194,6 +233,9 @@ class BrowseCache(context: Context) {
         const val MAX_MEMORY_ITEMS = 2_400
         const val MAX_SOURCE_HITS = 3_600
         const val MAX_SOURCES = 64
+        const val MAX_SOURCE_NAME_LENGTH = 120
+        const val MAX_SOURCE_ERROR_LENGTH = 300
+        val SOURCE_ID_PATTERN = Regex("[a-z][a-z0-9_-]{0,39}")
         const val MAX_PAGE = 100_000
         const val MAX_FILE_BYTES = 1024L * 1024
         const val MAX_DISK_BYTES = 8L * 1024 * 1024
