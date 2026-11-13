@@ -23,7 +23,6 @@ import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.Animatable
@@ -73,7 +72,6 @@ import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
-import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.ui.semantics.contentDescription
@@ -141,6 +139,7 @@ import dev.mangaflow.reader.ReaderScreen
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.HistoryActionIcon
 import dev.mangaflow.ui.motion.MotionNavigationColumn
 import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.motionPress
@@ -274,9 +273,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val keyboard = LocalSoftwareKeyboardController.current
     val motion = LocalMotionEnabled.current
     val feedback = rememberFeelFeedback()
-    val historyReveal = animateFloatAsState(if (recentReadingOpen) 1f else 0f,
-        if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
-        label = "recent-reading-clock")
 
     LaunchedEffect(drawerAction, motion) {
         val action = drawerAction
@@ -875,11 +871,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 closeSearch()
                                                 recentReadingOpen = true
                                             }) {
-                                                Icon(Icons.Outlined.History, "最近阅读", Modifier.size(22.dp).graphicsLayer {
-                                                    rotationZ = -32f * historyReveal.value
-                                                    val pressure = 1f - .12f * historyReveal.value.coerceIn(0f, 1f)
-                                                    scaleX = pressure; scaleY = pressure
-                                                })
+                                                HistoryActionIcon(active = recentReadingOpen, description = "最近阅读",
+                                                    modifier = Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurface)
                                             }
                                             // Match the fixed search trigger's 8dp inset in the root overlay.
                                             Spacer(Modifier.size(44.dp))

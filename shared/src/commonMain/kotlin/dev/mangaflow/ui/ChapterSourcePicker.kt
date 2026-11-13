@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.absoluteOffset
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,11 +26,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -46,7 +40,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.isSpecified
@@ -63,8 +56,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.dismiss
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -79,12 +70,10 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.storage.DownloadEntry
-import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBusyIndicator
-import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
 import kotlin.math.roundToInt
@@ -181,7 +170,7 @@ private object ChapterSourceWindowOrigin : PopupPositionProvider {
         layoutDirection: LayoutDirection, popupContentSize: IntSize) = IntOffset.Zero
 }
 
-/** The existing screen-coordinate morph, kept compact for both reading and downloading. */
+/** Preserve the real chapter-selection contract while unfolding sources at its trigger. */
 @Composable
 internal fun ChapterSourcePicker(
     chapter: Chapter?,
@@ -206,11 +195,43 @@ internal fun ChapterSourcePicker(
     if (chapter == null) return
     val key = chapter.logicalId.ifBlank { chapter.id }
     val frozen = remember(key) { chapter }
-    ChapterChoicePopover("read:$key", anchor, backdrop, onDismiss, closeRequested,
-        onCancelSelection, onPresenceChange, maximumWidth = 228.dp) { dismiss, reveal ->
-        ChapterSourceContent(frozen, downloaded, chapterPositions, loading, error, onReadVariant, dismiss, reveal)
+    var requestedVariant by remember(key) { mutableStateOf<ChapterVariant?>(null) }
+    val variants = remember(key, frozen.variants) {
+        frozen.variants.sortedBy { if (it.storageId == frozen.id) 0 else 1 }.distinctBy { it.storageId }
+    }
+    ChapterSourceOrbit("read:$key", anchor, backdrop, variants.size, onDismiss,
+        closeRequested = closeRequested, onCancel = onCancelSelection,
+        onPresenceChange = onPresenceChange,
+        hasStatus = loading && requestedVariant == null || !error.isNullOrBlank() || variants.isEmpty(),
+        status = {
+            if (variants.isEmpty()) Text("本章暂无可用来源", color = DetailSecondary, fontSize = 12.sp)
+            if (loading && requestedVariant == null) MotionBusyIndicator(Modifier.size(16.dp),
+                color = DetailSecondary, strokeWidth = 1.4.dp)
+            if (!error.isNullOrBlank()) Text(error, color = MaterialTheme.colorScheme.error,
+                fontSize = 12.sp, lineHeight = 18.sp)
+        }) { index, modifier, _ ->
+        val variant = variants[index]
+        val peers = variants.filter { it.sourceId == variant.sourceId }
+        val selected = variant.storageId == frozen.id
+        val saved = chapterPositions?.get(variant.storageId)
+        val details = listOfNotNull(
+            variant.language.takeIf(String::isNotBlank),
+            variant.edition.takeIf(String::isNotBlank),
+            variant.scanlator.takeIf { peers.size > 1 && it.isNotBlank() },
+            variant.title.takeIf { peers.map { it.title }.distinct().size > 1 && it != frozen.title },
+            saved?.takeIf { !selected }?.let { "续读第${it.pageIndex + 1}页" },
+        ).distinct().joinToString(" · ")
+        val secondary = if (peers.size > 1) listOf(variant.language, variant.edition, variant.scanlator)
+            .firstOrNull(String::isNotBlank).orEmpty() else ""
+        ChapterSourceDisc(variant, backdrop, modifier, selected = selected,
+            busy = loading && requestedVariant?.storageId == variant.storageId,
+            enabled = !loading, details = details, secondary = secondary,
+            entry = downloaded[variant.storageId],
+            actionLabel = "使用${variant.sourceName}阅读本章",
+            onClick = { requestedVariant = variant; onReadVariant(frozen, variant) })
     }
 }
+
 
 /**
  * Adapt ChapterSourcePicker's retained beUI anchor morph, shared by the two real source actions.
@@ -304,91 +325,3 @@ internal fun ChapterChoicePopover(
     }
 }
 
-@Composable
-private fun ChapterSourceContent(
-    chapter: Chapter,
-    downloaded: Map<String, DownloadEntry>,
-    positions: Map<String, ReadingProgress>?,
-    loading: Boolean,
-    error: String?,
-    onRead: (Chapter, ChapterVariant) -> Unit,
-    dismiss: () -> Unit,
-    reveal: () -> Float,
-) {
-    var requestedVariant by remember(chapter.logicalId, chapter.id) { mutableStateOf<ChapterVariant?>(null) }
-    val variants = remember(chapter.id, chapter.variants) {
-        chapter.variants.sortedBy { if (it.storageId == chapter.id) 0 else 1 }
-    }
-    val editions = variants.map { it.edition }.filter(String::isNotBlank).distinct()
-    val languages = variants.map { it.language }.filter(String::isNotBlank).distinct()
-    Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().heightIn(min = 32.dp).padding(start = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(chapter.title, color = DetailForeground, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            dev.mangaflow.ui.motion.MotionIconButton(onClick = dismiss, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Outlined.Close, "收起章节来源", Modifier.size(16.dp), tint = DetailMuted)
-            }
-        }
-        variants.forEachIndexed { index, variant ->
-            val selected = variant.storageId == chapter.id
-            val entry = downloaded[variant.storageId]
-            val saved = positions?.get(variant.storageId)
-            val peers = variants.filter { it.sourceId == variant.sourceId }
-            val details = listOfNotNull(
-                variant.language.takeIf { languages.size > 1 && it.isNotBlank() },
-                variant.edition.takeIf { editions.size > 1 && it.isNotBlank() },
-                variant.scanlator.takeIf { peers.size > 1 && it.isNotBlank() },
-                variant.title.takeIf { peers.map { it.title }.distinct().size > 1 && it != chapter.title },
-                saved?.takeIf { !selected }?.let { "续读第${it.pageIndex + 1}页" },
-            ).distinct().joinToString(" · ")
-            val interaction = remember(variant.storageId) { MutableInteractionSource() }
-            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).graphicsLayer {
-                    val start = index.coerceAtMost(3) * .07f
-                    val p = ((reveal() - start) / (1f - start)).coerceIn(0f, 1f)
-                    alpha = p
-                    translationY = (1f - p) * 6.dp.toPx()
-                }.clip(RoundedCornerShape(10.dp))
-                .background(if (selected) DetailForeground.copy(alpha = .035f) else Color.Transparent)
-                .clickable(enabled = !loading, interactionSource = interaction, indication = null,
-                    role = Role.Button, onClickLabel = "使用${variant.sourceName}阅读本章",
-                    onClick = { requestedVariant = variant; onRead(chapter, variant) })
-                .motionPress(interaction, enabled = !loading, pressedScale = .99f)
-                .semantics { stateDescription = listOfNotNull(
-                    "当前来源".takeIf { selected }, details.takeIf(String::isNotBlank),
-                    "已下载".takeIf { entry?.status == DownloadStatus.COMPLETED },
-                ).joinToString("，") }
-                .padding(horizontal = 6.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                ChapterSourceLogo(variant.sourceId, variant.sourceName, Modifier.size(20.dp))
-                Spacer(Modifier.width(9.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(variant.sourceName, color = DetailForeground, fontSize = 13.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (details.isNotBlank()) Text(details, color = DetailMuted, fontSize = 11.sp,
-                        lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                Spacer(Modifier.width(8.dp))
-                val indicator = when {
-                    loading && requestedVariant?.storageId == variant.storageId -> "preparing"
-                    selected -> "current"
-                    else -> "idle"
-                }
-                MotionSwap(indicator, Modifier.size(20.dp)) { state ->
-                    when (state) {
-                        "preparing" -> MotionBusyIndicator(Modifier.size(16.dp), color = DetailSecondary, strokeWidth = 1.4.dp)
-                        "current" -> Icon(Icons.Outlined.Check, "当前来源", Modifier.size(16.dp), tint = DetailSecondary)
-                        else -> Spacer(Modifier.size(16.dp))
-                    }
-                }
-            }
-        }
-        if (loading && requestedVariant == null) Row(Modifier.fillMaxWidth().padding(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            MotionBusyIndicator(Modifier.size(14.dp), color = DetailSecondary, strokeWidth = 1.5.dp)
-            Text("正在准备${requestedVariant?.sourceName.orEmpty()}本章", color = DetailSecondary, fontSize = 11.sp)
-        }
-        if (!error.isNullOrBlank()) Text(error, color = MaterialTheme.colorScheme.error, fontSize = 12.sp,
-            modifier = Modifier.fillMaxWidth().padding(8.dp))
-    }
-}

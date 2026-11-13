@@ -114,6 +114,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Constraints
@@ -311,11 +312,20 @@ fun DetailScreen(
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
         val compactHero = availableHeight < 600.dp
         val collapsedHero = availableHeight < 420.dp
-        val seamHeight = 8.dp
+        val seamHeight = if (collapsedHero) 0.dp else 8.dp
+        // Real artwork headroom keeps a small initial scroll above the sharp poster/title.
+        // Keep this space above the book, never between its metadata and section tabs.
+        val artworkHeadroom = if (compactHero) 28.dp
+            else (availableHeight * .10f).coerceIn(56.dp, 88.dp)
         var naturalHeroHeight by remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
         // The book information owns its height; never reserve a percentage of
         // the screen below short metadata.
         val heroHeight = if (collapsedHero) 0.dp else with(density) { naturalHeroHeight.toDp() }
+        val atmosphereHeight = heroHeight + statusInset + 56.dp + seamHeight
+        // Finish fading before the clipping edge, leaving identical body color on both sides.
+        val atmosphereFadeEnd = (1f - 24.dp / atmosphereHeight.coerceAtLeast(1.dp)).coerceIn(.65f, .96f)
+        val atmosphereFadeStart = (atmosphereFadeEnd - 104.dp / atmosphereHeight.coerceAtLeast(1.dp))
+            .coerceIn(.25f, .84f)
         val heroPixels = with(density) { heroHeight.toPx() }
         val collapseTravelScale = if (compactHero) .84f else .76f
         val collapseRange = heroPixels / collapseTravelScale
@@ -380,8 +390,12 @@ fun DetailScreen(
         // The cover atmosphere ends with the book header, above chapters/comments.
         Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(informationTone)) {
             Box(
-                Modifier.fillMaxWidth().height(heroHeight + statusInset + 56.dp + seamHeight)
-                    .graphicsLayer { translationY = header.heightOffset * collapseTravelScale; clip = true }
+                Modifier.fillMaxWidth().height(atmosphereHeight)
+                    .graphicsLayer {
+                        translationY = header.heightOffset * collapseTravelScale -
+                            seamHeight.toPx() * header.collapsedFraction
+                        clip = true
+                    }
                     .mangaHazeSource(artworkBackdrop).background(atmosphereColor),
                 contentAlignment = Alignment.TopCenter,
             ) {
@@ -397,8 +411,11 @@ fun DetailScreen(
                     contentScale = ContentScale.Crop,
                 )
                 Box(Modifier.matchParentSize().background(Brush.verticalGradient(
-                    0f to informationTone.copy(alpha = if (lightDetail) .58f else .62f),
-                    .65f to informationTone.copy(alpha = if (lightDetail) .80f else .84f),
+                    0f to informationTone.copy(alpha = if (lightDetail) .44f else .52f),
+                    atmosphereFadeStart to informationTone.copy(alpha = if (lightDetail) .44f else .52f),
+                    (atmosphereFadeStart + (atmosphereFadeEnd - atmosphereFadeStart) * .55f) to
+                        informationTone.copy(alpha = if (lightDetail) .72f else .78f),
+                    atmosphereFadeEnd to informationTone,
                     1f to informationTone,
                 )))
             }
@@ -437,7 +454,8 @@ fun DetailScreen(
                     if (!collapsedHero) {
                         key(current.id, viewportWidth, density) {
                             HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
-                                compact = compactHero, onIntroduction = { fullIntroduction = true },
+                                compact = compactHero, artworkHeadroom = artworkHeadroom,
+                                onIntroduction = { fullIntroduction = true },
                                 onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
                                 onTag = { onTag(current, it) },
                                 collapse = { header.collapsedFraction },
@@ -627,6 +645,7 @@ private fun HeroBookInformation(
     backdrop: HazeState,
     informationTone: Color,
     compact: Boolean,
+    artworkHeadroom: Dp,
     onIntroduction: () -> Unit,
     onRatings: () -> Unit,
     onAuthor: (String) -> Unit,
@@ -650,7 +669,7 @@ private fun HeroBookInformation(
     )
     BoxWithConstraints(modifier.fillMaxWidth().wrapContentHeight(unbounded = true)
         .onSizeChanged { onNaturalHeight(it.height) }
-        .padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 8.dp)
+        .padding(horizontal = 20.dp).padding(top = 12.dp + artworkHeadroom, bottom = 8.dp)
         .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })) {
         val contentWidth = maxWidth
         val posterWidth = minOf(contentWidth * if (density.fontScale >= 1.4f) .38f else .56f,

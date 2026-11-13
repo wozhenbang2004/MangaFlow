@@ -357,7 +357,8 @@ internal fun MotionBottomSheet(
     val window = LocalMangaWindow.current
     val sheetInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Bottom)
     ModalBottomSheet(onDismissRequest = { onDismiss() }, sheetState = sheet,
-        modifier = modifier.heightIn(max = (window.height - 16.dp).coerceAtLeast(1.dp)),
+        // The sheet's anchor must see the whole dialog; cap only its inner content.
+        modifier = modifier,
         sheetMaxWidth = MangaLayout.PanelWidth,
         containerColor = if (backdrop != null) Color.Transparent else containerColor,
         contentColor = contentColor, tonalElevation = 0.dp,
@@ -368,14 +369,17 @@ internal fun MotionBottomSheet(
             if (backdrop == null) MotionSheetHandle(contentColor)
         },
     ) {
-        if (backdrop != null) LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(),
+        if (backdrop != null) LiquidGlassSurface(backdrop,
+            Modifier.fillMaxWidth().heightIn(max = (window.height - 16.dp).coerceAtLeast(1.dp)),
             cornerRadius = 0.dp, role = GlassSurfaceRole.PANEL, surfaceColor = containerColor,
             elevation = 0.dp, softCard = true) {
             Column(Modifier.fillMaxWidth().windowInsetsPadding(sheetInsets).motionInputGate(!closing)) {
                 MotionSheetHandle(contentColor)
                 content(dismiss)
             }
-        } else Column(Modifier.fillMaxWidth().motionInputGate(!closing)) { content(dismiss) }
+        } else Column(Modifier.fillMaxWidth()
+            .heightIn(max = (window.height - 16.dp).coerceAtLeast(1.dp))
+            .motionInputGate(!closing)) { content(dismiss) }
     }
 }
 

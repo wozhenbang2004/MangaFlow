@@ -30,7 +30,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.MutableTransitionState
@@ -148,8 +147,9 @@ internal fun SegmentedGlassHeader(
 }
 
 /**
- * Adapt beUI's measured-trigger morph: foreground leaves before its shell returns.
- * One geometry progress owns both the surface and its reserved layout space.
+ * Adapt beUI's measured-trigger morph with one reversible geometry progress.
+ * Ink clears before the shell reaches its tab, without an empty-shell waiting phase.
+ * Surface, reserved space and primary-tab emphasis all follow that same progress.
  */
 @Composable
 internal fun RankingsFromTab(
@@ -187,26 +187,23 @@ internal fun RankingsFromTab(
         val transition = updateTransition(presence, label = "ranking-from-tab")
         val reveal = transition.animateFloat(transitionSpec = {
             if (!motion) snap()
-            else if (targetState) spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness)
-            else tween(MangaMotion.Exit, delayMillis = 60, easing = MangaMotion.EnterEasing)
+            else spring(dampingRatio = 1f, stiffness = MangaMotion.NavigationStiffness)
         }, label = "ranking-tab-surface") { if (it) 1f else 0f }
-        val foreground = transition.animateFloat(transitionSpec = {
-            if (!motion) snap()
-            else if (targetState) tween(MangaMotion.Quick, easing = MangaMotion.EnterEasing)
-            else tween(60, easing = MangaMotion.ExitEasing)
-        }, label = "ranking-tab-foreground") { if (it) 1f else 0f }
         val progress = reveal.value.coerceIn(0f, 1f)
         val present = presence.currentState || presence.targetState || !presence.isIdle
-        val contentEmphasis = remember(reveal, foreground) {
+        val geometryEmphasis = remember(reveal) {
+            derivedStateOf { reveal.value.coerceIn(0f, 1f) }
+        }
+        val contentEmphasis = remember(reveal) {
             derivedStateOf {
-                val room = ((reveal.value.coerceIn(0f, 1f) - .4f) / .6f).coerceIn(0f, 1f)
-                foreground.value * room * room * (3f - 2f * room)
+                val room = ((reveal.value.coerceIn(0f, 1f) - .44f) / .56f).coerceIn(0f, 1f)
+                room * room * (3f - 2f * room)
             }
         }
-        // Share the observable animation once; callers read it only in their
-        // drawing layer, without forwarding frame values through composition.
-        DisposableEffect(contentEmphasis) {
-            reportEmphasis(contentEmphasis)
+        // Primary-tab emphasis follows the moving shell rather than the earlier
+        // text fade, including during a quick reversal. Callers read this in drawing.
+        DisposableEffect(geometryEmphasis) {
+            reportEmphasis(geometryEmphasis)
             onDispose { reportEmphasis(null) }
         }
         Box(Modifier.fillMaxWidth().height((contentHeight + 2.dp) * progress)) {
@@ -238,7 +235,7 @@ internal fun RankingsFromTab(
                                 measuredWidth = endWidth
                             }
                         }.graphicsLayer { alpha = contentEmphasis.value }
-                        .motionInputGate(enabled && expanded && progress >= .85f && foreground.value >= .95f)) { content() }
+                        .motionInputGate(enabled && expanded && progress >= .85f && contentEmphasis.value >= .95f)) { content() }
                 }
             }
         }

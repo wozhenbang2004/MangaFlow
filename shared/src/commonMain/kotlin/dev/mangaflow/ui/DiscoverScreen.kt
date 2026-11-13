@@ -138,6 +138,7 @@ import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.HistoryActionIcon
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.data.MangaTag
 import dev.mangaflow.data.SearchTarget
@@ -182,7 +183,6 @@ fun DiscoverScreen(
     onToggleFavorite: (Manga) -> Unit,
     active: Boolean = true,
 ) {
-    val motion = LocalMotionEnabled.current
     val browse = if (!state.isSearch) state else backgroundState
     val positions = rememberSaveable(saver = BrowsePositionsSaver) { LinkedHashMap<String, LazyGridState>() }
     var actionsManga by remember { mutableStateOf<Manga?>(null) }
@@ -194,14 +194,6 @@ fun DiscoverScreen(
     }
     LaunchedEffect(browse.cacheKey) { sourceFan.clear() }
     val unobscured = active && !searchExpanded && actionsManga == null && ratingsManga == null && sourceFan.request == null
-    var retainedBrowse by remember { mutableStateOf(browse) }
-    // Wait on data, never on an animation clock. A slow uncached selection keeps the previous
-    // real list visible instead of replacing it with loading and then entering a second time.
-    val holdingContent = browse.loading && browse.items.isEmpty() && retainedBrowse.items.isNotEmpty()
-    val displayedBrowse = if (holdingContent) retainedBrowse else browse
-    SideEffect { if (!holdingContent) retainedBrowse = browse }
-    val retainedAlpha = animateFloatAsState(if (holdingContent) .48f else 1f,
-        if (motion) tween(MangaMotion.Content) else snap(), label = "browse-pending-content")
     CompositionLocalProvider(LocalMetricSourceFan provides sourceFan) {
     Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)
@@ -210,42 +202,32 @@ fun DiscoverScreen(
         wallpaper()
         Box(Modifier.fillMaxSize()) {
             MotionTabContent(
-                selected = displayedBrowse,
-                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = retainedAlpha.value },
-                // Loading -> first result gets one transition. Ratings, appends and refreshes
-                // retain the populated key and never replay the whole list's entrance.
-                contentKey = { it.cacheKey to it.items.isEmpty() },
+                selected = browse,
+                modifier = Modifier.fillMaxSize(),
+                // Selection owns one entrance. Cache hydration and network results
+                // update that same pane instead of entering it a second time.
+                contentKey = { it.cacheKey },
                 order = { it.mode.ordinal * 8 + it.period.ordinal * 2 + it.audience.ordinal },
                 soft = true,
             ) { pane ->
+                val selectedPane = pane.cacheKey == browse.cacheKey
+                var exitTopPadding by remember(pane.cacheKey) { mutableStateOf(contentTopPadding) }
+                SideEffect { if (selectedPane) exitTopPadding = contentTopPadding }
+                // The outgoing ranking keeps its last clearance while its subbar
+                // returns; a new selection cannot jerk that leaving list upward.
                 DiscoveryPane(pane, positions, repository,
                     columns = (if (pane.mode == DiscoveryMode.LATEST) updateColumns else discoverColumns).let {
                         if (platformKind == PlatformKind.DESKTOP) it.coerceIn(0, 8) else it.coerceIn(1, 4)
                     },
                     onColumnsChange = if (pane.mode == DiscoveryMode.LATEST) onUpdateColumnsChange else onDiscoverColumnsChange,
                     backdrop = searchBackdrop,
-                    active = unobscured && !holdingContent && pane.cacheKey == browse.cacheKey,
+                    active = unobscured && selectedPane,
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
                     onManage = { actionsManga = it }, onRatings = { ratingsManga = it },
-                    topPadding = contentTopPadding)
+                    topPadding = if (selectedPane) contentTopPadding else exitTopPadding)
             }
-            if (holdingContent) {
-                val label = if (browse.mode == DiscoveryMode.RANKING)
-                    "${browse.audience.label} · ${browse.period.label}" else browse.mode.label
-                Row(Modifier.align(Alignment.TopEnd).padding(top = contentTopPadding + 8.dp, end = 20.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = .96f))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (motion) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("正在载入$label", fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis)
-                }
-            }
+
         }
     }
     }
@@ -640,8 +622,16 @@ private fun DiscoveryPane(
         verticalArrangement = Arrangement.spacedBy(if (ranking) 6.dp else if (columns == 1) 12.dp else 10.dp),
         modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
     ) {
+        if (state.mode == DiscoveryMode.RECOMMENDED && (state.loading || state.items.isNotEmpty())) {
+            item(span = { GridItemSpan(maxLineSpan) }, key = "hero") {
+                FeaturedCarousel(state.items.take(6), repository,
+                    active && heroVisible && canAutoAdvance && !grid.isScrollInProgress && !layoutPresent,
+                    onOpen = onOpen, onRatings = onRatings, loading = state.loading)
+            }
+        }
         if (state.loading && state.items.isEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }, key = "loading") { QuietLoading("正在翻开书页…") }
+            if (state.mode != DiscoveryMode.RECOMMENDED)
+                item(span = { GridItemSpan(maxLineSpan) }, key = "loading") { QuietLoading("正在翻开书页…") }
         } else if (state.items.isEmpty() && state.error != null) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "error") {
                 EmptyMessage("暂时没能加载", state.error, "重试", onRetry)
@@ -651,13 +641,6 @@ private fun DiscoveryPane(
                 EmptyMessage("暂时没有漫画", "来源暂时没有返回内容，可以稍后刷新。", "刷新", onRefresh)
             }
         } else {
-            if (state.mode == DiscoveryMode.RECOMMENDED) {
-                item(span = { GridItemSpan(maxLineSpan) }, key = "hero") {
-                    FeaturedCarousel(state.items.take(6), repository,
-                        active && heroVisible && canAutoAdvance && !grid.isScrollInProgress && !layoutPresent,
-                        onOpen = onOpen, onRatings = onRatings)
-                }
-            }
             if (!ranking) item(span = { GridItemSpan(maxLineSpan) }, key = "section") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现",
@@ -1002,10 +985,6 @@ internal fun RecentReadingSheet(
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     items(history, key = { it.manga.id }) { progress ->
                         val rowInteraction = remember(progress.manga.id) { MutableInteractionSource() }
-                        val chapterReveal = animateFloatAsState(
-                            if (chapterManga?.id == progress.manga.id) 1f else 0f,
-                            if (LocalMotionEnabled.current) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else snap(),
-                            label = "chapter-history-clock")
                         SwipeToRemove(onRemove = { onRemoveHistory(progress.manga.id) }, label = "删除阅读记录") {
                             Row(Modifier.fillMaxWidth()
                                 .clickable(interactionSource = rowInteraction, indication = null, role = Role.Button,
@@ -1025,11 +1004,9 @@ internal fun RecentReadingSheet(
                                     recentFeedback.perform(dev.mangaflow.ui.motion.FeelEvent.Selection)
                                     chapterManga = progress.manga
                                 }, modifier = Modifier.size(44.dp)) {
-                                    Icon(Icons.Outlined.History, "章节阅读记录", Modifier.size(19.dp).graphicsLayer {
-                                        rotationZ = -32f * chapterReveal.value
-                                        val pressure = 1f - .12f * chapterReveal.value.coerceIn(0f, 1f)
-                                        scaleX = pressure; scaleY = pressure
-                                    }, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    HistoryActionIcon(active = chapterManga?.id == progress.manga.id,
+                                        description = "章节阅读记录", modifier = Modifier.size(19.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
                         }

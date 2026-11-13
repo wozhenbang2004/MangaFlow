@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
@@ -104,12 +105,33 @@ import kotlin.math.floor
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, visible: Boolean,
-    onOpen: (Manga) -> Unit, onRatings: ((Manga) -> Unit)? = null) {
-    if (manga.isEmpty()) return
+    onOpen: (Manga) -> Unit, onRatings: ((Manga) -> Unit)? = null, loading: Boolean = false) {
+    if (manga.isEmpty() && !loading) return
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val galleryWidth = maxWidth
         val density = LocalDensity.current
         val motion = LocalMotionEnabled.current
+        val window = LocalMangaWindow.current
+        val fontScale = density.fontScale.coerceAtLeast(1f)
+        // This is the complete gallery budget: artwork, labels, shadow and dots.
+        // Image decode and score arrivals never resize the surrounding list.
+        val galleryHeight = if (window.shortHeight)
+            (window.height * .5f).coerceIn(164.dp, 220.dp)
+            else (window.height / 3f).coerceIn(220.dp, 280.dp)
+        val preferredWidth = minOf(galleryWidth, (galleryWidth * .82f).coerceAtMost(304.dp))
+        val inlineInformation = preferredWidth >= 224.dp && fontScale <= 1.3f
+        val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
+        val captionHeight = if (inlineInformation) 0.dp else
+            (10f + (17f * titleLines + 22f) * fontScale).dp.coerceAtMost(galleryHeight - 96.dp)
+        val itemHeight = galleryHeight - 38.dp
+        val artworkHeight = (itemHeight - captionHeight).coerceAtLeast(1.dp)
+        val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
+        if (manga.isEmpty()) {
+            Box(Modifier.fillMaxWidth().height(galleryHeight), contentAlignment = Alignment.Center) {
+                QuietLoading("正在翻开书页…")
+            }
+            return@BoxWithConstraints
+        }
         val state = rememberPagerState { manga.size }
         val scope = rememberCoroutineScope()
         val fling = PagerDefaults.flingBehavior(state,
@@ -136,31 +158,21 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
             }
         }
         val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-        val fontScale = density.fontScale.coerceAtLeast(1f)
-        val captionHeight = (14f + 60f * fontScale).dp
-        val preferredWidth = minOf(galleryWidth, (galleryWidth * .72f).coerceAtMost(292.dp))
-        val edgePadding = ((galleryWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
-        val window = LocalMangaWindow.current
-        // Reserve one stable portrait slot before decode; typical 2:3 covers now
-        // nearly fill it instead of sitting narrow inside the former squat frame.
-        val artworkHeight = if (window.shortHeight)
-            (preferredWidth * 1.40f).coerceAtMost((window.height * .45f).coerceAtLeast(96.dp))
-            else (preferredWidth * 1.40f).coerceIn(216.dp, 360.dp)
-        val itemHeight = artworkHeight + captionHeight
         val imageWidthPx = with(density) { preferredWidth.roundToPx() }.coerceAtLeast(1)
         val imageHeightPx = with(density) { artworkHeight.roundToPx() }.coerceAtLeast(1)
-        Column(Modifier.padding(bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.height(galleryHeight).padding(bottom = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
             HorizontalPager(state = state, pageSize = PageSize.Fixed(preferredWidth),
                 // The adopted cover shadow draws outside its mask. Give its vertical
                 // falloff room without changing the pager's equal horizontal insets.
-                contentPadding = PaddingValues(start = edgePadding, end = edgePadding, top = 12.dp, bottom = 16.dp),
+                contentPadding = PaddingValues(start = edgePadding, end = edgePadding, top = 10.dp, bottom = 14.dp),
                 pageSpacing = 10.dp,
                 beyondViewportPageCount = 1, flingBehavior = fling, userScrollEnabled = visible,
                 key = { manga[it].id },
-                modifier = Modifier.fillMaxWidth().height(itemHeight + 28.dp)
+                modifier = Modifier.fillMaxWidth().height(itemHeight + 24.dp)
                     .semantics { stateDescription = "推荐 ${state.currentPage + 1} / ${manga.size}" }) { index ->
                 val emphasis = { (1f - abs(index - position.value)).coerceIn(0f, 1f) }
-                FeaturedManga(manga[index], repository, captionHeight, imageWidthPx, imageHeightPx,
+                FeaturedManga(manga[index], repository, captionHeight, titleLines, inlineInformation, imageWidthPx, imageHeightPx,
                     color = colors[index], atmosphere = atmosphere,
                     onColor = { extracted[manga[index].coverUrl] = it },
                     modifier = Modifier.fillMaxWidth().height(itemHeight).graphicsLayer {
@@ -177,9 +189,9 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                         else state.scrollToPage(index)
                     } }, enabled = visible, onOpen = onOpen, onRatings = onRatings)
             }
-            if (manga.size > 1) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Box(Modifier.fillMaxWidth().height(4.dp), contentAlignment = Alignment.Center) {
                 val color = MaterialTheme.colorScheme.onSurface
-                Canvas(Modifier.size(width = (manga.size * 16).dp, height = 4.dp).clearAndSetSemantics { }) {
+                if (manga.size > 1) Canvas(Modifier.size(width = (manga.size * 16).dp, height = 4.dp).clearAndSetSemantics { }) {
                     repeat(manga.size) { index ->
                         val visualIndex = if (rtl) manga.lastIndex - index else index
                         val weight = (1f - abs(position.value - index)).coerceIn(0f, 1f)
@@ -199,6 +211,8 @@ private fun FeaturedManga(
     manga: Manga,
     repository: MangaRepository,
     captionHeight: Dp,
+    titleLines: Int,
+    inlineInformation: Boolean,
     imageWidthPx: Int,
     imageHeightPx: Int,
     color: State<Color>,
@@ -264,68 +278,87 @@ private fun FeaturedManga(
             }
         }.semantics(mergeDescendants = true) { contentDescription = manga.title }
         .motionPress(interaction, pressedScale = .985f)) {
-        Box(Modifier.matchParentSize().mangaHazeSource(heroBackdrop).drawBehind { drawRect(atmosphere.value) }) {
-            Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.matchParentSize().graphicsLayer {
-                    scaleX = 1.16f; scaleY = 1.16f
-                    translationX = offset() * 10.dp.toPx()
-                    alpha = if (modernPlatformBlur) .22f else .12f
-                }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur))
-            // Side previews retain real artwork. Only the centered poster is fitted;
-            // every image stays inside the same outer 22dp cover mask.
-            Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.matchParentSize().graphicsLayer { alpha = 1f - emphasis() })
-            BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = 6.dp)
-                .padding(top = 6.dp, bottom = captionHeight + 4.dp),
-                contentAlignment = Alignment.Center) {
+        BoxWithConstraints(Modifier.matchParentSize()) {
+            val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+            val intrinsic = painter.intrinsicSize
+            val aspect = if (intrinsic.width.isFinite() && intrinsic.height.isFinite() &&
+                intrinsic.width > 0f && intrinsic.height > 0f)
+                intrinsic.width / intrinsic.height else 2f / 3f
+            val pictureHeight = (maxHeight - if (inlineInformation) 12.dp else captionHeight + 10.dp)
+                .coerceAtLeast(1.dp)
+            val pictureRoom = if (inlineInformation)
+                minOf(maxWidth * .52f, (maxWidth - 24.dp - 88.dp * fontScale).coerceAtLeast(1.dp))
+                else (maxWidth - 12.dp).coerceAtLeast(1.dp)
+            val posterWidth = minOf(pictureRoom, pictureHeight * aspect)
+            val posterHeight = posterWidth / aspect
+            val posterLeft = if (inlineInformation) 6.dp + (pictureRoom - posterWidth) / 2f
+                else (maxWidth - posterWidth) / 2f
+            val posterTop = 6.dp + (pictureHeight - posterHeight) / 2f
+            // Keep the text column stationary while the real aspect becomes known.
+            val infoLeft = if (inlineInformation) 6.dp + pictureRoom + 12.dp else 0.dp
+            val infoTop = if (inlineInformation) 6.dp else maxHeight - captionHeight
+            val infoWidth = (maxWidth - infoLeft - if (inlineInformation) 8.dp else 0.dp).coerceAtLeast(1.dp)
+            val infoHeight = if (inlineInformation) maxHeight - 12.dp else captionHeight
+            Box(Modifier.matchParentSize().mangaHazeSource(heroBackdrop).drawBehind { drawRect(atmosphere.value) }) {
+                Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize().graphicsLayer {
+                        scaleX = 1.16f; scaleY = 1.16f
+                        translationX = offset() * 10.dp.toPx()
+                        alpha = if (modernPlatformBlur) .22f else .12f
+                    }.hazeBlur(input = HazeInput.Content, style = atmosphereBlur))
+                // Neighbors keep recognizable original cover pixels inside the same mask.
+                Image(painter, contentDescription = null, contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize().graphicsLayer { alpha = 1f - emphasis() })
                 if (decoded == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
-                    tint = ink.copy(alpha = .22f), modifier = Modifier.size(28.dp))
-                val intrinsic = painter.intrinsicSize
-                val aspect = if (intrinsic.width.isFinite() && intrinsic.height.isFinite() &&
-                    intrinsic.width > 0f && intrinsic.height > 0f)
-                    intrinsic.width / intrinsic.height else 2f / 3f
-                val posterWidth = minOf(maxWidth, maxHeight * aspect)
-                val posterHeight = posterWidth / aspect
-                // Clip the actual fitted artwork, not the larger Fit container. The
-                // inner radius follows the outer radius minus its 6dp minimum inset.
+                    tint = ink.copy(alpha = .22f), modifier = Modifier.offset(posterLeft, posterTop)
+                        .size(posterWidth, posterHeight).padding(20.dp))
+                // The portrait fills the card's height beside its own information,
+                // without cropping it or exposing a wide empty Fit container.
                 Image(painter, contentDescription = null, contentScale = ContentScale.Fit,
-                    modifier = Modifier.size(posterWidth, posterHeight)
+                    modifier = Modifier.offset(posterLeft, posterTop).size(posterWidth, posterHeight)
                         .mangaSharedCover(manga.id, "discovery-featured")
                         .graphicsLayer {
                             translationX = offset() * 4.dp.toPx()
                             alpha = emphasis()
                         }.clip(RoundedCornerShape(16.dp)))
-            }
-            // A short cover-colored seam joins artwork and caption; no broad veil,
-            // white inset card, border or second image request is introduced.
-            Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(captionHeight + 24.dp)
-                .drawBehind {
-                    drawRect(Brush.verticalGradient(0f to Color.Transparent,
+                Box(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight).drawBehind {
+                    drawRect(if (inlineInformation)
+                        Brush.horizontalGradient(0f to Color.Transparent,
+                            .35f to surface.copy(alpha = .16f), 1f to surface.copy(alpha = .76f))
+                    else Brush.verticalGradient(0f to Color.Transparent,
                         .34f to surface.copy(alpha = .16f), 1f to surface.copy(alpha = .76f)))
                 })
-        }
-        // Only the material fades at its upper edge. Labels stay sharp and unmasked.
-        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(captionHeight)
-            .graphicsLayer {
+            }
+            // A single local information surface shares the artwork's cached pixels.
+            // Wide cards put it beside the full portrait; narrow/large-type cards
+            // keep the former readable footer within the same fixed gallery budget.
+            Box(Modifier.offset(infoLeft, infoTop).size(infoWidth, infoHeight).graphicsLayer {
                 alpha = information()
-                translationY = if (motion) (1f - information()) * 6.dp.toPx() else 0f
+                translationY = if (motion) (1f - information()) * 4.dp.toPx() else 0f
             }) {
-            LiquidGlassSurface(heroBackdrop, Modifier.matchParentSize()
-                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                .drawWithContent {
-                    drawContent()
-                    drawRect(Brush.verticalGradient(0f to Color.Transparent, .3f to Color.Black,
-                        1f to Color.Black), blendMode = BlendMode.DstIn)
-                }, cornerRadius = 0.dp, role = GlassSurfaceRole.GALLERY,
-                softCard = false, surfaceColor = surface, elevation = 0.dp) {}
-            Column(Modifier.fillMaxSize().padding(horizontal = 14.dp).padding(top = 5.dp, bottom = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.Bottom)) {
-                Text(manga.title, modifier = Modifier.clearAndSetSemantics { }, color = ink, style = MaterialTheme.typography.titleSmall.copy(
-                    shadow = Shadow(if (onDark) Color.Black.copy(alpha = .16f) else Color.White.copy(alpha = .18f),
-                        Offset(0f, 1f), 3f)), fontSize = 15.sp, lineHeight = 19.sp,
-                    fontWeight = FontWeight.Medium, minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
-                    onExpand = if (enabled && information() >= .98f && onRatings != null) ({ onRatings(manga) }) else null)
+                LiquidGlassSurface(heroBackdrop, Modifier.matchParentSize()
+                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                    .drawWithContent {
+                        drawContent()
+                        drawRect(if (inlineInformation)
+                            Brush.horizontalGradient(0f to Color.Transparent, .4f to Color.Black, 1f to Color.Black)
+                        else Brush.verticalGradient(0f to Color.Transparent, .3f to Color.Black, 1f to Color.Black),
+                            blendMode = BlendMode.DstIn)
+                    }, cornerRadius = 0.dp, role = GlassSurfaceRole.GALLERY,
+                    softCard = false, surfaceColor = surface, elevation = 0.dp) {}
+                Column(Modifier.fillMaxSize().padding(horizontal = if (inlineInformation) 2.dp else 12.dp)
+                    .padding(vertical = if (inlineInformation) 6.dp else 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (inlineInformation) 8.dp else 2.dp,
+                        if (inlineInformation) Alignment.CenterVertically else Alignment.Bottom)) {
+                    Text(manga.title, modifier = Modifier.clearAndSetSemantics { }, color = ink,
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            shadow = Shadow(if (onDark) Color.Black.copy(alpha = .16f) else Color.White.copy(alpha = .18f),
+                                Offset(0f, 1f), 3f)), fontSize = 14.sp, lineHeight = 17.sp,
+                        fontWeight = FontWeight.Medium, minLines = if (inlineInformation) 1 else titleLines,
+                        maxLines = if (inlineInformation) 3 else titleLines, overflow = TextOverflow.Ellipsis)
+                    MangaMetricBadges(manga, Modifier.fillMaxWidth(), foreground = ink, compact = true, plain = true,
+                        onExpand = if (enabled && information() >= .98f && onRatings != null) ({ onRatings(manga) }) else null)
+                }
             }
         }
     }

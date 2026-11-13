@@ -1,6 +1,16 @@
 # MangaFlow · current work
 
-Updated: 2026-11-13. Route: DELIVERY with focused research branches. Execution: cloud-only GitHub connector and in-memory edits, per the latest explicit user instruction.
+Updated: 2026-11-14. Route: DELIVERY with focused research branches. Execution: cloud-only GitHub connector and in-memory edits, per the latest explicit user instruction.
+
+## Current screenshot / source-disc integration · 2026-11-14
+
+Current scope and raw user evidence: DESIGN.md DETAIL-COVERAGE-61 through EXECUTION-70 (screenshots1592/1593/1595/1597/1598/1599/1601/1602/1603). The user explicitly renewed independent implementation delegation. Root remains the only commit/ref/docs controller; all work is cloud GitHub connector plus in-memory edits and cloud attachment viewing. Do not operate the user's local computer or introduce tests/local builds/probes or an extra review gate.
+
+This checkpoint integrates a genuinely taller detail artwork headroom and a late fade completing before its physical clip boundary into a full-window information tone; finite returning history pulses; gallery height budget near one third of a portrait screen; target-key single-entry browse with stable outgoing ranking clearance; ranking shell/space/labels/primary emphasis driven by one reversible spring; sibling library/download selector consuming the same residual top inset as its header; full-dialog sheet anchors with inner content height caps; and one source-disc picker shared by chapter read/download and reader, with the reader's actual stack screen anchor and original source/continuation/errors retained.
+
+Last observed build evidence: parent5e6ccdcec0e7c27cdf70f9fde4fe67487b263861 Android0.1.179/run43453311840 completed success; applications43453311759 completed success. These establish the previous compiler repair, not this checkpoint's appearance. Current code completion is not phone acceptance.
+
+Next exact action: submit this finished batch with expected main head protection, confirm its normal Android/applications CI triggers and provide the actual commit/run identities. If a concrete compiler/package error appears, repair it within this scope; do not add tests or a new pipeline. Actual fullscreen rendering, smoothness, source-disc comfort and typography await user artifact feedback. Preserve pending real source/account/desktop/platform behavior and all concurrent main changes.
 
 ## CI-178 repair · 2026-11-13
 

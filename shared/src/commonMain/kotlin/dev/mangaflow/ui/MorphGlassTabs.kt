@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -152,14 +153,16 @@ internal fun BoxScope.MorphGlassTabSelector(
         .coerceAtLeast(128.dp).coerceAtMost(156.dp * window.fontScale).coerceAtMost(maximumWidth)
     val rowHeight = morphGlassTabHeight()
     val availableHeight = if (maximumHeight.isSpecified) maximumHeight else window.panelHeight
+    // This surface is a sibling of the header, so it must share its residual top inset.
+    val topInset = screenFitContentInsets().asPaddingValues().calculateTopPadding()
     val bottomInset = with(LocalDensity.current) { WindowInsets.safeDrawing.getBottom(this).toDp() }
     val extendedHeight = (rowHeight * choices.size + 4.dp)
-        .coerceAtMost((availableHeight - bottomInset - 6.dp).coerceAtLeast(1.dp))
+        .coerceAtMost((availableHeight - topInset - bottomInset - 6.dp).coerceAtLeast(1.dp))
     val width = collapsedWidth + (extendedWidth - collapsedWidth) * progress
     val height = rowHeight + (extendedHeight - rowHeight) * progress
     LiquidGlassSurface(backdrop,
         modifier = Modifier.align(Alignment.TopStart).zIndex(41f)
-            .padding(start = 62.dp, top = 2.dp).width(width).height(height),
+            .padding(start = 62.dp, top = topInset + 2.dp).width(width).height(height),
         cornerRadius = 22.dp - 4.dp * progress, role = GlassSurfaceRole.NAVIGATION,
         interactionSource = interaction, trackPointer = false, materialExpansion = { progress }) {
         // Lay out menu labels once at their final size; only the surface clips/reveals them.
