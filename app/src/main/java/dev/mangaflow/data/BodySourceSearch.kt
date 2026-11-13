@@ -25,7 +25,7 @@ internal fun bodySourceSearchTerms(query: String, aliases: List<String> = emptyL
 /** Keep sequel symbols: stripping ≡ would conflate Jujutsu Kaisen with its independent sequel. */
 internal fun normalizedBodySourceTitle(value: String): String =
     convertBodyTitle(Normalizer.normalize(value, Normalizer.Form.NFKC), "Traditional-Simplified")
-        .lowercase(Locale.ROOT).filter { it.isLetterOrDigit() || it in "≡∞×+" }
+        .replace('迴', '回').lowercase(Locale.ROOT).filter { it.isLetterOrDigit() || it in "≡∞×+" }
 
 internal fun normalizedBodySourceAuthor(value: String): String {
     val expanded = buildString {

@@ -107,7 +107,7 @@ data class BrowseState(
     val cacheKey: String get() = when {
         isSearch -> {
             val keyword = if (searchTarget == SearchTarget.TAG) "" else query.trim()
-            "${if (isFederatedSearch) "search-v5-source-state" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
+            "${if (isFederatedSearch) "search-v6-relevance" else "search-v3-heat"}:${searchTarget.name}:${keyword.length}:$keyword:${selectedTags.map { it.path }.distinct().sorted().joinToString(",")}"
         }
         mode == DiscoveryMode.RANKING -> "ranking:${period.name}:${audience.name}"
         else -> "discover:${mode.name}"
@@ -554,7 +554,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 _browse.update { current ->
                     if (current.cacheKey != state.cacheKey || requestId != browseRequestId) current else {
                         val hits = (previousHits + partial.hits).distinctBy(Manga::id)
-                        val groups = groupFederatedSearch(hits, current.sourceMatches)
+                        val groups = groupFederatedSearch(hits, current.sourceMatches, state.query)
                         val statuses = (if (retain) state.searchSources else emptyMap()) + partial.sources
                         val pending = statuses.values.any { it.loading }
                         val next = statuses.values.filter { it.error == null && it.hasMore && it.nextPage != null }

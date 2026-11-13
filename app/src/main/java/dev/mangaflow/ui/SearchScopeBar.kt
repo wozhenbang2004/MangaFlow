@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -54,6 +57,8 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.MangaTag
@@ -79,6 +84,7 @@ internal fun SearchScopeBar(
     onRetryTags: () -> Unit,
     tagsOnly: Boolean = false,
     onTagQuery: ((String) -> Unit)? = null,
+    maxChoicesHeight: Dp = 200.dp,
 ) {
     val colors = MaterialTheme.colorScheme
     val focus = LocalFocusManager.current
@@ -87,10 +93,19 @@ internal fun SearchScopeBar(
     val labels = listOf("作品", "作者", "标签")
     val icons = listOf(Icons.AutoMirrored.Outlined.MenuBook, Icons.Outlined.PersonOutline, Icons.AutoMirrored.Outlined.Label)
     val selectedPaths = remember(selectedTags) { selectedTags.mapTo(mutableSetOf()) { it.path } }
-    var tagsExpanded by rememberSaveable(target, tagsOnly) { mutableStateOf(selectedTags.isEmpty()) }
-    val showChoices = target == SearchTarget.TAG && (!tagsOnly || tagsExpanded || selectedTags.isEmpty())
+    var tagsExpanded by rememberSaveable(target, tagsOnly) { mutableStateOf(false) }
+    val showChoices = target == SearchTarget.TAG && (tagsExpanded || selectedTags.isEmpty())
+    val releaseInput = { keyboard?.hide(); focus.clearFocus(force = true) }
+    val chooseTag: (MangaTag) -> Unit = { tag ->
+        tagsExpanded = false
+        releaseInput()
+        onTag(tag)
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (!tagsOnly) MotionTabs(targets.indexOf(target).coerceAtLeast(0), labels, { onTarget(targets[it]) },
+        if (!tagsOnly) MotionTabs(targets.indexOf(target).coerceAtLeast(0), labels, {
+            if (targets[it] == SearchTarget.TAG) releaseInput()
+            onTarget(targets[it])
+        },
             modifier = Modifier.widthIn(max = 228.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
             controlHeight = 36.dp, indicatorHeight = 28.dp, indicatorCornerRadius = 8.dp,
             fullWidthIndicator = true, treatment = MotionTabTreatment.Soft,
@@ -103,16 +118,22 @@ internal fun SearchScopeBar(
             })
         if (selectedTags.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().heightIn(min = 36.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("已选 " + selectedPaths.size, fontSize = 11.sp, color = colors.onSurfaceVariant)
-                if (selectedPaths.size > 1) Text(" · 同时匹配", fontSize = 11.sp, color = colors.onSurfaceVariant)
-                Spacer(Modifier.weight(1f))
-                if (tagsOnly) {
+                Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("已选 ${selectedPaths.size}", fontSize = 11.sp, color = colors.onSurfaceVariant,
+                        maxLines = 1)
+                    selectedTags.distinctBy { it.path }.forEach { tag ->
+                        SearchTagChoice(tag, selected = true, remove = true) { chooseTag(tag) }
+                    }
+                }
+                if (target == SearchTarget.TAG) {
                     val action = remember { MutableInteractionSource() }
-                    Row(Modifier.heightIn(min = 40.dp)
+                    Row(Modifier.heightIn(min = 36.dp)
                         .clickable(interactionSource = action, indication = null, role = Role.Button,
                             onClickLabel = if (showChoices) "收起标签选择" else "添加筛选标签",
                             onClick = {
-                                if (showChoices) { keyboard?.hide(); focus.clearFocus(force = true) }
+                                releaseInput()
                                 tagsExpanded = !showChoices
                             })
                         .motionPress(action, pressedScale = .97f)
@@ -124,17 +145,11 @@ internal fun SearchScopeBar(
                     }
                 }
             }
-            FlowRow(Modifier.fillMaxWidth().heightIn(max = 84.dp).verticalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                selectedTags.distinctBy { it.path }.forEach { tag ->
-                    SearchTagChoice(tag, selected = true, remove = true) { onTag(tag) }
-                }
-            }
         }
         MotionTabContent(showChoices, Modifier.fillMaxWidth(), contentKey = { it },
             order = { if (it) 1 else 0 }, fillContent = false, soft = true) { visible ->
-            if (visible) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (visible) Column(Modifier.fillMaxWidth().heightIn(max = maxChoicesHeight.coerceAtLeast(0.dp))
+                .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (tagsOnly && onTagQuery != null) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).clip(RoundedCornerShape(12.dp))
                         .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 12.dp, vertical = 8.dp),
@@ -143,6 +158,8 @@ internal fun SearchScopeBar(
                         BasicTextField(value = query, onValueChange = onTagQuery, singleLine = true,
                             textStyle = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, color = colors.onSurface),
                             cursorBrush = SolidColor(colors.onSurface),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = { releaseInput() }),
                             modifier = Modifier.weight(1f).semantics { contentDescription = "查找可选标签" },
                             decorationBox = { input -> Box {
                                 if (query.isEmpty()) Text("查找标签", color = colors.onSurfaceVariant, fontSize = 12.sp)
@@ -177,12 +194,9 @@ internal fun SearchScopeBar(
                     }
                     matches.isEmpty() -> if (tagsError == null) Text(if (query.isBlank()) "暂无可选标签" else "没有匹配的标签",
                         color = colors.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.padding(vertical = 8.dp))
-                    else -> FlowRow(Modifier.fillMaxWidth().heightIn(max = 144.dp).verticalScroll(rememberScrollState()),
+                    else -> FlowRow(Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                        matches.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) {
-                            if (tagsOnly) tagsExpanded = true
-                            onTag(tag)
-                        } }
+                        matches.forEach { tag -> SearchTagChoice(tag, tag.path in selectedPaths) { chooseTag(tag) } }
                     }
                 }
             } else Spacer(Modifier.height(0.dp))

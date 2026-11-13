@@ -9,6 +9,7 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceHttp
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.normalizedBodySourceTitle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -50,7 +51,12 @@ class BaoziBodySource : BodySource {
         require(page >= 0)
         if (page > 0) return@withContext MangaPage(emptyList(), false)
         val url = "$SITE/search".toHttpUrl().newBuilder().addQueryParameter("q", query.trim()).build()
-        MangaPage(cards(document(url)), false)
+        val normalizedQuery = normalizedBodySourceTitle(query)
+        // The full-page selector can include unrelated cards. No unverified search-container
+        // selector is assumed; only cards containing the full query survive.
+        MangaPage(cards(document(url)).filter {
+            normalizedQuery.isNotBlank() && normalizedBodySourceTitle(it.title).contains(normalizedQuery)
+        }, false)
     }
 
     override suspend fun detail(mangaId: String): MangaDetail = withContext(Dispatchers.IO) {

@@ -279,6 +279,7 @@ internal fun ExpandingSearchBar(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = {
                         keyboard?.hide()
+                        focus.clearFocus(force = true)
                         if (expanded && active && query.isNotBlank()) onSearch()
                     }),
                     modifier = Modifier.weight(1f).fillMaxHeight().focusRequester(requester)
