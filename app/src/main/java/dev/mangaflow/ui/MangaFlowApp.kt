@@ -597,7 +597,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         refreshingIds = refreshingDownloads, history = history)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
-                                        onLoginWithCookie = model::loginWithCookie, onLogin = model::login,
+                                        active = current.key == frame.key,
+                                        onLoginWithCookie = model::loginWithCookie,
+                                        onBeginWebsiteLogin = model::beginWebsiteLogin,
+                                        onCancelWebsiteLogin = model::cancelWebsiteLogin,
+                                        onWebsiteToken = model::loginWithWebsiteToken,
                                         onLogout = model::logout,
                                         onRefresh = model::refreshAccount,
                                         onMoreFavorites = model::moreCloudFavorites, onMoreHistory = model::moreCloudHistory,

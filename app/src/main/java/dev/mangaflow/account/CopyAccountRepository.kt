@@ -23,14 +23,9 @@ import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
 import okhttp3.Request
-import okhttp3.RequestBody
-import okio.BufferedSink
 import org.json.JSONObject
-import java.security.SecureRandom
-import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 
 /** Relay's owner-only routes. Public catalogs, pages and downloads never use this client. */
@@ -39,11 +34,9 @@ class CopyAccountRepository(context: Context) {
     // Relay's HttpClient requests use HTTP/1.1. Keep that wire profile for
     // owner requests instead of negotiating OkHttp's default HTTP/2 path.
     private val accountClient = sourceClient().newBuilder().protocols(listOf(Protocol.HTTP_1_1)).build()
-    private val loginClient = sourceClient().newBuilder().protocols(listOf(Protocol.HTTP_1_1)).build()
-    // Honor owner Retry-After across both stages without inheriting public-reader pauses.
+    // Owner profile/member requests never inherit public-reader cooldowns.
     private val accountPauses = ConcurrentHashMap<String, Long>()
     private val accountHttp = SourceHttp(accountClient, accountPauses)
-    private val loginHttp = SourceHttp(loginClient, accountPauses)
     private val appContext = context.applicationContext
     private val appProtocol by lazy { CopyAppAccountProtocol(CopyAnonymousIdentityStore.load(appContext)) }
     private val requests = Mutex()
@@ -60,8 +53,8 @@ class CopyAccountRepository(context: Context) {
     }
     private val apiOrigin = "https://api.copy202601.com".toHttpUrl()
     private val websiteOrigin = "https://copy4000.com".toHttpUrl()
-    private val webLoginUrl = websiteOrigin.newBuilder().addPathSegments("api/kb/web/login").build()
     private val webProfileUrl = "https://copy4000.com/api/v2/web/user/info".toHttpUrl()
+    private val websiteProfileUrl = "${CopyWebsiteLogin.ORIGIN}/api/v2/web/user/info".toHttpUrl()
     private val relayProfileUrl = apiUrl("member/info")
     private val publicConfig = CopyMangaConfig()
 
@@ -108,18 +101,24 @@ class CopyAccountRepository(context: Context) {
         }
     }
 
-    suspend fun login(username: String, password: String): AccountProfile {
-        val expected = beginAttempt()
+    /** The actual official form owns password entry, encoding and submission. */
+    fun beginWebsiteLogin(): Long = beginAttempt()
+
+    fun cancelWebsiteLogin(expected: Long) = synchronized(sessionLock) {
+        if (version == expected) {
+            version++
+            pendingLogin = null
+            accountClient.dispatcher.cancelAll()
+        }
+    }
+
+    suspend fun loginWithWebsiteToken(expected: Long, token: String): AccountProfile {
         return withContext(Dispatchers.IO) {
-            val name = username.trim()
-            if (name.length !in 1..120 || name.any(Char::isISOControl) ||
-                password.length !in 1..256 || password.any(Char::isISOControl)) {
-                throw SourceException("请输入有效的账号和密码。")
-            }
+            ensureVersion(expected)
+            val candidate = AccountTokenInput.validate(token)
             requests.withLock {
                 ensureVersion(expected)
-                val token = webLogin(name, password, expected)
-                val lease = SessionLease(expected, StoredAccountCredential(token, AccountChannel.WEB_API), committed = false)
+                val lease = SessionLease(expected, StoredAccountCredential(candidate, AccountChannel.WEBSITE), committed = false)
                 finishLogin(retainLogin(lease))
             }
         }
@@ -131,7 +130,6 @@ class CopyAccountRepository(context: Context) {
         sessionCredential = null
         mutableProfile.value = null
         accountClient.dispatcher.cancelAll()
-        loginClient.dispatcher.cancelAll()
         store.clear()
     }
 
@@ -218,8 +216,8 @@ class CopyAccountRepository(context: Context) {
     }
 
     private suspend fun verify(lease: SessionLease): AccountProfile {
-        // Password login follows Relay's Web-login / account-API verification pair.
-        // Legacy imports and existing App sessions retain their original profile path.
+        // Official-page logins verify on that same website; saved legacy channels
+        // retain their existing routes. Never promote a browser message alone.
         val data = accountObject(lease, profileUrl(lease), "登录状态验证")
         val username = data.text("username").ifBlank { data.text("mobile") }.ifBlank { data.text("email") }
         val nickname = data.text("nickname").ifBlank { data.text("name") }.ifBlank { username }
@@ -230,33 +228,11 @@ class CopyAccountRepository(context: Context) {
         return AccountProfile(username, nickname)
     }
 
-    private suspend fun webLogin(username: String, password: String, expected: Long): String {
-        val salt = (SecureRandom().nextInt(900_000) + 100_000).toString()
-        val salted = "$password-$salt".toByteArray(Charsets.UTF_8)
-        val encoded = try { Base64.getEncoder().encodeToString(salted) } finally { salted.fill(0) }
-        val form = FormBody.Builder().add("username", username).add("password", encoded).add("salt", salt)
-            .add("platform", "2").add("version", "2025.12.10").add("source", "freeSite").build()
-        // OkHttp's bridge uses the body's type, so a header alone loses Relay's charset.
-        val body = object : RequestBody() {
-            override fun contentType() = WEB_FORM_TYPE
-            override fun contentLength() = form.contentLength()
-            override fun writeTo(sink: BufferedSink) = form.writeTo(sink)
-        }
-        val request = websiteRequest(webLoginUrl).post(body).build()
-        ensureVersion(expected)
-        val response = try { loginHttp.request(request, "账号密码登录", readAccountErrors = true) }
-            catch (error: Exception) { ensureVersion(expected); throw error }
-        ensureVersion(expected)
-        val results = envelope(response, request.url, loginHttp, "账号密码登录", 256 * 1024, listOf(password, encoded)) as? JSONObject
-            ?: throw SourceException("账号密码登录没有返回有效的账号凭据。")
-        return AccountTokenInput.validate(results.opt("token") as? String
-            ?: throw SourceException("账号密码登录没有返回有效的账号凭据。"))
-    }
-
     private fun profileUrl(lease: SessionLease): HttpUrl = when (lease.channel) {
         AccountChannel.APP -> CopyAppAccountProtocol.profileUrl
         AccountChannel.WEB_API -> relayProfileUrl
         AccountChannel.WEB -> webProfileUrl
+        AccountChannel.WEBSITE -> websiteProfileUrl
     }
 
     private fun websiteRequest(url: HttpUrl): Request.Builder = Request.Builder().url(url)
@@ -264,8 +240,9 @@ class CopyAccountRepository(context: Context) {
             .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0")
             .header("Accept", "application/json, text/plain, */*")
             .header("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
-            .header("platform", "2").header("Origin", "https://copy4000.com")
-            .header("Referer", "https://copy4000.com/web/login/loginByAccount?url=person%2Fhome")
+            .header("platform", "2").header("Origin", "https://${url.host}")
+            .header("Referer", if (url == websiteProfileUrl) "${CopyWebsiteLogin.ORIGIN}/web/person/home"
+                else "https://copy4000.com/web/login/loginByAccount?url=person%2Fhome")
             .header("sec-ch-ua", "\"Microsoft Edge\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
             .header("sec-ch-ua-mobile", "?0").header("sec-ch-ua-platform", "\"Windows\"")
             .header("sec-fetch-site", "same-origin").header("sec-fetch-mode", "cors").header("sec-fetch-dest", "empty")
@@ -282,7 +259,9 @@ class CopyAccountRepository(context: Context) {
         if (!allowed(url, method) || (!lease.committed && url != profileUrl(lease))) {
             throw SourceException("该操作不属于个人账号接口，未发送登录凭据。")
         }
-        val request = if (lease.channel != AccountChannel.WEB || url != webProfileUrl) {
+        val websiteProfile = (lease.channel == AccountChannel.WEB && url == webProfileUrl) ||
+            (lease.channel == AccountChannel.WEBSITE && url == websiteProfileUrl)
+        val request = if (!websiteProfile) {
             val appUrl = url.newBuilder().removeAllQueryParameters("_t").removeAllQueryParameters("_update")
                 .setQueryParameter("platform", "3").apply {
                 if (CHAPTER_PATH.matches(url.encodedPath)) {
@@ -292,7 +271,7 @@ class CopyAccountRepository(context: Context) {
             }.build()
             appProtocol.memberRequest(appUrl, lease.token, body)
         } else {
-            // Only a legacy Web profile uses the original website route.
+            // Website-issued credentials are checked by the official website profile.
             val builder = websiteRequest(url).header("Authorization", "Token ${lease.token}")
             if (body != null) builder.post(body)
             builder.build()
@@ -324,14 +303,14 @@ class CopyAccountRepository(context: Context) {
                 throw SourceException("$operation 暂时被来源限制（$code）" +
                     (if (message.isNotBlank()) "：$message" else "，请稍后重试。") +
                     (if (retry > 0) "（$retry 秒后可重试）" else ""),
-                    retryAfterSeconds = retry)
+                    retryAfterSeconds = retry, httpStatus = code)
             }
             210 -> {
                 val retry = response.retryAfterSeconds
                 http.rememberPause(url, retry)
                 val detail = if (message.isNotBlank()) "：$message" else "，来源未提供具体原因，请稍后重试。"
                 val retryHint = if (retry > 0) "（$retry 秒后可重试）" else ""
-                throw SourceException("$operation 未成功（210）$detail$retryHint", retryAfterSeconds = retry)
+                throw SourceException("$operation 未成功（210）$detail$retryHint", retryAfterSeconds = retry, httpStatus = code)
             }
         }
         if (code != 200) {
@@ -364,6 +343,7 @@ class CopyAccountRepository(context: Context) {
         if (url.scheme != "https" || url.port != 443 ||
             url.username.isNotEmpty() || url.password.isNotEmpty() || url.fragment != null) return false
         if (url.host == websiteOrigin.host) return method == "GET" && url == webProfileUrl
+        if (url == websiteProfileUrl) return method == "GET"
         if (url == CopyAppAccountProtocol.profileUrl || url == relayProfileUrl) return method == "GET"
         if (url.host != apiOrigin.host) return false
         val path = url.encodedPath
@@ -406,7 +386,6 @@ class CopyAccountRepository(context: Context) {
         version++
         pendingLogin = null
         accountClient.dispatcher.cancelAll()
-        loginClient.dispatcher.cancelAll()
         version
     }
 
@@ -496,7 +475,6 @@ class CopyAccountRepository(context: Context) {
     private data class AccountRows(val items: List<JSONObject>, val hasMore: Boolean)
 
     private companion object {
-        val WEB_FORM_TYPE = "application/x-www-form-urlencoded; charset=UTF-8".toMediaType()
         val SEGMENT_PATTERN = Regex("[A-Za-z0-9_-]{1,160}")
         val UUID_PATTERN = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
         val QUERY_PATH = Regex("/api/v3/comic2/[A-Za-z0-9_-]{1,160}/query")

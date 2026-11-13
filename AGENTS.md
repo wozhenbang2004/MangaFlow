@@ -1,4 +1,7 @@
 # MangaFlow
+- ACCOUNT-WEBSITE-04 in DESIGN.md owns the current login repair. The single default account-password form is the real official www page inside AccountScreen, without an additional external-login button or copied native password POST. Keep exact-origin/main-frame/document/attempt/submission guards, fresh isolated WebKit profiles, complete cleanup and TLS rejection. New `website` credentials must pass the same www website profile before encrypted commit; preserve old channels and signed owner operations, with public reading anonymous. Token arrival and desktop website success are not Android success or a proven 210 fix. No tests/local build; latest main and CI-trigger-only delivery.
+
+
 
 - LAUNCH-118-03 in DESIGN.md records the user's real 0.1.123 Android16/API36 OPPO PKB110 stack: AndroidX Startup → WorkManagerInitializer → NoSuchMethodException WorkDatabase_Impl.<init>[], before app services/UI. Retain RoomDatabase subclasses' zero-argument constructors using the exact AndroidX e4765e38 R8 fix. Keep minification, WorkManager, all Haze 2.1 capabilities and data intact. Old-version Java reports remain exportable but must not block a newly installed version's startup; only an exact current version header activates the recovery page. The constructor failure is observed; corrected-device startup remains pending. No tests/local build; direct latest main and confirm CI trigger only.
 

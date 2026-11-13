@@ -12,7 +12,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import org.json.JSONObject
 
-internal enum class AccountChannel(val value: String) { WEB("web"), APP("app"), WEB_API("web_api") }
+internal enum class AccountChannel(val value: String) { WEB("web"), APP("app"), WEB_API("web_api"), WEBSITE("website") }
 
 internal class StoredAccountCredential(val token: String, val channel: AccountChannel)
 

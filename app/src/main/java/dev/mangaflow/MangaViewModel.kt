@@ -203,6 +203,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val downloadPreparationSlots = Semaphore(2)
     private var accountJob: Job? = null
     private var accountRequestId = 0L
+    private var websiteLoginAttempt: Long? = null
     private var accountCleanupFailed = false
     private var cloudFavoritesJob: Job? = null
     private var cloudHistoryJob: Job? = null
@@ -1235,11 +1236,32 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loginWithCookie(input: String) = authenticate { accountRepository.loginWithCookie(input) }
 
-    fun login(username: String, password: String) = authenticate { accountRepository.login(username, password) }
+    fun beginWebsiteLogin(): Long {
+        websiteLoginAttempt = null
+        accountJob?.cancel()
+        cancelAccountRequests()
+        accountRequestId++
+        return accountRepository.beginWebsiteLogin().also { websiteLoginAttempt = it }
+    }
+
+    fun cancelWebsiteLogin(expected: Long) {
+        if (websiteLoginAttempt != expected) return
+        websiteLoginAttempt = null
+        accountRepository.cancelWebsiteLogin(expected)
+    }
+
+    fun loginWithWebsiteToken(expected: Long, token: String) {
+        if (websiteLoginAttempt != expected || expected != accountRepository.sessionVersion) return
+        websiteLoginAttempt = null
+        authenticate { accountRepository.loginWithWebsiteToken(expected, token) }
+    }
 
     private fun restoreAccount() = authenticate(restoring = true) { accountRepository.restore() }
 
     private fun authenticate(restoring: Boolean = false, action: suspend () -> AccountProfile?) {
+        val browserAttempt = websiteLoginAttempt
+        websiteLoginAttempt = null
+        browserAttempt?.let(accountRepository::cancelWebsiteLogin)
         accountJob?.cancel()
         cancelAccountRequests()
         val requestId = ++accountRequestId
@@ -1274,6 +1296,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun logout() {
+        websiteLoginAttempt = null
         accountRequestId++
         accountJob?.cancel()
         cancelAccountRequests()
