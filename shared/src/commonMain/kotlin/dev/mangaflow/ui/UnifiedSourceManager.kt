@@ -55,6 +55,7 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabContent
+import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.FeelEvent
 import dev.mangaflow.ui.motion.motionPress
@@ -90,7 +91,7 @@ internal fun UnifiedSourceManager(
         val rows = linkedMapOf<String, SourceOverviewEntry>()
         state.discovery.forEach { result ->
             rows[result.sourceId] = SourceOverviewEntry(result.sourceId, result.sourceName,
-                result.status.name, result.chapters, result.message, result.candidates)
+                result.status.name, result.chapters, result.message, result.candidates, result.alignedChapters)
         }
         associated.forEach { manga ->
             val previous = rows[manga.sourceId]
@@ -210,6 +211,13 @@ internal fun UnifiedSourceManager(
                             }
                         }
                         items(overview, key = { "source:" + it.id }) { row ->
+                            val statusLabel = when {
+                                row.message == "尚未检查" -> "尚未检查"
+                                row.status == "LINKED" && row.id == state.work.sourceId -> "主来源"
+                                row.status == "LINKED" && row.alignedChapters != null ->
+                                    if (row.alignedChapters > 0) "已对齐 ${row.alignedChapters}" else "暂无重合"
+                                else -> sourceStatusLabel(row.status)
+                            }
                             val canChoose = row.status !in setOf("LINKED", "SEARCHING", "DISABLED") &&
                                 !state.connecting && pageActive
                             val interaction = remember(row.id) { MutableInteractionSource() }
@@ -233,7 +241,8 @@ internal fun UnifiedSourceManager(
                                     stateDescription = listOfNotNull(
                                         "${row.chapters}话".takeIf { row.chapters > 0 },
                                         "${row.candidates.size}个候选".takeIf { row.status == "NEEDS_CONFIRMATION" },
-                                        sourceStatusLabel(row.status),
+                                        statusLabel,
+                                        "作品已关联".takeIf { row.status == "LINKED" },
                                         row.message.takeIf { row.status == "FAILED" && it.isNotBlank() },
                                     ).joinToString("，")
                                 }, horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -262,9 +271,10 @@ internal fun UnifiedSourceManager(
                                             Text("检查失败", fontSize = 11.sp, color = colors.error, maxLines = 1)
                                             Icon(Icons.Outlined.Info, null, Modifier.size(13.dp), tint = colors.error)
                                         }
-                                    } else Text(if (row.message == "尚未检查") "尚未检查" else sourceStatusLabel(row.status),
-                                        fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                        color = if (row.status == "NEEDS_CONFIRMATION") colors.primary else colors.onSurfaceVariant)
+                                    } else MotionSwap(statusLabel) { label ->
+                                        Text(label, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                            color = if (row.status == "NEEDS_CONFIRMATION") colors.primary else colors.onSurfaceVariant)
+                                    }
                                 }
                             }
                         }
@@ -413,6 +423,7 @@ internal fun UnifiedSourceManager(
 private data class SourceOverviewEntry(
     val id: String, val name: String, val status: String,
     val chapters: Int = 0, val message: String = "", val candidates: List<Manga> = emptyList(),
+    val alignedChapters: Int? = null,
 )
 
 private fun sourceStatusLabel(status: String): String = when (status) {

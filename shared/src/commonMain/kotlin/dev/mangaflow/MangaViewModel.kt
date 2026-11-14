@@ -1777,6 +1777,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             }
             val existingChapters = chapters.count { chapter -> chapter.variants.any { it.sourceId == source.id } ||
                 chapter.variants.isEmpty() && chapter.sourceId == source.id }
+            val alignedChapters = chapters.count { chapter ->
+                chapter.variants.any { it.sourceId == source.id } && chapter.variants.any { it.sourceId != source.id }
+            }.takeIf { existingChapters > 0 }
             val discovery = discovered[source.id]
             val linkedFailure = settings.links.firstOrNull {
                 it.manga.sourceId == source.id && it.confirmedAt > 0L
@@ -1793,7 +1796,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     chapters = existingChapters, message = "$linkedFailure 已保留上次目录。")
                 discovery?.status in listOf(SourceDiscoveryStatus.SEARCHING, SourceDiscoveryStatus.FAILED) ||
                     !linked && discovery?.status == SourceDiscoveryStatus.NEEDS_CONFIRMATION -> discovery!!.copy(chapters = existingChapters)
-                linked -> SourceDiscoveryResult(source.id, source.name, SourceDiscoveryStatus.LINKED, chapters = existingChapters)
+                linked -> SourceDiscoveryResult(source.id, source.name, SourceDiscoveryStatus.LINKED,
+                    chapters = existingChapters, alignedChapters = alignedChapters)
                 else -> discovered[source.id] ?: SourceDiscoveryResult(source.id, source.name,
                     SourceDiscoveryStatus.NO_MATCH, message = "尚未检查")
             }

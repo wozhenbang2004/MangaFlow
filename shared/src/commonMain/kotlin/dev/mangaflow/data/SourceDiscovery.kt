@@ -9,6 +9,8 @@ data class SourceDiscoveryResult(
     val chapters: Int = 0,
     val message: String = "",
     val candidates: List<Manga> = emptyList(),
+    /** Null until a projected catalogue can show this source's actual chapter coverage. */
+    val alignedChapters: Int? = null,
 )
 
 /** Candidate ordering is never evidence. Full identities and the two actual directories are checked. */
@@ -115,7 +117,7 @@ internal object SourceDiscoveryIdentity {
         return sameChapterSystem && names.any { it.length >= 6 && it.any(Char::isLetter) }
     }
 
-    /** Three ordinary, unambiguous global chapter positions must agree, not just episode index. */
+    /** Exact serial positions must agree across three chapter ranges, not just episode index. */
     fun chapterSystemMatches(base: MangaDetail?, candidate: MangaDetail): Boolean {
         if (base == null) return false
         fun positions(detail: MangaDetail): Set<String> {
@@ -127,7 +129,7 @@ internal object SourceDiscoveryIdentity {
                 val meaning = ChapterSemantics.parse(original, confirmedSerialSystem = true) ?: return@mapNotNull null
                 val number = meaning.number ?: return@mapNotNull null
                 if (meaning.system != "chapter" || meaning.branch.isNotBlank() || meaning.part.isNotBlank() ||
-                    number.signum() <= 0 || number.scale() > 0) return@mapNotNull null
+                    number.signum() <= 0) return@mapNotNull null
                 val edition = native?.edition ?: "连载版"
                 if (ChapterSemantics.editionFamily(edition, meaning, true) != "serial") return@mapNotNull null
                 val volume = Regex("(?:第\\s*)?[0-9]+(?:\\.[0-9]+)?\\s*[卷巻册冊]")
@@ -140,7 +142,10 @@ internal object SourceDiscoveryIdentity {
         }
         val primary = positions(base)
         val target = positions(candidate)
-        return primary.intersect(target).size >= 3
+        // Fractional labels (1.1, 1.2, ...) are real upstream chapter numbers too.
+        // Compare them in full; count integer portions only to avoid proving a whole
+        // numbering system from three fragments of the same chapter.
+        return primary.intersect(target).map { it.substringBefore('.') }.distinct().size >= 3
     }
 
     fun signature(work: Manga, aliases: List<String>, base: MangaDetail?): String = buildString {

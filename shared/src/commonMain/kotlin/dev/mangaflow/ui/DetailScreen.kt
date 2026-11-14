@@ -1183,7 +1183,7 @@ private fun DetailSourceAction(
         .semantics(mergeDescendants = true) {
             contentDescription = "${sourceName}，漫画来源"
             stateDescription = listOfNotNull(
-                "已合并 ${sourceCount} 个来源",
+                "目录包含 ${sourceCount} 个来源",
                 "待确认 ${pendingSourceCount} 个来源".takeIf { pending },
                 "正在准备来源".takeIf { sourceLoading },
                 "正在检查来源".takeIf { sourcesChecking },
