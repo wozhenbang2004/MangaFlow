@@ -153,11 +153,12 @@ jobs:
 
   ios:
     name: iOS application (unsigned)
-    runs-on: macos-latest
+    runs-on: macos-26-intel
     timeout-minutes: 60
     env:
-      # Standard arm64 macOS runners have 7 GB; leave room for Xcode and native linking.
-      MANGAFLOW_IOS_GRADLE_JVMARGS: '-Xmx4g -Dfile.encoding=UTF-8'
+      # The standard Intel runner has 14 GB; Kotlin/Native release optimization exhausted 4 GB.
+      # Keep the single-worker build and leave 6 GB for Xcode and native allocations.
+      MANGAFLOW_IOS_GRADLE_JVMARGS: '-Xmx8g -Dfile.encoding=UTF-8'
     defaults:
       run:
         shell: bash

@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Experience-policy takeover and iOS compiler memory · 2026-11-14
+
+User: “接手体验策略升级提交以及派一个子代理去查是不是 ci 失败了那就去🫸”. Root resumed EXPERIENCE-166–173, COPY-MOTION-171–180 and SOURCE-ALIGN-20261114-01–08 from the published source, with one delegated CI investigator. These changes are already on main; do not replay them. Integrate this bounded build correction on 9e81f81, retaining its concurrent reader-recovery continuation.
+
+Observed CI: Android 251/252 assembled and signed but stopped at the current-main publication guard; preserve that guard and all immutable tag/signing checks. Android 253 / run 43596375494 completed successfully and published v0.1.253; its Windows application also built successfully and EXE/MSI assets were present. iOS 253 was still archiving at the last check, so it has no asserted outcome. The concrete iOS failure is the preceding native run 43593580483 at 1b52be2: linkReleaseFrameworkIosArm64 exhausted Java heap in StaticInitializersOptimization. This is a compiler-resource failure, not an installed experience-policy or UI result.
+
+CI-IOS-20261114-01 changes only the iOS workflow runner from macos-latest (7 GB arm64) to macos-26-intel (14 GB standard Intel), and its existing Gradle heap override from 4g to 8g. The current Xcode script already forwards that override and builds with one worker/no parallel work; Kotlin 2.4.21 runs the Native compiler in that process with the existing setting. Retain all compiler optimizations, the iosArm64/iosSimulatorArm64 targets, ARM64 simulator packaging, caches partitioned by runner architecture, Windows concurrency and every release guard. Intel hosts support building these targets; this workflow compiles/packages rather than running an ARM simulator. Primary contracts: https://docs.github.com/en/actions/reference/runners/github-hosted-runners and https://kotlinlang.org/docs/native-target-support.html; Kotlin v2.4.21 NativeLink/runner source was also inspected.
+
+Evidence: original CI logs, official contracts, source/diff review and YAML parsing only. No tests, local builds, device/service probes or new gate. Root submits one complete latest-main expected-head batch, confirms normal CI activation and then leaves main stable. Success of the adjusted iOS build and installed animation/source coverage/performance remain unverified until actual build or user evidence; the 8 GB cap is a resource correction, not a guarantee that compilation now succeeds.
+
 ## Reader recovery continuation: chapter waits and current-source retry · 2026-11-14
 
 User “继续” continues the original reader loading/console/source-recovery request; exact message ID unavailable. DESIGN READER-RECOVERY-11–13 owns this bounded continuation. Baselineb3957fe2 retainsd7ce61c visible-image/prefetch repair, starter-source installation and the newer live source-choice fixes. Concrete source gaps: chapter timeout still ran while background/blocked; choosing the current source during chapter failure only notified an absent image pane; GuidedPanelReader did not consume that retry pulse and only reported the previous successful page while the next image failed.
