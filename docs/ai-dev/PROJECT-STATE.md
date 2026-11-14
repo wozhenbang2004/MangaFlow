@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Current batch: source return / detail arrival · 2026-11-14
+
+User's two active animation complaints and implementation/acceptance live in DESIGN.md SOURCE-RETURN-20261114 / DETAIL-ARRIVAL-20261114. Source/read/download/rating exits now retain their flight, return to the trigger, separate label/glyph finishing and share the reverseable spring/blur. Detail arrival uses a stable navigation target/live payload, matched-cover timing without a competing route slide, same-frame natural-height measurement and a stable entry frame that settles to the true poster ratio after arrival.
+
+Finished source scope: ChapterSourceOrbit, ChapterSourcePicker, ChapterDownloadSourceSheet, MetricSourceFan, MangaFlowApp, DetailScreen and MangaCoverTransition. Preserve all original source/work/variant/storage/history/download identities and current layout. The R18/site-adapter request is explicitly not shipped; the supported generic content-profile/privacy research and its historical-source limits are recorded beside the animation contract. Do not mistake research or an empty mode shell for integration.
+
+Parent main53f439f2c6bba4c2f18a091cdaefc835864cc946 had successful Android199/run43533464367 and native43533464402; not current-batch evidence. Root alone integrates this complete batch with a latest-head lease and confirms normal CI identities. No tests/local builds/user filesystem/browser/device or source-service probes; no extra review gate. Current animation/device feel remains pending user feedback. Once this section/source batch is already on main, do not resubmit or make a status-only push.
+
 ## CI198 compile repair · 2026-11-14
 
 User feedback: “失败了？”. Android198/run43495905439/job132128823463, desktop job132129047085 and iOS job132129047732 all report the same common-source failure at DetailCatalog.kt:512: unresolved delay. Removing automatic volume-cover retries also removed that import, while the chapter-group selection's existing short closing delay still uses it. Restore kotlinx.coroutines.delay only; keep the full35-file upgrade, source sizes without“样本”, fixed filter selection/exit and every unrelated change.

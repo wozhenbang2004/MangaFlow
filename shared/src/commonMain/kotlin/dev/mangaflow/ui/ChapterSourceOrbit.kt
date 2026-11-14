@@ -3,7 +3,6 @@ package dev.mangaflow.ui
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -38,6 +37,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -46,6 +46,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.isSpecified
@@ -55,6 +56,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.semantics.Role
@@ -88,7 +90,9 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.motionPress
+import kotlin.math.PI
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 private object SourceOrbitWindowOrigin : PopupPositionProvider {
     override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize,
@@ -111,11 +115,12 @@ internal fun ChapterSourceOrbit(
     onPresenceChange: (Boolean) -> Unit = {},
     hasStatus: Boolean = false,
     status: @Composable () -> Unit = {},
-    item: @Composable (index: Int, modifier: Modifier, dismiss: () -> Unit) -> Unit,
+    item: @Composable (index: Int, modifier: Modifier, dismiss: () -> Unit, reveal: () -> Float) -> Unit,
 ) {
     val sourceAnchor = remember(identity) { anchor }
     val motion = LocalMotionEnabled.current
     val density = LocalDensity.current
+    val layoutDirection = LocalLayoutDirection.current
     var closing by remember(identity) { mutableStateOf(false) }
     var page by remember(identity) { mutableIntStateOf(0) }
     var origin by remember(identity) { mutableStateOf<Offset?>(null) }
@@ -127,6 +132,9 @@ internal fun ChapterSourceOrbit(
     LaunchedEffect(identity, closeRequested) { if (closeRequested) closing = true }
     val close = { if (!closing) { cancel(); closing = true } }
     val progress = remember(identity) { Animatable(0f) }
+    val canInteract by remember(identity, closing) {
+        derivedStateOf { !closing && progress.value >= .9f }
+    }
     val scrim = MaterialTheme.colorScheme.scrim
     // A Popup is another window: explicit source layers carry the actual page across it.
     // Keep the same presence through pagination so the page cannot flash sharp between groups.
@@ -145,11 +153,15 @@ internal fun ChapterSourceOrbit(
         }
     }
     LaunchedEffect(identity, closing, motion, origin != null) {
-        if (origin == null) return@LaunchedEffect
+        if (origin == null) {
+            if (closing) onClosed()
+            return@LaunchedEffect
+        }
+        // Keep the same spring and current position when a closing flight is reversed.
         progress.animateTo(if (closing) 0f else 1f,
-            if (!motion) snap()
-            else if (closing) tween(MangaMotion.Exit, easing = MangaMotion.ExitEasing)
-            else spring(dampingRatio = .86f, stiffness = MangaMotion.NavigationStiffness))
+            if (!motion) snap() else spring(
+                dampingRatio = MangaMotion.NavigationDamping,
+                stiffness = MangaMotion.NavigationStiffness))
         if (closing) onClosed()
     }
     Popup(popupPositionProvider = SourceOrbitWindowOrigin, onDismissRequest = close,
@@ -199,44 +211,72 @@ internal fun ChapterSourceOrbit(
                     .coerceAtLeast(1f)
                 val top = (start.y - slots * rowHeightPx / 2f)
                     .coerceIn(edge, (height - edge - boundsHeight).coerceAtLeast(edge))
+                val railScroll = rememberScrollState()
+                // Disc's 4dp inset and 36dp mark slot locate the glyph, not the text box.
+                val markInset = with(density) { 22.dp.toPx() }
+                val markCenterX = if (layoutDirection == LayoutDirection.Ltr) markInset else railWidthPx - markInset
+                val landingY = (slots * rowHeightPx / 2f - railScroll.value)
+                    .coerceIn(0f, with(density) { availableHeight.toPx() })
                 Column(Modifier.absoluteOffset { IntOffset(left.roundToInt(), top.roundToInt()) }
                     .width(railWidth).heightIn(max = availableHeight)
                     .graphicsLayer {
                         val p = progress.value.coerceIn(0f, 1f)
-                        transformOrigin = TransformOrigin(if (placeLeft) 1f else 0f, .5f)
-                        translationX = (if (placeLeft) edge else -edge) * (1f - p)
-                        scaleX = .9f + .1f * p
-                        alpha = if (origin == null) 0f else p
-                    }.verticalScroll(rememberScrollState())) {
+                        transformOrigin = TransformOrigin(
+                            (markCenterX / size.width.coerceAtLeast(1f)).coerceIn(0f, 1f),
+                            (landingY / size.height.coerceAtLeast(1f)).coerceIn(0f, 1f))
+                        translationX = (start.x - left - markCenterX) * (1f - p)
+                        translationY = (start.y - top - landingY) * (1f - p)
+                        scaleX = .62f + .38f * p
+                        scaleY = scaleX
+                        // Keep the glyphs visible until they reach the actual trigger.
+                        alpha = if (origin == null) 0f else (p / .12f).coerceIn(0f, 1f)
+                    }.verticalScroll(railScroll)) {
                     repeat(slots) { slot ->
+                        val reveal = {
+                            val delay = slot * .018f
+                            ((progress.value - delay) / (1f - delay)).coerceIn(0f, 1f)
+                        }
                         val modifier = Modifier.fillMaxWidth().height(rowHeight)
-                            .motionInputGate(!closing && progress.value >= .65f)
+                            .zIndex((slots - slot).toFloat())
+                            .motionInputGate(canInteract)
                             .graphicsLayer {
-                                val delay = slot * .025f
-                                val p = ((progress.value - delay) / (1f - delay)).coerceIn(0f, 1f)
-                                translationY = -slot * rowHeightPx * (1f - p) * .16f
-                                alpha = p
+                                val p = reveal()
+                                translationY = (landingY - ((slot + .5f) * rowHeightPx -
+                                    railScroll.value)) * (1f - p)
+                                translationX = (if (placeLeft) -edge else edge) *
+                                    sin(p * PI).toFloat() * (slot - (slots - 1) / 2f) / slots.coerceAtLeast(1)
                             }
-                        if (slot < visibleCount) item(first + slot, modifier, close)
+                        if (slot < visibleCount) item(first + slot, modifier, close, reveal)
                         else {
                             val interaction = remember { MutableInteractionSource() }
                             Row(modifier.clip(RoundedCornerShape(10.dp))
-                                .clickable(enabled = !closing && progress.value >= .65f,
+                                .clickable(enabled = canInteract,
                                     interactionSource = interaction, indication = null,
                                     role = Role.Button, onClickLabel = "下一组来源",
                                     onClick = { page = (currentPage + 1) % pages })
                                 .motionPress(interaction, enabled = !closing, pressedScale = .97f)
                                 .padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Outlined.MoreHoriz, null, Modifier.size(36.dp).padding(7.dp))
-                                Text("下一组 ${currentPage + 1}/$pages", Modifier.padding(start = 6.dp),
+                                Text("下一组 ${currentPage + 1}/$pages", Modifier.padding(start = 6.dp)
+                                    .graphicsLayer { alpha = ((reveal() - .3f) / .7f).coerceIn(0f, 1f) },
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 10.sp, lineHeight = 14.sp, maxLines = 1)
                             }
                         }
                     }
                     if (hasStatus) Column(Modifier.fillMaxWidth().heightIn(max = 72.dp)
+                        .graphicsLayer { alpha = ((progress.value - .5f) / .5f).coerceIn(0f, 1f) }
                         .verticalScroll(rememberScrollState()).padding(horizontal = 4.dp, vertical = 4.dp)) { status() }
                 }
+                // A second tap at the original stack takes over the same retained flight.
+                if (localAnchor != null) Box(Modifier.absoluteOffset {
+                    IntOffset(localAnchor.left.roundToInt(), localAnchor.top.roundToInt())
+                }.size(with(density) { localAnchor.width.toDp() }, with(density) { localAnchor.height.toDp() })
+                    .clickable(enabled = !closeRequested,
+                        interactionSource = remember(identity) { MutableInteractionSource() }, indication = null,
+                        role = Role.Button, onClickLabel = if (closing) "展开来源" else "收起来源",
+                        onClick = { if (closing) closing = false else close() })
+                    .semantics { contentDescription = if (closing) "展开来源" else "收起来源" })
             }
         }
     }
@@ -276,6 +316,7 @@ internal fun ChapterSourceDisc(
     resolution: ChapterResolutionState? = null,
     actionLabel: String,
     onInspect: (() -> Unit)? = null,
+    revealProgress: () -> Float = { 1f },
     onClick: () -> Unit,
 ) {
     val interaction = remember(variant.storageId) { MutableInteractionSource() }
@@ -306,7 +347,8 @@ internal fun ChapterSourceDisc(
                 ChapterDownloadMark(entry, showDownload = false, size = 10.dp)
             }
         }
-        Column(Modifier.weight(1f).padding(start = 6.dp)) {
+        Column(Modifier.weight(1f).padding(start = 6.dp)
+            .graphicsLayer { alpha = ((revealProgress() - .3f) / .7f).coerceIn(0f, 1f) }) {
             Text(variant.sourceName, color = colors.onSurface, fontSize = 11.sp, lineHeight = 14.sp,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)

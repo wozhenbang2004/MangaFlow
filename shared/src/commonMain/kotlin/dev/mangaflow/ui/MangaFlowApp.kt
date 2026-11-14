@@ -215,7 +215,10 @@ private fun Modifier.drawerSelectionTapInput(
 private sealed interface Frame {
     val key: String
     data class Root(val section: Section) : Frame { override val key = "root-${section.name}" }
-    data class Detail(val state: DetailState) : Frame { override val key = "detail-${state.manga.id}" }
+    class Detail(private val snapshot: State<DetailState>) : Frame {
+        val state: DetailState get() = snapshot.value
+        override val key = "detail-${snapshot.value.manga.id}"
+    }
     data class Reader(val session: ReadingSession) : Frame { override val key = "reader-${session.manga.id}-${session.collection?.key.orEmpty()}" }
 }
 
@@ -350,7 +353,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             changeSection(Section.DOWNLOADS)
         }
     }
-    val frame: Frame = reading?.let { Frame.Reader(it) } ?: detail?.let { Frame.Detail(it) } ?: Frame.Root(section)
+    // Loading, catalogue and review updates belong to this route, not its navigation target.
+    val detailFrame = detail?.let { state ->
+        androidx.compose.runtime.key(state.manga.id) {
+            val snapshot = rememberUpdatedState(state)
+            remember(snapshot) { Frame.Detail(snapshot) }
+        }
+    }
+    val frame: Frame = reading?.let { Frame.Reader(it) } ?: detailFrame ?: Frame.Root(section)
     sourceManagement?.let { state ->
         UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
             onSearch = model::searchBodySource, onAttach = { candidate -> model.attachBodySource(state.work.id, candidate) },
@@ -542,7 +552,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     if (!motion || (initialState is Frame.Root && targetState is Frame.Root &&
                         (targetState as Frame.Root).section == drawerRootTransition))
                         (fadeIn(snap()) togetherWith fadeOut(snap())).using(null)
-                    else {
+                    else if ((initialState is Frame.Root && targetState is Frame.Detail ||
+                        initialState is Frame.Detail && targetState is Frame.Root) &&
+                        selectedCover?.mangaId == ((targetState as? Frame.Detail)?.state?.manga?.id
+                            ?: (initialState as? Frame.Detail)?.state?.manga?.id)) {
+                        // The matched cover owns the spatial journey; a second route slide
+                        // would move its landing target while the cover is already in flight.
+                        (fadeIn(tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing)) togetherWith
+                            fadeOut(tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing))).using(null)
+                    } else {
                         val forward = targetState.depth >= initialState.depth
                         val direction = if (forward) 1 else -1
                         ((fadeIn(tween(MangaMotion.NavigationFade)) +

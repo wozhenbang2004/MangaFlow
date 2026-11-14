@@ -6,7 +6,7 @@ import dev.mangaflow.platform.*
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
@@ -114,6 +114,10 @@ internal class MetricSourceFanState {
         closing = true
     }
 
+    fun reopen(value: MetricSourceFanRequest) {
+        if (request === value && closing && afterClose == null) closing = false
+    }
+
     fun finish(value: MetricSourceFanRequest) {
         if (request !== value) return
         val action = afterClose
@@ -151,7 +155,8 @@ internal fun MetricSourceFan(state: MetricSourceFanState, backdrop: HazeState? =
             return@LaunchedEffect
         }
         progress.animateTo(if (closing) 0f else 1f,
-            if (motion) tween(240, easing = MangaMotion.EnterEasing) else snap())
+            if (motion) spring(dampingRatio = MangaMotion.NavigationDamping,
+                stiffness = MangaMotion.NavigationStiffness) else snap())
         if (closing) state.finish(request)
     }
     val density = LocalDensity.current
@@ -216,6 +221,14 @@ internal fun MetricSourceFan(state: MetricSourceFanState, backdrop: HazeState? =
             val preferredTop = if (anchor.top >= fanHeight + gap + inset)
                 anchor.top - gap - fanHeight else anchor.bottom + gap
             val top = preferredTop.coerceIn(inset, heightPx - inset - fanHeight)
+            Box(Modifier.absoluteOffset {
+                IntOffset(anchor.left.roundToInt(), anchor.top.roundToInt())
+            }.size(with(density) { anchor.width.toDp() }, with(density) { anchor.height.toDp() })
+                .clickable(interactionSource = remember(request) { MutableInteractionSource() },
+                    indication = null, role = Role.Button,
+                    onClickLabel = if (closing) "展开评分来源" else "收起评分来源",
+                    onClick = { if (closing) state.reopen(request) else state.close() })
+                .semantics { contentDescription = if (closing) "展开评分来源" else "收起评分来源" })
             request.items.indices.reversed().forEach { index ->
                 val item = request.items[index]
                 val row = index / columns

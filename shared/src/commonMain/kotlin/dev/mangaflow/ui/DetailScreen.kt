@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 
 import coil3.Image as CoilImage
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.core.snap
@@ -75,11 +77,11 @@ import androidx.compose.material3.TopAppBarState
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -107,7 +109,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -285,7 +287,7 @@ fun DetailScreen(
             .size(coverDecodeWidth, coverDecodeWidth * 3 / 2)
             .httpHeaders(NetworkHeaders.Builder().set("User-Agent", "Mozilla/5.0")
                 .set("Referer", current.sourceUrl.ifBlank { "https://www.copy3000.com/comic/" + current.id }).build())
-            .crossfade(if (motion) MangaMotion.Quick else 0)
+            .crossfade(0)
             .placeholderMemoryCacheKey("manga-cover:" + current.coverUrl)
             .memoryCacheKey("detail-cover:" + current.coverUrl + ":" + coverRetry).build()
     }
@@ -331,24 +333,16 @@ fun DetailScreen(
         val toolbarClearance = statusInset + 56.dp
         val toolbarPixels = with(density) { toolbarClearance.roundToPx() }
         val artworkHeadroom = toolbarClearance + if (compactHero) 8.dp else 16.dp
-        var naturalHeroHeight by remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
-        // The book information owns its height; never reserve a percentage of
-        // the screen below short metadata.
-        val heroHeight = if (collapsedHero) 0.dp else with(density) { naturalHeroHeight.toDp() }
-        val atmosphereHeight = heroHeight + seamHeight
-        // Finish fading before the clipping edge, leaving identical body color on both sides.
-        val atmosphereFadeEnd = (1f - 24.dp / atmosphereHeight.coerceAtLeast(1.dp)).coerceIn(.65f, .96f)
-        val atmosphereFadeStart = (atmosphereFadeEnd - 104.dp / atmosphereHeight.coerceAtLeast(1.dp))
-            .coerceIn(.25f, .84f)
-        val heroPixels = with(density) { heroHeight.toPx() }
-        // Foreground movement follows the gesture one-to-one; only the atmosphere stays fixed.
-        val collapseRange = heroPixels
-        val header = key(current.id) { rememberTopAppBarState(initialHeightOffsetLimit = -collapseRange) }
+        val naturalHeroHeight = remember(current.id, viewportWidth, density) { mutableIntStateOf(0) }
+        // Foreground measurement publishes this frame's actual height. Background layers
+        // measure afterwards and draw behind it, without a zero-height first-frame handoff.
+        val header = key(current.id) { rememberTopAppBarState(initialHeightOffsetLimit = 0f) }
         val dockScrollTravel = with(density) { 96.dp.toPx() }
-        val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel, heroPixels) {
+        val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel, naturalHeroHeight) {
             derivedStateOf {
                 if (activeSection != 0) 0f else {
                     // Start with the first actual pixel; an unmeasured header is not a scroll.
+                    val heroPixels = naturalHeroHeight.intValue.toFloat()
                     val coverTravel = if (heroPixels > 0f)
                         (-header.heightOffset).coerceIn(0f, heroPixels) else 0f
                     val coverProgress = (coverTravel / dockScrollTravel).coerceIn(0f, 1f)
@@ -363,14 +357,6 @@ fun DetailScreen(
         val behavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(
             state = header, snapAnimationSpec = null, flingAnimationSpec = rememberSplineBasedDecay(),
         )
-        SideEffect {
-            if (header.heightOffsetLimit != -collapseRange) {
-                val collapsed = if (header.heightOffsetLimit < 0f) header.collapsedFraction else 0f
-                contentsJump?.cancel()
-                header.heightOffsetLimit = -collapseRange
-                header.heightOffset = -collapseRange * collapsed
-            }
-        }
         val scrolling = remember(behavior, activeSection) {
             object : NestedScrollConnection by behavior.nestedScrollConnection {
                 override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
@@ -406,38 +392,6 @@ fun DetailScreen(
         // A fixed atmosphere sits behind the moving book and opaque catalogue plane.
         // Floating controls sample the final composed scene through the existing Haze source.
         Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(informationTone)) {
-            Box(
-                Modifier.fillMaxWidth().height(atmosphereHeight)
-                    .graphicsLayer { clip = true }
-                    .mangaHazeSource(artworkBackdrop).background(atmosphereColor),
-                contentAlignment = Alignment.TopCenter,
-            ) {
-                Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
-                    modifier = Modifier.align(Alignment.Center).size(48.dp))
-                if (current.coverUrl.isNotBlank()) Image(
-                    painter = coverPainter, contentDescription = null,
-                    modifier = Modifier.fillMaxSize().graphicsLayer {
-                        scaleX = 1.12f; scaleY = 1.12f
-                        alpha = appearance.strength
-                    }.then(if (appearance.blur > 0f && modernPlatformBlur)
-                        Modifier.hazeBlur(input = HazeInput.Content, style = atmosphereBlur) else Modifier),
-                    contentScale = ContentScale.Crop,
-                )
-                Box(Modifier.matchParentSize().background(Brush.verticalGradient(
-                    0f to informationTone.copy(alpha = if (lightDetail) .44f else .52f),
-                    atmosphereFadeStart to informationTone.copy(alpha = if (lightDetail) .44f else .52f),
-                    (atmosphereFadeStart + (atmosphereFadeEnd - atmosphereFadeStart) * .55f) to
-                        informationTone.copy(alpha = if (lightDetail) .72f else .78f),
-                    atmosphereFadeEnd to informationTone,
-                    1f to informationTone,
-                )))
-            }
-            // The catalogue's surface rises over the stationary atmosphere, including wide-window gutters.
-            Box(Modifier.matchParentSize().drawBehind {
-                val chapterTop = (heroPixels + header.heightOffset).coerceIn(0f, size.height)
-                drawRect(informationTone, topLeft = Offset(0f, chapterTop),
-                    size = androidx.compose.ui.geometry.Size(size.width, size.height - chapterTop))
-            })
             Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
                 .align(Alignment.TopCenter).nestedScroll(scrolling)) {
                 Box(
@@ -463,6 +417,14 @@ fun DetailScreen(
                                 constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity),
                             )
                             val expanded = if (collapsedHero) 0 else foreground.height
+                            if (naturalHeroHeight.intValue != expanded) naturalHeroHeight.intValue = expanded
+                            val limit = -expanded.toFloat()
+                            if (header.heightOffsetLimit != limit) {
+                                contentsJump?.cancel()
+                                val offset = header.heightOffset.coerceIn(limit, 0f)
+                                header.heightOffsetLimit = limit
+                                header.heightOffset = offset
+                            }
                             val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
                             val visibleHeight = maxOf(toolbarPixels, expanded + offset)
                                 .coerceIn(constraints.minHeight, constraints.maxHeight)
@@ -478,8 +440,7 @@ fun DetailScreen(
                                 onIntroduction = { fullIntroduction = true },
                                 onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
                                 onTag = { onTag(current, it) },
-                                collapse = { header.collapsedFraction },
-                                onNaturalHeight = { naturalHeroHeight = it })
+                                collapse = { header.collapsedFraction })
                         }
                     }
                 }
@@ -554,6 +515,50 @@ fun DetailScreen(
                     }
                 }
             }
+            // Measure after the foreground, paint before it and its toolbar.
+            Box(
+                Modifier.fillMaxWidth().zIndex(-1f)
+                    .layout { measurable, constraints ->
+                        val height = (naturalHeroHeight.intValue + seamHeight.roundToPx())
+                            .coerceIn(constraints.minHeight, constraints.maxHeight)
+                        val layer = measurable.measure(constraints.copy(minHeight = height, maxHeight = height))
+                        layout(layer.width, layer.height) { layer.placeRelative(0, 0) }
+                    }
+                    .graphicsLayer { clip = true }
+                    .mangaHazeSource(artworkBackdrop).background(atmosphereColor),
+                contentAlignment = Alignment.TopCenter,
+            ) {
+                Icon(Icons.AutoMirrored.Outlined.MenuBook, null, tint = DetailMuted.copy(alpha = .3f),
+                    modifier = Modifier.align(Alignment.Center).size(48.dp))
+                if (current.coverUrl.isNotBlank()) Image(
+                    painter = coverPainter, contentDescription = null,
+                    modifier = Modifier.fillMaxSize().graphicsLayer {
+                        scaleX = 1.12f; scaleY = 1.12f
+                        alpha = appearance.strength
+                    }.then(if (appearance.blur > 0f && modernPlatformBlur)
+                        Modifier.hazeBlur(input = HazeInput.Content, style = atmosphereBlur) else Modifier),
+                    contentScale = ContentScale.Crop,
+                )
+                Box(Modifier.matchParentSize().drawBehind {
+                    val height = size.height.coerceAtLeast(1f)
+                    val fadeEnd = (1f - 24.dp.toPx() / height).coerceIn(.65f, .96f)
+                    val fadeStart = (fadeEnd - 104.dp.toPx() / height).coerceIn(.25f, .84f)
+                    drawRect(Brush.verticalGradient(
+                        0f to informationTone.copy(alpha = if (lightDetail) .44f else .52f),
+                        fadeStart to informationTone.copy(alpha = if (lightDetail) .44f else .52f),
+                        (fadeStart + (fadeEnd - fadeStart) * .55f) to
+                            informationTone.copy(alpha = if (lightDetail) .72f else .78f),
+                        fadeEnd to informationTone,
+                        1f to informationTone,
+                    ))
+                })
+            }
+            // The catalogue's surface rises over the stationary atmosphere, including wide-window gutters.
+            Box(Modifier.matchParentSize().zIndex(-1f).drawBehind {
+                val chapterTop = (naturalHeroHeight.intValue + header.heightOffset).coerceIn(0f, size.height)
+                drawRect(informationTone, topLeft = Offset(0f, chapterTop),
+                    size = androidx.compose.ui.geometry.Size(size.width, size.height - chapterTop))
+            })
             // Keep toolbar hit targets safe while the real clear artwork scrolls under them.
             Box(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxWidth()
                 .height(toolbarClearance + 24.dp).align(Alignment.TopCenter)
@@ -702,15 +707,26 @@ private fun HeroBookInformation(
     onAuthor: (String) -> Unit,
     onTag: (String) -> Unit,
     collapse: () -> Float,
-    onNaturalHeight: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val infoVisible by remember(collapse) { derivedStateOf { collapse() < .98f } }
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val coverSize = cover.intrinsicSize
-    val posterAspect = if (coverSize.width.isFinite() && coverSize.height.isFinite() &&
-        coverSize.width > 0f && coverSize.height > 0f) coverSize.width / coverSize.height else 2f / 3f
+    val actualAspect = if (coverSize.width.isFinite() && coverSize.height.isFinite() &&
+        coverSize.width > 0f && coverSize.height > 0f) coverSize.width / coverSize.height else null
+    val route = LocalMangaCoverTransition.current?.visibility?.transition
+    val arrived = route == null || route.currentState == EnterExitState.Visible &&
+        route.targetState == EnterExitState.Visible && !route.isRunning
+    var targetAspect by remember(manga.id, manga.coverUrl) { mutableFloatStateOf(actualAspect ?: 2f / 3f) }
+    LaunchedEffect(actualAspect, arrived) {
+        if (arrived && actualAspect != null) targetAspect = actualAspect
+    }
+    // Late intrinsic dimensions may change the fitted frame only after the cover lands.
+    // Keep the whole image visible and settle to its real ratio without a layout snap.
+    val posterAspect by animateFloatAsState(targetAspect,
+        if (LocalMotionEnabled.current) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap(),
+        label = "detail-poster-aspect")
     val ink = if (informationTone.luminance() > .5f) Color(0xFF242426) else Color.White
     val titleInteraction = remember(manga.id) { MutableInteractionSource() }
     val titleStyle = MaterialTheme.typography.headlineSmall.copy(
@@ -720,7 +736,6 @@ private fun HeroBookInformation(
         fontWeight = FontWeight.SemiBold,
     )
     BoxWithConstraints(modifier.fillMaxWidth().wrapContentHeight(unbounded = true)
-        .onSizeChanged { onNaturalHeight(it.height) }
         .padding(horizontal = 20.dp).padding(top = 12.dp + artworkHeadroom, bottom = 2.dp)
         .then(if (infoVisible) Modifier else Modifier.clearAndSetSemantics { })) {
         val contentWidth = maxWidth

@@ -43,7 +43,7 @@ internal fun ChapterDownloadSourceSheet(
             if (variants.isEmpty()) Text("本章暂无可用来源，更新目录后重试。",
                 color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
             inspected?.let { Text(it, color = colors.onSurfaceVariant, fontSize = 11.sp, lineHeight = 17.sp) }
-        }) { index, modifier, dismiss ->
+        }) { index, modifier, dismiss, reveal ->
         val variant = variants[index]
         val entry = entries[variant.storageId]
         val sourceMangaId = remember(variant.sourceId, variant.mangaId) {
@@ -84,6 +84,7 @@ internal fun ChapterDownloadSourceSheet(
         ChapterSourceDisc(variant.copy(sourceName = name), backdrop, modifier,
             selected = variant.storageId == chapter.id, enabled = enabled,
             details = details, secondary = secondary, entry = entry, resolution = resolution,
+            revealProgress = reveal,
             actionLabel = "从${name}下载${chapter.title}",
             onInspect = { inspected = "$name · $details" },
             onClick = {

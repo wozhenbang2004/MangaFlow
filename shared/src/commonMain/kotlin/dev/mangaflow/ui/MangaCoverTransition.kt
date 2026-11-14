@@ -10,7 +10,6 @@ import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
@@ -53,11 +52,11 @@ internal fun Modifier.mangaSharedCover(mangaId: String, placement: String? = nul
             renderInOverlayDuringTransition = false,
             enter = fadeIn(tween(MangaMotion.NavigationFade, easing = MangaMotion.EnterEasing)),
             exit = fadeOut(tween(MangaMotion.Quick, easing = MangaMotion.ExitEasing)),
-            boundsTransform = { _, _ -> spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) },
+            boundsTransform = { _, _ -> tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) },
         ) else this@mangaSharedCover.sharedElement(
             content, animatedVisibilityScope = host.visibility,
             renderInOverlayDuringTransition = false,
-            boundsTransform = { _, _ -> spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) },
+            boundsTransform = { _, _ -> tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) },
         )
     }
 }

@@ -215,7 +215,7 @@ internal fun ChapterSourcePicker(
             if (!error.isNullOrBlank()) Text(error, color = MaterialTheme.colorScheme.error,
                 fontSize = 12.sp, lineHeight = 18.sp)
             inspected?.let { Text(it, color = DetailSecondary, fontSize = 11.sp, lineHeight = 17.sp) }
-        }) { index, modifier, _ ->
+        }) { index, modifier, _, reveal ->
         val variant = variants[index]
         val peers = variants.filter { it.sourceId == variant.sourceId }
         val selected = variant.storageId == frozen.id
@@ -240,7 +240,7 @@ internal fun ChapterSourcePicker(
         ChapterSourceDisc(variant, backdrop, modifier, selected = selected,
             busy = loading && requestedVariant?.storageId == variant.storageId,
             enabled = !loading, details = details, secondary = secondary,
-            entry = entry, resolution = resolution,
+            entry = entry, resolution = resolution, revealProgress = reveal,
             actionLabel = "使用${variant.sourceName}阅读本章",
             onInspect = { inspected = listOf(variant.sourceName, secondary, details)
                 .filter(String::isNotBlank).distinct().joinToString(" · ") },
