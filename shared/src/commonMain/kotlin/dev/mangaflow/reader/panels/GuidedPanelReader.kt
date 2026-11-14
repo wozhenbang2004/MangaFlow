@@ -34,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -48,14 +49,17 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.ChapterVariant
+import dev.mangaflow.data.ReaderSourceStandby
 import dev.mangaflow.reader.ReaderImageRecovery
 import dev.mangaflow.reader.ReaderLoadAttempt
 import dev.mangaflow.reader.ReaderPageResolver
+import dev.mangaflow.reader.isReaderPrefetchFailure
 import dev.mangaflow.reader.rememberReaderPageTransfer
 import dev.mangaflow.reader.ReaderSurface
 import dev.mangaflow.reader.ReaderWaitCaption
@@ -108,6 +112,8 @@ internal fun GuidedPanelReader(
     recoveryForeground: Color,
     sourceName: String,
     sourceAlternatives: List<ChapterVariant>,
+    readySourceVariants: Map<String, ReaderSourceStandby>,
+    onPrefetchFailure: (Page) -> Unit,
     onQuickSwitch: (Int, ChapterVariant) -> Unit,
     onMoreSources: (Rect?) -> Unit,
     onNext: (() -> Unit)?,
@@ -119,6 +125,10 @@ internal fun GuidedPanelReader(
     val context = LocalContext.current
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
     val experienceBudget by experience.state.collectAsStateWithLifecycle()
+    val pageFailed by rememberUpdatedState(onPrefetchFailure)
+    val prefetchFailures = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
+    val inspectedPages = remember(pages, headers, sourceId) { mutableMapOf<Int, Boolean>() }
+    var viewport by remember { mutableStateOf(IntSize.Zero) }
     val repository = remember(context) { PanelRepository(context) }
     val models = remember(context) { PanelModelStore.get(context) }
     val runtimes = remember(context) { PanelRuntimeStore.get(context) }
@@ -127,6 +137,12 @@ internal fun GuidedPanelReader(
     val installedModels = modelStates.mapValues { it.value.installed }
     val installedRuntimes = runtimeStates.mapValues { it.value.installed }
     var pageIndex by rememberSaveable { mutableIntStateOf(initialPage.coerceIn(pages.indices)) }
+    var previousPage by remember(pages) { mutableIntStateOf(pageIndex) }
+    var prefetchDirection by remember(pages) { mutableIntStateOf(1) }
+    LaunchedEffect(pageIndex) {
+        if (pageIndex != previousPage) prefetchDirection = if (pageIndex > previousPage) 1 else -1
+        previousPage = pageIndex
+    }
     var panelIndex by rememberSaveable { mutableIntStateOf(initialPanel.coerceAtLeast(0)) }
     var overview by rememberSaveable { mutableStateOf(false) }
     var reload by remember { mutableIntStateOf(0) }
@@ -251,7 +267,7 @@ internal fun GuidedPanelReader(
             val detected = if (skipDetection) PanelDetection(listOf(PanelBox.FULL), PanelEngine.CLASSIC.name, bypassNotice)
             else withTimeoutOrNull(READER_PAGE_WAIT_MILLIS) {
                 repository.detect(page, headers, { resolved }, preferences.panelEngine,
-                    preferences.panelDirection, preferences.panelLearnedOrder, force = forceDetection)
+                    preferences.panelDirection, preferences.panelLearnedOrder, force = forceDetection, sourceId = sourceId)
             }
             val result = detected ?: PanelDetection(listOf(PanelBox.FULL), PanelEngine.CLASSIC.name,
                 "分镜识别超时，已保留整页，可继续翻页")
@@ -275,24 +291,54 @@ internal fun GuidedPanelReader(
         }
     }
     LaunchedEffect(attempt, pageIndex, detection, imageReady, error, active, prefetchPage, scriptPrefetch,
-        experienceBudget.prefetchAhead, experienceBudget.adjacentPrefetchBytes) {
+        prefetchDirection, viewport, experienceBudget.prefetchAhead, experienceBudget.decodedPrefetchPages,
+        experienceBudget.adjacentPrefetchBytes) {
         if (!active || !imageReady || error != null || !attempt.acceptsResult || detection == null ||
-            experienceBudget.prefetchAhead == 0 || sourceId == "jmcomic") return@LaunchedEffect
+            experienceBudget.prefetchAhead == 0 || experienceBudget.adjacentPrefetchBytes == 0L) return@LaunchedEffect
         // Prepare readable source images only; panel recognition belongs to the displayed page.
         delay(400)
         val bytes = PrefetchByteBudget(experienceBudget.adjacentPrefetchBytes)
-        for (index in pageIndex + 1..minOf(pageIndex + minOf(2, experienceBudget.prefetchAhead), pages.lastIndex)) {
+        for (offset in 1..minOf(2, experienceBudget.prefetchAhead)) {
+            val index = pageIndex + offset * prefetchDirection
+            if (index !in pages.indices) break
+            val warmMemory = offset <= experienceBudget.decodedPrefetchPages && viewport.width > 0
+            if (inspectedPages[index] == true || inspectedPages[index] == warmMemory) continue
             try {
                 withTimeoutOrNull(15_000) {
-                    if (sourceId.startsWith("js_")) scriptPrefetch(pages[index], bytes, PrefetchWork(experience::wakeAdmissions))
-                    else {
-                        val resource = prefetchPage(pages[index])
-                        if (resource != null && resource.url.startsWith("https:"))
-                            prefetchOriginalPage(context, resource, headers, sourceId, bytes)
+                    val work = PrefetchWork(experience::wakeAdmissions)
+                    val resource = if (sourceId.startsWith("js_")) scriptPrefetch(pages[index], bytes, work)
+                        else prefetchPage(pages[index])
+                    if (resource == null || sourceId == "jmcomic" && !resource.url.startsWith("file:")) return@withTimeoutOrNull
+                    var diskKey = readerPageCacheKey(resource, headers, sourceId)
+                    if (resource.url.startsWith("https:")) {
+                        val fetched = prefetchOriginalPageResult(context, resource, headers, sourceId, bytes, work)
+                        fetched.failure?.let { throw it }
+                        if (!fetched.received) return@withTimeoutOrNull
+                        diskKey = fetched.diskCacheKey ?: diskKey
+                    }
+                    val preview = readerPreviewSize(viewport.width, viewport.height)
+                    val checked = preflightReaderPage(context, resource, headers, sourceId,
+                        preview.width, preview.height, diskKey, warmMemory, work)
+                    currentCoroutineContext().ensureActive()
+                    if (!attempt.acceptsResult) return@withTimeoutOrNull
+                    if (checked.status == ReaderPagePreflightStatus.FAILED) {
+                        checked.failure?.takeIf(::isReaderPrefetchFailure)?.let {
+                            prefetchFailures[index] = it.message.orEmpty()
+                            pageFailed(pages[index])
+                        }
+                    }
+                    if (checked.status != ReaderPagePreflightStatus.DEFERRED) {
+                        inspectedPages[index] = warmMemory
                     }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { /* The visible page owns retry and error presentation. */ }
+            catch (failure: Exception) {
+                if (isReaderPrefetchFailure(failure) && attempt.acceptsResult) {
+                    prefetchFailures[index] = failure.message.orEmpty()
+                    pageFailed(pages[index])
+                    inspectedPages[index] = warmMemory
+                }
+            }
         }
     }
     LaunchedEffect(pageIndex, selected, detection, imageReady, active) {
@@ -321,8 +367,10 @@ internal fun GuidedPanelReader(
     Box(Modifier.fillMaxSize()) {
         resource?.takeIf { attempt.acceptsResult && error == null }?.let { loaded -> key(attempt, loaded.url) {
             PanelCamera(
-                page = loaded, headers = headers, box = boxes[selected], overview = overview,
+                page = loaded, headers = headers, sourceId = sourceId, box = boxes[selected], overview = overview,
                 transferObserver = transferObserver,
+                bypassFailedCache = prefetchFailures[pageIndex] != null && imageRetry == 0,
+                onViewportChanged = { viewport = it },
                 active = active,
                 onTap = { x ->
                     val forwardZone = if (preferences.panelDirection == PanelDirection.RIGHT_TO_LEFT) x < .3f else x > .7f
@@ -334,7 +382,10 @@ internal fun GuidedPanelReader(
                         else -> onTap()
                     }
                 },
-                onImageReady = { if (attempt.acceptsResult) imageReady = it },
+                onImageReady = { if (attempt.acceptsResult) {
+                    imageReady = it
+                    if (it) prefetchFailures.remove(pageIndex)
+                } },
                 onError = {
                     if (attempt.acceptsResult) {
                         error = it; imageReady = false; loading = false; attempt.stopped = true
@@ -364,8 +415,10 @@ internal fun GuidedPanelReader(
                         DownloadProgress(phase = dev.mangaflow.storage.DownloadPhase.TRANSFERRING,
                             receivedBytes = it.receivedBytes, expectedBytes = it.expectedBytes)
                     },
-                    stage = if (resource == null) "准备本页图片" else "载入本页图片",
+                    stage = if (prefetchFailures[pageIndex] != null && transportProgress.receivedBytes == 0L)
+                        "预取发现异常 · 正在重新读取" else if (resource == null) "准备本页图片" else "载入本页图片",
                     attempt = attempt, foreground = recoveryForeground, alternatives = sourceAlternatives,
+                    readySourceVariants = readySourceVariants,
                     startedAt = waitClock,
                     onRetry = {
                         attempt.stopped = true; detectionRun.stopped = true

@@ -3,6 +3,7 @@ package dev.mangaflow.experience
 enum class ExperienceMode { AUTO, ECO, PERFORMANCE }
 enum class PrefetchMode { SMART, OFF, MANUAL }
 enum class RefreshPreference { SYSTEM, INTERACTION, MANUAL }
+enum class SourceRecoveryMode { OFF, BALANCED, AGGRESSIVE }
 
 /** Null means follow the selected goal. Overrides are ceilings, never protection bypasses. */
 data class ExperienceOverrides(
@@ -24,6 +25,28 @@ data class ExperienceOverrides(
     val refreshHz: Int? = null,
     val batteryProtection: Boolean = true,
     val allowBackgroundDownloads: Boolean = true,
+    val decodedPrefetchPages: Int? = null,
+    val sourceRecovery: SourceRecoveryMode? = null,
+    val browseWarmup: Boolean = true,
+)
+
+/** Selected mode's intent, before manual ceilings and live resource protection. */
+data class ExperienceGoalBudget(
+    val prefetchAhead: Int = 6,
+    val prefetchBehind: Int = 1,
+    val decodedPrefetchPages: Int = 1,
+    val backgroundPages: Int = 2,
+    val chapterParallelism: Int = 2,
+    val sourceParallelism: Int = 2,
+    val readerRequests: Int = 2,
+    val prefetchRequests: Int = 1,
+    val prefetchBytes: Long = 24L * EXPERIENCE_MIB,
+    val standbySources: Int = 1,
+    val browseWarmup: Boolean = true,
+    val memoryCacheFraction: Double = .18,
+    val diskCacheBytes: Long = 512L * EXPERIENCE_MIB,
+    val sourceHedgeDelayMillis: Long = 1_800L,
+    val sourceRecovery: SourceRecoveryMode = SourceRecoveryMode.BALANCED,
 )
 
 data class ExperienceBudget(
@@ -45,9 +68,16 @@ data class ExperienceBudget(
     val refreshHz: Int? = null,
     val protections: List<String> = emptyList(),
     val foreground: Boolean = false,
+    val decodedPrefetchPages: Int = 0,
+    val standbySources: Int = 0,
+    val browseWarmup: Boolean = false,
+    val sourceHedgeDelayMillis: Long = 1_800L,
+    val sourceRecovery: SourceRecoveryMode = SourceRecoveryMode.OFF,
+    val goal: ExperienceGoalBudget = ExperienceGoalBudget(),
 ) {
+    val standbyPrefetchBytes: Long get() = if (standbySources > 0) minOf(prefetchBytes / 4L, 12L * EXPERIENCE_MIB) else 0L
     val nextChapterPrefetchBytes: Long get() = if (crossChapter) minOf(prefetchBytes / 4L, 12L * EXPERIENCE_MIB) else 0L
-    val adjacentPrefetchBytes: Long get() = prefetchBytes - nextChapterPrefetchBytes
+    val adjacentPrefetchBytes: Long get() = prefetchBytes - nextChapterPrefetchBytes - standbyPrefetchBytes
 }
 
 /** Only actual sensors are populated. JVM heap is labelled separately from physical RAM. */

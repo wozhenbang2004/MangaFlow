@@ -4,6 +4,11 @@ import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.PrefetchByteBudget
 import dev.mangaflow.experience.prefetchOriginalPage
+import dev.mangaflow.data.ReaderSourceStandbyController
+import dev.mangaflow.data.approximateReaderPage
+import dev.mangaflow.data.plugins.prefetchScriptPage
+import dev.mangaflow.data.plugins.scriptSourceImageEpoch
+import dev.mangaflow.experience.PrefetchWork
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.mangaflow.account.AccountProfile
@@ -117,7 +122,6 @@ import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.storage.preferences
 import kotlin.concurrent.Volatile
-import kotlin.math.roundToInt
 
 data class BrowseState(
     val query: String = "",
@@ -317,6 +321,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private var authorRequest = 0L
     private val _reading = MutableStateFlow<ReadingSession?>(null)
     val reading = _reading.asStateFlow()
+    private val readerStandbys = ReaderSourceStandbyController(application, repository, viewModelScope)
+    val readerSourceStandbys = readerStandbys.state
     private val _chapterSourceOperation = MutableStateFlow(ChapterSourceOperation())
     val chapterSourceOperation = _chapterSourceOperation.asStateFlow()
     private val _sourceResumeChoice = MutableStateFlow<SourceResumeChoice?>(null)
@@ -402,6 +408,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                             }
                         }
                         val current = _browse.value
+                        cancelReaderSourceStandbys()
                         if (current.isFederatedSearch && current.sourceScope != scope) showBrowse(current.copy(
                             items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
                             searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
@@ -420,6 +427,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }
         viewModelScope.launch {
             library.backupRestored.drop(1).collect {
+                cancelReaderSourceStandbys()
                 copyShelfSync.invalidateAfterRestore()
                 clearCopyProgress()
                 try {
@@ -436,6 +444,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             bodySources.entries.collect {
                 val enabled = bodySources.enabledSourceIds
                 if (enabled != repository.enabledSources()) {
+                    cancelReaderSourceStandbys()
                     withContext(Dispatchers.Default) { repository.setEnabledSources(enabled) }
                     val current = _browse.value
                     if (current.isFederatedSearch) showBrowse(current.copy(
@@ -1698,7 +1707,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 val visible = visibleReading?.takeIf { it.first.id == session.manga.id }?.second
                     ?: findSourceChapter(session.chapters, session.chapterId)
                 val projected = if (visible != null) selectedChapters(catalog.chapters, visible) else catalog.chapters
-                if (session.chapters != projected) _reading.value = session.copy(chapters = projected)
+                if (session.chapters != projected) {
+                    cancelReaderSourceStandbys()
+                    _reading.value = session.copy(chapters = projected)
+                }
             }
         }
         changedCatalog?.let { catalog ->
@@ -1992,7 +2004,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         requestSourceVariant(chapter, variant, pageIndex.coerceAtLeast(0), pageCount.coerceAtLeast(0))
     }
 
-    /** Fast one-tap fallback for a failed image: the alternative source owns the new page. */
+    /** Explicit whole-chapter fallback; the other edition owns its independent page/cursor. */
     fun quickReadReaderChapterVariant(chapter: Chapter, variant: ChapterVariant, pageIndex: Int, pageCount: Int) {
         if (chapter.variants.none { it.storageId == variant.storageId } || variant.storageId == chapter.id) return
         _sourceResumeChoice.value = null
@@ -2088,10 +2100,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 // Page cuts may differ between editions. Preserve approximate progress
                 // rather than treating the same integer page as the same artwork.
                 val initialPage = samePageIndex?.let { oldIndex ->
-                    if (fromPageCount > 1 && pages.size > 1)
-                        (oldIndex.coerceIn(0, fromPageCount - 1).toDouble() /
-                            (fromPageCount - 1) * (pages.size - 1)).roundToInt().coerceIn(0, pages.lastIndex)
-                    else oldIndex.coerceIn(0, pages.lastIndex)
+                    approximateReaderPage(oldIndex, fromPageCount, pages.size)
                 }
                 val latestCatalog = (if (session != null) _reading.value?.chapters
                     else _detail.value?.detail?.chapters) ?: return@launch
@@ -2282,6 +2291,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private fun beginReading(session: ReadingSession) {
+        cancelReaderSourceStandbys()
         cancelLibraryReading()
         readingCatalogJob?.cancel()
         chapterPrefetchJob?.cancel()
@@ -2436,6 +2446,46 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         return repository.coverPage(chapterSourceMangaId(mangaId, chapter), chapter.id, forceRefresh)
     }
 
+    fun cancelReaderSourceStandbys() = readerStandbys.clear()
+
+    /** Prepare confirmed alternatives without selecting one or manufacturing page equivalence. */
+    fun warmReaderSourceStandbys(manga: Manga, chapter: Chapter, pageIndex: Int, pageCount: Int) {
+        if (manga.sourceUrl == LOCAL_SOURCE_URL) return
+        val session = _reading.value?.takeIf { it.manga.id == manga.id && it.collection == null } ?: return
+        val current = session.chapters.firstOrNull { it.id == chapter.id } ?: return
+        val epoch = readingRequestId
+        val logical = current.logicalId.ifBlank { current.id }
+        val configuration = repository.sourceConfigurationKey()
+        val confirmed = unifiedChapters.linkedSources(manga.id).filter { it.confirmedAt > 0L }
+            .map { it.manga.id }.toSet() + manga.id
+        val enabled = repository.enabledSources()
+        val candidates = current.variants.filter { variant ->
+            variant.storageId != current.id && variant.sourceId in enabled &&
+                SourceKeys.manga(variant.sourceId, variant.mangaId) in confirmed
+        }.distinctBy { it.sourceId }
+        val epochs = candidates.associate { it.sourceId to scriptSourceImageEpoch(application, it.sourceId) }
+        val key = "$epoch\u0000${manga.id}\u0000${current.id}\u0000$logical\u0000$configuration\u0000" +
+            candidates.joinToString("|") { "${it.storageId}:${epochs[it.sourceId]}" }
+        readerStandbys.warm(key, manga.id, current, candidates, pageIndex, pageCount) { variant ->
+            val active = _reading.value
+            epoch == readingRequestId && active != null && active.manga.id == manga.id &&
+                repository.sourceConfigurationKey() == configuration &&
+                scriptSourceImageEpoch(application, variant.sourceId) == epochs[variant.sourceId] &&
+                active.chapters.any { item -> item.id == current.id &&
+                    item.logicalId.ifBlank { item.id } == logical &&
+                    item.variants.any { it.storageId == variant.storageId } }
+        }
+    }
+
+    /** Only a real failed look-ahead page can request early preparation of an alternative. */
+    fun onPrefetchPageFailed(manga: Manga, chapter: Chapter, page: Page) {
+        val session = _reading.value?.takeIf { it.manga.id == manga.id } ?: return
+        val current = session.chapters.firstOrNull { it.id == chapter.id } ?: return
+        val pages = repository.cachedPages(chapterSourceMangaId(manga.id, current), current.id) ?: return
+        if (pages.none { it == page }) return
+        warmReaderSourceStandbys(manga, current, pages.indexOf(page), pages.size)
+    }
+
     /** Only a visible chapter can request its immediate same-group successor. */
     fun prefetchNextChapter(manga: Manga, chapter: Chapter) {
         if (manga.sourceUrl == LOCAL_SOURCE_URL) return
@@ -2468,7 +2518,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                             _reading.value?.manga?.id == manga.id &&
                             visibleReading?.first?.id == manga.id && visibleReading?.second?.id == currentChapter
                         if (!currentSession()) return@collectLatest
-                        val upcoming = repository.pages(owner, chapter.id)
+                        val upcoming = repository.cachedPages(owner, chapter.id) ?: withTimeout(25_000L) {
+                            policy.withPrefetchAdmission(source, 1_048_576L, { false }) {
+                                withTimeout(15_000L) { repository.pages(owner, chapter.id) }
+                            }
+                        }
                         if (!currentSession()) return@collectLatest
                         val headers = repository.imageHeaders(owner, chapter.id).toMap()
                         val window = PrefetchByteBudget(limit)
@@ -2476,7 +2530,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                             if (!currentSession() || !policy.state.value.crossChapter) break
                             val available = downloads.resolvePrefetchPage(manga.id, chapter.id, page) ?: continue
                             if (available.url.startsWith("file:")) continue
-                            if (!prefetchOriginalPage(application, available, headers, source, window)) break
+                            if (source.startsWith("js_")) {
+                                if (prefetchScriptPage(application, owner, chapter.id, available, window, PrefetchWork()) == null) break
+                            } else if (!prefetchOriginalPage(application, available, headers, source, window)) break
                         }
                     }
             } catch (cancel: CancellationException) {
@@ -2532,6 +2588,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     fun closeReader() {
+        cancelReaderSourceStandbys()
         cancelSourceResumeChoice()
         cancelSourceSelection()
         cancelLibraryReading()
@@ -2924,6 +2981,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     fun onChapterVisible(manga: Manga, chapter: Chapter) {
         if (_reading.value?.manga?.id != manga.id) return
         if (visibleReading?.second?.id != chapter.id) {
+            if (visibleReading != null) cancelReaderSourceStandbys()
             chapterPrefetchJob?.cancel()
             chapterPrefetchKey = null
         }

@@ -409,13 +409,15 @@ private fun FeaturedManga(
                 ?.let { latestOnColor(it) }
         }
     }
-    val request = remember(context, manga.id, manga.coverUrl, manga.sourceUrl, repository, imageWidthPx, imageHeightPx, motion) {
+    val identity = mangaCoverIdentity(manga, repository)
+    val request = remember(context, manga.id, manga.coverUrl, manga.sourceUrl, repository, identity, imageWidthPx, imageHeightPx, motion) {
         ImageRequest.Builder(imagePlatformContext(context)).data(manga.coverUrl).softwareBitmap()
             .size(imageWidthPx, imageHeightPx)
-            .memoryCacheKey("featured-cover:" + manga.coverUrl)
-            .placeholderMemoryCacheKey("manga-cover:" + manga.coverUrl)
+            .memoryCacheKey("featured-cover:" + identity.cacheKey)
+            .placeholderMemoryCacheKey("manga-cover:" + identity.cacheKey)
+            .diskCacheKey(identity.cacheKey)
             .httpHeaders(NetworkHeaders.Builder().apply {
-                repository.imageHeaders(manga.id, "").forEach { (name, value) -> set(name, value) }
+                identity.headers.forEach { (name, value) -> set(name, value) }
             }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
     }
     // Both artwork layers share one bounded Coil decode and the original request headers.
@@ -430,7 +432,8 @@ private fun FeaturedManga(
         val t = ((emphasis() - .55f) / .45f).coerceIn(0f, 1f)
         t * t * (3f - 2f * t)
     }
-    Box(modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button, enabled = enabled,
+    Box(modifier.browseIntentWarmup(manga, repository, interaction, enabled)
+        .clickable(interactionSource = interaction, indication = null, role = Role.Button, enabled = enabled,
         onClickLabel = "查看${manga.title}") {
             if (emphasis() < .98f) onPreview() else {
                 transition?.select?.invoke(MangaCoverKey(manga.id, "discovery-featured"))

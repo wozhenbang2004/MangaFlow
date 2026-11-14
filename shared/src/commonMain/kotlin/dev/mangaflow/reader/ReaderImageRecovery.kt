@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Tune
@@ -43,6 +44,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Page
+import dev.mangaflow.data.ReaderSourceStandby
+import dev.mangaflow.data.approximateReaderPage
+import dev.mangaflow.experience.PrefetchBudgetExceeded
+import dev.mangaflow.experience.PrefetchPromoted
+import dev.mangaflow.experience.ExperienceAdmissionDeferred
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.storage.StorageLock
@@ -54,6 +60,7 @@ import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlin.time.TimeMark
@@ -63,6 +70,18 @@ internal const val READER_SLOW_LOAD_MILLIS = 8_000L
 internal const val READER_PAGE_WAIT_MILLIS = 45_000L
 
 internal typealias ReaderPageResolver = suspend (Page, ((Long) -> Unit)?) -> Page
+
+/** An optional budget, cancellation or foreground promotion says nothing about source health. */
+internal fun isReaderPrefetchFailure(failure: Throwable): Boolean {
+    var cause: Throwable? = failure
+    repeat(8) {
+        val current = cause ?: return true
+        if (current is CancellationException || current is PrefetchBudgetExceeded || current is PrefetchPromoted ||
+            current is ExperienceAdmissionDeferred || current is OutOfMemoryError) return false
+        cause = current.cause
+    }
+    return true
+}
 
 /** One foreground wait owns its cancellation; shared downloads retain their own owner. */
 internal class ReaderLoadAttempt {
@@ -161,6 +180,7 @@ internal fun ReaderImageRecovery(
     pageCount: Int = 0,
     sourceName: String = "",
     transferProgress: DownloadProgress? = null,
+    readySourceVariants: Map<String, ReaderSourceStandby> = emptyMap(),
     foreground: Color = MaterialTheme.colorScheme.onSurface,
     onStop: () -> Unit = {},
 ) {
@@ -213,6 +233,17 @@ internal fun ReaderImageRecovery(
                         Spacer(Modifier.width(5.dp))
                         Text(variant.sourceName, fontSize = 11.sp, maxLines = 1, color = foreground,
                             overflow = TextOverflow.Ellipsis)
+                        val standby = readySourceVariants[variant.storageId]?.takeIf { prepared ->
+                            index != null && pageCount > 0 && prepared.totalPages != null && prepared.totalPages > 0 &&
+                                prepared.targetPageIndex == approximateReaderPage(index, pageCount, prepared.totalPages)
+                        }
+                        if (standby != null) {
+                            val target = standby.targetPageIndex
+                            Spacer(Modifier.width(3.dp))
+                            Icon(Icons.Outlined.Check, "备用已预热" +
+                                (target?.let { "，约第 ${it + 1} 页" } ?: "") + "；切换整章版本",
+                                Modifier.size(12.dp), tint = foreground.copy(alpha = .65f))
+                        }
                     }
                 }
                 if (hasMore) MotionTextButton(onClick = { onMore(moreAnchor) },

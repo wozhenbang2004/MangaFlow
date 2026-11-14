@@ -12,14 +12,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.SingletonImageLoader
 import coil3.annotation.ExperimentalCoilApi
 import coil3.decode.BlackholeDecoder
-import coil3.network.NetworkHeaders
-import coil3.network.httpHeaders
 import coil3.request.CachePolicy
-import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import dev.mangaflow.data.CHAPTER_DIMENSION_SAMPLE_LIMIT
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.Page
+import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.experience.readerPageCacheKey
+import dev.mangaflow.experience.readerPageRequest
 import dev.mangaflow.data.plugins.resolveScriptPage
 import dev.mangaflow.data.plugins.materializeScriptPage
 import dev.mangaflow.platform.LocalMangaContext
@@ -68,6 +68,12 @@ internal fun rememberChapterResolution(
     val context = LocalMangaContext.current
     val downloads = remember(context) { DownloadStore.get(context) }
     val loader = remember(context) { SingletonImageLoader.get(imagePlatformContext(context)) }
+    val sourceId = remember(mangaId, chapterId) {
+        if (mangaId.startsWith("local:") || chapterId.startsWith("local:")) null
+        else runCatching { SourceKeys.decodeChapter(mangaId, chapterId).sourceId }.getOrNull()
+    }
+    var imageOwner by remember(repository, mangaId, chapterId) { mutableStateOf<ChapterImageOwner?>(null) }
+    var ownerRequest by remember(repository, mangaId, chapterId) { mutableIntStateOf(0) }
     val revision by ReaderDimensionCache.revision.collectAsStateWithLifecycle()
     val exactEntry = entry?.takeIf { it.chapter.id == chapterId }
     val retained = remember(repository, mangaId, chapterId, exactEntry?.id,
@@ -86,31 +92,41 @@ internal fun rememberChapterResolution(
 
     LaunchedEffect(repository, mangaId, chapterId, retained, exactEntry?.completedPages, active) {
         if (!active) return@LaunchedEffect
+        val request = ++ownerRequest
         try {
             if (!retained.isNullOrEmpty()) pages = retained
             else if (exactEntry != null) {
                 downloads.storedPages(exactEntry.manga.id, chapterId)?.let { pages = it }
             }
+            val localFiles = mangaId.startsWith("local:") && pages.isNotEmpty() &&
+                pages.all { readerFilePath(it.url) != null }
+            val owner = if (localFiles) ChapterImageOwner("local", emptyMap())
+                else readChapterImageOwner(repository, mangaId, chapterId, sourceId)
+            if (request != ownerRequest) return@LaunchedEffect
+            imageOwner = owner
+            if (owner == null) return@LaunchedEffect
             // At most three cached-file headers; no request, pixel decoding or chapter scan.
             val samples = pages.take(3)
-            for (page in samples) readerImageDimensions(loader, page)
+            for (page in samples) readerImageDimensions(loader, page, owner.identity(page))
             if (exactEntry != null && samples.isNotEmpty()) {
                 val cover = downloads.coverPage(exactEntry.manga.id, chapterId)
                 val original = samples.first()
-                if (cover != null && cover.index == original.index && readerFilePath(cover.url) != null) {
-                    readerImageDimensions(loader, cover, originalPage = original)
+                if (cover != null && cover.index == original.index && readerFilePath(cover.url) != null && original.transform.isBlank()) {
+                    readerImageDimensions(loader, cover, owner.identity(cover), originalPage = original,
+                        originalCacheIdentity = owner.identity(original))
                 }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) {
             // A missing/cleaned local cache leaves explicit unknown dimensions.
+            if (request == ownerRequest) imageOwner = null
         }
     }
 
-    val inspected = remember(pages, revision) {
+    val inspected = remember(pages, revision, imageOwner) {
         pages.asSequence().take(CHAPTER_DIMENSION_SAMPLE_LIMIT)
             .filter { it.index >= 0 }.distinctBy(Page::index).mapNotNull { page ->
-                val measured = ReaderDimensionCache.get(page.url)
+                val measured = imageOwner?.identity(page)?.let(ReaderDimensionCache::get)
                 val size = measured ?: page.takeIf { it.width > 0 && it.height > 0 }
                     ?.let { IntSize(it.width, it.height) }
                 size?.let { ResolutionSample(page.index, it, measured != null) }
@@ -137,7 +153,7 @@ internal fun rememberChapterResolution(
     LaunchedEffect(repository, mangaId, chapterId, active, autoMeasure, measurementRequest) {
         val generation = measurementGeneration + 1
         measurementGeneration = generation
-        if (!active || repository == null) {
+        if (!active || repository == null || sourceId == null) {
             busy = false
             return@LaunchedEffect
         }
@@ -152,31 +168,34 @@ internal fun rememberChapterResolution(
                     val loaded = pages.takeIf { it.isNotEmpty() }
                         ?: repository.pages(mangaId, chapterId)
                     if (loaded.isEmpty()) throw IllegalStateException()
+                    // Reading the manifest can replace chapter headers. One fresh snapshot owns
+                    // both the request and its original-dimension alias, never the old composition.
+                    val request = ++ownerRequest
+                    val owner = readChapterImageOwner(repository, mangaId, chapterId, sourceId)
+                    if (request == ownerRequest) imageOwner = owner
+                    requireNotNull(owner) { "当前来源的图片身份不可用。" }
                     pages = loaded
                     // Recheck after queuing: another consumer may have filled this exact cache.
                     if (!manual && loaded.asSequence().take(CHAPTER_DIMENSION_SAMPLE_LIMIT)
                         .filter { it.index >= 0 }.any {
-                            ReaderDimensionCache.get(it.url) != null || it.width > 0 && it.height > 0
+                            ReaderDimensionCache.get(owner.identity(it)) != null || it.width > 0 && it.height > 0
                         }) return@withPermit
                     val page = loaded.asSequence().take(CHAPTER_DIMENSION_SAMPLE_LIMIT)
-                        .firstOrNull { ReaderDimensionCache.get(it.url) == null }
+                        .firstOrNull { ReaderDimensionCache.get(owner.identity(it)) == null }
                         ?: loaded.first()
-                    var size = readerImageDimensions(loader, page)
+                    var size = readerImageDimensions(loader, page, owner.identity(page))
                     if (size == null && exactEntry != null && page.index == loaded.first().index) {
                         val local = downloads.coverPage(exactEntry.manga.id, chapterId)
-                        if (local != null && local.index == page.index && readerFilePath(local.url) != null)
-                            size = readerImageDimensions(loader, local, originalPage = page)
+                        if (local != null && local.index == page.index && readerFilePath(local.url) != null && page.transform.isBlank())
+                            size = readerImageDimensions(loader, local, owner.identity(local), originalPage = page,
+                                originalCacheIdentity = owner.identity(page))
                     }
                     if (size == null) {
-                        val resolved = materializeScriptPage(context, mangaId, chapterId,
-                            resolveScriptPage(context, mangaId, chapterId, page))
-                        val headers = repository.imageHeaders(mangaId, chapterId) + resolved.headers
+                        val acquired = resolveScriptPage(context, mangaId, chapterId, page)
+                        val resolved = materializeScriptPage(context, mangaId, chapterId, acquired)
+                        val headers = owner.headers + resolved.headers
                         val result = withContext(Dispatchers.IO) {
-                            loader.execute(ImageRequest.Builder(imagePlatformContext(context))
-                                .data(resolved.url)
-                                .httpHeaders(NetworkHeaders.Builder().apply {
-                                    headers.forEach { (name, value) -> set(name, value) }
-                                }.build())
+                            loader.execute(readerPageRequest(context, resolved, headers, owner.sourceId)
                                 .size(1)
                                 .memoryCachePolicy(CachePolicy.DISABLED)
                                 .diskCachePolicy(CachePolicy.ENABLED)
@@ -184,7 +203,10 @@ internal fun rememberChapterResolution(
                                 .build())
                         }
                         if (result !is SuccessResult) throw IllegalStateException()
-                        size = readerImageDimensions(loader, resolved, result.diskCacheKey, originalPage = page)
+                        val original = page.takeIf { it.transform.isBlank() && acquired.transform.isBlank() }
+                        val resolvedIdentity = result.diskCacheKey ?: readerPageCacheKey(resolved, headers, owner.sourceId)
+                        size = readerImageDimensions(loader, resolved, resolvedIdentity, originalPage = original,
+                            originalCacheIdentity = original?.let(owner::identity))
                     }
                     if (size == null) throw IllegalStateException()
                 }
@@ -206,7 +228,7 @@ internal fun rememberChapterResolution(
         }
     }
     val measure: () -> Unit = {
-        if (active && !busy && repository != null) {
+        if (active && !busy && repository != null && sourceId != null) {
             busy = true
             error = null
             measurementRequest += 1
@@ -216,10 +238,24 @@ internal fun rememberChapterResolution(
         compactLabel = primary?.let { resolutionPair(it.size) } ?: "尺寸未知",
         detail = listOfNotNull(detail, error).joinToString(" · "),
         known = primary != null,
-        busy = busy || autoMeasure && !automaticAttempted && primary == null && repository != null,
+        busy = busy || autoMeasure && !automaticAttempted && primary == null && repository != null && sourceId != null,
         error = error,
-        canMeasure = active && repository != null && !busy, measure = measure,
+        canMeasure = active && repository != null && sourceId != null && !busy, measure = measure,
     )
+}
+
+/** Missing source headers stay unknown; an empty-map fallback could select another session's bytes. */
+private data class ChapterImageOwner(val sourceId: String, val headers: Map<String, String>) {
+    fun identity(page: Page) = readerPageCacheKey(page, headers, sourceId)
+}
+
+private suspend fun readChapterImageOwner(repository: MangaRepository?, mangaId: String,
+    chapterId: String, sourceId: String?): ChapterImageOwner? = withContext(Dispatchers.IO) {
+    if (repository == null || sourceId == null) return@withContext null
+    try {
+        ChapterImageOwner(sourceId, repository.imageHeaders(mangaId, chapterId).toMap())
+    } catch (cancelled: CancellationException) { throw cancelled }
+    catch (_: Exception) { null }
 }
 
 private data class ResolutionSample(val index: Int, val size: IntSize, val measured: Boolean)

@@ -291,6 +291,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val reading by model.reading.collectAsStateWithLifecycle()
     val sourceManagement by model.sourceManagement.collectAsStateWithLifecycle()
     val sourceOperation by model.chapterSourceOperation.collectAsStateWithLifecycle()
+    val sourceStandbys by model.readerSourceStandbys.collectAsStateWithLifecycle()
     val sourceResumeChoice by model.sourceResumeChoice.collectAsStateWithLifecycle()
     val sourceResumePolicy by model.sourceResumePolicy.collectAsStateWithLifecycle()
     val sourceCatalogErrors by model.repository.sourceErrors.collectAsStateWithLifecycle()
@@ -948,6 +949,18 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         active = current.key == frame.key && sourceManagement == null && sourceResumeChoice == null,
                         onReadVariant = model::readReaderChapterVariant,
                         onQuickReadVariant = model::quickReadReaderChapterVariant,
+                        sourceStandbys = sourceStandbys,
+                        onWarmSourceStandbys = { chapter, index, count ->
+                            if (model.reading.value === current.session)
+                                model.warmReaderSourceStandbys(current.session.manga, chapter, index, count)
+                        },
+                        onPrefetchPageFailed = { chapter, page ->
+                            if (model.reading.value === current.session)
+                                model.onPrefetchPageFailed(current.session.manga, chapter, page)
+                        },
+                        onCancelSourceStandbys = {
+                            if (model.reading.value === current.session) model.cancelReaderSourceStandbys()
+                        },
                         sourceSwitchName = sourceOperation.targetSource,
                         onSetPreferredSource = model::preferBodySource,
                         onClearChapterSource = model::clearChapterSource,

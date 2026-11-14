@@ -1,16 +1,14 @@
 package dev.mangaflow.reader.panels
 
-import dev.mangaflow.experience.readerPriority
+import dev.mangaflow.experience.readerPageCacheKey
+import dev.mangaflow.experience.readerPageRequest
 
 import android.content.Context
 import androidx.compose.ui.graphics.asImageBitmap
 import coil3.BitmapImage
 import coil3.imageLoader
-import coil3.network.NetworkHeaders
-import coil3.network.httpHeaders
 import coil3.request.CachePolicy
 import coil3.request.ErrorResult
-import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import coil3.request.allowHardware
 import coil3.size.Precision
@@ -46,16 +44,16 @@ actual class PanelRepository actual constructor(context: Context) {
         direction: PanelDirection,
         useLearnedOrder: Boolean,
         force: Boolean,
+        sourceId: String,
     ): PanelDetection = gate.withLock {
         check(!closed) { "分镜阅读已关闭" }
         if (engine == PanelEngine.OFF) return@withLock PanelDetection(listOf(PanelBox.FULL), engine.name)
-        val key = withContext(Dispatchers.IO) { cacheKey(page, engine, direction, useLearnedOrder) }
+        val key = withContext(Dispatchers.IO) { cacheKey(page, headers, sourceId, engine, direction, useLearnedOrder) }
         if (!force) withContext(Dispatchers.IO) { readCache(key) }?.let { return@withLock it }
         currentCoroutineContext().ensureActive()
         val resolved = resolvePage(page)
-        val result = context.imageLoader.execute(ImageRequest.Builder(context)
+        val result = context.imageLoader.execute(readerPageRequest(context, resolved, headers, sourceId)
             .data(if (resolved.url.startsWith("file:")) File(URI(resolved.url)) else resolved.url)
-            .readerPriority().httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
             .size(1536, 1536).precision(Precision.EXACT).scale(Scale.FIT)
             // This analysis bitmap is owned by this call, not by the displayed original or Coil's memory cache.
             .allowHardware(false).memoryCachePolicy(CachePolicy.DISABLED).build())
@@ -112,10 +110,12 @@ actual class PanelRepository actual constructor(context: Context) {
         models.close()
     }
 
-    private fun cacheKey(page: Page, engine: PanelEngine, direction: PanelDirection, learned: Boolean): String {
+    private fun cacheKey(page: Page, headers: Map<String, String>, sourceId: String, engine: PanelEngine,
+        direction: PanelDirection, learned: Boolean): String {
         val local = if (page.url.startsWith("file:")) runCatching { File(URI(page.url)) }.getOrNull() else null
         val identity = listOf(SCHEMA, ClassicPanelDetector.VERSION, PanelModelRuntime.VERSION,
-            page.url, page.index, page.width, page.height, local?.length(), local?.lastModified(), engine.name, direction.name, learned)
+            readerPageCacheKey(page, headers, sourceId), page.index, page.width, page.height,
+            local?.length(), local?.lastModified(), engine.name, direction.name, learned)
             .joinToString("\u0000")
         return MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }

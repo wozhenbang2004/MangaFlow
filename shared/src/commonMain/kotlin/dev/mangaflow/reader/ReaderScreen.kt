@@ -6,6 +6,8 @@ import dev.mangaflow.ui.chapterGroupLabel
 import dev.mangaflow.ui.mangaNumberText
 
 import dev.mangaflow.data.chapterSourceMangaId
+import dev.mangaflow.data.ReaderSourceStandby
+import dev.mangaflow.data.ReaderSourceStandbyPhase
 import dev.mangaflow.data.sources.materializeJmPage
 import dev.mangaflow.data.plugins.resolveScriptPage
 import dev.mangaflow.data.plugins.materializeScriptPage
@@ -173,13 +175,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.currentStateAsState
 import coil3.compose.AsyncImage
-import coil3.network.NetworkHeaders
-import coil3.network.httpHeaders
 import coil3.annotation.ExperimentalCoilApi
 import coil3.decode.BlackholeDecoder
 import coil3.SingletonImageLoader
 import coil3.request.CachePolicy
 import coil3.request.Disposable
+import coil3.request.ErrorResult
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import coil3.request.crossfade
@@ -288,6 +289,10 @@ fun ReaderScreen(
     initialPageIndex: Int? = null,
     sourceResumePolicy: String = "ask",
     onSourceResumePolicy: (String) -> Unit = {},
+    sourceStandbys: List<ReaderSourceStandby> = emptyList(),
+    onWarmSourceStandbys: (Chapter, Int, Int) -> Unit = { _, _, _ -> },
+    onPrefetchPageFailed: (Chapter, Page) -> Unit = { _, _ -> },
+    onCancelSourceStandbys: () -> Unit = {},
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     val adultImageContext = LocalContext.current
@@ -446,7 +451,33 @@ fun ReaderScreen(
     val scope = rememberCoroutineScope()
     val sourceIdentity = ReaderSourceIdentity(chapter.logicalId.ifBlank { chapter.id },
         chapter.id, chapter.sourceId, chapter.sourceMangaId)
+    val warmSourceStandbys by rememberUpdatedState(onWarmSourceStandbys)
+    val prefetchedPageFailed by rememberUpdatedState(onPrefetchPageFailed)
+    val cancelSourceStandbys by rememberUpdatedState(onCancelSourceStandbys)
+    val readySourceVariants = remember(sourceStandbys, manga.id, chapter.id) {
+        sourceStandbys.filter { it.workId == manga.id && it.chapterId == chapter.id &&
+            it.phase == ReaderSourceStandbyPhase.READY }.associateBy { it.variantId }
+    }
+    val standbyActive = readerForeground && !leavingReader && !chapterChangeRequested
+    DisposableEffect(sourceIdentity, standbyActive) {
+        if (!standbyActive) cancelSourceStandbys()
+        onDispose { cancelSourceStandbys() }
+    }
+    LaunchedEffect(sourceIdentity, pageIndex, pages, standbyActive, loading, error,
+        sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources) {
+        if (!standbyActive || loading || error != null || pages.isEmpty() ||
+            sourcePickerBlocking || chapterChangeRequested || experienceBudget.standbySources == 0) return@LaunchedEffect
+        // A finite intent delay follows the actual cursor; rapid paging replaces stale work.
+        delay(350)
+        warmSourceStandbys(chapter, pageIndex.coerceIn(pages.indices), pages.size)
+    }
     val latestReadingIdentity by rememberUpdatedState(manga.id to sourceIdentity)
+    val reportPrefetchFailure = remember(manga.id, sourceIdentity) {
+        { page: Page ->
+            if (latestReadingIdentity == (manga.id to sourceIdentity) && pages.any { it == page })
+                prefetchedPageFailed(chapter, page)
+        }
+    }
     var headers by remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, repository, localImport) {
         mutableStateOf(if (localImport) emptyMap() else
             repository.imageHeaders(chapterSourceMangaId(manga.id, chapter), chapterId).toMap())
@@ -872,6 +903,7 @@ fun ReaderScreen(
                     startedAt = chapterWaitClock ?: chapterLoadAttempt.startedAt,
                     foreground = preferences.theme.foreground(), modifier = Modifier.align(Alignment.Center),
                     alternatives = alternativeSources,
+                    readySourceVariants = readySourceVariants,
                     onRetry = { chapterLoadAttempt.stopped = true; retry++ },
                     onSwitch = { variant -> onReadVariant(chapter, variant, pageIndex, pages.size) },
                     onMore = { anchor ->
@@ -891,6 +923,7 @@ fun ReaderScreen(
                         observePageTransfer = observePageTransfer,
                         sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
                         sourceName = currentSourceName.orEmpty(), sourceAlternatives = alternativeSources,
+                        readySourceVariants = readySourceVariants, onPrefetchFailure = reportPrefetchFailure,
                         externalRetrySerial = currentPageRetrySerial,
                         onShowControls = { controlsVisible = true },
                         recoveryForeground = preferences.theme.foreground(),
@@ -933,6 +966,7 @@ fun ReaderScreen(
                         retryPage = retryPage,
                         observePageTransfer = observePageTransfer,
                         sourceAlternatives = alternativeSources,
+                        readySourceVariants = readySourceVariants, onPrefetchFailure = reportPrefetchFailure,
                         sourceName = currentSourceName.orEmpty(),
                         onShowControls = { controlsVisible = true },
                         retryTargetIndex = currentPageRetryIndex, retryPulse = currentPageRetrySerial,
@@ -1132,6 +1166,7 @@ fun ReaderScreen(
                         if (pages.isNotEmpty()) key(chapterId) {
                             ReaderProgressSlider(
                                 pageIndex = pageIndex, pages = pages, pendingPage = targetPage,
+                                headers = headers, sourceId = chapter.sourceId,
                                 enabled = controlsVisible,
                                 onSeek = { destination ->
                                     if (destination != pageIndex) {
@@ -1369,6 +1404,7 @@ fun ReaderScreen(
         visible = showPageNavigator,
         pages = pages,
         headers = headers,
+        sourceId = chapter.sourceId,
         resolvePage = resolvePage,
         currentPage = pageIndex,
         collectedPages = pageCollections.filter { it.manga.id == manga.id && it.chapter.id == chapterId && !it.spread }
@@ -1464,6 +1500,8 @@ private fun ChapterPages(
     retryPage: ReaderPageResolver,
     observePageTransfer: (Page) -> Flow<DownloadProgress?>,
     sourceAlternatives: List<ChapterVariant>,
+    readySourceVariants: Map<String, ReaderSourceStandby>,
+    onPrefetchFailure: (Page) -> Unit,
     sourceName: String,
     onShowControls: () -> Unit,
     retryTargetIndex: Int,
@@ -1500,13 +1538,16 @@ private fun ChapterPages(
     val nearEnd by rememberUpdatedState(onNearEnd)
     val atEndChanged by rememberUpdatedState(onAtEndChanged)
     val currentPages by rememberUpdatedState(pages)
-    val loadedPages = remember { mutableStateMapOf<Int, String>() }
-    val composedPages = remember { mutableStateMapOf<Int, Boolean>() }
-    val prefetchRequests = remember(pages) { mutableStateMapOf<Int, Disposable>() }
-    val pageDimensions = remember { mutableStateMapOf<String, IntSize>() }
+    val loadedPages = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
+    val composedPages = remember(pages, headers, sourceId) { mutableStateMapOf<Int, Boolean>() }
+    val prefetchRequests = remember(pages, headers, sourceId) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
+    val prefetchFailures = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
+    val pageDimensions = remember(pages, headers, sourceId) { mutableStateMapOf<String, IntSize>() }
     val startPage = remember { initialPage.coerceIn(0, pages.lastIndex) }
     val startOffset = remember { initialOffset.coerceAtLeast(0) }
     val endRevealPx = with(LocalDensity.current) { 24.dp.roundToPx() }
+    val previewHeightPx = with(LocalDensity.current) { LocalMangaWindow.current.height.roundToPx() }
+    var contentWidthPx by remember { mutableIntStateOf(0) }
     val keyboardMotion = LocalMotionEnabled.current
     if (preferences.mode == ReadingMode.VERTICAL) {
         val list = rememberLazyListState(initialFirstVisibleItemIndex = startPage)
@@ -1655,6 +1696,9 @@ private fun ChapterPages(
         AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, prefetchPage,
             scriptPrefetch = scriptPrefetch,
             enabled = active, sourceId = sourceId,
+            viewportWidth = { contentWidthPx }, viewportHeight = previewHeightPx,
+            onPageFailure = { index, failure -> prefetchFailures[index] = readerPageErrorLabel(failure)
+                onPrefetchFailure(pages[index]) },
             onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size },
             position = {
                 val item = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == list.firstVisibleItemIndex }
@@ -1667,13 +1711,14 @@ private fun ChapterPages(
         Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
             .bottomPullLoad(pull).bottomPullLoad(previousPull)) {
             LazyColumn(state = list, modifier = Modifier.widthIn(max = MangaLayout.ReaderPageWidth)
-                .fillMaxSize().align(Alignment.TopCenter),
+                .fillMaxSize().align(Alignment.TopCenter).onSizeChanged { contentWidthPx = it.width },
                 verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
                 itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                     ReaderPage(
                         page, headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage,
                         observePageTransfer = observePageTransfer, paged = false, onTap = onTap,
                         sourceAlternatives = sourceAlternatives, sourceName = sourceName,
+                        readySourceVariants = readySourceVariants, prefetchFailure = prefetchFailures[index],
                         pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
                         onQuickSwitch = { variant -> onQuickSwitch(index, variant) },
                         onMoreSources = onMoreSources,
@@ -1682,6 +1727,7 @@ private fun ChapterPages(
                             if (currentPages.getOrNull(index)?.url == page.url) {
                                 if (ready) loadedPages[index] = page.url
                                 else if (loadedPages[index] == page.url) loadedPages.remove(index)
+                                if (ready) prefetchFailures.remove(index)
                             }
                         },
                         onHeightMeasured = { if (index == startPage) targetHeight = it },
@@ -1807,6 +1853,9 @@ private fun ChapterPages(
         AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, prefetchPage,
             scriptPrefetch = scriptPrefetch,
             enabled = active, sourceId = sourceId, groups = groups,
+            viewportWidth = { contentWidthPx }, viewportHeight = previewHeightPx,
+            onPageFailure = { index, failure -> prefetchFailures[index] = readerPageErrorLabel(failure)
+                onPrefetchFailure(pages[index]) },
             position = { pager.currentPage + pager.currentPageOffsetFraction }) {
             val shown = groups.getOrNull(pager.currentPage)
             (shown?.first ?: pages.lastIndex) to (shown?.last ?: pages.lastIndex)
@@ -1815,9 +1864,9 @@ private fun ChapterPages(
             .bottomPullLoad(pull)) {
             HorizontalPager(
                 state = pager,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().onSizeChanged { contentWidthPx = it.width },
                 reverseLayout = preferences.mode == ReadingMode.RIGHT_TO_LEFT,
-                // Original-byte prefetch warms neighbors; do not decode whole offscreen spreads at entry.
+                // The separate bounded warmer owns offscreen previews; the pager composes only its viewport.
                 beyondViewportPageCount = 0,
                 key = { index -> "image:${groups[index].first}" },
             ) { index ->
@@ -1829,6 +1878,7 @@ private fun ChapterPages(
                                 pages[imageIndex], headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage,
                                 observePageTransfer = observePageTransfer, paged = true, pagedAlignment = alignment, onTap = onTap,
                                 sourceAlternatives = sourceAlternatives, sourceName = sourceName,
+                                readySourceVariants = readySourceVariants, prefetchFailure = prefetchFailures[imageIndex],
                                 pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
                                 onQuickSwitch = { variant -> onQuickSwitch(imageIndex, variant) },
                                 onMoreSources = onMoreSources,
@@ -1838,6 +1888,7 @@ private fun ChapterPages(
                                     if (currentPages.getOrNull(imageIndex)?.url == url) {
                                         if (ready) loadedPages[imageIndex] = url
                                         else if (loadedPages[imageIndex] == url) loadedPages.remove(imageIndex)
+                                        if (ready) prefetchFailures.remove(imageIndex)
                                     }
                                 },
                                 onComposed = { present -> if (present) composedPages[imageIndex] = true else composedPages.remove(imageIndex) },
@@ -1891,8 +1942,16 @@ private class ReaderCursor(var scrollOffset: Int = 0, var panelIndex: Int = 0)
 private data class PrefetchWindow(
     val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>, val enabled: Boolean,
     val visibleReady: Boolean, val ahead: Int, val behind: Int,
-    val position: Float, val bytes: Long, val parallel: Int,
+    val position: Float, val bytes: Long, val parallel: Int, val decoded: Int,
+    val viewport: IntSize, val checking: Set<Int>,
 )
+
+private data class PrefetchedReaderPage(val page: Page, val diskCacheKey: String?)
+
+/** One exact image request retains its body observer through promotion into the visible page. */
+private data class ReaderPagePrefetch(val request: Disposable, val transfer: ReaderTransferObserver)
+
+private class ReaderPrefetchCacheRecovery(var recovered: Boolean = false)
 
 private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize)
 
@@ -1904,10 +1963,12 @@ private fun IntSize.readerAspectRatio(): Float = (width.toFloat() / height).coer
 private fun AdjacentPagePrefetch(
     pages: List<Page>, headers: Map<String, String>, mode: ReadingMode,
     composedPages: Map<Int, Boolean>, loadedPages: Map<Int, String>,
-    requests: MutableMap<Int, Disposable>, resolvePage: suspend (Page) -> Page?,
+    requests: MutableMap<Int, ReaderPagePrefetch>, resolvePage: suspend (Page) -> Page?,
     scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page?,
     enabled: Boolean, sourceId: String = "",
+    viewportWidth: () -> Int, viewportHeight: Int,
     onPageDimensions: (Int, IntSize) -> Unit = { _, _ -> },
+    onPageFailure: (Int, String) -> Unit = { _, _ -> },
     position: (() -> Float)? = null, groups: List<PageSpread>? = null,
     visibleRange: () -> Pair<Int, Int>,
 ) {
@@ -1921,17 +1982,29 @@ private fun AdjacentPagePrefetch(
     val visible by rememberUpdatedState(visibleRange)
     val currentPosition by rememberUpdatedState(position)
     val dimensionsKnown by rememberUpdatedState(onPageDimensions)
+    val pageFailed by rememberUpdatedState(onPageFailure)
+    val currentViewportWidth by rememberUpdatedState(viewportWidth)
     val prefetchEnabled by rememberUpdatedState(enabled)
-    LaunchedEffect(pages, headers, mode, imageLoader, resolvePage, scriptPrefetch, sourceId, groups) {
+    LaunchedEffect(pages, headers, mode, imageLoader, resolvePage, scriptPrefetch, sourceId, groups, viewportHeight) {
         val requestScope = this
         val finished = mutableSetOf<Int>()
         val workTokens = mutableMapOf<Int, PrefetchWork>()
         val scriptRequests = mutableStateMapOf<Int, Job>()
+        val checks = mutableStateMapOf<Int, Job>()
+        val checkTokens = mutableMapOf<Int, PrefetchWork>()
+        val retainedPages = mutableMapOf<Int, PrefetchedReaderPage>()
+        val inspected = mutableSetOf<Int>()
+        val warmed = mutableMapOf<Int, IntSize>()
+        val deferredChecks = mutableMapOf<Int, Long>()
+        val pairedPages = groups.orEmpty().filter { it.second != null }
+            .flatMap { listOfNotNull(it.first, it.second) }.toSet()
         fun pending(): Set<Int> = (requests.keys + scriptRequests.keys).toSet()
         fun stop(index: Int) {
-            requests.remove(index)?.dispose()
+            requests.remove(index)?.request?.dispose()
             scriptRequests.remove(index)?.cancel()
             workTokens.remove(index)
+            checks.remove(index)?.cancel()
+            checkTokens.remove(index)
         }
         var previousPosition = Float.NaN
         var previousTime = monotonicTimeMillis()
@@ -1948,7 +2021,8 @@ private fun AdjacentPagePrefetch(
                     (first..last).all { it !in pages.indices || loadedPages[it] == pages[it].url },
                     currentBudget.prefetchAhead, currentBudget.prefetchBehind,
                     ((currentPosition?.invoke() ?: first.toFloat()) * 10f).roundToInt() / 10f,
-                    currentBudget.adjacentPrefetchBytes, currentBudget.prefetchRequests)
+                    currentBudget.adjacentPrefetchBytes, currentBudget.prefetchRequests,
+                    currentBudget.decodedPrefetchPages, IntSize(currentViewportWidth(), viewportHeight), checks.keys.toSet())
             }.distinctUntilChanged().combine(snapshotFlow {
                 prefetchEnabled && currentBudget.prefetchBytes > 0L
             }.distinctUntilChanged().flatMapLatest { running -> flow {
@@ -1958,11 +2032,12 @@ private fun AdjacentPagePrefetch(
                 val now = monotonicTimeMillis()
                 val active = window.composed + (window.first..window.last)
                 active.forEach { workTokens[it]?.promote() }
+                active.forEach { checkTokens[it]?.promote() }
                 if (previousPosition.isFinite() && window.position != previousPosition) {
                     val delta = window.position - previousPosition
                     val nextDirection = if (delta > 0f) 1 else -1
                     if (nextDirection != direction) {
-                        pending().filter { it !in active }.forEach(::stop)
+                        (pending() + checks.keys).filter { it !in active }.forEach(::stop)
                         finished.clear(); speed = 0f
                     }
                     direction = nextDirection
@@ -1993,15 +2068,20 @@ private fun AdjacentPagePrefetch(
                     return selected
                 }
                 val desired = (candidates(ahead, true) + candidates(window.behind, false)).filter { index ->
-                    window.enabled && sourceId != "jmcomic" && window.bytes > 0L && window.visibleReady && index in pages.indices &&
-                        index !in window.composed && (pages[index].url.startsWith("https:") ||
+                    window.enabled && window.bytes > 0L && window.visibleReady && index in pages.indices &&
+                        index !in window.composed && (pages[index].url.startsWith("file:") ||
+                        pages[index].url.startsWith("https:") ||
                         sourceId.startsWith("js_") && pages[index].sourceImageToken.isNotBlank())
                 }.toSet()
                 val retained = desired + active
-                pending().filter { it !in retained }.forEach(::stop)
+                (pending() + checks.keys).filter { it !in retained }.forEach(::stop)
                 finished.retainAll(retained)
+                retainedPages.keys.retainAll(retained)
+                inspected.retainAll(retained)
+                warmed.keys.retainAll(retained)
+                deferredChecks.keys.retainAll(retained)
                 if (window.bytes < budgetLimit) {
-                    pending().filter { it !in active }.forEach(::stop)
+                    (pending() + checks.keys).filter { it !in active }.forEach(::stop)
                 }
                 if ((desired != budgetOwner || window.bytes != budgetLimit) && pending().none { it !in active }) {
                     budgetOwner = desired; budgetLimit = window.bytes
@@ -2024,15 +2104,16 @@ private fun AdjacentPagePrefetch(
                                 val resource = scriptPrefetch(pages[index], windowBytes, token)
                                 currentCoroutineContext().ensureActive()
                                 if (resource != null && scriptRequests[index] === owned) {
-                                    readerImageDimensions(imageLoader, resource, originalPage = pages[index])?.let { size ->
-                                        currentCoroutineContext().ensureActive()
-                                        if (scriptRequests[index] === owned) dimensionsKnown(index, size)
-                                    }
+                                    retainedPages[index] = PrefetchedReaderPage(resource,
+                                        readerPageCacheKey(resource, headers, sourceId))
                                 }
                                 if (scriptRequests[index] === owned) finished += index
                             } catch (cancelled: CancellationException) { throw cancelled }
                             catch (_: PrefetchBudgetExceeded) { windowBytes.exhaust(); if (scriptRequests[index] === owned) finished += index }
-                            catch (_: Exception) { if (scriptRequests[index] === owned) finished += index }
+                            catch (failure: Exception) { if (scriptRequests[index] === owned) {
+                                if (isReaderPrefetchFailure(failure)) pageFailed(index, failure.message.orEmpty())
+                                finished += index
+                            } }
                             finally {
                                 if (scriptRequests[index] === owned) { scriptRequests.remove(index); workTokens.remove(index) }
                             }
@@ -2044,58 +2125,121 @@ private fun AdjacentPagePrefetch(
                     }
                     val resource = try { resolvePage(pages[index]) }
                     catch (cancelled: CancellationException) { throw cancelled }
-                    catch (_: Exception) { finished += index; continue }
+                    catch (failure: Exception) {
+                        if (isReaderPrefetchFailure(failure)) pageFailed(index, failure.message.orEmpty())
+                        finished += index; continue
+                    }
                     if (resource == null) { finished += index; continue }
+                    if (sourceId == "jmcomic" && !resource.url.startsWith("file:")) {
+                        // This source's native decryptor remains foreground-owned.
+                        finished += index; continue
+                    }
                     if (!resource.url.startsWith("https:")) {
-                        readerImageDimensions(imageLoader, resource, originalPage = pages[index])?.let { dimensionsKnown(index, it) }
+                        retainedPages[index] = PrefetchedReaderPage(resource,
+                            readerPageCacheKey(resource, headers, sourceId))
                         finished += index
                         continue
                     }
                     val windowBytes = byteWindow
                     val token = PrefetchWork(experience::wakeAdmissions)
-                    val request = imageLoader.enqueue(readerImageRequest(context, resource, headers)
+                    val transfer = ReaderTransferObserver()
+                    val request = imageLoader.enqueue(readerImageRequest(context, resource, headers, sourceId)
+                        .readerTransferProgress(transfer)
                         .prefetchPriority(windowBytes, sourceId.ifBlank { experienceOrigin(resource.url) }, token)
                         .size(1).memoryCachePolicy(CachePolicy.DISABLED).diskCachePolicy(CachePolicy.ENABLED)
                         .decoderFactory(BlackholeDecoder.Factory()).build())
-                    requests[index] = request
+                    val ownedRequest = ReaderPagePrefetch(request, transfer)
+                    requests[index] = ownedRequest
                     workTokens[index] = token
                     requestScope.launch {
                         val result = try { request.job.await() } catch (_: CancellationException) { return@launch }
-                        if (result is SuccessResult && requests[index] === request) {
-                            val size = readerImageDimensions(imageLoader, resource,
-                                result.diskCacheKey ?: resource.url, originalPage = pages[index], refresh = true)
-                            if (size != null && requests[index] === request) dimensionsKnown(index, size)
+                        if (result is SuccessResult && requests[index] === ownedRequest) {
+                            retainedPages[index] = PrefetchedReaderPage(resource,
+                                result.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId))
                             if (result.dataSource != coil3.decode.DataSource.NETWORK) {
                                 try { windowBytes.accept(experience.estimatedPageBytes(resource.url)) }
                                 catch (_: PrefetchBudgetExceeded) { windowBytes.exhaust() }
                             }
+                        } else if (result is ErrorResult && requests[index] === ownedRequest &&
+                            isReaderPrefetchFailure(result.throwable)) {
+                            pageFailed(index, result.throwable.message.orEmpty())
                         }
-                        if (requests[index] === request) {
+                        if (requests[index] === ownedRequest) {
                             finished += index
                             requests.remove(index)
                             workTokens.remove(index)
                         }
                     }
                 }
+                // Validate retained originals before they become visible. Only a tiny near-page
+                // subset is decoded into memory; the rest keeps original bytes and header evidence.
+                val memoryWindow = desired.take(window.decoded).toSet()
+                checks.keys.filter { it !in active && it !in desired }.toList().forEach(::stop)
+                for (index in desired) {
+                    val retainedPage = retainedPages[index] ?: continue
+                    val size = readerPreviewSize(
+                        if (index in pairedPages) window.viewport.width / 2 else window.viewport.width,
+                        window.viewport.height)
+                    val warmMemory = index in memoryWindow && window.viewport.width > 0
+                    if (index in checks || (!warmMemory && index in inspected) ||
+                        (warmMemory && warmed[index] == size) ||
+                        now < (deferredChecks[index] ?: 0L)) continue
+                    // Serialize cache-only decoding; original-byte transfers keep their own permits.
+                    if (checks.isNotEmpty()) break
+                    val token = PrefetchWork(experience::wakeAdmissions)
+                    val check = requestScope.launch(start = CoroutineStart.LAZY) {
+                        val owned = currentCoroutineContext()[Job]
+                        try {
+                            val result = preflightReaderPage(context, retainedPage.page, headers, sourceId,
+                                size.width, size.height, retainedPage.diskCacheKey, warmMemory, token)
+                            currentCoroutineContext().ensureActive()
+                            if (checks[index] !== owned) return@launch
+                            result.dimensions?.let {
+                                ReaderDimensionCache.put(readerPageCacheKey(pages[index], headers, sourceId), it)
+                                dimensionsKnown(index, it)
+                            }
+                            when (result.status) {
+                                ReaderPagePreflightStatus.READY -> {
+                                    inspected += index
+                                    if (warmMemory) warmed[index] = size
+                                }
+                                ReaderPagePreflightStatus.UNVERIFIED -> {
+                                    inspected += index
+                                    if (warmMemory) warmed[index] = size
+                                }
+                                ReaderPagePreflightStatus.FAILED -> {
+                                    inspected += index
+                                    if (warmMemory) warmed[index] = size
+                                    result.failure?.takeIf(::isReaderPrefetchFailure)?.let {
+                                        pageFailed(index, it.message.orEmpty())
+                                    }
+                                }
+                                ReaderPagePreflightStatus.DEFERRED -> deferredChecks[index] = monotonicTimeMillis() + 2_000L
+                            }
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        finally { if (checks[index] === owned) { checks.remove(index); checkTokens.remove(index) } }
+                    }
+                    checks[index] = check
+                    checkTokens[index] = token
+                    check.start()
+                }
             }
         } finally {
+            val pendingChecks = checks.values.toList()
+            checks.clear()
+            pendingChecks.forEach { it.cancel() }
             val scriptPending = scriptRequests.values.toList()
             scriptRequests.clear()
             scriptPending.forEach { it.cancel() }
             val pending = requests.values.toList()
             requests.clear()
-            pending.forEach(Disposable::dispose)
+            pending.forEach { it.request.dispose() }
         }
     }
 }
 
 private fun readerImageRequest(context: dev.mangaflow.platform.PlatformContext, page: Page, headers: Map<String, String>, sourceId: String = ""): ImageRequest.Builder =
-    ImageRequest.Builder(imagePlatformContext(context))
-        .data(page.url).readerPriority(sourceId.takeIf { it.isNotBlank() })
-        .httpHeaders(NetworkHeaders.Builder().apply {
-            headers.forEach { (name, value) -> set(name, value) }
-            page.headers.forEach { (name, value) -> set(name, value) }
-        }.build())
+    readerPageRequest(context, page, headers, sourceId)
 
 @Composable
 private fun ReaderPage(
@@ -2113,13 +2257,15 @@ private fun ReaderPage(
     pageCount: Int,
     foreground: Color,
     sourceAlternatives: List<ChapterVariant> = emptyList(),
+    readySourceVariants: Map<String, ReaderSourceStandby> = emptyMap(),
+    prefetchFailure: String? = null,
     onQuickSwitch: (ChapterVariant) -> Unit = {},
     onMoreSources: (Rect?) -> Unit = {},
     externalRetrySerial: Int = 0,
     onLoadChanged: (Boolean) -> Unit,
     onHeightMeasured: (Int) -> Unit = {},
     onComposed: (Boolean) -> Unit = {},
-    prefetch: Disposable? = null,
+    prefetch: ReaderPagePrefetch? = null,
     knownDimensions: IntSize? = null,
     onDimensionsKnown: (IntSize) -> Unit = {},
     deferResize: () -> Boolean = { false },
@@ -2144,21 +2290,29 @@ private fun ReaderPage(
     val visible by rememberUpdatedState(isVisible)
     val pageVisible by remember { derivedStateOf { visible() } }
     // Lazy layout recycling must not collapse a measured page back to its placeholder height.
-    val cachedDimensions = remember(page.url) { ReaderDimensionCache.get(page.url) }
-    var aspect by rememberSaveable(page.url) { mutableFloatStateOf(
+    val originalCacheIdentity = remember(page, headers, sourceId) { readerPageCacheKey(page, headers, sourceId) }
+    val cachedDimensions = remember(originalCacheIdentity) { ReaderDimensionCache.get(originalCacheIdentity) }
+    var aspect by rememberSaveable(originalCacheIdentity) { mutableFloatStateOf(
         (knownDimensions ?: cachedDimensions)?.readerAspectRatio()
             ?: if (page.width > 0 && page.height > 0) page.width.toFloat() / page.height else 0.7f) }
-    var hasDimensions by rememberSaveable(page.url) {
+    var hasDimensions by rememberSaveable(originalCacheIdentity) {
         mutableStateOf(knownDimensions != null || cachedDimensions != null || (page.width > 0 && page.height > 0))
     }
-    var observedDimensions by remember(page.url) { mutableStateOf<IntSize?>(null) }
+    var observedDimensions by remember(originalCacheIdentity) { mutableStateOf<IntSize?>(null) }
     var measuredHeight by remember { mutableIntStateOf(0) }
-    var reload by remember(page.url) { mutableIntStateOf(0) }
-    var fileRecoveryAttempted by remember(page.url) { mutableStateOf(false) }
-    var failedMaterializedUrl by remember(page.url) { mutableStateOf<String?>(null) }
-    val attempt = remember(page, headers, sourceId, reload) { ReaderLoadAttempt() }
+    var reload by remember(originalCacheIdentity) { mutableIntStateOf(0) }
+    var fileRecoveryAttempted by remember(originalCacheIdentity) { mutableStateOf(false) }
+    var failedMaterializedUrl by remember(originalCacheIdentity) { mutableStateOf<String?>(null) }
+    // Keep the failed-prefetch fact after its caption clears. A late discovery creates one
+    // fresh attempt, while a successful foreground image never gets restarted by old evidence.
+    var bypassPrefetchCache by remember(originalCacheIdentity) { mutableStateOf(prefetchFailure != null) }
+    val prefetchCacheRecovery = remember(originalCacheIdentity) { ReaderPrefetchCacheRecovery() }
+    val attempt = remember(page, headers, sourceId, reload, bypassPrefetchCache) { ReaderLoadAttempt() }
     val transferObserver = remember(attempt) { ReaderTransferObserver() }
     var transportProgress by remember(attempt) { mutableStateOf(transferObserver.snapshot()) }
+    val attemptPrefetch = remember(attempt) { prefetch.takeIf { reload == 0 } }
+    var waitingForPrefetch by remember(attempt, attemptPrefetch) { mutableStateOf(attemptPrefetch != null) }
+    var handedOffPrefetchProgress by remember(attempt) { mutableStateOf<ReaderTransferSnapshot?>(null) }
     var error by remember(attempt) { mutableStateOf<String?>(null) }
     var loading by remember(attempt) { mutableStateOf(true) }
     var slowLoading by remember(attempt) { mutableStateOf(false) }
@@ -2167,16 +2321,39 @@ private fun ReaderPage(
     val pageTransfer by rememberReaderPageTransfer(attempt, page, observePageTransfer,
         enabled = pageVisible && loading && error == null && resolvedPage == null)
     DisposableEffect(attempt) { onDispose { attempt.active = false } }
+    LaunchedEffect(prefetchFailure, attempt) {
+        if (prefetchFailure != null && !bypassPrefetchCache && (loading || error != null)) {
+            attempt.stopped = true
+            bypassPrefetchCache = true
+        }
+    }
     LaunchedEffect(attempt, pageVisible, loading, error) {
         slowLoading = false
         // Composition can prepare an offscreen page; only a visible foreground wait owns this deadline.
         if (pageVisible && loading && error == null && attempt.acceptsResult) {
             val visibleSince = TimeSource.Monotonic.markNow()
+            val visibleAt = monotonicTimeMillis()
+            val initialPrefetch = attemptPrefetch?.transfer?.snapshot()
+            var observedPrefetchBytes = initialPrefetch?.receivedBytes ?: 0L
+            var observedPrefetchAt = initialPrefetch?.lastProgressAt
+            var inheritedProgressAt: Long? = null
             waitClock = visibleSince
             while (pageVisible && loading && error == null && attempt.acceptsResult) {
                 val transport = transferObserver.snapshot()
-                transportProgress = transport
-                val idle = attempt.idleMillis(visibleSince, transport.lastProgressAt)
+                val inherited = if (waitingForPrefetch) attemptPrefetch?.transfer?.snapshot() else handedOffPrefetchProgress
+                // Headers and bytes received before this page became visible cannot renew its
+                // clock. Only this exact promoted request's later positive body writes count.
+                if (inherited != null) {
+                    val latest = inherited.lastProgressAt
+                    if (latest != null && latest >= visibleAt &&
+                        (inherited.receivedBytes > observedPrefetchBytes || latest != observedPrefetchAt))
+                        inheritedProgressAt = maxOf(inheritedProgressAt ?: latest, latest)
+                    observedPrefetchBytes = inherited.receivedBytes
+                    observedPrefetchAt = inherited.lastProgressAt
+                }
+                transportProgress = if (transport.receivedBytes > 0L || inherited == null) transport else inherited
+                val latestByte = listOfNotNull(transport.lastProgressAt, inheritedProgressAt).maxOrNull()
+                val idle = attempt.idleMillis(visibleSince, latestByte)
                 slowLoading = idle >= READER_SLOW_LOAD_MILLIS
                 if (idle >= READER_PAGE_WAIT_MILLIS) {
                     attempt.stopped = true
@@ -2189,14 +2366,14 @@ private fun ReaderPage(
             }
         }
     }
-    var previousRetrySerial by remember(page.url) { mutableIntStateOf(externalRetrySerial) }
+    var previousRetrySerial by remember(originalCacheIdentity) { mutableIntStateOf(externalRetrySerial) }
     LaunchedEffect(externalRetrySerial) {
         if (externalRetrySerial > previousRetrySerial) reload++
         previousRetrySerial = externalRetrySerial
     }
-    var detailStatus by remember(page.url, reload) { mutableStateOf<ReaderDetailStatus?>(null) }
-    var detailRetry by remember(page.url, reload) { mutableIntStateOf(0) }
-    var loadedImage by remember(page.url, reload) { mutableStateOf<LoadedReaderImage?>(null) }
+    var detailStatus by remember(originalCacheIdentity, reload) { mutableStateOf<ReaderDetailStatus?>(null) }
+    var detailRetry by remember(originalCacheIdentity, reload) { mutableIntStateOf(0) }
+    var loadedImage by remember(originalCacheIdentity, reload) { mutableStateOf<LoadedReaderImage?>(null) }
     LaunchedEffect(attempt, attempt.stopped) {
         if (!attempt.acceptsResult) return@LaunchedEffect
         loadChanged(false)
@@ -2213,7 +2390,9 @@ private fun ReaderPage(
             // Start the image immediately; original-size IO can finish alongside its decode.
             resolvedPage = resource
             readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
-                originalPage = page.takeIf { reload == 0 || resource.url == page.url })?.let {
+                diskCacheKey = readerPageCacheKey(resource, headers, sourceId),
+                originalPage = page.takeIf { reload == 0 || resource.url == page.url },
+                originalCacheIdentity = originalCacheIdentity)?.let {
                 currentCoroutineContext().ensureActive()
                 if (attempt.acceptsResult) {
                     observedDimensions = it
@@ -2243,12 +2422,11 @@ private fun ReaderPage(
         hasDimensions = true
     }
     val delayedLoading = rememberDelayedBusy(loading)
-    var waitingForPrefetch by remember(attempt, prefetch) { mutableStateOf(prefetch != null && reload == 0) }
-    LaunchedEffect(attempt, prefetch, attempt.stopped) {
+    LaunchedEffect(attempt, attemptPrefetch, attempt.stopped) {
         if (!attempt.acceptsResult) return@LaunchedEffect
-        if (prefetch != null && reload == 0) {
+        if (attemptPrefetch != null) {
             try {
-                prefetch.job.await()
+                attemptPrefetch.request.job.await()
                 currentCoroutineContext().ensureActive()
                 if (!attempt.acceptsResult) return@LaunchedEffect
                 // Optional failure only releases the handoff. The foreground image request reports its own result.
@@ -2257,21 +2435,31 @@ private fun ReaderPage(
                 currentCoroutineContext().ensureActive()
             }
         }
+        handedOffPrefetchProgress = attemptPrefetch?.transfer?.snapshot()
         waitingForPrefetch = false
     }
-    DisposableEffect(page.url) {
+    DisposableEffect(originalCacheIdentity) {
         val releaseLoad = onLoadChanged
         composed(true)
         onDispose { composed(false); releaseLoad(false) }
     }
     BoxWithConstraints(if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
         val viewportWidthPx = with(density) { maxWidth.roundToPx() }
-        val previewWidth = viewportWidthPx.coerceIn(1, 1600)
-        val previewHeight = with(density) { screenHeight.roundToPx() }.coerceIn(1, 4096)
+        val previewSize = readerPreviewSize(viewportWidthPx, with(density) { screenHeight.roundToPx() })
+        val previewWidth = previewSize.width
+        val previewHeight = previewSize.height
         val resource = resolvedPage
         val request = remember(resource, headers, attempt, previewWidth, previewHeight) {
             resource?.let { requested -> readerImageRequest(context, requested, headers, sourceId)
                 .readerTransferProgress(transferObserver)
+                .apply {
+                    // Retry a suspect cached original until a foreground network decode succeeds.
+                    // Never evict a key that another visible request may already have replaced.
+                    if (bypassPrefetchCache && !prefetchCacheRecovery.recovered && requested.url.startsWith("https:")) {
+                        diskCachePolicy(CachePolicy.WRITE_ONLY)
+                        memoryCachePolicy(CachePolicy.DISABLED)
+                    }
+                }
                 // The preview need only fit this viewport. Telephoto keeps the original
                 // disk file for full-quality visible tiles and pinch zoom.
                 .size(previewWidth, previewHeight)
@@ -2288,6 +2476,8 @@ private fun ReaderPage(
                             loadedImage = LoadedReaderImage(result.diskCacheKey, IntSize(width, height))
                         }
                         loading = false
+                        if (width > 0 && height > 0 && bypassPrefetchCache && requested.url.startsWith("https:") &&
+                            result.dataSource == coil3.decode.DataSource.NETWORK) prefetchCacheRecovery.recovered = true
                         loadChanged(true)
                     } },
                     onError = { _, result -> if (attempt.acceptsResult) {
@@ -2312,8 +2502,9 @@ private fun ReaderPage(
             val image = loadedImage ?: return@LaunchedEffect
             if (resource != null) {
                 readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
-                    image.diskCacheKey ?: resource.url,
-                    originalPage = page.takeIf { reload == 0 || resource.url == page.url }, refresh = true)?.let { size ->
+                    image.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId),
+                    originalPage = page.takeIf { reload == 0 || resource.url == page.url }, refresh = true,
+                    originalCacheIdentity = originalCacheIdentity)?.let { size ->
                     observedDimensions = size
                     dimensionsMeasured(size)
                 }
@@ -2439,6 +2630,7 @@ private fun ReaderPage(
                             receivedBytes = it.receivedBytes, expectedBytes = it.expectedBytes)
                     },
                     stage = when {
+                        prefetchFailure != null && transportProgress.receivedBytes == 0L -> "预取发现异常 · 正在重新读取"
                         resource == null -> "检查本机与已有下载"
                         awaitingPrefetch -> "等待已开始的图片请求"
                         resource.url.startsWith("file:") -> "解码本机图片"
@@ -2447,6 +2639,7 @@ private fun ReaderPage(
                     attempt = attempt, startedAt = waitClock ?: attempt.startedAt, foreground = foreground,
                     modifier = feedbackPosition.onSizeChanged { feedbackHeight = it.height },
                     alternatives = sourceAlternatives,
+                    readySourceVariants = readySourceVariants,
                     onRetry = { reload++ }, onSwitch = onQuickSwitch, onMore = onMoreSources,
                     onControls = onShowControls,
                     onStop = {
@@ -2465,6 +2658,7 @@ private fun ReaderPageNavigatorDialog(
     visible: Boolean,
     pages: List<Page>,
     headers: Map<String, String>,
+    sourceId: String,
     resolvePage: ReaderPageResolver,
     currentPage: Int,
     collectedPages: Set<Int>,
@@ -2502,8 +2696,8 @@ private fun ReaderPageNavigatorDialog(
                             catch (cancel: CancellationException) { throw cancel }
                             catch (_: Exception) { preview = null }
                         }
-                        val request = remember(preview, headers) {
-                            preview?.let { readerImageRequest(context, it, headers).crossfade(0).build() }
+                        val request = remember(preview, headers, sourceId) {
+                            preview?.let { readerImageRequest(context, it, headers, sourceId).crossfade(0).build() }
                         }
                         Column(
                             Modifier.clip(RoundedCornerShape(10.dp))
@@ -2549,6 +2743,8 @@ private fun ReaderProgressSlider(
     pageIndex: Int,
     pages: List<Page>,
     pendingPage: Int?,
+    headers: Map<String, String>,
+    sourceId: String,
     enabled: Boolean,
     onSeek: (Int) -> Unit,
     onOpenNavigator: () -> Unit,
@@ -2565,8 +2761,8 @@ private fun ReaderProgressSlider(
     val shown = (preview ?: pendingPage?.toFloat() ?: pageIndex.toFloat()).coerceIn(0f, lastPage.toFloat())
     val dimensionRevision by ReaderDimensionCache.revision.collectAsStateWithLifecycle()
     val shownPage = pages.getOrNull(shown.roundToInt())
-    val originalSize = remember(shownPage?.url, dimensionRevision) {
-        shownPage?.let { ReaderDimensionCache.get(it.url) }
+    val originalSize = remember(shownPage, headers, sourceId, dimensionRevision) {
+        shownPage?.let { ReaderDimensionCache.get(readerPageCacheKey(it, headers, sourceId)) }
     }
     val resolutionLabel = originalSize?.let { "${it.width} × ${it.height} px" } ?: "—"
     val resolutionDescription = originalSize?.let { "原图 ${it.width} × ${it.height} 像素" } ?: "原图尺寸尚未获取"

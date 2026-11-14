@@ -55,7 +55,7 @@ data class PanelRuntimeSpec(
 expect class PanelRepository(context: PlatformContext) {
     suspend fun detect(page: Page, headers: Map<String, String>, resolvePage: suspend (Page) -> Page,
         engine: PanelEngine, direction: PanelDirection, useLearnedOrder: Boolean,
-        force: Boolean = false): PanelDetection
+        force: Boolean = false, sourceId: String = ""): PanelDetection
     suspend fun close()
 }
 

@@ -2,6 +2,7 @@
 
 package dev.mangaflow.experience
 
+import androidx.compose.ui.unit.IntSize
 import coil3.EventListener
 import coil3.Extras
 import coil3.ImageLoader
@@ -21,17 +22,27 @@ import coil3.network.NetworkResponseBody
 import coil3.network.httpHeaders
 import coil3.request.*
 import coil3.request.Options
+import coil3.size.Scale
+import dev.mangaflow.data.Page
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.sha256
+import dev.mangaflow.reader.readerFilePath
+import dev.mangaflow.reader.readerImageDimensions
 import dev.mangaflow.platform.storage.StorageFile
 import dev.mangaflow.platform.storage.StorageLock
 import dev.mangaflow.platform.storage.cacheDirectory
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import okio.*
 
 internal expect fun createExperienceNetworkClient(): NetworkClient
@@ -41,6 +52,7 @@ private val bytesKey = Extras.Key<PrefetchByteBudget?>(null)
 private val sourceKey = Extras.Key<String?>(null)
 private val workTokenKey = Extras.Key<PrefetchWork?>(null)
 private val readerTransferKey = Extras.Key<ReaderTransferObserver?>(null)
+private val cacheOnlyKey = Extras.Key(false)
 
 /** Only successfully written body bytes advance this monotonic foreground inactivity clock. */
 internal data class ReaderTransferSnapshot(
@@ -115,21 +127,183 @@ internal class PrefetchByteBudget(private val maximum: Long) {
 internal class PrefetchBudgetExceeded : IOException("本次预取已达到资源预算")
 internal fun experienceOrigin(url: String) = url.toHttpUrlOrNull()?.host ?: "local"
 
-/** Original bytes only. Native decrypted sources keep foreground materialization ownership. */
-internal suspend fun prefetchOriginalPage(
-    context: PlatformContext, page: dev.mangaflow.data.Page, headers: Map<String, String>,
-    source: String, bytes: PrefetchByteBudget,
-): Boolean {
-    if (source == "jmcomic" || !page.url.startsWith("https:")) return false
-    val imageContext = imagePlatformContext(context)
-    val request = ImageRequest.Builder(imageContext).data(page.url)
+private val publicImageHeaders = setOf("referer", "user-agent", "accept", "accept-language", "accept-encoding", "origin")
+
+private fun readerPageHeaders(page: Page, headers: Map<String, String>): Map<String, String> = buildMap {
+    headers.forEach { (name, value) -> put(name.lowercase(), value) }
+    page.headers.forEach { (name, value) -> put(name.lowercase(), value) }
+}
+
+/** Protected images cannot reuse an old session's mutable URL or credential-bearing cache entry. */
+internal fun readerPageCacheKey(page: Page, headers: Map<String, String>, source: String = ""): String {
+    val merged = readerPageHeaders(page, headers)
+    val scoped = page.sourceRevision.isNotBlank() || page.sourceSessionEpoch.isNotBlank() ||
+        page.sourceImageToken.isNotBlank() || page.headerSecretRef.isNotBlank() ||
+        page.headerSecretBinding.isNotBlank() || page.transform.isNotBlank() ||
+        merged.keys.any { it !in publicImageHeaders }
+    if (!scoped) return page.url
+    // Length prefixes retain exact boundaries; only the digest is retained in cache keys.
+    val identity = buildString {
+        fun field(value: String) { append(value.length).append(':').append(value) }
+        field("reader-owned-v1"); field(source); field(page.url); field(page.sourceRevision)
+        field(page.sourceSessionEpoch); field(page.sourceImageToken); field(page.headerSecretRef)
+        field(page.headerSecretBinding); field(page.transform)
+        merged.entries.sortedBy { it.key }.forEach { (name, value) -> field(name); field(value) }
+    }
+    return "reader-owned:" + sha256(identity.encodeToByteArray()).joinToString("") {
+        (it.toInt() and 255).toString(16).padStart(2, '0')
+    }
+}
+
+/** Visible, original-byte and decoded warm requests use the same exact source/cache ownership. */
+internal fun readerPageRequest(
+    context: PlatformContext, page: Page, headers: Map<String, String>, source: String = "",
+): ImageRequest.Builder {
+    val key = readerPageCacheKey(page, headers, source)
+    return ImageRequest.Builder(imagePlatformContext(context)).data(page.url)
+        .readerPriority(source.takeIf { it.isNotBlank() })
+        .memoryCacheKey(key).diskCacheKey(key)
         .httpHeaders(coil3.network.NetworkHeaders.Builder().apply {
-            headers.forEach { (name, value) -> set(name, value) }
+            readerPageHeaders(page, headers).forEach { (name, value) -> set(name, value) }
         }.build())
-        .prefetchPriority(bytes, source).size(1)
+}
+
+/** Preview-only bound; original-file dimensions and full-detail tiles are never reduced. */
+internal fun readerPreviewSize(widthPx: Int, heightPx: Int): IntSize =
+    IntSize(widthPx.coerceIn(1, 1600), heightPx.coerceIn(1, 4096))
+
+internal data class OriginalPagePrefetchResult(
+    val received: Boolean,
+    val diskCacheKey: String? = null,
+    val deferred: Boolean = false,
+    val failure: Throwable? = null,
+)
+
+/** Original bytes only; a successful receipt is not an image validation result. */
+internal suspend fun prefetchOriginalPageResult(
+    context: PlatformContext, page: Page, headers: Map<String, String>,
+    source: String, bytes: PrefetchByteBudget, work: PrefetchWork = PrefetchWork(),
+): OriginalPagePrefetchResult {
+    if (source == "jmcomic" || !page.url.startsWith("https:")) return OriginalPagePrefetchResult(false)
+    val imageContext = imagePlatformContext(context)
+    val request = readerPageRequest(context, page, headers, source)
+        .prefetchPriority(bytes, source, work).size(1)
         .memoryCachePolicy(CachePolicy.DISABLED).diskCachePolicy(CachePolicy.ENABLED)
         .decoderFactory(BlackholeDecoder.Factory()).build()
-    return SingletonImageLoader.get(imageContext).execute(request) is SuccessResult
+    val result = try { SingletonImageLoader.get(imageContext).execute(request) }
+    catch (cancelled: CancellationException) { throw cancelled }
+    catch (_: PrefetchBudgetExceeded) { return OriginalPagePrefetchResult(false, deferred = true) }
+    catch (_: ExperienceAdmissionDeferred) { return OriginalPagePrefetchResult(false, deferred = true) }
+    catch (_: OutOfMemoryError) { return OriginalPagePrefetchResult(false, deferred = true) }
+    currentCoroutineContext().ensureActive()
+    return when (result) {
+        is SuccessResult -> {
+            if (result.dataSource != DataSource.NETWORK) try {
+                bytes.accept(ExperiencePolicyStore.get(context).estimatedPageBytes(page.url))
+            } catch (_: PrefetchBudgetExceeded) {
+                bytes.exhaust()
+                return OriginalPagePrefetchResult(false, result.diskCacheKey, deferred = true)
+            }
+            OriginalPagePrefetchResult(true, result.diskCacheKey)
+        }
+        is ErrorResult -> {
+            val failure = result.throwable
+            if (failure is CancellationException) throw failure
+            if (failure is PrefetchBudgetExceeded || failure is ExperienceAdmissionDeferred ||
+                failure is PrefetchPromoted || failure is OutOfMemoryError)
+                OriginalPagePrefetchResult(false, deferred = true)
+            else OriginalPagePrefetchResult(false, failure = failure)
+        }
+    }
+}
+
+/** Compatibility for callers that only need to know whether the original bytes arrived. */
+internal suspend fun prefetchOriginalPage(
+    context: PlatformContext, page: Page, headers: Map<String, String>,
+    source: String, bytes: PrefetchByteBudget,
+): Boolean = prefetchOriginalPageResult(context, page, headers, source, bytes).received
+
+internal enum class ReaderPagePreflightStatus { READY, UNVERIFIED, DEFERRED, FAILED }
+internal data class ReaderPagePreflight(
+    val status: ReaderPagePreflightStatus,
+    val dimensions: IntSize? = null,
+    val diskCacheKey: String? = null,
+    val failure: Throwable? = null,
+)
+private class PrefetchCacheUnavailable : IOException("预取原图已不在缓存中")
+
+/**
+ * Inspect bytes already owned by this page. Far pages read headers only; only a real sampled
+ * decode reports READY. Cache misses, local resource stops and cancellation are not source faults.
+ * Even Coil's cache-control fallback is vetoed before transport, so inspection never downloads.
+ */
+internal suspend fun preflightReaderPage(
+    context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
+    viewportWidthPx: Int, viewportHeightPx: Int, diskCacheKey: String? = null,
+    warmMemory: Boolean = true, work: PrefetchWork = PrefetchWork(),
+): ReaderPagePreflight {
+    val policy = ExperiencePolicyStore.get(context)
+    if (!policy.canWritePrefetch() && !work.isForeground)
+        return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED)
+    val loader = SingletonImageLoader.get(imagePlatformContext(context))
+    val key = diskCacheKey ?: readerPageCacheKey(page, headers, source)
+    val local = readerFilePath(page.url)
+    val remote = page.url.startsWith("https:") || page.url.startsWith("http:")
+    if (local == null && !remote) return ReaderPagePreflight(ReaderPagePreflightStatus.UNVERIFIED)
+    val retainedBytes = try { withContext(Dispatchers.IO) {
+        if (local != null) StorageFile(local).takeIf { it.isFile }?.length()
+        else loader.diskCache?.let { cache -> cache.openSnapshot(key)?.use { snapshot ->
+            cache.fileSystem.metadata(snapshot.data).size
+        } }
+    } } catch (cancelled: CancellationException) { throw cancelled }
+    catch (_: Exception) { null }
+    if (retainedBytes == null) return ReaderPagePreflight(ReaderPagePreflightStatus.UNVERIFIED, diskCacheKey = key)
+    if (retainedBytes <= 0L) return ReaderPagePreflight(ReaderPagePreflightStatus.FAILED,
+        diskCacheKey = key, failure = IOException("预取图片为空"))
+    val dimensions = try { readerImageDimensions(loader, page, key, refresh = true) }
+    catch (_: OutOfMemoryError) { return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, diskCacheKey = key) }
+    currentCoroutineContext().ensureActive()
+    if (!warmMemory) return ReaderPagePreflight(ReaderPagePreflightStatus.UNVERIFIED, dimensions, key)
+    if (!policy.canWritePrefetch() && !work.isForeground)
+        return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, dimensions, key)
+    val size = readerPreviewSize(viewportWidthPx, viewportHeightPx)
+    // Keep room for the visible spread and its detail tiles. Never shrink a warm preview to
+    // a different quality/key just to make it fit: the foreground request owns that decision.
+    val estimatedPixels = dimensions?.let { original ->
+        val scale = minOf(1.0, size.width.toDouble() / original.width, size.height.toDouble() / original.height)
+        kotlin.math.ceil(original.width * scale).toLong() * kotlin.math.ceil(original.height * scale).toLong()
+    } ?: (size.width.toLong() * size.height)
+    val decodeLimit = minOf((loader.memoryCache?.maxSize ?: 0L) / 4L, 24L * EXPERIENCE_MIB)
+    if (!work.isForeground && estimatedPixels * 4L > decodeLimit)
+        return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, dimensions, key)
+    val request = readerPageRequest(context, page, headers, source)
+        .prefetchPriority(PrefetchByteBudget(0L), source, work)
+        .apply { extras[cacheOnlyKey] = true }
+        .size(size.width, size.height).scale(Scale.FIT).crossfade(false)
+        .memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.READ_ONLY)
+        .networkCachePolicy(CachePolicy.DISABLED).build()
+    val result = try { loader.execute(request) }
+    catch (cancelled: CancellationException) { throw cancelled }
+    catch (_: PrefetchBudgetExceeded) { return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, dimensions, key) }
+    catch (_: ExperienceAdmissionDeferred) { return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, dimensions, key) }
+    catch (_: OutOfMemoryError) { return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, dimensions, key) }
+    currentCoroutineContext().ensureActive()
+    return when (result) {
+        is SuccessResult -> if (result.image.width > 0 && result.image.height > 0)
+            ReaderPagePreflight(ReaderPagePreflightStatus.READY, dimensions, result.diskCacheKey ?: key)
+        else ReaderPagePreflight(ReaderPagePreflightStatus.FAILED, dimensions, key,
+            IOException("预取图片尺寸无效"))
+        is ErrorResult -> {
+            val failure = result.throwable
+            when (failure) {
+                is CancellationException -> throw failure
+                is PrefetchCacheUnavailable -> ReaderPagePreflight(ReaderPagePreflightStatus.UNVERIFIED, dimensions, key)
+                is PrefetchBudgetExceeded, is ExperienceAdmissionDeferred, is PrefetchPromoted, is OutOfMemoryError ->
+                    ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, dimensions, key)
+                else -> ReaderPagePreflight(ReaderPagePreflightStatus.FAILED, dimensions, key, failure)
+            }
+        }
+    }
 }
 
 /** The sole cache factory used by every platform entry, including Android Application. */
@@ -148,8 +322,7 @@ internal fun initializeExperienceImages(context: PlatformContext) {
                     val request = chain.request
                     val work = request.extras[workKey] ?: ExperienceImageWork.VISIBLE
                     val remote = request.data.toString().startsWith("https:") || request.data.toString().startsWith("http:")
-                    if (!remote) chain.proceed()
-                    else if (work == ExperienceImageWork.PREFETCH) {
+                    if (work == ExperienceImageWork.PREFETCH && (remote || request.extras[cacheOnlyKey])) {
                         val token = request.extras[workTokenKey]
                         if (token?.isForeground == true) policy.withImageAdmission(true) { chain.proceed() }
                         else try {
@@ -159,7 +332,8 @@ internal fun initializeExperienceImages(context: PlatformContext) {
                         } catch (_: PrefetchPromoted) {
                             policy.withImageAdmission(true) { chain.proceed() }
                         }
-                    } else policy.withImageAdmission(work == ExperienceImageWork.READER) { chain.proceed() }
+                    } else if (!remote) chain.proceed()
+                    else policy.withImageAdmission(work == ExperienceImageWork.READER) { chain.proceed() }
                 })
             }
             .memoryCache(memory).diskCache(disk)
@@ -182,6 +356,7 @@ private class ExperienceImageEvents(
         bytes = runCatching { source.fileOrNull()?.let { source.fileSystem.metadata(it).size } }.getOrNull()
     }
     override fun onSuccess(request: ImageRequest, result: SuccessResult) {
+        if (request.extras[cacheOnlyKey]) return
         policy.recordImage(monotonicTimeMillis() - started, result.dataSource == DataSource.MEMORY_CACHE,
             result.dataSource == DataSource.DISK, prefetch && work?.isForeground != true, key, bytes)
     }
@@ -195,6 +370,9 @@ private class ExperienceImageNetworkClient(
     private val delegate: NetworkClient, private val policy: ExperiencePolicyStore,
 ) : NetworkClient {
     override suspend fun <T> executeRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
+        // Coil 3.2's networkCachePolicy adds only-if-cached headers but still calls its client.
+        // A source or transport cache cannot turn this local inspection into an HTTP request.
+        if (request.extras[cacheOnlyKey]) throw PrefetchCacheUnavailable()
         val started = monotonicTimeMillis()
         val optional = request.extras[workKey] == ExperienceImageWork.PREFETCH
         val budget = request.extras[bytesKey]

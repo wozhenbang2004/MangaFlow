@@ -2,7 +2,9 @@
 
 package dev.mangaflow.reader.panels
 
-import dev.mangaflow.experience.readerPriority
+import dev.mangaflow.experience.readerPageRequest
+import dev.mangaflow.experience.readerPageCacheKey
+import dev.mangaflow.experience.readerPreviewSize
 import dev.mangaflow.experience.ReaderTransferObserver
 import dev.mangaflow.experience.readerTransferProgress
 
@@ -36,13 +38,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
-import dev.mangaflow.platform.imagePlatformContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import coil3.network.NetworkHeaders
-import coil3.network.httpHeaders
-import coil3.request.ImageRequest
+import coil3.request.CachePolicy
 import coil3.request.crossfade
 import coil3.size.Scale
 import dev.mangaflow.data.Page
@@ -73,6 +72,7 @@ import me.saket.telephoto.zoomable.spatial.SpatialOffset
 internal fun PanelCamera(
     page: Page,
     headers: Map<String, String>,
+    sourceId: String = "",
     box: PanelBox,
     overview: Boolean,
     active: Boolean,
@@ -82,18 +82,22 @@ internal fun PanelCamera(
     onDetailError: (String?) -> Unit,
     modifier: Modifier = Modifier,
     transferObserver: ReaderTransferObserver? = null,
+    bypassFailedCache: Boolean = false,
+    onViewportChanged: (IntSize) -> Unit = {},
     onSwipe: (deltaX: Float) -> Unit = {},
     boxes: List<PanelBox> = emptyList(),
     selectedIndex: Int = 0,
     onSelectPanel: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
+    val cacheIdentity = remember(page, headers, sourceId) { readerPageCacheKey(page, headers, sourceId) }
+    val viewportChanged by rememberUpdatedState(onViewportChanged)
     val motion = LocalMotionEnabled.current
     val zoom = rememberZoomableState(zoomSpec = ZoomSpec(maxZoomFactor = 8f))
     val image = rememberZoomableImageState(zoom)
     var viewport by remember { mutableStateOf(IntSize.Zero) }
-    var sourceBounds by remember(page.url) { mutableStateOf<Rect?>(null) }
-    var failure by remember(page.url) { mutableStateOf<String?>(null) }
+    var sourceBounds by remember(cacheIdentity) { mutableStateOf<Rect?>(null) }
+    var failure by remember(cacheIdentity) { mutableStateOf<String?>(null) }
     val tap by rememberUpdatedState(onTap)
     val swipe by rememberUpdatedState(onSwipe)
     val ready by rememberUpdatedState(onImageReady)
@@ -103,7 +107,7 @@ internal fun PanelCamera(
     val displayedBoxes by rememberUpdatedState(boxes)
     // A newly selected target releases a prior manual pan/zoom, while a gesture always wins
     // over an in-flight camera. A viewport/source change establishes a fresh coordinate frame.
-    var manualControl by remember(page.url, box, overview, viewport, sourceBounds) { mutableStateOf(false) }
+    var manualControl by remember(cacheIdentity, box, overview, viewport, sourceBounds) { mutableStateOf(false) }
     val swipeThreshold = with(LocalDensity.current) { 56.dp.toPx() }
 
     @Suppress("DEPRECATION") // 0.16 exposes the actual decoder/painter coordinate size here.
@@ -114,7 +118,7 @@ internal fun PanelCamera(
             else transformation.contentSize to transformation.scaleMetadata.initialScale
         }
     }
-    LaunchedEffect(page.url, geometry, viewport) {
+    LaunchedEffect(cacheIdentity, geometry, viewport) {
         if (geometry == null) {
             sourceBounds = null
             return@LaunchedEffect
@@ -127,13 +131,13 @@ internal fun PanelCamera(
             unscaledContentBounds.rectIn(CoordinateSpace.ZoomableContent)
         }.takeIf { it.width > 0f && it.height > 0f }
     }
-    LaunchedEffect(page.url, image) {
+    LaunchedEffect(cacheIdentity, image) {
         snapshotFlow { image.isImageDisplayed }.distinctUntilChanged().collect { ready(it) }
     }
-    DisposableEffect(page.url) { onDispose { ready(false) } }
+    DisposableEffect(cacheIdentity) { onDispose { ready(false) } }
     LaunchedEffect(failure) { failure?.let { reportError(it) } }
     LaunchedEffect(image.detailError) { reportDetailError(image.detailError) }
-    LaunchedEffect(page.url, box, overview, sourceBounds, viewport, geometry, active, motion, manualControl) {
+    LaunchedEffect(cacheIdentity, box, overview, sourceBounds, viewport, geometry, active, motion, manualControl) {
         val bounds = sourceBounds ?: return@LaunchedEffect
         if (!active || manualControl || !image.isImageDisplayed) return@LaunchedEffect
         try {
@@ -144,21 +148,22 @@ internal fun PanelCamera(
         }
     }
 
-    val request = remember(page.url, headers, viewport, context, transferObserver) {
-        ImageRequest.Builder(imagePlatformContext(context))
-            .data(page.url).readerPriority()
+    val request = remember(cacheIdentity, viewport, context, transferObserver) {
+        val preview = readerPreviewSize(viewport.width, viewport.height)
+        readerPageRequest(context, page, headers, sourceId)
             .apply { transferObserver?.let { readerTransferProgress(it) } }
-            .httpHeaders(NetworkHeaders.Builder().apply {
-                headers.forEach { (name, value) -> set(name, value) }
-            }.build())
-            .size(viewport.width.coerceIn(1, 1600), viewport.height.coerceIn(1, 4096))
+            .apply { if (bypassFailedCache && page.url.startsWith("https:")) {
+                diskCachePolicy(CachePolicy.WRITE_ONLY)
+                memoryCachePolicy(CachePolicy.DISABLED)
+            } }
+            .size(preview.width, preview.height)
             .scale(Scale.FIT)
             .crossfade(false)
             .listener(onError = { _, result -> failure = result.throwable.message ?: "原图暂时无法读取" })
             .build()
     }
-    Box(modifier.fillMaxSize().clipToBounds().onSizeChanged { viewport = it }
-        .pointerInput(page.url, active, overview, box, viewport, sourceBounds) {
+    Box(modifier.fillMaxSize().clipToBounds().onSizeChanged { viewport = it; viewportChanged(it) }
+        .pointerInput(cacheIdentity, active, overview, box, viewport, sourceBounds) {
             if (!active) return@pointerInput
             awaitEachGesture {
                 val first = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)

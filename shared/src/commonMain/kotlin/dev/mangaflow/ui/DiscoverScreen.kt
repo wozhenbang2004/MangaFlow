@@ -222,7 +222,8 @@ fun DiscoverScreen(
             if (state.sourceScope.startsWith("scoped:")) null else DesktopMenuAction("各站评分") { ratingsManga = manga },
         )
     }
-    CompositionLocalProvider(LocalMetricSourceFan provides sourceFan) {
+    CompositionLocalProvider(LocalMetricSourceFan provides sourceFan,
+        LocalBrowseWarmupEnabled provides unobscured) {
     Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)
         .motionInputGate(active && !searchExpanded)) {
@@ -369,6 +370,8 @@ internal fun DiscoverySearchResults(
     // Empty title/author search is only the 44dp input row; no padded, invisible result panel.
     if (awaitingKeyword && !selectingTags) return
     val showResults = search.isSearch && !selectingTags && !awaitingKeyword
+    BrowseCoverWarmup(search.items, repository,
+        active && expanded && showResults && sourceChoices == null, retainedResults)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     if (desktopMainContent) DesktopBrowsePagination(search,
         enabled = active && expanded && showResults && sourceChoices == null,
@@ -377,6 +380,7 @@ internal fun DiscoverySearchResults(
             info.totalItemsCount == count + 1 &&
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 5
         }, onMore = onMore)
+    CompositionLocalProvider(LocalBrowseWarmupEnabled provides (active && expanded && sourceChoices == null)) {
     BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
         val contentRoom = (this.maxHeight - if (tagsOnly) 0.dp else 16.dp).coerceAtLeast(0.dp)
         val resultReserve = if (showResults) minOf(contentRoom * .5f, 120.dp * fontScale) else 0.dp
@@ -494,6 +498,7 @@ internal fun DiscoverySearchResults(
     sourceChoices?.let { matches ->
         FederatedSearchChoices(matches, repository, backdrop, onDismiss = { sourceChoices = null },
             onOpen = { manga -> sourceChoices = null; onOpen(manga) })
+    }
     }
 }
 
@@ -678,6 +683,7 @@ private fun DiscoveryPane(
         else -> MangaLayout.columns(maxWidth, columns,
             (if (desktop) 156.dp else if (columns == 4) 68.dp else 88.dp) * fontScale, gap, sidePadding)
     }
+    BrowseCoverWarmup(state.items, repository, active, grid, visibleColumns)
     val preferredWidth = when {
         ranking || desktop && columns == 1 -> MangaLayout.ListWidth
         desktop && columns > 1 -> 240.dp * fontScale * visibleColumns +
@@ -878,6 +884,7 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
     val interaction = remember { MutableInteractionSource() }
     Row(
         Modifier.fillMaxWidth()
+            .browseIntentWarmup(manga, repository, interaction)
             .clickable(interactionSource = interaction, indication = null, role = Role.Button,
                 onClickLabel = "查看${manga.title}", onClick = {
                 transition?.select?.invoke(MangaCoverKey(manga.id, placement))
@@ -915,7 +922,8 @@ private fun BrowseListRow(
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
-    Row(Modifier.fillMaxWidth().combinedClickable(interactionSource = interaction,
+    Row(Modifier.fillMaxWidth().browseIntentWarmup(manga, repository, interaction)
+        .combinedClickable(interactionSource = interaction,
         indication = null, role = Role.Button, onClickLabel = "查看${manga.title}",
         onLongClickLabel = "漫画操作", onLongClick = onLongClick, onClick = {
             transition?.select?.invoke(MangaCoverKey(manga.id, placement))
@@ -1132,7 +1140,7 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
     modifier: Modifier = Modifier, onRatings: () -> Unit, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
-    Row(modifier.fillMaxWidth()
+    Row(modifier.fillMaxWidth().browseIntentWarmup(manga, repository, interaction)
         .clickable(interactionSource = interaction, indication = null, onClick = {
             transition?.select?.invoke(MangaCoverKey(manga.id, "ranking-$listKey"))
             onClick()
@@ -1285,7 +1293,7 @@ internal fun CoverTile(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val transition = LocalMangaCoverTransition.current
-    Column(modifier
+    Column(modifier.browseIntentWarmup(manga, repository, interaction)
         .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
             onClickLabel = "查看${manga.title}", onLongClickLabel = if (onLongClick != null) "漫画操作" else null,
             onLongClick = onLongClick, onClick = {
@@ -1312,12 +1320,14 @@ internal fun CoverTile(
 internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Modifier, scale: ContentScale = ContentScale.Crop) {
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
-    val request = remember(context, repository, manga.id, manga.coverUrl, manga.sourceUrl, motion) {
+    val identity = mangaCoverIdentity(manga, repository)
+    val request = remember(context, repository, manga.id, manga.coverUrl, manga.sourceUrl, identity, motion) {
         manga.coverUrl.takeIf(String::isNotBlank)?.let { url ->
             ImageRequest.Builder(imagePlatformContext(context)).data(url)
-                .memoryCacheKey("manga-cover:" + url)
+                .memoryCacheKey("manga-cover:" + identity.cacheKey)
+                .diskCacheKey(identity.cacheKey)
                 .httpHeaders(NetworkHeaders.Builder().apply {
-                    repository.imageHeaders(manga.id, "").forEach { (name, value) -> set(name, value) }
+                    identity.headers.forEach { (name, value) -> set(name, value) }
                 }.build()).crossfade(if (motion) MangaMotion.Quick else 0).build()
         }
     }

@@ -3,6 +3,7 @@ package dev.mangaflow.reader
 import androidx.compose.ui.unit.IntSize
 import coil3.ImageLoader
 import dev.mangaflow.data.Page
+import dev.mangaflow.experience.readerPageCacheKey
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
@@ -23,15 +24,15 @@ internal object ReaderDimensionCache {
     private val _revision = MutableStateFlow(0)
     val revision: StateFlow<Int> = _revision.asStateFlow()
 
-    fun get(url: String): IntSize? = synchronized(gate) {
-        entries.remove(url)?.also { entries[url] = it }
+    fun get(identity: String): IntSize? = synchronized(gate) {
+        entries.remove(identity)?.also { entries[identity] = it }
     }
 
-    fun put(url: String, dimensions: IntSize) = synchronized(gate) {
-        if (url.isNotBlank() && dimensions.width > 0 && dimensions.height > 0) {
-            val changed = entries[url] != dimensions
-            entries.remove(url)
-            entries[url] = dimensions
+    fun put(identity: String, dimensions: IntSize) = synchronized(gate) {
+        if (identity.isNotBlank() && dimensions.width > 0 && dimensions.height > 0) {
+            val changed = entries[identity] != dimensions
+            entries.remove(identity)
+            entries[identity] = dimensions
             while (entries.size > MAX_ENTRIES) entries.remove(entries.keys.first())
             if (changed) _revision.value += 1
         }
@@ -44,28 +45,35 @@ private val dimensionReads = Array(16) { Mutex() }
 /**
  * Read original bytes already present locally; measuring never requests an image.
  * originalPage is supplied only by a caller that resolved this exact owning chapter/page
- * to its unmodified saved file. A changed remote/retry URL is never an alias.
+ * to its unmodified saved file. Protected page aliases require the original exact cache identity;
+ * a session-bearing URL or changed remote/retry URL is never an unscoped dimension alias.
  */
 internal suspend fun readerImageDimensions(
     imageLoader: ImageLoader,
     page: Page,
-    diskCacheKey: String? = page.url,
+    diskCacheKey: String? = readerPageCacheKey(page, emptyMap()),
     originalPage: Page? = null,
     refresh: Boolean = false,
+    originalCacheIdentity: String? = null,
 ): IntSize? {
     val file = readerFilePath(page.url)
+    val identity = diskCacheKey ?: readerPageCacheKey(page, emptyMap())
     fun publish(dimensions: IntSize?): IntSize? = dimensions?.takeIf {
         it.width > 0 && it.height > 0
     }?.also { size ->
-        ReaderDimensionCache.put(page.url, size)
+        ReaderDimensionCache.put(identity, size)
         originalPage?.takeIf { original ->
             original.index == page.index && (original.url == page.url || file != null)
-        }?.let { ReaderDimensionCache.put(it.url, size) }
+        }?.let { original ->
+            val originalIdentity = originalCacheIdentity ?: readerPageCacheKey(original, emptyMap())
+                .takeIf { it == original.url && identity == page.url }
+            originalIdentity?.let { ReaderDimensionCache.put(it, size) }
+        }
     }
-    if (!refresh) ReaderDimensionCache.get(page.url)?.let { return publish(it) }
+    if (!refresh) ReaderDimensionCache.get(identity)?.let { return publish(it) }
     return withContext(Dispatchers.IO) {
-        dimensionReads[(page.url.hashCode() and Int.MAX_VALUE) % dimensionReads.size].withLock {
-            if (!refresh) ReaderDimensionCache.get(page.url)?.let { return@withLock publish(it) }
+        dimensionReads[(identity.hashCode() and Int.MAX_VALUE) % dimensionReads.size].withLock {
+            if (!refresh) ReaderDimensionCache.get(identity)?.let { return@withLock publish(it) }
             val dimensions = try {
                 if (file != null) readNativeReaderSize(file)
                 else diskCacheKey?.let { key ->

@@ -64,6 +64,10 @@ internal class ExperienceDiskCache(
     override val size: Long get() = synchronized(lock) { delegate?.size ?: 0L }
     override val maxSize: Long get() = synchronized(lock) { if (delegate == null) 0L else applied }
     val resizePending: Boolean get() = synchronized(lock) { target != applied || error != null }
+    /** A queued growth keeps the existing bounded journal usable while reader leases finish. */
+    val acceptsPrefetchWrites: Boolean get() = synchronized(lock) {
+        !closed && error == null && delegate != null && applied > 0L && target >= applied
+    }
     val resizeError: String? get() = synchronized(lock) { error }
     private fun build(bytes: Long) = DiskCache.Builder().directory(directory).fileSystem(fileSystem)
         .maxSizeBytes(bytes.coerceAtLeast(1L)).build()

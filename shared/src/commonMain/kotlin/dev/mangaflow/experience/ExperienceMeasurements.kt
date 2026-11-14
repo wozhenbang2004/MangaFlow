@@ -15,6 +15,9 @@ internal fun encodeExperienceOverrides(o: ExperienceOverrides) = buildJsonObject
     o.memoryMiB?.let { put("memoryMiB", it) }; o.diskMiB?.let { put("diskMiB", it) }
     o.refresh?.let { put("refresh", it.name) }; o.refreshHz?.let { put("hz", it) }
     put("battery", o.batteryProtection); put("background", o.allowBackgroundDownloads)
+    o.decodedPrefetchPages?.let { put("decodedPages", it) }
+    o.sourceRecovery?.let { put("sourceRecovery", it.name) }
+    put("browseWarmup", o.browseWarmup)
 }.toString()
 
 internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = runCatching {
@@ -30,6 +33,9 @@ internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = ru
         memoryMiB = int("memoryMiB", 16, 512), diskMiB = int("diskMiB", 32, 8192),
         refresh = RefreshPreference.entries.firstOrNull { it.name == json["refresh"]?.jsonPrimitive?.content },
         refreshHz = int("hz", 30, 360), batteryProtection = bool("battery", true), allowBackgroundDownloads = bool("background", true),
+        decodedPrefetchPages = int("decodedPages", 0, 2),
+        sourceRecovery = SourceRecoveryMode.entries.firstOrNull { it.name == json["sourceRecovery"]?.jsonPrimitive?.content },
+        browseWarmup = bool("browseWarmup", true),
     )
 }.getOrDefault(ExperienceOverrides())
 

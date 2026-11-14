@@ -756,6 +756,16 @@ class UnifiedMangaRepository(
         }
     }
 
+    /**
+     * A bounded browse intent may prepare only this exact owning catalogue.
+     * The caller owns optional admission/cancellation; linked-source discovery,
+     * projections and source choices still belong to an actual detail opening.
+     */
+    suspend fun prewarmDetail(mangaId: String): Boolean {
+        val ref = SourceKeys.decodeManga(mangaId)
+        return detailSource(ref.sourceId, mangaId).chapters.isNotEmpty()
+    }
+
     override suspend fun detail(mangaId: String): MangaDetail = detail(mangaId) {}
 
     suspend fun detail(mangaId: String, onMetadata: (Manga) -> Unit): MangaDetail {

@@ -13,8 +13,9 @@ internal actual fun panelModelDirectory(context: PlatformContext): StorageFile =
 actual class PanelRepository actual constructor(context: PlatformContext) {
     private val delegate = PortablePanelRepository(context)
     actual suspend fun detect(page: Page, headers: Map<String, String>, resolvePage: suspend (Page) -> Page,
-        engine: PanelEngine, direction: PanelDirection, useLearnedOrder: Boolean, force: Boolean): PanelDetection =
-        delegate.detect(page, headers, resolvePage, engine, direction, useLearnedOrder, force)
+        engine: PanelEngine, direction: PanelDirection, useLearnedOrder: Boolean, force: Boolean,
+        sourceId: String): PanelDetection =
+        delegate.detect(page, headers, resolvePage, engine, direction, useLearnedOrder, force, sourceId)
     actual suspend fun close() { delegate.close() }
 }
 

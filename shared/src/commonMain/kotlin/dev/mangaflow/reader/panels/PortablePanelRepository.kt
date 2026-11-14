@@ -1,6 +1,7 @@
 package dev.mangaflow.reader.panels
 
-import dev.mangaflow.experience.readerPriority
+import dev.mangaflow.experience.readerPageCacheKey
+import dev.mangaflow.experience.readerPageRequest
 
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Canvas
@@ -10,11 +11,8 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import coil3.compose.asPainter
 import coil3.SingletonImageLoader
-import coil3.network.NetworkHeaders
-import coil3.network.httpHeaders
 import coil3.request.CachePolicy
 import coil3.request.ErrorResult
-import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import coil3.size.Precision
 import coil3.size.Scale
@@ -44,15 +42,15 @@ internal class PortablePanelRepository(private val context: PlatformContext) {
     private val cache = StorageFile(cacheDirectory(context), "reader-panels")
     private var closed = false
     suspend fun detect(page: Page, headers: Map<String, String>, resolvePage: suspend (Page) -> Page,
-        engine: PanelEngine, direction: PanelDirection, useLearnedOrder: Boolean, force: Boolean): PanelDetection = gate.withLock {
+        engine: PanelEngine, direction: PanelDirection, useLearnedOrder: Boolean, force: Boolean,
+        sourceId: String): PanelDetection = gate.withLock {
         check(!closed) { "分镜阅读已关闭" }
         if (engine == PanelEngine.OFF) return@withLock PanelDetection(listOf(PanelBox.FULL), engine.name)
-        val key = withContext(Dispatchers.IO) { cacheKey(page, engine, direction, useLearnedOrder) }
+        val key = withContext(Dispatchers.IO) { cacheKey(page, headers, sourceId, engine, direction, useLearnedOrder) }
         if (!force) withContext(Dispatchers.IO) { readCache(key) }?.let { return@withLock it }
         val resource = resolvePage(page)
         val imageContext = imagePlatformContext(context)
-        val result = SingletonImageLoader.get(imageContext).execute(ImageRequest.Builder(imageContext).data(resource.url).readerPriority()
-            .httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
+        val result = SingletonImageLoader.get(imageContext).execute(readerPageRequest(context, resource, headers, sourceId)
             .size(1536, 1536).precision(Precision.EXACT).scale(Scale.FIT)
             .memoryCachePolicy(CachePolicy.DISABLED).build())
         if (result is ErrorResult) throw IllegalStateException("这一页暂时无法识别，请重试", result.throwable)
@@ -82,9 +80,10 @@ internal class PortablePanelRepository(private val context: PlatformContext) {
     }
     suspend fun close() = gate.withLock { closed = true }
 
-    private fun cacheKey(page: Page, engine: PanelEngine, direction: PanelDirection, learned: Boolean): String {
+    private fun cacheKey(page: Page, headers: Map<String, String>, sourceId: String, engine: PanelEngine,
+        direction: PanelDirection, learned: Boolean): String {
         val local = readerFilePath(page.url)?.let(::StorageFile)
-        val identity = listOf(1, ClassicPanelDetector.VERSION, PANEL_MODEL_RUNTIME_VERSION, page.url,
+        val identity = listOf(1, ClassicPanelDetector.VERSION, PANEL_MODEL_RUNTIME_VERSION, readerPageCacheKey(page, headers, sourceId),
             page.index, page.width, page.height, local?.length(), local?.lastModified(), engine.name, direction.name, learned)
             .joinToString("\u0000")
         return sha256(identity.encodeToByteArray()).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
