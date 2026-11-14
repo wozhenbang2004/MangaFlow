@@ -302,7 +302,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val copyProgress by model.copyProgress.collectAsStateWithLifecycle()
     val adoptedResumeTargets by model.library.resumeTargets.collectAsStateWithLifecycle()
     var copySyncOpen by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(account.profile?.username) { copySyncOpen = false }
+    var copySyncFocus by remember { mutableStateOf<String?>(null) }
+    fun openCopyComparison(mangaId: String? = null) {
+        copySyncFocus = mangaId
+        copySyncOpen = true
+        model.copyShelfSync.check()
+    }
+    LaunchedEffect(account.profile?.username) { copySyncOpen = false; copySyncFocus = null }
     val update by model.updates.state.collectAsStateWithLifecycle()
     var restrictedMode by remember { mutableStateOf(false) }
     var profileSourcesOpen by remember { mutableStateOf(false) }
@@ -317,10 +323,18 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val section = Section.entries.firstOrNull {
         it.name == sectionName && (!restrictedMode || it != Section.BOARDS)
     } ?: Section.DISCOVER
-    LaunchedEffect(account.profile?.username, account.busy, section, reading == null, detail == null, restrictedMode) {
-        if (!restrictedMode && account.profile != null && !account.busy && reading == null && detail == null &&
-            section in setOf(Section.ACCOUNT, Section.LIBRARY) && !copyShelfSync.checked && !copyShelfSync.busy)
-            model.copyShelfSync.check()
+    LaunchedEffect(account.profile?.username, account.busy, reading == null, detail == null,
+        restrictedMode, copySyncOpen, experienceLifecycle) {
+        if (restrictedMode || account.profile == null || account.busy || reading != null || detail != null || copySyncOpen)
+            return@LaunchedEffect
+        experienceLifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            try {
+                while (true) {
+                    model.copyShelfSync.checkInBackground()
+                    kotlinx.coroutines.delay(5 * 60_000L)
+                }
+            } finally { model.copyShelfSync.pauseCheck() }
+        }
     }
     LaunchedEffect(account.profile?.username, account.busy, section, reading == null, detail == null, restrictedMode) {
         if (!restrictedMode && section == Section.ACCOUNT && reading == null && detail == null &&
@@ -381,6 +395,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             searchExpanded && platformKind != PlatformKind.DESKTOP)
     val favorites by model.library.favorites.collectVisibleAsState(reading == null)
     val history by model.library.history.collectVisibleAsState(reading == null || recentReadingOpen)
+    LaunchedEffect(favorites, history, adoptedResumeTargets, account.profile?.username) {
+        model.copyShelfSync.onLocalReadingChanged()
+    }
     val accountChapterHistoryRevision by model.library.chapterHistoryRevision.collectVisibleAsState(
         reading == null && detail == null && section == Section.ACCOUNT && !restrictedMode)
     val preferences by model.library.preferences.collectVisibleAsState(reading == null)
@@ -531,10 +548,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         profileSections.map { DesktopDestination(it.navigationTitle(restrictedMode), it.icon) }
     }
     CopyShelfSyncSheet(
-        visible = copySyncOpen && account.profile != null && !restrictedMode,
+        visible = copySyncOpen && account.profile != null && copyShelfSync.owner == account.profile?.username && !restrictedMode,
         state = copyShelfSync, backdrop = drawerBackdrop,
         onCheck = model.copyShelfSync::check, onImport = model.copyShelfSync::importFavorites,
-        onUpload = model.copyShelfSync::upload, onDismiss = { copySyncOpen = false },
+        onApply = model.copyShelfSync::applyMerge, onDismiss = { copySyncOpen = false },
+        focusMangaId = copySyncFocus,
     )
     sourceManagement?.let { state ->
         UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
@@ -971,7 +989,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 chapterPositions = chapterPositions,
                                 cloudProgress = copyProgress?.takeIf { it.mangaId == current.state.manga.id &&
                                     it.owner == account.profile?.username },
-                                onAdoptCloudProgress = model::adoptCopyProgress,
+                                onAdoptCloudProgress = { openCopyComparison(current.state.manga.id) },
                                 onRetryCloudProgress = { model.refreshCopyProgress(current.state.manga) },
                                 preferredResumeChapter = adoptedResumeTargets[current.state.manga.id]
                                     ?.takeIf { it.accountOwner == account.profile?.username }
@@ -1220,13 +1238,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         )
                                     }
                                     Section.LIBRARY -> LibraryScreen(
+                                        preferredResumeTargets = if (restrictedMode) emptyMap() else
+                                            adoptedResumeTargets.filterValues { it.accountOwner == account.profile?.username },
                                         copySyncState = copyShelfSync.takeIf { !restrictedMode &&
                                             account.profile != null && it.owner == account.profile?.username },
                                         onCopySync = if (restrictedMode) null else {
-                                            { if (account.profile == null) changeSection(Section.ACCOUNT) else copySyncOpen = true }
+                                            { if (account.profile == null) changeSection(Section.ACCOUNT) else openCopyComparison() }
                                         },
                                         onImportCopy = if (restrictedMode) null else {
-                                            { copySyncOpen = true; model.copyShelfSync.importFavorites() }
+                                            { openCopyComparison() }
                                         },
                                         favorites = ordinaryFavorites, history = ordinaryHistory,
                                         libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
@@ -1282,7 +1302,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         metadataLoading = copyShelfRemote.loading,
                                         metadataError = copyShelfRemote.error,
                                         onRetryMetadata = model::refreshCopyShelfMetadata,
-                                        onOpenSync = { copySyncOpen = true },
+                                        onOpenSync = { openCopyComparison() },
                                         onLoginWithPassword = model::loginWithPassword,
                                         onLoginWithCookie = model::loginWithCookie,
                                         onLogout = model::logout,

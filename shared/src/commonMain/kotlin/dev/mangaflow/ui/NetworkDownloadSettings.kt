@@ -37,6 +37,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.semantics.Role
@@ -57,7 +59,6 @@ import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.ui.motion.MotionDialog
-import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTabs
@@ -117,6 +118,15 @@ private fun DownloadConnectionSettings(
     var type by remember(settings.proxy) { mutableStateOf(settings.proxy?.type ?: DownloadProxyType.SOCKS) }
     var notice by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf(false) }
+    var useAfterSave by remember { mutableStateOf(false) }
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    fun finishEditing() {
+        proxyExpanded = false
+        useAfterSave = false
+        focus.clearFocus(force = true)
+        keyboard?.hide()
+    }
     LaunchedEffect(suggestionRevision, suggestedProxy) {
         if (suggestionRevision > 0 && suggestedProxy != null) {
             // Preserve the reported protocol and port. This does not save or switch a route.
@@ -124,6 +134,7 @@ private fun DownloadConnectionSettings(
             port = suggestedProxy.port.toString()
             type = suggestedProxy.type
             proxyExpanded = true
+            useAfterSave = false
             error = false
             notice = "已填入识别地址，保存后可选择指定代理。"
             onSuggestionConsumed()
@@ -135,10 +146,15 @@ private fun DownloadConnectionSettings(
             onSelect = { index ->
                 notice = null
                 error = false
-                try { store.setDefault(DownloadRouteMode.entries[index]) }
+                useAfterSave = false
+                val chosen = DownloadRouteMode.entries[index]
+                try {
+                    store.setDefault(chosen)
+                    finishEditing()
+                }
                 catch (failure: DownloadRouteException) {
-                    notice = "先保存代理地址，再选择指定代理。"
-                    error = true
+                    notice = "填写地址后即可使用指定代理。"
+                    useAfterSave = chosen == DownloadRouteMode.PROXY
                     proxyExpanded = true
                 }
             }, modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
@@ -148,25 +164,39 @@ private fun DownloadConnectionSettings(
             if (environment?.defaultNetworkUsesVpn == true) "当前系统 VPN 仍会影响连接。"
             else "跳过 HTTP / SOCKS；VPN 由系统决定。",
             style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-        MotionTabContent(proxyExpanded, Modifier.fillMaxWidth(), contentKey = { it },
-            order = { if (it) 1 else 0 }, fillContent = false) { editing ->
-            if (editing) Column(Modifier.fillMaxWidth().padding(top = 3.dp),
+        MotionTextButton(onClick = {
+            notice = null
+            error = false
+            if (proxyExpanded) finishEditing() else proxyExpanded = true
+        }, enabled = active, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+            Icon(Icons.Outlined.Edit, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            Spacer(Modifier.width(7.dp))
+            Text(settings.proxy?.let(::proxyAddressLabel) ?: "设置代理地址",
+                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Icon(if (proxyExpanded) Icons.Outlined.Close else Icons.Outlined.ChevronRight,
+                if (proxyExpanded) "收起代理地址" else "编辑代理地址", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+        }
+        // The network workspace owns height animation; never nest an empty/editor SizeTransform.
+        if (proxyExpanded) Column(Modifier.fillMaxWidth().padding(top = 3.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 MotionTabs(selected = if (type == DownloadProxyType.SOCKS) 0 else 1,
                     labels = listOf("SOCKS5", "HTTP"), onSelect = {
                         type = if (it == 0) DownloadProxyType.SOCKS else DownloadProxyType.HTTP
+                        notice = null
+                        error = false
                     }, modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
                     fullWidthIndicator = true, controlHeight = 36.dp,
                     track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
                 BoxWithConstraints(Modifier.fillMaxWidth()) {
                     val stacked = maxWidth < 280.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
                     if (stacked) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ProxyValueField(host, { host = it }, "主机名或 IP", Modifier.fillMaxWidth())
-                        ProxyValueField(port, { port = it.filter(Char::isDigit).take(5) }, "端口",
+                        ProxyValueField(host, { host = it; notice = null; error = false }, "主机名或 IP", Modifier.fillMaxWidth())
+                        ProxyValueField(port, { port = it.filter(Char::isDigit).take(5); notice = null; error = false }, "端口",
                             Modifier.fillMaxWidth(), KeyboardType.Number)
                     } else Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        ProxyValueField(host, { host = it }, "主机名或 IP", Modifier.weight(1f))
-                        ProxyValueField(port, { port = it.filter(Char::isDigit).take(5) }, "端口",
+                        ProxyValueField(host, { host = it; notice = null; error = false }, "主机名或 IP", Modifier.weight(1f))
+                        ProxyValueField(port, { port = it.filter(Char::isDigit).take(5); notice = null; error = false }, "端口",
                             Modifier.width(88.dp), KeyboardType.Number)
                     }
                 }
@@ -177,7 +207,7 @@ private fun DownloadConnectionSettings(
                         store.setProxy(null)
                         host = ""
                         port = ""
-                        proxyExpanded = false
+                        finishEditing()
                         error = false
                         notice = "地址已移除；原有指定代理选择需重新配置。"
                     }) { Text("移除", style = MaterialTheme.typography.labelMedium) }
@@ -186,34 +216,25 @@ private fun DownloadConnectionSettings(
                         host = settings.proxy?.host.orEmpty()
                         port = settings.proxy?.port?.toString().orEmpty()
                         type = settings.proxy?.type ?: DownloadProxyType.SOCKS
-                        proxyExpanded = false
+                        finishEditing()
+                        error = false
                         notice = null
                     }) { Text("取消") }
                     MotionTextButton(enabled = active, onClick = {
                         try {
                             store.setProxy(DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type))
-                            proxyExpanded = false
+                            if (useAfterSave) store.setDefault(DownloadRouteMode.PROXY)
+                            val nowUsingProxy = useAfterSave || settings.defaultMode == DownloadRouteMode.PROXY
+                            finishEditing()
                             error = false
-                            notice = if (settings.defaultMode == DownloadRouteMode.PROXY) "代理地址已保存"
+                            notice = if (nowUsingProxy) "已设为指定代理"
                                 else "地址已保存，选择指定代理后使用。"
                         } catch (failure: DownloadRouteException) {
                             error = true
                             notice = failure.message
                         }
-                    }) { Text("保存地址") }
+                    }) { Text(if (useAfterSave) "保存并使用" else "保存地址") }
                 }
-            } else {
-                MotionTextButton(onClick = { proxyExpanded = true; notice = null }, enabled = active,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
-                    Icon(Icons.Outlined.Edit, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-                    Spacer(Modifier.width(7.dp))
-                    Text(settings.proxy?.let(::proxyAddressLabel) ?: "设置代理地址",
-                        Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                        color = if (settings.defaultMode == DownloadRouteMode.PROXY && settings.proxy == null)
-                            colors.error else colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Icon(Icons.Outlined.ChevronRight, "编辑代理地址", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-                }
-            }
         }
         notice?.let { Text(it, style = MaterialTheme.typography.labelSmall,
             color = if (error) colors.error else colors.onSurfaceVariant) }

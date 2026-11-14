@@ -47,7 +47,6 @@ import dev.mangaflow.net.NetworkProbeResult
 import dev.mangaflow.net.diagnoseNetwork
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.ui.motion.MotionTabs
-import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionTabTreatment
@@ -99,12 +98,9 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
             }
         }
         // Adapt the existing settings disclosure: scope belongs on demand, not in every result row.
-        MotionTabContent(showScope, Modifier.fillMaxWidth(), contentKey = { it },
-            order = { if (it) 1 else 0 }, fillContent = false, soft = true) { expanded ->
-            if (expanded) Text("仅在点击后请求所选服务，比较两次接口响应的平均耗时；不代表下载速度，也不识别外部软件或验证 VPN 绕行。",
+        if (showScope) Text("仅在点击后请求所选服务，比较两次接口响应的平均耗时；不代表下载速度，也不识别外部软件或验证 VPN 绕行。",
                 Modifier.padding(bottom = 4.dp), style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant)
-        }
         MotionTabs(
             selected = target.ordinal,
             labels = listOf("拷贝", "GitHub"),
@@ -183,9 +179,7 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
                                 tint = colors.onSurfaceVariant)
                         }
                     }
-                    MotionTabContent(details == row.route.mode, Modifier.fillMaxWidth(), contentKey = { it },
-                        order = { if (it) 1 else 0 }, fillContent = false, soft = true) { expanded ->
-                        if (expanded) Column(Modifier.padding(start = 24.dp, end = 8.dp, bottom = 6.dp),
+                    if (details == row.route.mode) Column(Modifier.padding(start = 24.dp, end = 8.dp, bottom = 6.dp),
                             verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text(row.message, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                             row.route.proxy?.let { endpoint ->
@@ -194,7 +188,6 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
                                     color = colors.onSurfaceVariant)
                             }
                         }
-                    }
                 }
             }
             result.recommended?.let { recommended ->

@@ -1,71 +1,32 @@
 package dev.mangaflow.ui
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.snap
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.ChevronRight
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.RadioButtonUnchecked
-import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.SwapHoriz
-import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.ArrowDownward
-import androidx.compose.material.icons.outlined.BookmarkAdd
-import androidx.compose.material.icons.outlined.BookmarkRemove
-import androidx.compose.material.icons.outlined.Smartphone
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.key
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.account.CopyMergeChoice
 import dev.mangaflow.account.CopyShelfSyncState
-import dev.mangaflow.data.Manga
-import dev.mangaflow.ui.motion.MotionBusyIndicator
-import dev.mangaflow.ui.motion.MotionButton
-import dev.mangaflow.ui.motion.MotionDialog
-import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionTextButton
-import dev.mangaflow.ui.motion.MotionSwap
-import dev.mangaflow.ui.motion.MotionTabContent
-import dev.mangaflow.ui.motion.LocalMotionEnabled
-import dev.mangaflow.ui.motion.MangaMotion
-import dev.mangaflow.ui.motion.motionInputGate
-import androidx.compose.foundation.layout.Box
+import dev.mangaflow.account.CopySyncDifference
+import dev.mangaflow.account.CopySyncDifferenceKind
+import dev.mangaflow.ui.motion.*
 
-/** Reuse the retained Steam/network workspace: one scrolling comparison and one explicit commit. */
+/** One actual comparison, no automatic winners, and one explicit selected merge. */
 @Composable
 internal fun CopyShelfSyncSheet(
     visible: Boolean,
@@ -73,240 +34,202 @@ internal fun CopyShelfSyncSheet(
     backdrop: HazeState,
     onCheck: () -> Unit,
     onImport: () -> Unit,
-    onUpload: (Set<String>) -> Unit,
+    onApply: (Long, Map<String, CopyMergeChoice>) -> Unit,
     onDismiss: () -> Unit,
+    focusMangaId: String? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
-    val removalIds = remember(state.toRemove) { state.toRemove.map { it.id }.toSet() }
-    var selectedRemovals by remember(state.owner, removalIds) { mutableStateOf(removalIds) }
+    var choices by remember(state.owner, state.revision) {
+        mutableStateOf<Map<String, CopyMergeChoice>>(emptyMap())
+    }
+    var filter by remember(state.owner) { mutableIntStateOf(0) }
     var showScope by remember(state.owner) { mutableStateOf(false) }
-    var showIncoming by remember(state.owner) { mutableStateOf(false) }
-    var showAdditions by remember(state.owner) { mutableStateOf(false) }
-    var showRemovals by remember(state.owner) { mutableStateOf(true) }
-    val canAct = state.owner != null && state.checked && !state.busy && state.error == null
-    val canUpload = canAct && state.hasFullImport && (state.toAdd.isNotEmpty() || selectedRemovals.isNotEmpty())
+    val list = key(state.owner) { rememberLazyListState() }
+    LaunchedEffect(visible, focusMangaId) {
+        if (visible && focusMangaId != null) { filter = 2; list.scrollToItem(0) }
+    }
+    val canAct = visible && state.owner != null && state.checked && !state.busy && state.error == null
+    val favorites = state.differences.count { it.kind == CopySyncDifferenceKind.FAVORITE }
+    val progress = state.differences.count { it.kind == CopySyncDifferenceKind.PROGRESS }
+    val shown = state.differences.sortedBy { if (it.manga.id == focusMangaId) 0 else 1 }.filter {
+        filter == 0 || filter == 1 && it.kind == CopySyncDifferenceKind.FAVORITE ||
+            filter == 2 && it.kind == CopySyncDifferenceKind.PROGRESS
+    }
+    val selected = state.differences.filter { it.key in choices }
+    val actions = selected.groupingBy {
+        if (choices[it.key] == CopyMergeChoice.USE_LOCAL) it.localActionLabel else it.cloudActionLabel
+    }.eachCount().entries.joinToString(" · ") { it.key + " " + it.value }
     key(state.owner) {
-    MotionDialog(visible, onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp) {
-        BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
-            // Checking/importing may reveal a longer comparison; keep the same retained viewport.
-            val panelHeight = minOf(maxHeight, LocalMangaWindow.current.height * .88f, 440.dp)
-            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
-                role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
-                Column(Modifier.fillMaxWidth().height(panelHeight).padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
-                        Spacer(Modifier.width(10.dp))
-                        Text("拷贝收藏", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        MotionIconButton(onClick = { showScope = !showScope }, modifier = Modifier.size(44.dp),
-                            tooltip = "同步范围") {
-                            Icon(Icons.Outlined.Info, "同步范围", Modifier.size(17.dp), tint = colors.onSurfaceVariant)
-                        }
-                        CopyShelfTool(state.owner != null && state.checked && state.error == null) {
-                            MotionIconButton(onClick = onCheck, enabled = visible && !state.busy && state.owner != null && state.checked && state.error == null,
-                                modifier = Modifier.size(44.dp), tooltip = "重新检查收藏变化") {
-                                Icon(Icons.Outlined.Refresh, "重新检查收藏变化", Modifier.size(19.dp))
+        MotionDialog(visible, onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false),
+            maximumWidth = 600.dp) {
+            BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
+                val height = minOf(maxHeight, LocalMangaWindow.current.height * .88f, 580.dp)
+                LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
+                    role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
+                    Column(Modifier.fillMaxWidth().height(height).padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("拷贝差异", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                            MotionIconButton(onClick = { showScope = !showScope }, enabled = visible,
+                                modifier = Modifier.size(44.dp), tooltip = "合并范围") {
+                                Icon(Icons.Outlined.Info, "合并范围", Modifier.size(17.dp), tint = colors.onSurfaceVariant)
                             }
-                        }
-                        MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp),
-                            tooltip = if (state.busy) "收起同步窗口" else "关闭同步窗口") {
-                            Icon(Icons.Outlined.Close, "收起同步窗口", Modifier.size(20.dp))
-                        }
-                    }
-                    LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(vertical = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (showScope) copySyncItem(key = "sync-scope") {
-                            Text("只处理收藏。阅读进度在漫画详情中比较和采用；本机独有漫画、下载和每章位置都保留。",
-                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                        }
-                        if (state.busy) copySyncItem(key = "sync-busy") {
-                            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (state.busy) Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
                                 MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.6.dp)
-                                MotionSwap(when {
-                                    state.importing -> "正在导入…"
-                                    state.uploading -> "正在提交到拷贝…"
-                                    else -> "正在检查…"
-                                }) { label -> Text(label, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
+                            } else MotionIconButton(onClick = onCheck, enabled = visible && state.owner != null,
+                                modifier = Modifier.size(44.dp), tooltip = "重新检查差异") {
+                                Icon(Icons.Outlined.Refresh, "重新检查差异", Modifier.size(18.dp))
+                            }
+                            MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭差异") {
+                                Icon(Icons.Outlined.Close, "关闭差异", Modifier.size(20.dp))
                             }
                         }
-                        state.error?.let { error -> copySyncItem(key = "sync-error") {
-                            Text(error, style = MaterialTheme.typography.bodySmall, color = colors.error)
-                        } }
-                        state.message?.takeIf { it.isNotBlank() }?.let { message -> copySyncItem(key = "sync-message") {
-                            MotionTabContent(message, contentKey = { it }, order = { 0 }, fillContent = false) {
-                                Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        MotionTabs(filter, listOf("全部 " + state.differences.size, "收藏 " + favorites, "进度 " + progress),
+                            onSelect = { if (visible) filter = it }, modifier = Modifier.fillMaxWidth(),
+                            treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 40.dp,
+                            track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
+                        LazyColumn(Modifier.weight(1f).fillMaxWidth().motionInputGate(visible), state = list,
+                            verticalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                            if (showScope) item(key = "scope") {
+                                Text("左侧本机，右侧拷贝。逐项选择处理方式，再合并所选；再次点击可取消选择。阅读仅比较章节，本机各章页码保留；保留本机不会上报阅读。",
+                                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                             }
-                        } }
-                        when {
-                            state.owner == null -> copySyncItem(key = "sync-login") {
-                                Text("请先在拷贝账号页登录。", style = MaterialTheme.typography.bodyMedium)
+                            if (state.progressUnavailableCount > 0) item(key = "unknown-progress") {
+                                Text("另有 " + state.progressUnavailableCount + " 本进度尚不可比较",
+                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                             }
-                            !state.checked -> copySyncItem(key = "sync-unchecked") {
-                                Text("检查后查看收藏变化。",
-                                    style = MaterialTheme.typography.bodyMedium)
+                            if (progress > 0 && filter != 1) item(key = "progress-scope") {
+                                Text("进度按章节比较，本机页码保留。",
+                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                             }
-                            !state.hasFullImport -> copySyncItem(key = "sync-first-import") {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text("首次导入 · ${state.cloudFavorites.size} 本", style = MaterialTheme.typography.titleSmall)
-                                    Text("仅导入收藏，保留本机书架与阅读记录。",
-                                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                                    Text("完成后可主动提交本机增删。",
-                                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            if (state.busy) item(key = "busy") {
+                                Text(when {
+                                    state.importing -> "正在完整导入收藏…"
+                                    state.uploading -> "正在应用所选更改…"
+                                    else -> "正在检查差异…"
+                                }, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            }
+                            state.error?.let { error -> item(key = "error") {
+                                Text(error, style = MaterialTheme.typography.bodySmall, color = colors.error)
+                            } }
+                            state.message?.takeIf(String::isNotBlank)?.let { message -> item(key = "message") {
+                                Text(message, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            } }
+                            when {
+                                state.owner == null -> item(key = "login") { Text("请先连接拷贝账号。") }
+                                !state.checked -> item(key = "unchecked") {
+                                    Text("检查完成后显示本机与拷贝的差异。", style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant)
                                 }
-                            }
-                            else -> {
-                                if (state.cloudAdded.isNotEmpty()) {
-                                    copySyncItem(key = "sync-incoming") {
-                                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                            SyncGroupHeading(Icons.Outlined.ArrowDownward, "导入本机", state.cloudAdded.size.toString(), showIncoming,
-                                                { showIncoming = !showIncoming }, Modifier.weight(1f))
-                                            MotionTextButton(onClick = onImport, enabled = canAct) { Text("导入") }
+                                else -> {
+                                    if (!state.hasFullImport) item(key = "full-import") {
+                                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Text("先完整导入收藏，才可向拷贝提交收藏增删。原有书架与阅读记录保留。",
+                                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                            MotionTextButton(onClick = onImport, enabled = canAct) {
+                                                Icon(Icons.Outlined.ArrowDownward, null, Modifier.size(15.dp))
+                                                Spacer(Modifier.width(6.dp))
+                                                Text("完整导入收藏 · " + state.cloudFavorites.size + " 本")
+                                            }
                                         }
                                     }
-                                    if (showIncoming) items(state.cloudAdded, key = { "incoming:${it.id}" }) { manga ->
-                                        Box(Modifier.animateItem(
-                                            fadeInSpec = if (motion) tween(MangaMotion.ListEnter) else null,
-                                            placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
-                                            fadeOutSpec = if (motion) tween(MangaMotion.ListExit) else null)) { SyncBookTitle(manga) }
-                                    }
-                                }
-                                if (state.toAdd.isNotEmpty()) {
-                                    copySyncItem(key = "sync-additions") {
-                                        SyncGroupHeading(Icons.Outlined.BookmarkAdd, "加入拷贝", state.toAdd.size.toString(), showAdditions,
-                                            { showAdditions = !showAdditions })
-                                    }
-                                    if (showAdditions) items(state.toAdd, key = { "addition:${it.id}" }) { manga ->
-                                        Box(Modifier.animateItem(
-                                            fadeInSpec = if (motion) tween(MangaMotion.ListEnter) else null,
-                                            placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
-                                            fadeOutSpec = if (motion) tween(MangaMotion.ListExit) else null)) { SyncBookTitle(manga) }
-                                    }
-                                }
-                                if (state.toRemove.isNotEmpty()) {
-                                    copySyncItem(key = "sync-removals") {
-                                        SyncGroupHeading(Icons.Outlined.BookmarkRemove, "移出拷贝", "${selectedRemovals.size}/${state.toRemove.size}", showRemovals,
-                                            { showRemovals = !showRemovals })
-                                    }
-                                    if (showRemovals) items(state.toRemove, key = { "removal:${it.id}" }) { manga ->
-                                        val selected = manga.id in selectedRemovals
-                                        MotionTextButton(onClick = {
-                                            if (visible && showRemovals && canAct)
-                                                selectedRemovals = if (selected) selectedRemovals - manga.id else selectedRemovals + manga.id
-                                        }, enabled = visible && showRemovals && canAct, modifier = Modifier.fillMaxWidth()
-                                            .animateItem(
+                                    items(shown, key = { it.key }, contentType = { "copy-difference" }) { difference ->
+                                        CopyDifferenceRow(difference, choices[difference.key], canAct,
+                                            Modifier.animateItem(
                                                 fadeInSpec = if (motion) tween(MangaMotion.ListEnter) else null,
                                                 placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
-                                                fadeOutSpec = if (motion) tween(MangaMotion.ListExit) else null)
-                                            .motionInputGate(visible && showRemovals)
-                                            .semantics { this.selected = selected },
-                                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
-                                            MotionSwap(selected, Modifier.size(17.dp)) { checked ->
-                                                Icon(if (checked) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                                                    if (checked) "取消移出${manga.title}" else "选择移出${manga.title}",
-                                                    Modifier.size(17.dp), tint = if (checked) colors.error else colors.onSurfaceVariant)
-                                            }
-                                            Text(manga.title, Modifier.weight(1f).padding(start = 10.dp),
-                                                style = MaterialTheme.typography.bodyMedium, color = colors.onSurface,
-                                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                                fadeOutSpec = if (motion) tween(MangaMotion.ListExit) else null),
+                                            showDetail = state.hasFullImport && (!difference.canUseLocal || !difference.canUseCopy)) { choice ->
+                                            if (canAct) choices = if (choices[difference.key] == choice)
+                                                choices - difference.key else choices + (difference.key to choice)
                                         }
                                     }
-                                }
-                                if (state.localOnlyCount > 0) copySyncItem(key = "sync-local-only") {
-                                    Row(Modifier.fillMaxWidth().semantics {
-                                        contentDescription = "${state.localOnlyCount} 本仅保留在本机，不参与拷贝同步"
-                                    }, verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        Icon(Icons.Outlined.Smartphone, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
-                                        Text("仅本机 ${state.localOnlyCount}", style = MaterialTheme.typography.bodySmall,
-                                            color = colors.onSurfaceVariant)
+                                    if (shown.isEmpty() && state.error == null && !state.busy) item(key = "empty") {
+                                        Text(if (state.differences.isEmpty())
+                                            if (state.progressUnavailableCount > 0) "已知项目暂无待处理差异" else "暂无待处理差异"
+                                            else "这一类暂无差异",
+                                            style = MaterialTheme.typography.bodyMedium)
                                     }
-                                }
-                                if (state.cloudAdded.isEmpty() && state.toAdd.isEmpty() && state.toRemove.isEmpty() && state.error == null) {
-                                    copySyncItem(key = "sync-no-changes") {
-                                        Text("暂无待同步更改", style = MaterialTheme.typography.bodyMedium)
+                                    if (state.localOnlyCount > 0) item(key = "local-only") {
+                                        Text("仅本机 " + state.localOnlyCount + " 本",
+                                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                                     }
                                 }
                             }
                         }
-                    }
-                    Column(Modifier.fillMaxWidth()) {
-                    CopyShelfValue((state.toAdd.size to selectedRemovals.size).takeIf { canUpload }) { (add, remove) ->
-                        Text("加入 $add · 移出 $remove", Modifier.padding(bottom = 6.dp), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    }
-                    val action = when {
-                        state.owner == null -> CopySyncAction.CLOSE
-                        !state.checked || state.error != null -> CopySyncAction.CHECK
-                        !state.hasFullImport -> CopySyncAction.FULL_IMPORT
-                        state.toAdd.isNotEmpty() || state.toRemove.isNotEmpty() -> CopySyncAction.UPLOAD
-                        state.cloudAdded.isNotEmpty() -> CopySyncAction.IMPORT
-                        else -> CopySyncAction.CLOSE
-                    }
-                    MotionTabContent(action, contentKey = { it }, order = { it.ordinal }, fillContent = false, soft = true) { target ->
-                        when (target) {
-                            CopySyncAction.CLOSE -> MotionTextButton(onClick = onDismiss, enabled = visible && !state.busy,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("完成") }
-                            CopySyncAction.CHECK -> MotionButton(onClick = onCheck, enabled = visible && !state.busy,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                MotionSwap(state.error != null) { retry -> Text(if (retry) "重新检查" else "检查拷贝书架") }
-                            }
-                            CopySyncAction.FULL_IMPORT -> MotionButton(onClick = onImport, enabled = visible && canAct,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("完整导入到本机") }
-                            CopySyncAction.UPLOAD -> MotionButton(
-                                onClick = { if (visible && canUpload) onUpload(selectedRemovals.intersect(removalIds)) }, enabled = visible && canUpload,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("同步到拷贝") }
-                            CopySyncAction.IMPORT -> MotionButton(onClick = onImport, enabled = visible && canAct,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                MotionSwap(state.cloudAdded.size) { count -> Text("导入 $count 本到本机") }
-                            }
+                        if (selected.isNotEmpty()) Text(actions, Modifier.fillMaxWidth(),
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                            maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        MotionButton(onClick = {
+                            if (canAct && selected.isNotEmpty()) onApply(state.revision, choices.toMap())
+                        }, enabled = canAct && selected.isNotEmpty(),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                            Text(if (selected.isEmpty()) "选择合并方式" else "合并所选 " + selected.size + " 项")
                         }
-                    }
                     }
                 }
             }
         }
     }
-    }
 }
 
 @Composable
-private fun SyncGroupHeading(icon: ImageVector, label: String, count: String, expanded: Boolean,
-    onToggle: () -> Unit, modifier: Modifier = Modifier) {
-    val motion = LocalMotionEnabled.current
-    val rotation by animateFloatAsState(if (expanded) 90f else 0f,
-        if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(), label = "copy-sync-group")
-    MotionTextButton(onClick = onToggle, modifier = modifier.fillMaxWidth().heightIn(min = 44.dp),
-        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
-        Icon(icon, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(8.dp))
-        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        MotionSwap(count, Modifier.padding(horizontal = 6.dp)) { value ->
-            Text(value, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun CopyDifferenceRow(
+    difference: CopySyncDifference,
+    choice: CopyMergeChoice?,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    showDetail: Boolean = true,
+    onChoose: (CopyMergeChoice) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Icon(if (difference.kind == CopySyncDifferenceKind.FAVORITE) Icons.Outlined.BookmarkBorder
+                else Icons.Outlined.AutoStories, if (difference.kind == CopySyncDifferenceKind.FAVORITE) "收藏差异" else "阅读进度差异",
+                Modifier.size(15.dp), tint = colors.onSurfaceVariant)
+            Text(difference.manga.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
-        Icon(Icons.Outlined.ChevronRight, if (expanded) "收起书目" else "查看书目",
-            Modifier.size(18.dp).graphicsLayer { rotationZ = rotation },
-            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            CopyDifferenceValue("本机", difference.localValue, Modifier.weight(1f))
+            CopyDifferenceValue("拷贝", difference.cloudValue, Modifier.weight(1f))
+        }
+        difference.detail?.takeIf { showDetail && it.isNotBlank() }?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            CopyMergeButton(difference.localActionLabel, choice == CopyMergeChoice.USE_LOCAL,
+                enabled && difference.canUseLocal, Modifier.weight(1f)) { onChoose(CopyMergeChoice.USE_LOCAL) }
+            CopyMergeButton(difference.cloudActionLabel, choice == CopyMergeChoice.USE_COPY,
+                enabled && difference.canUseCopy, Modifier.weight(1f)) { onChoose(CopyMergeChoice.USE_COPY) }
+        }
     }
 }
 
 @Composable
-private fun SyncBookTitle(manga: Manga) {
-    Text(manga.title, Modifier.fillMaxWidth().padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
-        style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+private fun CopyDifferenceValue(label: String, value: String, modifier: Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(value, style = MaterialTheme.typography.bodySmall)
+    }
 }
 
-private enum class CopySyncAction { CHECK, FULL_IMPORT, IMPORT, UPLOAD, CLOSE }
-
-/** Same stable-ID insertion/removal/placement used by the production local library. */
-private fun LazyListScope.copySyncItem(key: String, content: @Composable () -> Unit) {
-    item(key = key) {
-        val motion = LocalMotionEnabled.current
-        Box(Modifier.fillMaxWidth().animateItem(
-            fadeInSpec = if (motion) tween(MangaMotion.ListEnter) else null,
-            placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
-            fadeOutSpec = if (motion) tween(MangaMotion.ListExit) else null)) { content() }
+@Composable
+private fun CopyMergeButton(label: String, selected: Boolean, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    MotionTextButton(onClick = onClick, enabled = enabled,
+        modifier = modifier.heightIn(min = 44.dp).semantics { this.selected = selected },
+        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)) {
+        Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+            if (selected) Icon(Icons.Outlined.Check, "已选择", Modifier.size(15.dp), tint = colors.primary)
+        }
+        Spacer(Modifier.width(4.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium,
+            color = if (!enabled) colors.onSurfaceVariant.copy(alpha = .4f)
+                else if (selected) colors.primary else colors.onSurfaceVariant,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }

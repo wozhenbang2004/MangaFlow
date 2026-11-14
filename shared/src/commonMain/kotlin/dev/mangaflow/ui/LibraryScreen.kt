@@ -114,6 +114,7 @@ import dev.mangaflow.account.CopyShelfSyncState
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.storage.SavedResumeTarget
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.PageCollection
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -152,6 +153,7 @@ fun LibraryScreen(
     copySyncState: CopyShelfSyncState? = null,
     onCopySync: (() -> Unit)? = null,
     onImportCopy: (() -> Unit)? = null,
+    preferredResumeTargets: Map<String, SavedResumeTarget> = emptyMap(),
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -216,7 +218,7 @@ fun LibraryScreen(
     val visibleFavorites = remember(scopedFavorites, pendingFavorites) { scopedFavorites.filterNot { it.id in pendingFavorites } }
     val visibleHistory = remember(scopedHistory, pendingHistory) { scopedHistory.filterNot { it.manga.id in pendingHistory } }
     val copyNotice = copySyncState?.takeIf {
-        it.owner != null && it.checked && it.error == null && it.cloudAdded.isNotEmpty()
+        it.owner != null && it.checked && it.error == null && it.differences.isNotEmpty()
     }
     val importCopy = onImportCopy ?: onCopySync
     fun removeFavoriteWithUndo(manga: Manga) {
@@ -291,6 +293,9 @@ fun LibraryScreen(
                         contentPadding = PaddingValues(start = historyInset, end = historyInset, top = headerPadding + 4.dp, bottom = 24.dp + bottomInset),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
+                        if (copyNotice != null && importCopy != null) item(key = "copy-differences") {
+                            CopyShelfImportHint(copyNotice, active, importCopy)
+                        }
                         if (visibleHistory.isEmpty()) item(key = "empty-history") {
                             EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
                         }
@@ -353,13 +358,15 @@ fun LibraryScreen(
                             }) { EmptyBookshelf(onDiscover) }
                             gridItems(visibleFavorites, key = Manga::id, contentType = { "shelf-book" }) { manga ->
                                 val saved = progressById[manga.id]
+                                val preferred = preferredResumeTargets[manga.id]?.takeIf { it.mangaId == manga.id }
+                                val hasContinuation = preferred != null || saved != null
                                 val dragged = draggedFavorite?.id == manga.id
                                 val interaction = remember(manga.id) { MutableInteractionSource() }
                                 val hovered by interaction.collectIsHoveredAsState()
                                 var cardFocused by remember(manga.id) { mutableStateOf(false) }
                                 var bookMenuOpen by remember(manga.id) { mutableStateOf(false) }
                                 val bookActions = listOf(
-                                    DesktopMenuAction(if (saved == null) "开始阅读" else "继续阅读") { onOpen(manga) },
+                                    DesktopMenuAction(if (hasContinuation) "继续阅读" else "开始阅读") { onOpen(manga) },
                                     DesktopMenuAction("详情与目录") { onCancelOpen(); onDetails(manga) },
                                     DesktopMenuAction("章节记录") { onCancelOpen(); chapterHistoryManga = manga },
                                     DesktopMenuAction("移出书架") { removeFavoriteWithUndo(manga) })
@@ -375,6 +382,7 @@ fun LibraryScreen(
                                         label = "删除收藏", enabled = !dragged && !desktop) {
                                         BookshelfBook(
                                             manga, repository, saved,
+                                            resumeTarget = preferred,
                                             opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
                                             onOpen = { onOpen(manga) },
                                             dragging = dragged,
@@ -417,7 +425,7 @@ fun LibraryScreen(
                                         Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
                                             .semantics(mergeDescendants = true) { contentDescription = manga.title }
                                             .combinedClickable(interactionSource = interaction, indication = null,
-                                                onClickLabel = if (saved == null) "开始阅读" else "继续阅读",
+                                                onClickLabel = if (hasContinuation) "继续阅读" else "开始阅读",
                                                 onLongClickLabel = "详情与目录",
                                                 onLongClick = { onCancelOpen(); managedId = manga.id },
                                                 onClick = { onOpen(manga) })
@@ -426,7 +434,8 @@ fun LibraryScreen(
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.Medium,
                                                 maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                            val progressText = saved?.let {
+                                            // An adopted cloud chapter has no observed local page cursor.
+                                            val progressText = preferred?.chapterTitle?.ifBlank { "继续阅读" } ?: saved?.let {
                                                 it.chapterTitle.ifBlank { "继续阅读" } +
                                                     if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
                                             } ?: "未读"
@@ -468,8 +477,8 @@ fun LibraryScreen(
                     treatment = MotionTabTreatment.Soft, controlHeight = 36.dp)
                 if (!stackedTools) Spacer(Modifier.weight(1f))
                 if (onCopySync != null) MotionIconButton(onClick = onCopySync, enabled = active,
-                    modifier = Modifier.size(36.dp), tooltip = "拷贝收藏同步") {
-                    Icon(Icons.Outlined.Sync, "拷贝收藏同步", Modifier.size(19.dp))
+                    modifier = Modifier.size(36.dp), tooltip = "查看拷贝差异") {
+                    Icon(Icons.Outlined.Sync, "查看拷贝差异", Modifier.size(19.dp))
                 }
                 MotionIconButton(onClick = { showCollections = true }, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Outlined.Collections, "画面收藏", Modifier.size(19.dp))
@@ -522,7 +531,7 @@ fun LibraryScreen(
                                     libraryActionsOpen = false
                                 }
                                 if (onCopySync != null) LibraryToolAction(Icons.Outlined.Sync, "拷贝同步",
-                                    copySyncState?.cloudAdded?.size?.takeIf { it > 0 }?.toString()) {
+                                    copySyncState?.differences?.size?.takeIf { it > 0 }?.toString()) {
                                     pendingLibraryTool = LibraryToolDestination.COPY_SYNC
                                     libraryActionsOpen = false
                                 }
@@ -571,18 +580,18 @@ fun LibraryScreen(
     }
 }
 
-/** One additive, factual notice belongs to the collection rather than another account feed. */
+/** A read-only difference notice opens the comparison; it never starts an import. */
 @Composable
 private fun CopyShelfImportHint(state: CopyShelfSyncState, active: Boolean, onImport: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("拷贝新增 ${state.cloudAdded.size} 本", Modifier.weight(1f),
+        Text("拷贝有 ${state.differences.size} 项差异", Modifier.weight(1f),
             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
             maxLines = 2, overflow = TextOverflow.Ellipsis)
         if (state.importing) dev.mangaflow.ui.motion.MotionBusyIndicator(Modifier.padding(horizontal = 14.dp).size(17.dp),
             strokeWidth = 1.6.dp)
-        else TextButton(onClick = onImport, enabled = active && !state.busy) { Text("导入") }
+        else TextButton(onClick = onImport, enabled = active && !state.busy) { Text("查看") }
     }
 }
 

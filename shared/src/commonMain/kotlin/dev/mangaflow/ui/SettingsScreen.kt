@@ -203,6 +203,7 @@ fun SettingsScreen(
     var expandedSetting by rememberSaveable { mutableStateOf<String?>(null) }
     var showBodySources by remember { mutableStateOf(false) }
     var showNetworkDownloads by remember { mutableStateOf(false) }
+    var showExperience by remember { mutableStateOf(false) }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
 
     val backupWriter = rememberTextDocumentSaver { result ->
@@ -488,10 +489,8 @@ fun SettingsScreen(
                 RetainedSettingsCategory(!desktop || settingsCategory == 3) {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SettingsSection("应用", sourceBackdrop) {
-                        SettingsDisclosure("体验策略", experienceModeLabel(experienceBudget.mode), Icons.Outlined.Tune,
-                            expanded = expandedSetting == "experience", onToggle = { toggleSetting("experience") }) {
-                            ExperienceSettings(active = expandedSetting == "experience" && (!desktop || settingsCategory == 3))
-                        }
+                        SettingsLinkRow("体验策略", experienceModeLabel(experienceBudget.mode), Icons.Outlined.Tune,
+                            inlineDetail = true) { showExperience = true }
                         SettingsLinkRow("网络与下载", downloadRouteLabel(routes.defaultMode), Icons.Outlined.SwapVert,
                             inlineDetail = true) { showNetworkDownloads = true }
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
@@ -628,6 +627,7 @@ fun SettingsScreen(
     }
 
     NetworkDownloadDialog(showNetworkDownloads, sourceBackdrop, onDismiss = { showNetworkDownloads = false })
+    ExperienceSettingsDialog(showExperience, sourceBackdrop, onDismiss = { showExperience = false })
 
     BackupRestoreDialog(
         pending = pendingRestore,

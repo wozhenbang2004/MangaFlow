@@ -34,6 +34,9 @@ import dev.mangaflow.net.Request
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.platform.ConcurrentMap as ConcurrentHashMap
 
+/** Complete read-only account evidence; absent chapter data is not an unread marker. */
+data class CopyAccountSyncSnapshot(val favorites: List<Manga>, val progress: Map<String, CloudHistoryEntry>)
+
 /** Relay's owner-only routes. Public catalogs, pages and downloads never use this client. */
 class CopyAccountRepository(context: Context) {
     private val store = AccountTokenStore(context)
@@ -194,7 +197,7 @@ class CopyAccountRepository(context: Context) {
                 val offset = page * 18
                 val data = accountObject(lease, apiUrl("member/collect/comics", "limit" to "18", "offset" to "$offset",
                     "free_type" to "1", "ordering" to ordering), "个人收藏", maxChars = 1024 * 1024)
-                val rows = pageRows(data, offset, 18, "个人收藏")
+                val rows = pageRows(data, offset, 18, "个人收藏", strict)
                 val items = rows.items.mapNotNull { row ->
                     row.optJSONObject("comic")?.let(::parseManga)?.let { manga ->
                         FavoriteRow(manga, shelfMetadata(row))
@@ -211,18 +214,20 @@ class CopyAccountRepository(context: Context) {
     }
 
     /** Full, stable membership only; a partially loaded UI feed never authorizes deletions. */
-    suspend fun completeFavorites(): List<Manga> {
+    suspend fun completeFavorites(): List<Manga> = completeFavoriteRows().map(FavoriteRow::manga)
+
+    private suspend fun completeFavoriteRows(): List<FavoriteRow> {
         val expected = sessionVersion
-        suspend fun scan(): List<Manga> {
-            val result = mutableListOf<Manga>()
+        suspend fun scan(): List<FavoriteRow> {
+            val result = mutableListOf<FavoriteRow>()
             val seen = mutableSetOf<String>()
             for (page in 0..1200) {
                 ensureVersion(expected)
-                val next = favoritePage(page, strict = true)
+                val next = favoriteRows(page, strict = true, ordering = "-datetime_updated")
                 ensureVersion(expected)
-                for (manga in next.items) {
-                    if (!seen.add(manga.id)) throw SourceException("拷贝收藏在读取期间发生变化，请重新检查。")
-                    result += manga
+                for (row in next.items) {
+                    if (!seen.add(row.manga.id)) throw SourceException("拷贝收藏在读取期间发生变化，请重新检查。")
+                    result += row
                 }
                 if (!next.hasMore) return result
             }
@@ -230,11 +235,55 @@ class CopyAccountRepository(context: Context) {
         }
         val first = scan()
         val second = scan()
-        if (first.map(Manga::id) != second.map(Manga::id)) {
+        if (first.map { it.manga.id } != second.map { it.manga.id }) {
             throw SourceException("拷贝收藏在读取期间发生变化，请重新检查后同步。")
         }
         ensureVersion(expected)
         return second
+    }
+
+    /** Reuse collection metadata, then read account history in bounded complete pages. */
+    suspend fun completeSyncSnapshot(): CopyAccountSyncSnapshot {
+        val expected = sessionVersion
+        val collected = completeFavoriteRows()
+        ensureVersion(expected)
+        suspend fun scanHistory(): List<CloudHistoryEntry> {
+            val result = mutableListOf<CloudHistoryEntry>()
+            val seen = mutableSetOf<String>()
+            for (page in 0..500) {
+                ensureVersion(expected)
+                val next = historyPage(page, strict = true)
+                ensureVersion(expected)
+                for (entry in next.items) {
+                    if (!seen.add(entry.manga.id)) throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
+                    result += entry
+                }
+                if (!next.hasMore) return result
+            }
+            throw SourceException("拷贝阅读记录尚未完整读取，请稍后重试。")
+        }
+        val first = scanHistory()
+        val history = scanHistory()
+        if (first.map { it.manga.id to it.chapterId } != history.map { it.manga.id to it.chapterId }) {
+            throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
+        }
+        val progress = mutableMapOf<String, CloudHistoryEntry>()
+        collected.forEach { row ->
+            val chapter = row.metadata.chapterId.takeIf { UUID_PATTERN.matches(it) && it.any { c -> c != '0' && c != '-' } }
+            if (chapter != null) progress[row.manga.id] = CloudHistoryEntry(row.manga, chapter, row.metadata.chapterTitle)
+        }
+        history.forEach { entry ->
+            if (UUID_PATTERN.matches(entry.chapterId) && entry.chapterId.any { it != '0' && it != '-' }) {
+                val previous = progress[entry.manga.id]
+                if (previous != null && previous.chapterId != entry.chapterId) {
+                    throw SourceException("拷贝进度在检查期间发生变化，请重新检查后合并。")
+                }
+                progress[entry.manga.id] = entry.copy(manga = previous?.manga ?: entry.manga,
+                    chapterTitle = entry.chapterTitle.ifBlank { previous?.chapterTitle.orEmpty() })
+            }
+        }
+        ensureVersion(expected)
+        return CopyAccountSyncSnapshot(collected.map(FavoriteRow::manga), progress)
     }
 
     /**
@@ -322,7 +371,9 @@ class CopyAccountRepository(context: Context) {
         }
     }
 
-    suspend fun history(page: Int): CloudPage<CloudHistoryEntry> {
+    suspend fun history(page: Int): CloudPage<CloudHistoryEntry> = historyPage(page, strict = false)
+
+    private suspend fun historyPage(page: Int, strict: Boolean): CloudPage<CloudHistoryEntry> {
         val lease = requireSession()
         return withContext(Dispatchers.IO) {
             requirePage(page, 500)
@@ -330,13 +381,16 @@ class CopyAccountRepository(context: Context) {
                 val offset = page * 20
                 val data = accountObject(lease, apiUrl("member/browse/comics", "free_type" to "1", "offset" to "$offset",
                     "limit" to "20", "_update" to "true", "platform" to "3"), "云端阅读记录", maxChars = 512 * 1024)
-                val rows = pageRows(data, offset, 20, "云端阅读记录")
+                val rows = pageRows(data, offset, 20, "云端阅读记录", strict)
                 val items = rows.items.mapNotNull { row ->
                     val manga = row.optJSONObject("comic")?.let(::parseManga) ?: return@mapNotNull null
                     val chapterId = row.text("last_chapter_id").takeIf { SEGMENT_PATTERN.matches(it) }.orEmpty()
                     CloudHistoryEntry(manga, chapterId, row.text("last_chapter_name").take(120))
                 }.distinctBy { it.manga.id }
                 if (rows.items.isNotEmpty() && items.isEmpty()) throw SourceException("云端阅读记录中没有可识别的作品资料。")
+                if (strict && (rows.items.size != data.optJSONArray("list")?.length() || items.size != rows.items.size)) {
+                    throw SourceException("拷贝阅读记录中有无法识别或重复的作品，请重新检查。")
+                }
                 ensureLease(lease)
                 CloudPage(items, rows.hasMore)
             }
@@ -531,12 +585,15 @@ class CopyAccountRepository(context: Context) {
         return QUERY_PATH.matches(path) || CHAPTER_PATH.matches(path)
     }
 
-    private fun pageRows(data: JSONObject, offset: Int, limit: Int, operation: String): AccountRows {
+    private fun pageRows(data: JSONObject, offset: Int, limit: Int, operation: String, strict: Boolean = false): AccountRows {
         val array = data.optJSONArray("list") ?: throw SourceException("$operation 没有返回有效列表。")
         val total = data.integer("total") ?: throw SourceException("$operation 缺少总数。")
         if (total !in 0..20_000 || array.length() > limit ||
             (array.length() > 0 && offset + array.length() > total) || (array.length() == 0 && offset < total)) {
             throw SourceException("$operation 分页数据不完整，请刷新后重试。")
+        }
+        if (strict && array.length() != (total - offset).coerceIn(0, limit)) {
+            throw SourceException("$operation 返回了截断分页，尚不能建立完整同步状态。")
         }
         val rows = (0 until array.length()).mapNotNull(array::optJSONObject)
         if (array.length() > 0 && rows.isEmpty()) throw SourceException("$operation 返回的记录无法识别。")

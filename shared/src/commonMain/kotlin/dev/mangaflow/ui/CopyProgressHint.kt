@@ -82,7 +82,7 @@ internal fun CopyProgressHint(
                 state.canAdopt && onAdopt != null -> ({
                     MotionTextButton(onClick = onAdopt, enabled = active,
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)) {
-                        Text("采用拷贝进度", style = MaterialTheme.typography.labelSmall)
+                        Text("比较拷贝进度", style = MaterialTheme.typography.labelSmall)
                     }
                 })
                 else -> null

@@ -2,7 +2,9 @@ package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -10,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -24,35 +27,78 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.currentStateAsState
+import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.experience.*
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.ui.motion.MotionSlider
+import dev.mangaflow.ui.motion.MotionDialog
+import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.motionInputGate
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
+/** A compact settings entry opens one retained workspace, rather than expanding the page. */
+@Composable
+internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, onDismiss: () -> Unit) {
+    val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    val active = visible && lifecycle.isAtLeast(Lifecycle.State.RESUMED)
+    var expanded by rememberSaveable { mutableStateOf<String?>(null) }
+    val scroll = rememberScrollState()
+    val colors = MaterialTheme.colorScheme
+    MotionDialog(visible, onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp) {
+        val maximumHeight = minOf(LocalMangaWindow.current.height * .9f, 640.dp)
+        val panel: @Composable () -> Unit = {
+            Column(Modifier.fillMaxWidth().heightIn(max = maximumHeight)
+                .padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("体验策略", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭体验策略") {
+                        Icon(Icons.Outlined.Close, "关闭体验策略", Modifier.size(20.dp))
+                    }
+                }
+                Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(scroll)
+                    .padding(top = 6.dp, bottom = 8.dp)) {
+                    ExperienceSettings(active, expanded) { expanded = it }
+                }
+            }
+        }
+        Box(Modifier.padding(horizontal = 12.dp)) {
+            if (backdrop != null) LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
+                role = GlassSurfaceRole.PANEL, elevation = 0.dp) { panel() }
+            else Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
+                color = colors.surfaceContainerLow, tonalElevation = 0.dp) { panel() }
+        }
+    }
+}
+
 /** Existing Ovio selection, retained disclosure, shared slider and press-stretch switch. */
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-internal fun ExperienceSettings(active: Boolean) {
+private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedChange: (String?) -> Unit) {
     val context = LocalMangaContext.current
     val store = remember(context) { ExperiencePolicyStore.get(context) }
     val budget by store.state.collectAsStateWithLifecycle()
     val custom by store.overrides.collectAsStateWithLifecycle()
     val usage by store.usage.collectAsStateWithLifecycle()
-    var expanded by rememberSaveable { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     val colors = MaterialTheme.colorScheme
     fun change(value: ExperienceOverrides) {
         try { store.setOverrides(value); notice = null }
         catch (_: Exception) { notice = "设置暂未保存，请重试" }
     }
-    fun toggle(key: String) { if (active) expanded = if (expanded == key) null else key }
+    fun toggle(key: String) { if (active) onExpandedChange(if (expanded == key) null else key) }
     LaunchedEffect(active, expanded) {
         if (!active) return@LaunchedEffect
         store.refreshResources()

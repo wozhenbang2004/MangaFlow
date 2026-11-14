@@ -2585,6 +2585,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 if (request != copyProgressRequest || !isCurrentAccount(version) || _detail.value?.manga?.id != manga.id)
                     return@launch
                 _copyProgress.value = cloud?.takeIf { it.chapterId.isNotBlank() }?.let {
+                    copyShelfSync.observeCloudProgress(manga, it.chapterId, it.chapterTitle)
                     CopyProgressHintState(owner, manga.id, cloudChapterId = it.chapterId, cloudChapterTitle = it.chapterTitle)
                 }
                 reconcileCopyProgress()

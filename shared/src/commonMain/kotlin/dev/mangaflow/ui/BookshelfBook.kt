@@ -54,6 +54,7 @@ import androidx.compose.ui.zIndex
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.storage.SavedResumeTarget
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.MangaMotion
@@ -76,6 +77,7 @@ internal fun BookshelfBook(
     onDragEnd: (Offset) -> Unit,
     onDragCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    resumeTarget: SavedResumeTarget? = null,
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -123,7 +125,9 @@ internal fun BookshelfBook(
         label = "collection-cover-press",
     )
     val colors = MaterialTheme.colorScheme
-    val readingState = progress?.let {
+    val readingState = resumeTarget?.let {
+        "已采用拷贝进度，继续至 ${it.chapterTitle.ifBlank { "已保存章节" }}"
+    } ?: progress?.let {
         "读至 ${it.chapterTitle.ifBlank { "已保存章节" }}，第 ${it.pageIndex + 1} 页" +
             if (it.pageCount > 0) "，共 ${it.pageCount} 页" else ""
     } ?: "尚未阅读"
@@ -177,7 +181,7 @@ internal fun BookshelfBook(
             stateDescription = if (opening) "正在打开，$readingState" else readingState
         }
         .clickable(interactionSource = interaction, indication = null, enabled = !dragging,
-            role = Role.Button, onClickLabel = if (progress == null) "开始阅读" else "继续阅读",
+            role = Role.Button, onClickLabel = if (resumeTarget != null || progress != null) "继续阅读" else "开始阅读",
             onClick = onOpen)) {
         MangaCover(manga, repository, Modifier.fillMaxSize().mangaCoverCard(),
             scale = ContentScale.Crop)

@@ -1,5 +1,9 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,6 +19,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
@@ -43,7 +50,7 @@ internal enum class NetworkDownloadScene(val label: String) {
     CONNECTION("连接"), CATEGORIES("按类型"), CHECK("检查"),
 }
 
-/** Retained dialog/scenes, with content-sized height inside a bounded scrolling viewport. */
+/** Retained scenes share one content-size owner inside the bounded scrolling viewport. */
 @Composable
 internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDismiss: () -> Unit) {
     val context = LocalMangaContext.current
@@ -111,8 +118,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                         onSelect = { scene = NetworkDownloadScene.entries[it] }, modifier = Modifier.fillMaxWidth(),
                         treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 40.dp,
                         track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
-                    MotionTabContent(scene, Modifier.weight(1f, fill = false).fillMaxWidth(),
-                        contentKey = { it }, order = { it.ordinal }, fillContent = false, soft = true) { shown ->
+                    NetworkSceneContent(scene, Modifier.weight(1f, fill = false).fillMaxWidth()) { shown ->
                         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
                             .padding(top = 6.dp, bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                             if (shown == NetworkDownloadScene.CONNECTION) NetworkEnvironmentSummary(
@@ -131,10 +137,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                                 environment = environment, suggestedProxy = suggestedProxy,
                                 suggestionRevision = suggestionRevision,
                                 onSuggestionConsumed = { suggestedProxy = null })
-                            MotionTabContent(showInfo, Modifier.fillMaxWidth(), contentKey = { it },
-                                order = { if (it) 1 else 0 }, fillContent = false) { expanded ->
-                                if (expanded) NetworkConnectionHelp()
-                            }
+                            if (showInfo) NetworkConnectionHelp()
                         }
                     }
                     Text("设置用于新建与手动重试的下载", Modifier.padding(top = 3.dp, bottom = 4.dp),
@@ -144,6 +147,43 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
             if (backdrop != null) LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
                 role = GlassSurfaceRole.PANEL, elevation = 0.dp) { panel() }
             else Surface(shape = RoundedCornerShape(22.dp), color = colors.surfaceContainerLow, tonalElevation = 0.dp) { panel() }
+        }
+    }
+}
+
+/** Measure real destinations before switching; only this container animates pane height. */
+@Composable
+private fun NetworkSceneContent(
+    selected: NetworkDownloadScene,
+    modifier: Modifier = Modifier,
+    content: @Composable (NetworkDownloadScene) -> Unit,
+) {
+    val motion = LocalMotionEnabled.current
+    Layout(modifier = modifier.animateContentSize(
+        if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap()
+    ).clipToBounds(), content = {
+        NetworkDownloadScene.entries.forEach { scene ->
+            key(scene) {
+                val alpha by animateFloatAsState(if (scene == selected) 1f else 0f,
+                    if (motion) tween(MangaMotion.Quick) else snap(), label = "network-pane-alpha")
+                val offset by animateFloatAsState(
+                    if (scene == selected) 0f else if (scene.ordinal < selected.ordinal) -10f else 10f,
+                    if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
+                    label = "network-pane-offset")
+                Box(Modifier.fillMaxWidth().motionInputGate(scene == selected).graphicsLayer {
+                    this.alpha = alpha
+                    translationX = offset.dp.toPx()
+                }) { content(scene) }
+            }
+        }
+    }) { measurables, constraints ->
+        val panes = measurables.map { it.measure(constraints.copy(minHeight = 0)) }
+        val target = panes[selected.ordinal]
+        layout(target.width, target.height) {
+            panes.forEachIndexed { index, pane ->
+                if (index != selected.ordinal) pane.placeRelative(0, 0)
+            }
+            target.placeRelative(0, 0)
         }
     }
 }
