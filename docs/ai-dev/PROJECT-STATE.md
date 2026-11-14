@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## CI198 compile repair · 2026-11-14
+
+User feedback: “失败了？”. Android198/run43495905439/job132128823463, desktop job132129047085 and iOS job132129047732 all report the same common-source failure at DetailCatalog.kt:512: unresolved delay. Removing automatic volume-cover retries also removed that import, while the chapter-group selection's existing short closing delay still uses it. Restore kotlinx.coroutines.delay only; keep the full35-file upgrade, source sizes without“样本”, fixed filter selection/exit and every unrelated change.
+
+All three decoded job logs were read. This is a source-import repair, not a runtime diagnosis or a claim that the next build has passed. Submit code and this existing record once on latest main with expected-head protection, confirm normal Android/native CI identities and keep main stable. No tests/local builds/product probes or extra review gate.
+
 ## Whole-system cache / performance / UIUX upgrade · 2026-11-14
 
 Active raw request and seven-domain contract are DESIGN.md SYSTEM-UPGRADE-123; SIZE-LABEL-124 records the follow-up“样本二字没必要吧。然后继续” with1000121658. The full task is retained. Six isolated implementation agents supplied31 source files; root adds shared state/metrics/navigation work and integrates two small grafts. Expected finished scope is35 source files plus these existing records, with no new UI/report framework.
