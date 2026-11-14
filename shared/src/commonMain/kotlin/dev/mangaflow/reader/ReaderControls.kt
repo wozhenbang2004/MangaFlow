@@ -2,6 +2,11 @@ package dev.mangaflow.reader
 
 import dev.mangaflow.ui.mangaNumberText
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -12,6 +17,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -30,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,6 +53,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -54,6 +63,7 @@ import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.glass.softSurfaceShadow
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MotionSwitchThumb
 import kotlin.math.roundToInt
 
@@ -78,10 +88,44 @@ internal fun ReaderSurface(
 internal fun ReaderDialogSurface(
     modifier: Modifier = Modifier,
     backdrop: HazeState,
+    dialogWindow: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    ConfigureReaderDialogWindow(.12f)
+    if (dialogWindow) ConfigureReaderDialogWindow(.12f)
     LiquidGlassSurface(backdrop, modifier, role = GlassSurfaceRole.PANEL, softCard = true) { content() }
+}
+
+/** Icon actions can return to the page without stealing focus from a settings editor. */
+internal val LocalReaderActionFinished = staticCompositionLocalOf<() -> Unit> { {} }
+
+/** Keep the actual page tree in one slot while an optional desktop inspector opens beside it. */
+@Composable
+internal fun ReaderWorkspace(
+    panelVisible: Boolean,
+    panelWidth: Dp,
+    panel: @Composable () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val motion = LocalMotionEnabled.current
+    Row(Modifier.fillMaxSize()) {
+        Box(Modifier.weight(1f).fillMaxHeight()) { content() }
+        AnimatedVisibility(
+            visible = panelVisible,
+            enter = expandHorizontally(
+                animationSpec = tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
+                expandFrom = Alignment.End,
+            ) + fadeIn(tween(if (motion) MangaMotion.Quick else 0)),
+            exit = shrinkHorizontally(
+                animationSpec = tween(if (motion) MangaMotion.Exit else 0, easing = MangaMotion.ExitEasing),
+                shrinkTowards = Alignment.End,
+            ) + fadeOut(tween(if (motion) MangaMotion.Quick else 0)),
+        ) {
+            Box(Modifier.width(panelWidth).fillMaxHeight().padding(start = 6.dp, top = 8.dp, end = 8.dp, bottom = 8.dp)
+                .motionInputGate(panelVisible)) {
+                panel()
+            }
+        }
+    }
 }
 
 /** Keeps Material's seek, keyboard and accessibility behavior, with a quiet track and stable thumb slot. */

@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -260,7 +261,8 @@ internal fun DetailCatalog(
             } else {
                 val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                 val showGroup = targetGroup == null && groups.size > 1
-                val tileHeight = (40f * fontScale + 8f).dp
+                val desktop = platformKind == PlatformKind.DESKTOP
+                val tileHeight = ((if (desktop) 56f else 40f) * fontScale + 8f).dp
                 // Source groups are consecutive. Keep that exact order and give each run
                 // its own grid row so a book cover never stretches a normal chapter row.
                 val runs = remember(visibleChapters) {
@@ -273,13 +275,21 @@ internal fun DetailCatalog(
                     }
                 }
                 BoxWithConstraints(Modifier.fillMaxSize()) {
-                    // Four compact columns on ordinary phones; only narrow windows or
-                    // larger type reduce the count. Covers and chapter cells use the same slots.
-                    val chapterColumns = MangaLayout.columns(maxWidth, 4, 64.dp * fontScale, 6.dp, 16.dp)
+                    // Phones retain their compact four-column layout. Desktop uses the
+                    // remaining pane width, including the actual scrollbar gutter.
+                    val gridWidth = (maxWidth - (if (desktop) 12.dp else 0.dp)).coerceAtLeast(1.dp)
+                    val chapterColumns = if (desktop)
+                        MangaLayout.columns(gridWidth, 12, 116.dp * fontScale, 6.dp, 16.dp)
+                    else MangaLayout.columns(gridWidth, 4, 64.dp * fontScale, 6.dp, 16.dp)
+                    val volumeColumns = if (desktop)
+                        MangaLayout.columns(gridWidth, 8, 128.dp * fontScale, 6.dp, 16.dp)
+                    else chapterColumns
+                    // Separate book/text densities share one scroll state and full-width group breaks.
+                    val gridUnits = detailCatalogGridUnits(chapterColumns, volumeColumns)
                     LazyVerticalGrid(
-                        columns = GridCells.Fixed(chapterColumns),
+                        columns = GridCells.Fixed(gridUnits),
                         state = grid, userScrollEnabled = paneActive,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize().padding(end = if (desktop) 12.dp else 0.dp),
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 5.dp, bottom = bottomPadding),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         // Reading and source marks share the compact secondary line.
@@ -294,6 +304,8 @@ internal fun DetailCatalog(
                             if (!showGroup && runIndex > 0) item(key = "run-break:$runIndex",
                                 span = { GridItemSpan(maxLineSpan) }, contentType = "run-break") { Spacer(Modifier.height(4.dp)) }
                             items(run, key = { it.logicalId.ifBlank { it.id } },
+                                span = { chapter -> GridItemSpan(gridUnits /
+                                    (if (isVolumeChapter(chapter)) volumeColumns else chapterColumns)) },
                                 contentType = { if (isVolumeChapter(it)) "volume" else "chapter" }) { chapter ->
                                 var downloadAnchor by remember(chapter.logicalId, chapter.id) { mutableStateOf<Rect?>(null) }
                                 val downloadAnchorModifier = Modifier.onGloballyPositioned { coordinates ->
@@ -343,6 +355,11 @@ internal fun DetailCatalog(
                                             enabled = true,
                                             onRead = { onRead(chapter) }, onDownload = { onDownload(chapter, downloadAnchor) },
                                             onActions = { selectedChapterId = chapter.logicalId.ifBlank { chapter.id }; selectedChapterAnchor = downloadAnchor },
+                                            sourcesEnabled = !sourceLoading && chapter.variants.isNotEmpty(),
+                                            onSources = {
+                                                sourceCloseRequested = false
+                                                sourceChapter = chapter; sourceAnchor = downloadAnchor
+                                            },
                                             onCoverError = {
                                                 if (paneActive && coverState.value === cover)
                                                     coverState.value = cover.copy(error = "封面图片暂不可用")
@@ -385,6 +402,8 @@ internal fun DetailCatalog(
                             }
                         }
                     }
+                    if (desktop) DesktopVerticalScrollbar(grid,
+                        Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                 }
             }
         }
@@ -394,7 +413,7 @@ internal fun DetailCatalog(
     shownError?.let { message ->
         MotionBottomSheet(
             onDismissRequest = { shownError = null },
-            backdrop = backdrop,
+            backdrop = backdrop, desktopCloseButton = true,
             containerColor = DetailSurface, contentColor = DetailForeground,
         ) { dismiss ->
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
@@ -432,7 +451,7 @@ internal fun DetailCatalog(
                 }
                 pendingSourceChapter = null
             },
-            backdrop = backdrop,
+            backdrop = backdrop, desktopCloseButton = true,
             containerColor = DetailSurface, contentColor = DetailForeground,
         ) { dismiss ->
             val dismissActions = {
@@ -468,6 +487,18 @@ internal fun DetailCatalog(
             }
         }
     }
+}
+
+/** Least-common slots let two semantic grids retain independent widths without nested scrolling. */
+private fun detailCatalogGridUnits(chapters: Int, volumes: Int): Int {
+    var a = chapters
+    var b = volumes
+    while (b != 0) {
+        val remainder = a % b
+        a = b
+        b = remainder
+    }
+    return chapters / a * volumes
 }
 
 /** The selected group keeps its anchor while other groups reveal inside this control row. */
@@ -621,57 +652,71 @@ private fun ChapterTile(
     onSources: (Rect?) -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val desktopActions = listOf(
+        DesktopMenuAction("阅读章节", onClick = onRead),
+        DesktopMenuAction("选择来源下载", onClick = onDownload),
+        DesktopMenuAction("选择章节来源", enabled = sourceEnabled && chapter.variants.isNotEmpty()) { onSources(null) },
+        DesktopMenuAction("章节信息", onClick = onActions),
+    )
     val complete = detailReadingFraction(progress) == 1f
     val readingColor = MaterialTheme.colorScheme.primary
     val hasDownloadMark = downloadMode || entry != null
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     val markSize = 10.dp * fontScale
-    Box(
-        modifier.fillMaxWidth().height(height.coerceAtLeast(48.dp))
-            .combinedClickable(
-                interactionSource = interaction, indication = null,
-                role = Role.Button,
-                onClickLabel = if (downloadMode) "选择来源下载章节" else "阅读章节",
-                onLongClickLabel = "章节详情和操作",
-                onClick = if (downloadMode) onDownload else onRead,
-                onLongClick = onActions,
-            )
-            .semantics {
-                contentDescription = chapter.title
-                stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
-                    .filter(String::isNotBlank).joinToString("，")
-            },
-    ) {
-        Column(Modifier.fillMaxSize().padding(vertical = 4.dp)
-            .motionPress(interaction, pressedScale = .98f)
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (current) readingColor.copy(alpha = .055f) else Color.Transparent)
-            .padding(horizontal = 6.dp)) {
-            Box(Modifier.fillMaxWidth().height(20.dp * fontScale), contentAlignment = Alignment.CenterStart) {
-                Text(
-                    chapter.title, color = when {
-                        current -> readingColor
-                        complete -> DetailSecondary.copy(alpha = .65f)
-                        else -> DetailForeground.copy(alpha = .90f)
+    Box(modifier.fillMaxWidth().height(height.coerceAtLeast(48.dp))) {
+        DesktopContextMenuArea(desktopActions) {
+            Box(
+                Modifier.fillMaxSize()
+                    .combinedClickable(
+                        interactionSource = interaction, indication = null,
+                        role = Role.Button,
+                        onClickLabel = if (downloadMode) "选择来源下载章节" else "阅读章节",
+                        onLongClickLabel = "章节详情和操作",
+                        onClick = if (downloadMode) onDownload else onRead,
+                        onLongClick = if (desktop) null else onActions,
+                    )
+                    .semantics {
+                        contentDescription = chapter.title
+                        stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
+                            .filter(String::isNotBlank).joinToString("，")
                     },
-                    fontSize = 13.sp, lineHeight = 20.sp, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            Row(Modifier.fillMaxWidth().height(20.dp * fontScale), verticalAlignment = Alignment.CenterVertically) {
-                CatalogSourceEntry(chapter,
-                    enabled = sourceEnabled,
-                    onOpen = { anchor -> if (downloadMode) onDownload() else onSources(anchor) })
-                Spacer(Modifier.weight(1f))
-                Row(Modifier.width(markSize * 2f + 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(markSize), contentAlignment = Alignment.Center) {
-                        if (progress != null) ChapterReadMark(progress, progressKnown, size = markSize)
+            ) {
+                Column(Modifier.fillMaxSize().padding(vertical = 4.dp)
+                    .motionPress(interaction, pressedScale = .98f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (current) readingColor.copy(alpha = .055f) else Color.Transparent)
+                    .padding(horizontal = 6.dp)) {
+                    Box(Modifier.fillMaxWidth().height((if (desktop) 24.dp else 20.dp) * fontScale), contentAlignment = Alignment.CenterStart) {
+                        Text(
+                            chapter.title, color = when {
+                                current -> readingColor
+                                complete -> DetailSecondary.copy(alpha = .65f)
+                                else -> DetailForeground.copy(alpha = .90f)
+                            },
+                            fontSize = 13.sp, lineHeight = 20.sp, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
-                    Box(Modifier.size(markSize), contentAlignment = Alignment.Center) {
-                        if (hasDownloadMark) ChapterDownloadMark(entry, downloadMode, size = markSize)
+                    Row(Modifier.fillMaxWidth().height((if (desktop) 32.dp else 20.dp) * fontScale), verticalAlignment = Alignment.CenterVertically) {
+                        CatalogSourceEntry(chapter,
+                            enabled = sourceEnabled,
+                            onOpen = { anchor -> if (downloadMode) onDownload() else onSources(anchor) })
+                        Spacer(Modifier.weight(1f))
+                        Row(Modifier.width(markSize * 2f + 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(markSize), contentAlignment = Alignment.Center) {
+                                if (progress != null) ChapterReadMark(progress, progressKnown, size = markSize)
+                            }
+                            Box(Modifier.size(markSize), contentAlignment = Alignment.Center) {
+                                if (hasDownloadMark) ChapterDownloadMark(entry, downloadMode, size = markSize)
+                            }
+                        }
+                        if (desktop) Box(Modifier.size(32.dp)) {
+                            DesktopMoreButton(desktopActions, label = chapter.title + "的操作")
+                        }
                     }
                 }
             }

@@ -75,6 +75,7 @@ internal fun DetailReadingDock(
     hidden: Boolean,
     collapseProgress: Float = 0f,
     active: Boolean,
+    persistent: Boolean = false,
     modifier: Modifier = Modifier,
     onHeightChanged: (Int) -> Unit = {},
     onContinue: (ReadingProgress) -> Unit,
@@ -86,13 +87,18 @@ internal fun DetailReadingDock(
     val interaction = remember { MutableInteractionSource() }
     var actions by remember(mangaId) { mutableStateOf(false) }
     val motion = LocalMotionEnabled.current
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val desktopActions = buildList {
+        if (firstChapter != null) add(DesktopMenuAction("从头阅读", enabled = active) { onRestart(firstChapter) })
+        add(DesktopMenuAction("章节列表", enabled = active, onClick = onContents))
+    }
     val density = LocalDensity.current
     val fontScale = density.fontScale.coerceAtLeast(1f)
     // The same reversible scroll progress owns size, position, content and material shape.
-    val collapse = if (motion) collapseProgress.coerceIn(0f, 1f)
+    val collapse = if (desktop || persistent) 0f else if (motion) collapseProgress.coerceIn(0f, 1f)
         else if (collapseProgress < .5f) 0f else 1f
     val minimumHeight = lerp(56.dp, 36.dp, collapse)
-    val visibility by animateFloatAsState(if (hidden && !actions) 0f else 1f,
+    val visibility by animateFloatAsState(if (!desktop && !persistent && hidden && !actions) 0f else 1f,
         tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
         label = "reading-dock")
     val fraction = detailReadingFraction(resume)
@@ -108,19 +114,21 @@ internal fun DetailReadingDock(
         else -> "暂无可读章节"
     }
     if (visibility > .01f) BoxWithConstraints(modifier.fillMaxWidth()) {
-        val fullWidth = minOf(maxWidth, 280.dp + 40.dp * (fontScale - 1f).coerceIn(0f, 1f))
+        val fullWidth = if (persistent) maxWidth else minOf(maxWidth, 280.dp + 40.dp * (fontScale - 1f).coerceIn(0f, 1f))
         val compactWidth = minOf(fullWidth, 104.dp * fontScale.coerceAtMost(1.6f))
         val width = lerp(fullWidth, compactWidth, collapse)
         Box(Modifier.align(BiasAlignment(collapse, 1f)).width(width).heightIn(min = 48.dp)
             .onSizeChanged { onHeightChanged(it.height) }.graphicsLayer {
                 alpha = visibility
                 translationY = (1f - visibility) * 86.dp.toPx()
-            }.motionInputGate(active && visibility > .9f)
+            }.motionInputGate(active && visibility > .9f)) {
+            DesktopContextMenuArea(desktopActions) {
+            Box(Modifier.fillMaxWidth()
             .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
                 enabled = active && canRead,
-                onLongClickLabel = "阅读选项", onLongClick = { actions = true },
+                onLongClickLabel = "阅读选项", onLongClick = if (desktop) null else ({ actions = true }),
                 onClick = { if (resume != null) onContinue(resume) else firstChapter?.let(onRead) })
-            .pointerInput(mangaId, canRead, active) {
+            .then(if (desktop) Modifier else Modifier.pointerInput(mangaId, canRead, active) {
                 if (canRead && active) {
                     var travel = 0f
                     detectVerticalDragGestures(onDragStart = { travel = 0f }, onVerticalDrag = { change, dy ->
@@ -128,7 +136,7 @@ internal fun DetailReadingDock(
                         if (travel < -24.dp.toPx()) { change.consume(); actions = true }
                     })
                 }
-            }.motionPress(interaction, enabled = canRead, pressedScale = .985f)) {
+            }).motionPress(interaction, enabled = canRead, pressedScale = .985f)) {
             LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().align(Alignment.Center),
                 cornerRadius = lerp(28.dp, 18.dp, collapse), role = GlassSurfaceRole.READING_DOCK,
                 interactionSource = interaction, trackPointer = true,
@@ -176,13 +184,18 @@ internal fun DetailReadingDock(
                                 fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
                         }
                     }
+                    if (desktop) Box(Modifier.size(32.dp)) {
+                        DesktopMoreButton(desktopActions, label = "阅读选项")
+                    }
                 }
+            }
+            }
             }
         }
     }
     BackHandler(enabled = active && actions) { actions = false }
     if (actions && active) MotionBottomSheet(onDismissRequest = { actions = false },
-        backdrop = backdrop,
+        backdrop = backdrop, desktopCloseButton = true,
         containerColor = DetailBackground, contentColor = DetailForeground) { dismiss ->
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 20.dp)) {
             if (firstChapter != null) DockOption("从第一话开始") { actions = false; dismiss(); onRestart(firstChapter) }

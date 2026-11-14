@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -88,6 +89,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.storage.applicationContext
@@ -100,11 +108,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.ui.glass.mangaHazeSource
+import dev.mangaflow.data.Manga
+import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.DownloadEntry
@@ -169,7 +180,9 @@ fun DownloadsScreen(
     wallpaper: @Composable () -> Unit = {},
     backgroundInParent: Boolean = false,
     excludedSourceIds: Set<String> = emptySet(),
+    onDetails: ((Manga) -> Unit)? = null,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
     val context = LocalContext.current
     val entries by store.entries.collectAsStateWithLifecycle()
     val loading by store.loading.collectAsStateWithLifecycle()
@@ -315,16 +328,102 @@ fun DownloadsScreen(
         }
     }
 
-    BoxWithConstraints(Modifier.fillMaxSize().background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
+    val queueActions: @Composable () -> Unit = {
+                    if (managing) {
+                        MotionIconButton(onClick = {
+                            val visible = when (filter) {
+                                DownloadFilter.ALL -> manageableEntries
+                                DownloadFilter.ACTIVE -> manageableEntries.filter { it.status != DownloadStatus.COMPLETED }
+                                DownloadFilter.SAVED -> completedEntries
+                            }
+                            toggleSelection(visible)
+                        }, modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.SelectAll, "全选当前列表", Modifier.size(20.dp), tint = foreground) }
+                        MotionIconButton(enabled = selectedEntries.isNotEmpty(), onClick = { pendingDeletion = selectedEntries },
+                            modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.DeleteOutline, "删除选中的 ${selectedEntries.size} 话", Modifier.size(20.dp),
+                                tint = if (selectedEntries.isNotEmpty()) colors.error else secondary.copy(alpha = .4f)) }
+                        MotionIconButton(onClick = { managing = false; selectedIds = emptySet() }, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Outlined.Close, "退出管理", Modifier.size(20.dp), tint = secondary)
+                        }
+                    } else {
+                        MotionIconButton(enabled = !importBusy, modifier = Modifier.size(44.dp),
+                            onClick = { showImportSources = true }) {
+                            if (importBusy) CircularProgressIndicator(Modifier.size(16.dp)
+                                .semantics { contentDescription = "正在导入" }, strokeWidth = 1.5.dp, color = secondary)
+                            else Icon(Icons.Outlined.Add, "导入漫画", Modifier.size(21.dp), tint = foreground)
+                        }
+                        Box {
+                            MotionIconButton(onClick = { showQueueActions = !showQueueActions }, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Outlined.MoreHoriz, "存储与下载管理", Modifier.size(21.dp), tint = secondary)
+                            }
+                            CompactGlassPopover(visible = showQueueActions, backdrop = backdrop,
+                                onDismiss = { showQueueActions = false },
+                                maximumWidth = 216.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.35f)) {
+                                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                        Text("已下载", fontSize = 11.sp, color = secondary)
+                                        Spacer(Modifier.weight(1f))
+                                        Text(downloadBytes(usedBytes), fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium, color = foreground)
+                                    }
+                                    Text(availableBytes?.let { "${downloadBytes(it)} 可用" } ?: "正在读取可用空间…",
+                                        fontSize = 11.sp, color = secondary)
+                                }
+                                HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                    color = foreground.copy(alpha = .07f))
+                                CompactMenuAction(Icons.Outlined.Inventory2, "管理下载", enabled = manageableEntries.isNotEmpty()) {
+                                    showQueueActions = false; managing = true; selectedIds = emptySet()
+                                }
+                                if (activeEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.Pause, "全部暂停") {
+                                    showQueueActions = false; activeEntries.forEach { store.pause(it.id) }
+                                }
+                                if (resumableEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.PlayArrow, "继续未完成") {
+                                    showQueueActions = false; resumableEntries.forEach(onRetry)
+                                }
+                                if (completedEntries.isNotEmpty()) {
+                                    HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                        color = foreground.copy(alpha = .07f))
+                                    CompactMenuAction(Icons.Outlined.DeleteOutline, "清理已下载", destructive = true) {
+                                        showQueueActions = false; pendingDeletion = completedEntries
+                                    }
+                                }
+                            }
+                        }
+                    }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+        if (!desktop || event.type != KeyEventType.KeyDown) false
+        else if ((event.isCtrlPressed || event.isMetaPressed) && event.key == Key.A && manageableEntries.isNotEmpty()) {
+            val currentEntries = when (filter) {
+                DownloadFilter.ALL -> manageableEntries
+                DownloadFilter.ACTIVE -> manageableEntries.filter { it.status != DownloadStatus.COMPLETED }
+                DownloadFilter.SAVED -> completedEntries
+            }
+            if (currentEntries.isEmpty()) false else {
+                managing = true
+                selectedIds = currentEntries.map(DownloadEntry::id).toSet()
+                true
+            }
+        } else if (managing && event.key == Key.Delete && selectedEntries.isNotEmpty()) {
+            pendingDeletion = selectedEntries
+            true
+        } else false
+    }.background(if (LocalWallpaperActive.current) Color.Transparent else MaterialTheme.colorScheme.background)) {
         val filterWidth = preferredFilterWidth.coerceAtMost(
             (maxWidth - if (managing) 224.dp else 180.dp).coerceAtLeast(70.dp))
         val contentInset = MangaLayout.sidePadding(maxWidth)
-        val downloadChapterColumns = MangaLayout.columns(maxWidth, 4,
+        val desktopSplit = desktop && maxWidth >= 1040.dp && orderedBooks.getValue(filter).isNotEmpty()
+        val visibleBookIds = orderedBooks.getValue(filter).keys
+        val inspectedBook = expandedBooks.lastOrNull { it in visibleBookIds } ?: visibleBookIds.firstOrNull()
+        val inspectedChapters = inspectedBook?.let { orderedBooks.getValue(filter)[it]?.mapNotNull(entriesById::get) }.orEmpty()
+        val downloadChapterColumns = if (desktop) 1 else MangaLayout.columns(maxWidth, 4,
             96.dp * LocalDensity.current.fontScale.coerceAtLeast(1f), 6.dp, contentInset + 4.dp)
         // The captured scene contains the wallpaper and scrolling list, never the header itself.
         Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
             wallpaper()
-            // The filter owns the transition; progress updates keep the existing list in place.
+            // Work selection and chapter disclosure share the current filtered queue.
+            Row(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(if (desktopSplit) .46f else 1f).fillMaxSize()) {
             MotionTabContent(filter.ordinal, Modifier.fillMaxSize()) { index ->
                 val pageFilter = DownloadFilter.entries[index]
                 val visible = when (pageFilter) {
@@ -387,14 +486,15 @@ fun DownloadsScreen(
                     } else {
                         orderedBooks.getValue(pageFilter).forEach { (mangaId, chapterIds) ->
                             val chapters = chapterIds.mapNotNull(entriesById::get)
-                            val expanded = mangaId in expandedBooks && chapters.size > 1
+                            val expanded = if (desktopSplit) mangaId == inspectedBook
+                                else mangaId in expandedBooks && chapters.size > 1
                             item(key = "work:$mangaId", contentType = "download-work") {
                                 val placement = Modifier.animateItem(
                                     fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
                                     placementSpec = if (motion) tween(MangaMotion.Content) else null,
                                     fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)
                                 Box(placement) {
-                                    SwipeToRemove(enabled = !managing,
+                                    SwipeToRemove(enabled = !managing && !desktop,
                                         label = "删除这部作品的 ${chapters.size} 话下载", onRemove = { removeWithUndo(chapters) }) {
                                         DownloadBookRow(chapters, repository, expanded, managing,
                                             selected = chapters.all { it.id in selectedIds }, refreshingIds = refreshingIds,
@@ -407,24 +507,28 @@ fun DownloadsScreen(
                                             },
                                             onSelect = { toggleSelection(chapters) },
                                             onManage = { if (managing) toggleSelection(chapters) else { managing = true; selectedIds = chapters.map(DownloadEntry::id).toSet() } },
-                                            onExpand = { expandedBooks = if (expanded) expandedBooks - mangaId else expandedBooks + mangaId },
-                                            onPause = { store.pause(it.id) }, onRetry = onRetry)
+                                            onExpand = { expandedBooks = if (desktopSplit) listOf(mangaId)
+                                                else if (expanded) expandedBooks - mangaId else expandedBooks + mangaId },
+                                            onPause = { store.pause(it.id) }, onRetry = onRetry,
+                                            onDetails = onDetails?.let { open -> { open(chapters.first().manga) } },
+                                            onRemove = { pendingDeletion = chapters }, inspectMode = desktopSplit)
                                     }
                                 }
                             }
-                            if (expanded) items(chapters.chunked(downloadChapterColumns),
+                            if (expanded && !desktopSplit) items(chapters.chunked(downloadChapterColumns),
                                 key = { "chapters:" + it.first().id }, contentType = { "download-chapter-grid" }) { row ->
                                 Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp),
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     row.forEach { entry ->
                                         Box(Modifier.weight(1f)) {
-                                            SwipeToRemove(enabled = !managing, label = "删除 ${entry.chapter.title} 下载",
+                                            SwipeToRemove(enabled = !managing && !desktop, label = "删除 ${entry.chapter.title} 下载",
                                                 onRemove = { removeWithUndo(listOf(entry)) }) {
                                                 DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
                                                     onRead = { onRead(entry) }, onSelect = { toggleSelection(listOf(entry)) },
                                                     onManage = { if (managing) toggleSelection(listOf(entry)) else {
                                                         managing = true; selectedIds = setOf(entry.id) } },
-                                                    onPause = { store.pause(it.id) }, onRetry = onRetry)
+                                                    onPause = { store.pause(it.id) }, onRetry = onRetry,
+                                                    onRemove = { pendingDeletion = listOf(entry) })
                                             }
                                         }
                                     }
@@ -439,8 +543,43 @@ fun DownloadsScreen(
                     }
                 }
             }
+            if (desktop) DesktopVerticalScrollbar(when (filter) {
+                DownloadFilter.ALL -> allScroll
+                DownloadFilter.ACTIVE -> activeScroll
+                DownloadFilter.SAVED -> savedScroll
+            }, Modifier.align(Alignment.CenterEnd).padding(top = contentTopPadding, bottom = bottomInset))
+            }
+            if (desktopSplit) {
+                DesktopDownloadChapterPane(
+                    entries = inspectedChapters, managing = managing, selectedIds = selectedIds,
+                    refreshingIds = refreshingIds, resumeChapterId = inspectedBook?.let { historyById[it]?.chapterId },
+                    topPadding = contentTopPadding,
+                    bottomPadding = 32.dp + bottomInset,
+                    modifier = Modifier.weight(.54f).fillMaxSize(),
+                    onRead = onRead, onSelect = { toggleSelection(listOf(it)) },
+                    onManage = { managing = true; selectedIds = setOf(it.id) },
+                    onRemove = { pendingDeletion = listOf(it) },
+                    onPause = { store.pause(it.id) }, onRetry = onRetry,
+                )
+            }
+            }
         }
-        Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
+        if (desktop) {
+            DesktopManagementToolbar("下载", Modifier.align(Alignment.TopCenter)
+                .onSizeChanged { headerHeightPx = it.height },
+                navigation = navigation, minimumToolsWidth = 840.dp) {
+                val stackedTools = maxWidth < 840.dp * density.fontScale.coerceAtLeast(1f)
+                MotionTabs(filter.ordinal, DownloadFilter.entries.map { it.label }, { index ->
+                    filter = DownloadFilter.entries[index]; selectedIds = emptySet()
+                }, modifier = if (stackedTools) Modifier.width(360.dp * density.fontScale.coerceAtLeast(1f))
+                    else Modifier.widthIn(max = 420.dp).weight(1f, fill = false),
+                    treatment = MotionTabTreatment.Soft, controlHeight = 36.dp)
+                if (!stackedTools) Spacer(Modifier.weight(1f))
+                if (!managing) TextButton(enabled = manageableEntries.isNotEmpty(),
+                    onClick = { managing = true; selectedIds = emptySet() }) { Text("选择") }
+                queueActions()
+            }
+        } else Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
             .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
             .padding(horizontal = 8.dp, vertical = 2.dp)) {
             PageTitleHeader("下载", backdrop, navigation,
@@ -449,71 +588,13 @@ fun DownloadsScreen(
                     Spacer(Modifier.width(filterWidth).height(morphGlassTabHeight()))
                 }, actions = {
                 toolbar {
-                    if (managing) {
-                        MotionIconButton(onClick = {
-                            val visible = when (filter) {
-                                DownloadFilter.ALL -> manageableEntries
-                                DownloadFilter.ACTIVE -> manageableEntries.filter { it.status != DownloadStatus.COMPLETED }
-                                DownloadFilter.SAVED -> completedEntries
-                            }
-                            toggleSelection(visible)
-                        }, modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.SelectAll, "全选当前列表", Modifier.size(20.dp), tint = foreground) }
-                        MotionIconButton(enabled = selectedEntries.isNotEmpty(), onClick = { pendingDeletion = selectedEntries },
-                            modifier = Modifier.size(44.dp)) { Icon(Icons.Outlined.DeleteOutline, "删除选中的 ${selectedEntries.size} 话", Modifier.size(20.dp),
-                                tint = if (selectedEntries.isNotEmpty()) colors.error else secondary.copy(alpha = .4f)) }
-                        MotionIconButton(onClick = { managing = false; selectedIds = emptySet() }, modifier = Modifier.size(44.dp)) {
-                            Icon(Icons.Outlined.Close, "退出管理", Modifier.size(20.dp), tint = secondary)
-                        }
-                    } else {
-                        MotionIconButton(enabled = !importBusy, modifier = Modifier.size(44.dp),
-                            onClick = { showImportSources = true }) {
-                            if (importBusy) CircularProgressIndicator(Modifier.size(16.dp)
-                                .semantics { contentDescription = "正在导入" }, strokeWidth = 1.5.dp, color = secondary)
-                            else Icon(Icons.Outlined.Add, "导入漫画", Modifier.size(21.dp), tint = foreground)
-                        }
-                        Box {
-                            MotionIconButton(onClick = { showQueueActions = !showQueueActions }, modifier = Modifier.size(44.dp)) {
-                                Icon(Icons.Outlined.MoreHoriz, "存储与下载管理", Modifier.size(21.dp), tint = secondary)
-                            }
-                            CompactGlassPopover(visible = showQueueActions, backdrop = backdrop,
-                                onDismiss = { showQueueActions = false },
-                                maximumWidth = 216.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.35f)) {
-                                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                        Text("已下载", fontSize = 11.sp, color = secondary)
-                                        Spacer(Modifier.weight(1f))
-                                        Text(downloadBytes(usedBytes), fontSize = 14.sp,
-                                            fontWeight = FontWeight.Medium, color = foreground)
-                                    }
-                                    Text(availableBytes?.let { "${downloadBytes(it)} 可用" } ?: "正在读取可用空间…",
-                                        fontSize = 11.sp, color = secondary)
-                                }
-                                HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                                    color = foreground.copy(alpha = .07f))
-                                CompactMenuAction(Icons.Outlined.Inventory2, "管理下载", enabled = manageableEntries.isNotEmpty()) {
-                                    showQueueActions = false; managing = true; selectedIds = emptySet()
-                                }
-                                if (activeEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.Pause, "全部暂停") {
-                                    showQueueActions = false; activeEntries.forEach { store.pause(it.id) }
-                                }
-                                if (resumableEntries.isNotEmpty()) CompactMenuAction(Icons.Outlined.PlayArrow, "继续未完成") {
-                                    showQueueActions = false; resumableEntries.forEach(onRetry)
-                                }
-                                if (completedEntries.isNotEmpty()) {
-                                    HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                                        color = foreground.copy(alpha = .07f))
-                                    CompactMenuAction(Icons.Outlined.DeleteOutline, "清理已下载", destructive = true) {
-                                        showQueueActions = false; pendingDeletion = completedEntries
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    queueActions()
                 }
             })
 
         }
-        MorphGlassTabSelector(backdrop, filterChoices, filter.ordinal, filterWidth,
+
+        if (!desktop) MorphGlassTabSelector(backdrop, filterChoices, filter.ordinal, filterWidth,
             maximumHeight = maxHeight,
             onToggle = { filterMenuExpanded = !filterMenuExpanded; showQueueActions = false },
             expanded = filterMenuExpanded, onDismiss = { filterMenuExpanded = false },
@@ -620,6 +701,65 @@ private fun LocalImportChoice(
             tint = colors.onSurfaceVariant.copy(alpha = .65f))
     }
 }
+
+
+/** A selected work's real chapters stay beside the queue on wide desktop windows. */
+@Composable
+private fun DesktopDownloadChapterPane(
+    entries: List<DownloadEntry>,
+    managing: Boolean,
+    selectedIds: Set<String>,
+    refreshingIds: Set<String>,
+    resumeChapterId: String?,
+    topPadding: Dp,
+    bottomPadding: Dp,
+    modifier: Modifier,
+    onRead: (DownloadEntry) -> Unit,
+    onSelect: (DownloadEntry) -> Unit,
+    onManage: (DownloadEntry) -> Unit,
+    onRemove: (DownloadEntry) -> Unit,
+    onPause: (DownloadEntry) -> Unit,
+    onRetry: (DownloadEntry) -> Unit,
+) {
+    val scroll = rememberLazyListState()
+    val workId = entries.firstOrNull()?.manga?.id
+    LaunchedEffect(workId) { scroll.scrollToItem(0) }
+    val colors = MaterialTheme.colorScheme
+    Column(modifier.padding(start = 16.dp, end = 20.dp, top = topPadding)) {
+        Row(Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(entries.firstOrNull()?.manga?.title.orEmpty(),
+                    fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("${entries.size} 话 · ${downloadBytes(entries.sumOf { it.downloadedBytes })}",
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            }
+            if (entries.isNotEmpty() && !managing) TextButton(onClick = {
+                val target = entries.firstOrNull { it.chapter.id == resumeChapterId }
+                    ?: entries.firstOrNull { it.status == DownloadStatus.COMPLETED }
+                    ?: entries.firstOrNull { it.completedPages > 0 } ?: entries.first()
+                onRead(target)
+            }) { Text("阅读") }
+        }
+        HorizontalDivider(color = colors.onSurface.copy(alpha = .06f))
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+        LazyColumn(Modifier.fillMaxSize(), state = scroll,
+            contentPadding = PaddingValues(top = 10.dp, bottom = bottomPadding),
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(entries, key = DownloadEntry::id, contentType = { "desktop-download-chapter" }) { entry ->
+                DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
+                    onRead = { onRead(entry) }, onSelect = { onSelect(entry) },
+                    onManage = { onManage(entry) }, onPause = onPause, onRetry = onRetry,
+                    onRemove = { onRemove(entry) })
+            }
+        }
+        DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd))
+        }
+    }
+}
+
 
 @Composable
 private fun LocalImportDetailsDialog(

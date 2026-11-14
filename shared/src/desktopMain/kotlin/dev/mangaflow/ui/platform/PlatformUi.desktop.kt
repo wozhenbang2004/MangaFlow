@@ -29,6 +29,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import netscape.javascript.JSObject
 import java.awt.Desktop
+import java.awt.KeyboardFocusManager
+import java.awt.Window
 import java.awt.SystemTray
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
@@ -43,6 +45,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Comparator
 import javax.swing.JFileChooser
+import javax.swing.filechooser.FileNameExtensionFilter
 import javax.swing.JOptionPane
 import javax.swing.SwingUtilities
 
@@ -56,28 +59,70 @@ internal fun initializeJavaFx() {
         fxInitialized = true
     }
 }
+// Accessed only on Swing's event dispatch thread; separate import/export locations.
+private var lastOpenDirectory: File? = null
+private var lastSaveDirectory: File? = null
+
+private fun desktopDialogOwner(): Window? {
+    val focus = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+    return focus.activeWindow?.takeIf { it.isShowing }
+        ?: focus.focusedWindow?.takeIf { it.isShowing }
+        ?: Window.getWindows().lastOrNull { it.isShowing && it.owner == null }
+}
+
+private fun JFileChooser.configureDocumentTypes(mimeTypes: Array<String>) {
+    val types = mimeTypes.map { it.substringBefore(';').trim().lowercase() }.toSet()
+    val filter = when {
+        types.any { it in setOf("application/zip", "application/x-zip-compressed",
+            "application/x-cbz", "application/vnd.comicbook+zip") } ->
+            FileNameExtensionFilter("ZIP / CBZ 漫画", "zip", "cbz")
+        "application/json" in types -> FileNameExtensionFilter("JSON 文本", "json", "txt")
+        types.any { it == "application/javascript" || it == "text/javascript" } ->
+            FileNameExtensionFilter("JS 漫画源", "js")
+        else -> null
+    }
+    if (filter != null) {
+        addChoosableFileFilter(filter)
+        // Wildcard/octet-stream/plain-text requests can contain valid files with other suffixes.
+        fileFilter = if (types.size == 1 && types.first() in setOf("application/json",
+            "application/javascript", "text/javascript")) filter else acceptAllFileFilter
+    }
+}
+
 @Composable
 actual fun rememberDocumentPicker(kind: DocumentPickerKind, onResult: (List<String>) -> Unit): DocumentPickerLauncher {
     val latest = rememberUpdatedState(onResult)
     val scope = rememberCoroutineScope()
     return remember(kind) {
-        DocumentPickerLauncher { _, name ->
+        DocumentPickerLauncher { mimeTypes, name ->
             SwingUtilities.invokeLater {
-                val chooser = JFileChooser().apply {
-                    dialogTitle = when (kind) {
-                        DocumentPickerKind.FOLDER -> "导入漫画文件夹"
-                        else -> "选择文件"
+                val result = runCatching {
+                    val owner = desktopDialogOwner()
+                    val chooser = JFileChooser(lastOpenDirectory?.takeIf { it.isDirectory }).apply {
+                        val types = mimeTypes.toSet()
+                        dialogTitle = when {
+                            kind == DocumentPickerKind.FOLDER -> "导入漫画文件夹"
+                            types.any { it.contains("zip") || it.contains("cbz") } -> "导入本地漫画"
+                            "image/*" in types && "video/*" in types -> "选择壁纸"
+                            "image/*" in types -> "选择图片"
+                            "application/json" in types -> "导入阅读备份"
+                            else -> "选择文件"
+                        }
+                        approveButtonText = if (kind == DocumentPickerKind.FOLDER) "导入文件夹" else "选择"
+                        isMultiSelectionEnabled = kind == DocumentPickerKind.OPEN_MULTIPLE
+                        fileSelectionMode = if (kind == DocumentPickerKind.FOLDER) JFileChooser.DIRECTORIES_ONLY else JFileChooser.FILES_ONLY
+                        if (kind != DocumentPickerKind.FOLDER) configureDocumentTypes(mimeTypes)
+                        if (name != null) selectedFile = File(name)
                     }
-                    isMultiSelectionEnabled = kind == DocumentPickerKind.OPEN_MULTIPLE
-                    fileSelectionMode = if (kind == DocumentPickerKind.FOLDER) JFileChooser.DIRECTORIES_ONLY else JFileChooser.FILES_ONLY
-                    if (name != null) selectedFile = File(name)
+                    val choice = chooser.showOpenDialog(owner)
+                    lastOpenDirectory = chooser.currentDirectory
+                    if (choice == JFileChooser.APPROVE_OPTION) {
+                        val files = if (kind == DocumentPickerKind.OPEN_MULTIPLE) chooser.selectedFiles.toList() else listOf(chooser.selectedFile)
+                        files.map { it.toURI().toString() }
+                    } else emptyList()
                 }
-                val result = chooser.showOpenDialog(null)
-                val selections = if (result == JFileChooser.APPROVE_OPTION) {
-                    val files = if (kind == DocumentPickerKind.OPEN_MULTIPLE) chooser.selectedFiles.toList() else listOf(chooser.selectedFile)
-                    files.map { it.toURI().toString() }
-                } else emptyList()
-                scope.launch { latest.value(selections) }
+                if (result.isFailure) PlatformNotices.show("无法打开文件选择器，请重试。")
+                scope.launch { latest.value(result.getOrDefault(emptyList())) }
             }
         }
     }
@@ -88,28 +133,40 @@ actual fun rememberTextDocumentSaver(onResult: (DocumentSaveResult) -> Unit): Te
     val scope = rememberCoroutineScope()
     return remember { TextDocumentSaver { name, text ->
         SwingUtilities.invokeLater {
-            val chooser = JFileChooser().apply { dialogTitle = "导出阅读备份"; selectedFile = File(name) }
-            if (chooser.showSaveDialog(null) != JFileChooser.APPROVE_OPTION) scope.launch { latest.value(DocumentSaveResult(false)) }
-            else {
-                val file = chooser.selectedFile
-                if (file.exists() && JOptionPane.showConfirmDialog(null, "覆盖已存在的同名文件？", "导出备份",
-                    JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) scope.launch { latest.value(DocumentSaveResult(false)) }
-                else scope.launch {
-                    val result = runCatching { withContext(Dispatchers.IO) {
-                        val target = file.toPath().toAbsolutePath()
-                        val temporary = Files.createTempFile(target.parent, ".mangaflow-export-", ".json")
-                        try {
-                            Files.newBufferedWriter(temporary, StandardCharsets.UTF_8).use { it.write(text) }
-                            try { Files.move(temporary, target, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                                java.nio.file.StandardCopyOption.REPLACE_EXISTING) }
-                            catch (_: java.nio.file.AtomicMoveNotSupportedException) {
-                                Files.move(temporary, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-                            }
-                        } finally { Files.deleteIfExists(temporary) }
-                    } }
-                    latest.value(if (result.isSuccess) DocumentSaveResult(true) else DocumentSaveResult(false,
-                        result.exceptionOrNull()?.message ?: "备份导出失败"))
+            val selection = runCatching {
+                val owner = desktopDialogOwner()
+                val chooser = JFileChooser(lastSaveDirectory?.takeIf { it.isDirectory }).apply {
+                    dialogTitle = "导出阅读备份"
+                    approveButtonText = "保存备份"
+                    addChoosableFileFilter(FileNameExtensionFilter("JSON 阅读备份", "json"))
+                    selectedFile = File(currentDirectory, File(name).name)
                 }
+                val choice = chooser.showSaveDialog(owner)
+                lastSaveDirectory = chooser.currentDirectory
+                if (choice != JFileChooser.APPROVE_OPTION) null
+                else chooser.selectedFile.takeIf { file ->
+                    !file.exists() || JOptionPane.showConfirmDialog(owner, "覆盖已存在的同名文件？", "导出备份",
+                        JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION
+                }
+            }
+            val file = selection.getOrNull()
+            if (selection.isFailure) scope.launch { latest.value(DocumentSaveResult(false, "无法打开保存窗口，请重试。")) }
+            else if (file == null) scope.launch { latest.value(DocumentSaveResult(false)) }
+            else scope.launch {
+                val result = runCatching { withContext(Dispatchers.IO) {
+                    val target = file.toPath().toAbsolutePath()
+                    val temporary = Files.createTempFile(target.parent, ".mangaflow-export-", ".json")
+                    try {
+                        Files.newBufferedWriter(temporary, StandardCharsets.UTF_8).use { it.write(text) }
+                        try { Files.move(temporary, target, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING) }
+                        catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                            Files.move(temporary, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                        }
+                    } finally { Files.deleteIfExists(temporary) }
+                } }
+                latest.value(if (result.isSuccess) DocumentSaveResult(true) else DocumentSaveResult(false,
+                    result.exceptionOrNull()?.message ?: "备份导出失败"))
             }
         }
     } }

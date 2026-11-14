@@ -7,6 +7,12 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.rememberTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.geometry.Offset
@@ -204,6 +210,16 @@ fun DiscoverScreen(
     }
     LaunchedEffect(browse.cacheKey) { sourceFan.clear() }
     val unobscured = active && !searchExpanded && actionsManga == null && ratingsManga == null && sourceFan.request == null
+    val desktopActions: (Manga) -> List<DesktopMenuAction> = { manga ->
+        listOf(
+            DesktopMenuAction("查看详情") {
+                coverTransition?.select?.invoke(null)
+                onOpen(manga)
+            },
+            DesktopMenuAction(if (isFavorite(manga)) "移出书架" else "加入书架") { onToggleFavorite(manga) },
+            DesktopMenuAction("各站评分") { ratingsManga = manga },
+        )
+    }
     CompositionLocalProvider(LocalMetricSourceFan provides sourceFan) {
     Box(Modifier.fillMaxSize().mangaHazeSource(searchBackdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)
@@ -235,6 +251,7 @@ fun DiscoverScreen(
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
                     onManage = { actionsManga = it }, onRatings = { ratingsManga = it },
+                    desktopActions = desktopActions,
                     topPadding = if (selectedPane) contentTopPadding else exitTopPadding)
             }
 
@@ -243,7 +260,7 @@ fun DiscoverScreen(
     }
     MetricSourceFan(sourceFan, backdrop = searchBackdrop)
     actionsManga?.let { manga ->
-        MotionBottomSheet(onDismissRequest = { actionsManga = null }) { dismiss ->
+        MotionBottomSheet(onDismissRequest = { actionsManga = null }, desktopCloseButton = true) { dismiss ->
             Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 16.dp)) {
                 Row(Modifier.padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -298,6 +315,8 @@ internal fun DiscoverySearchResults(
     onTagQuery: ((String) -> Unit)? = null,
     backdrop: HazeState? = null,
     scopeInToolbar: Boolean = false,
+    desktopMainContent: Boolean = false,
+    desktopActions: ((Manga) -> List<DesktopMenuAction>)? = null,
 ) {
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
@@ -347,6 +366,13 @@ internal fun DiscoverySearchResults(
     if (awaitingKeyword && !selectingTags) return
     val showResults = search.isSearch && !selectingTags && !awaitingKeyword
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    if (desktopMainContent) DesktopBrowsePagination(search,
+        enabled = active && expanded && showResults && sourceChoices == null,
+        nearEnd = { count ->
+            val info = retainedResults.layoutInfo
+            info.totalItemsCount == count + 1 &&
+                (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >= info.totalItemsCount - 5
+        }, onMore = onMore)
     BoxWithConstraints(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
         val contentRoom = (this.maxHeight - if (tagsOnly) 0.dp else 16.dp).coerceAtLeast(0.dp)
         val resultReserve = if (showResults) minOf(contentRoom * .5f, 120.dp * fontScale) else 0.dp
@@ -356,7 +382,11 @@ internal fun DiscoverySearchResults(
             if ((federated && search.searchSources.isNotEmpty()) ||
                 (showResults && search.items.isNotEmpty())) 28.dp else 0.dp
         val choicesRoom = (controlsRoom - fixedScope).coerceIn(0.dp, 200.dp)
-        Column(Modifier.fillMaxWidth().heightIn(max = this.maxHeight).padding(if (tagsOnly) 0.dp else 8.dp)
+        Column(Modifier.then(if (desktopMainContent)
+                Modifier.align(Alignment.TopCenter).widthIn(max = 1040.dp).fillMaxHeight()
+                    .semantics { paneTitle = "搜索结果" }.focusGroup()
+                else Modifier)
+            .fillMaxWidth().heightIn(max = this.maxHeight).padding(if (tagsOnly) 0.dp else 8.dp)
             .motionInputGate(active && sourceChoices == null)) {
             // Chrome receives a finite share before the result list is measured. Even the
             // expanded tag/source directory can scroll here instead of measuring the list to zero.
@@ -413,39 +443,45 @@ internal fun DiscoverySearchResults(
                         else TextButton(onClick = onMore) { Text("继续筛选") }
                     }
                 }
-                else -> LazyColumn(
-                    state = retainedResults,
-                    modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
-                    contentPadding = PaddingValues(bottom = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    items(search.items, key = Manga::id, contentType = { "search-result" }) { manga ->
-                        SearchResultRow(manga, repository, "search-${search.cacheKey}",
-                            horizontalInset = if (tagsOnly) 0.dp else 6.dp,
-                            bodySources = if (federated) search.sourceMatches[manga.id].orEmpty() else emptyList(),
-                            onSource = if (federated) openSource else null) { openResult(manga) }
-                    }
-                    if (search.hasMore || search.loadingMore) {
-                        item(key = "search-more") {
-                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                if (search.loadingMore) {
-                                    CircularProgressIndicator(Modifier.padding(12.dp).size(19.dp), strokeWidth = 2.dp)
-                                } else MotionIconButton(onClick = onMore, modifier = Modifier.size(44.dp)) {
-                                    Icon(Icons.Outlined.ExpandMore, "加载更多结果", Modifier.size(20.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                else -> Box(Modifier.fillMaxWidth().weight(1f, fill = desktopMainContent)) {
+                    LazyColumn(
+                        state = retainedResults,
+                        modifier = Modifier.fillMaxWidth().then(if (desktopMainContent) Modifier.fillMaxHeight() else Modifier),
+                        contentPadding = PaddingValues(end = if (desktopMainContent) 12.dp else 0.dp, bottom = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        items(search.items, key = Manga::id, contentType = { "search-result" }) { manga ->
+                            DesktopBrowseActions(desktopActions?.invoke(manga).orEmpty(), active) {
+                                SearchResultRow(manga, repository, "search-${search.cacheKey}",
+                                    horizontalInset = if (tagsOnly) 0.dp else 6.dp,
+                                    bodySources = if (federated) search.sourceMatches[manga.id].orEmpty() else emptyList(),
+                                    onSource = if (federated) openSource else null) { openResult(manga) }
+                            }
+                        }
+                        if (search.hasMore || search.loadingMore) {
+                            item(key = "search-more") {
+                                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                    if (search.loadingMore) {
+                                        CircularProgressIndicator(Modifier.padding(12.dp).size(19.dp), strokeWidth = 2.dp)
+                                    } else MotionIconButton(onClick = onMore, modifier = Modifier.size(44.dp)) {
+                                        Icon(Icons.Outlined.ExpandMore, "加载更多结果", Modifier.size(20.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                 }
                             }
                         }
-                    }
-                    if (search.error != null) item(key = "search-error") {
-                        Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(search.error, style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 3, overflow = TextOverflow.Ellipsis)
-                            TextButton(onClick = onRetry) { Text("重试") }
+                        if (search.error != null) item(key = "search-error") {
+                            Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(search.error, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                TextButton(onClick = onRetry) { Text("重试") }
+                            }
                         }
                     }
+                if (desktopMainContent) DesktopVerticalScrollbar(retainedResults,
+                    Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
                 }
             }
         }
@@ -588,6 +624,7 @@ private fun DiscoveryPane(
     onOpen: (Manga) -> Unit,
     onManage: (Manga) -> Unit,
     onRatings: (Manga) -> Unit,
+    desktopActions: (Manga) -> List<DesktopMenuAction>,
     topPadding: Dp,
 ) {
     var layoutPresent by remember(state.cacheKey) { mutableStateOf(false) }
@@ -608,9 +645,10 @@ private fun DiscoveryPane(
     val motion = LocalMotionEnabled.current
     val firstEntranceIndex = remember(state.cacheKey) { retainedGrid.firstVisibleItemIndex }
     val featured = remember(state.items) { state.items.take(6) }
+    val desktop = platformKind == PlatformKind.DESKTOP
     val pull = rememberBottomPullLoadState(
         key = state.cacheKey,
-        enabled = active && state.items.isNotEmpty() && state.hasMore && !state.loading &&
+        enabled = !desktop && active && state.items.isNotEmpty() && state.hasMore && !state.loading &&
             !state.refreshing && state.error == null,
         loading = state.loadingMore,
         canScrollForward = { grid.canScrollForward },
@@ -622,18 +660,33 @@ private fun DiscoveryPane(
         showRefreshingIndicator = false,
     ) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
-    val inset = MangaLayout.sidePadding(maxWidth) + if (ranking)
-        ((maxWidth - MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp) else 0.dp
+    val sidePadding = MangaLayout.sidePadding(maxWidth)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
-    val desktop = platformKind == PlatformKind.DESKTOP
     val gap = if (desktop) 12.dp else if (columns == 4) 8.dp else 10.dp
-    // The saved setting is the preferred maximum; narrow windows and large type reflow.
+    // A saved count is a maximum. Desktop artwork keeps a readable target size,
+    // and sparse/list modes get their own line width instead of enlarging posters.
     val visibleColumns = when {
         ranking || columns == 1 -> 1
-        desktop && columns == 0 -> MangaLayout.automaticDesktopColumns(maxWidth, fontScale, gap, inset)
+        desktop && columns == 0 -> MangaLayout.automaticDesktopColumns(maxWidth, fontScale, gap, sidePadding)
         else -> MangaLayout.columns(maxWidth, columns,
-            (if (!desktop && columns == 4) 68.dp else 88.dp) * fontScale, gap, inset)
+            (if (desktop) 156.dp else if (columns == 4) 68.dp else 88.dp) * fontScale, gap, sidePadding)
     }
+    val preferredWidth = when {
+        ranking || desktop && columns == 1 -> MangaLayout.ListWidth
+        desktop && columns > 1 -> 240.dp * fontScale * visibleColumns +
+            gap * (visibleColumns - 1) + sidePadding * 2
+        else -> maxWidth
+    }
+    val inset = sidePadding + ((maxWidth - preferredWidth) / 2f).coerceAtLeast(0.dp)
+    if (desktop) DesktopBrowsePagination(state, enabled = active,
+        nearEnd = { count ->
+            val info = grid.layoutInfo
+            val chromeItems = 1 + (if (ranking) 0 else 1) +
+                (if (state.mode == DiscoveryMode.RECOMMENDED) 1 else 0)
+            info.totalItemsCount == count + chromeItems &&
+                (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >=
+                    info.totalItemsCount - visibleColumns * 2 - 1
+        }, onMore = onMore)
     val sectionControls: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (state.mode == DiscoveryMode.LATEST) "最近更新" else "为你发现",
@@ -650,7 +703,8 @@ private fun DiscoveryPane(
             bottom = 32.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
         horizontalArrangement = Arrangement.spacedBy(gap),
         verticalArrangement = Arrangement.spacedBy(if (ranking) 6.dp else if (columns == 1) 12.dp else 10.dp),
-        modifier = Modifier.fillMaxSize().bottomPullLoad(pull).motionInputGate(active),
+        modifier = Modifier.fillMaxSize().then(if (desktop) Modifier else Modifier.bottomPullLoad(pull))
+            .motionInputGate(active),
     ) {
         if (state.mode == DiscoveryMode.RECOMMENDED && (state.loading || state.items.isNotEmpty())) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "hero", contentType = "featured") {
@@ -658,7 +712,8 @@ private fun DiscoveryPane(
                 // visible without keeping an offscreen gallery active.
                 FeaturedCarousel(featured, repository,
                     active && heroVisible && canAutoAdvance && !layoutPresent,
-                    onOpen = onOpen, onRatings = onRatings, loading = state.loading)
+                    onOpen = onOpen, onRatings = onRatings, loading = state.loading,
+                    desktopActions = desktopActions)
             }
         }
         if (state.loading && state.items.isEmpty()) {
@@ -680,25 +735,30 @@ private fun DiscoveryPane(
             if (ranking) {
                 itemsIndexed(state.items, key = { _, manga -> manga.id }, contentType = { _, _ -> "ranking-book" },
                     span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
-                    RankRow(manga, repository, state.period, state.cacheKey,
-                        modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
-                            placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())
-                            .rankingRowEntrance(index - firstEntranceIndex),
-                        onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
+                    Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
+                        placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())
+                        .rankingRowEntrance(index - firstEntranceIndex)) {
+                        DesktopBrowseActions(if (desktop) desktopActions(manga) else emptyList(), active) {
+                            RankRow(manga, repository, state.period, state.cacheKey,
+                                onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
+                        }
+                    }
                 }
             } else {
                 items(state.items, key = Manga::id, contentType = { "browse-book" }) { manga ->
                     Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
                         placementSpec = if (motion) tween(MangaMotion.Enter, easing = MangaMotion.EnterEasing) else snap())) {
-                        MotionTabContent(selected = columns == 1, modifier = Modifier.fillMaxWidth(),
-                            contentKey = { it }, order = { if (it) 0 else 1 }, fillContent = false) { list ->
-                            val placement = "discovery-grid-${state.cacheKey}-" + if (list) "list" else "tile"
-                            if (list) BrowseListRow(manga, repository,
-                                showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
-                                onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
-                            else CoverTile(manga, repository, dense = true, narrow = visibleColumns >= 4,
-                                showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
-                                onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
+                        DesktopBrowseActions(if (desktop) desktopActions(manga) else emptyList(), active) {
+                            MotionTabContent(selected = columns == 1, modifier = Modifier.fillMaxWidth(),
+                                contentKey = { it }, order = { if (it) 0 else 1 }, fillContent = false) { list ->
+                                val placement = "discovery-grid-${state.cacheKey}-" + if (list) "list" else "tile"
+                                if (list) BrowseListRow(manga, repository,
+                                    showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
+                                    onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }, onClick = { onOpen(manga) })
+                                else CoverTile(manga, repository, dense = true, narrow = visibleColumns >= 4,
+                                    showChapter = state.mode == DiscoveryMode.LATEST, placement = placement,
+                                    onLongClick = { onManage(manga) }, onRatings = { onRatings(manga) }) { onOpen(manga) }
+                            }
                         }
                     }
                 }
@@ -710,16 +770,87 @@ private fun DiscoveryPane(
                         TextButton(onClick = onRetry) { Text("重试") }
                     }
                 } else {
-                    if (state.hasMore || state.loadingMore) Box(Modifier.fillMaxWidth().height(48.dp)
-                        .semantics { contentDescription = if (state.loadingMore) "正在加载" else if (pull.progress >= 1f)
-                            "松手加载" else "上拉加载" }, contentAlignment = Alignment.Center) {
-                        BottomPullLoadIndicator(pull, Modifier.size(32.dp))
+                    if (state.hasMore || state.loadingMore) Box(Modifier.fillMaxWidth().height(48.dp),
+                        contentAlignment = Alignment.Center) {
+                        if (desktop) {
+                            if (state.loadingMore) CircularProgressIndicator(
+                                Modifier.size(20.dp).semantics { contentDescription = "正在加载更多漫画" }, strokeWidth = 2.dp)
+                            else TextButton(onClick = onMore, enabled = active && !state.loading && !state.refreshing) {
+                                Text("加载更多")
+                            }
+                        } else Box(Modifier.semantics {
+                            contentDescription = if (state.loadingMore) "正在加载" else if (pull.progress >= 1f)
+                                "松手加载" else "上拉加载"
+                        }) { BottomPullLoadIndicator(pull, Modifier.size(32.dp)) }
                     } else Spacer(Modifier.height(12.dp))
                 }
             }
         }
     }
+    if (desktop) DesktopVerticalScrollbar(grid,
+        Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
     }
+    }
+}
+
+/**
+ * One automatic request per growing result set. A duplicate/empty page keeps the
+ * explicit footer available instead of chaining requests while the viewport is unchanged.
+ */
+@Composable
+private fun DesktopBrowsePagination(
+    state: BrowseState,
+    enabled: Boolean,
+    nearEnd: (itemCount: Int) -> Boolean,
+    onMore: () -> Unit,
+) {
+    val latestState by rememberUpdatedState(state)
+    val latestEnabled by rememberUpdatedState(enabled)
+    val latestNearEnd by rememberUpdatedState(nearEnd)
+    val latestMore by rememberUpdatedState(onMore)
+    LaunchedEffect(state.cacheKey, state.updatedAt) {
+        val cacheKey = state.cacheKey
+        var requestedCount = -1
+        snapshotFlow {
+            val current = latestState
+            val count = current.items.size
+            val eligible = latestEnabled && current.cacheKey == cacheKey && count > 0 &&
+                current.hasMore && !current.loading && !current.loadingMore && !current.refreshing &&
+                current.error == null && current.failedPage == null && latestNearEnd(count)
+            eligible to count
+        }.collect { (eligible, count) ->
+            if (eligible && count > requestedCount) {
+                requestedCount = count
+                latestMore()
+            }
+        }
+    }
+}
+
+/** The existing work actions stay local to their book; mouse and keyboard share one menu. */
+@Composable
+internal fun DesktopBrowseActions(
+    actions: List<DesktopMenuAction>,
+    enabled: Boolean,
+    content: @Composable () -> Unit,
+) {
+    if (platformKind != PlatformKind.DESKTOP || actions.isEmpty()) {
+        content()
+        return
+    }
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    var focused by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
+    DesktopContextMenuArea(if (enabled) actions else emptyList()) {
+        Box(Modifier.fillMaxWidth()
+            .hoverable(interactionSource = interaction, enabled = enabled)
+            .onFocusChanged { focused = it.hasFocus }.focusGroup()) {
+            content()
+            if (enabled && (hovered || focused || menuOpen)) Box(Modifier.align(Alignment.TopEnd)) {
+                DesktopMoreButton(actions, label = "漫画操作", onExpandedChange = { menuOpen = it })
+            }
+        }
     }
 }
 
@@ -731,7 +862,8 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
     val interaction = remember { MutableInteractionSource() }
     Row(
         Modifier.fillMaxWidth()
-            .clickable(interactionSource = interaction, indication = null, onClick = {
+            .clickable(interactionSource = interaction, indication = null, role = Role.Button,
+                onClickLabel = "查看${manga.title}", onClick = {
                 transition?.select?.invoke(MangaCoverKey(manga.id, placement))
                 onOpen()
             })
@@ -740,7 +872,9 @@ private fun SearchResultRow(manga: Manga, repository: MangaRepository, placement
         verticalAlignment = Alignment.CenterVertically,
     ) {
         MangaCover(manga, repository, Modifier.width(42.dp).height(58.dp).mangaSharedCover(manga.id, placement).mangaCoverCard(7.dp))
-        Column(Modifier.weight(1f).padding(start = 11.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Column(Modifier.weight(1f).padding(start = 11.dp,
+            end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
@@ -773,7 +907,9 @@ private fun BrowseListRow(
         }).motionPress(interaction, pressedScale = .985f), verticalAlignment = Alignment.CenterVertically) {
         MangaCover(manga, repository, Modifier.width(64.dp).height(92.dp)
             .mangaSharedCover(manga.id, placement).mangaCoverCard(9.dp))
-        Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.weight(1f).padding(start = 12.dp,
+            end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (manga.authors.isNotEmpty()) Text(manga.authors.take(2).joinToString(" / "),
@@ -994,7 +1130,8 @@ private fun RankRow(manga: Manga, repository: MangaRepository, period: RankPerio
             maxLines = 1, modifier = Modifier.widthIn(min = 30.dp).padding(end = 4.dp))
         MangaCover(manga, repository, Modifier.width(54.dp).height(78.dp)
             .mangaSharedCover(manga.id, "ranking-$listKey").mangaCoverCard(6.dp))
-        Column(Modifier.weight(1f).padding(start = 10.dp).heightIn(min = 78.dp),
+        Column(Modifier.weight(1f).padding(start = 10.dp,
+                end = if (platformKind == PlatformKind.DESKTOP) 44.dp else 0.dp).heightIn(min = 78.dp),
             verticalArrangement = Arrangement.SpaceBetween) {
             Column {
                 Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 15.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
@@ -1064,7 +1201,7 @@ internal fun RecentReadingSheet(
     val recentPosition = rememberLazyListState()
     val recentFeedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
     MotionBottomSheet(onDismissRequest = onDismiss, containerColor = MaterialTheme.colorScheme.background,
-        backdrop = backdrop) { dismiss ->
+        backdrop = backdrop, desktopCloseButton = true) { dismiss ->
         MotionTabContent(selected = chapterManga, modifier = Modifier.fillMaxWidth(),
             contentKey = { it?.id ?: "recent-books" }, order = { if (it == null) 0 else 1 },
             fillContent = false, soft = true) { selected ->

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Refresh
@@ -78,12 +79,21 @@ internal fun VolumeBookTile(
     onRead: () -> Unit,
     onDownload: () -> Unit,
     onActions: () -> Unit,
+    onSources: () -> Unit,
+    sourcesEnabled: Boolean,
     onCoverError: () -> Unit,
     onRetryCover: () -> Unit,
     sourceMarks: @Composable () -> Unit = {},
 ) {
     val context = LocalContext.current
     val motion = LocalMotionEnabled.current
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val desktopActions = listOf(
+        DesktopMenuAction("阅读这一卷", enabled = enabled, onClick = onRead),
+        DesktopMenuAction("选择来源下载", enabled = enabled, onClick = onDownload),
+        DesktopMenuAction("选择章节来源", enabled = enabled && sourcesEnabled, onClick = onSources),
+        DesktopMenuAction("章节信息", enabled = enabled, onClick = onActions),
+    )
     val interaction = remember(mangaId, chapter.id) { MutableInteractionSource() }
     val request = remember(mangaId, chapter.id, cover.page, cover.attempt, motion) {
         cover.page?.let { page ->
@@ -97,46 +107,53 @@ internal fun VolumeBookTile(
     var imageLoading by remember(request) { mutableStateOf(request != null) }
     var imageReady by remember(request) { mutableStateOf(false) }
     val busy = rememberDelayedBusy(cover.loading || imageLoading)
-    Column(
-        Modifier.fillMaxWidth().combinedClickable(
-            interactionSource = interaction, indication = null, enabled = enabled,
-            role = Role.Button,
-            onClickLabel = if (downloadMode) "下载这一卷" else "阅读这一卷",
-            onLongClickLabel = "单行本详情和操作",
-            onClick = if (downloadMode) onDownload else onRead,
-            onLongClick = onActions,
-        ).motionPress(interaction, enabled = enabled).semantics {
-            contentDescription = chapter.title + "，" + chapter.group
-            stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
-                .filter(String::isNotBlank).joinToString("，")
-        },
-        verticalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        // Reuse the browse cover's stable book frame; changing image dimensions cannot move this grid.
-        Box(Modifier.fillMaxWidth().aspectRatio(.70f).mangaCoverCard()
-            .then(if (!imageReady) Modifier.background(DetailSurface) else Modifier),
-            contentAlignment = Alignment.Center) {
-            if (!imageReady && !busy && cover.error == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
-                Modifier.size(25.dp), tint = DetailMuted.copy(alpha = .35f))
-            if (request != null && cover.error == null) AsyncImage(
-                model = request, contentDescription = null, contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-                onLoading = { imageLoading = true },
-                onSuccess = { imageLoading = false; imageReady = true },
-                onError = { imageLoading = false; onCoverError() },
-            )
-            if (cover.error != null) DetailAction(Icons.Outlined.Refresh, "重试这一卷封面", onClick = onRetryCover)
-            else if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = DetailMuted, strokeWidth = 1.5.dp)
-        }
-        Text(chapter.title, color = if (current) DetailForeground else DetailSecondary,
-            fontSize = 12.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp))
-        Row(Modifier.fillMaxWidth().padding(horizontal = 1.dp), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) { sourceMarks() }
-            ChapterReadMark(progress, progressKnown, size = 12.dp)
-            ChapterDownloadMark(entry, downloadMode, size = 12.dp)
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopStart) {
+        DesktopContextMenuArea(desktopActions) {
+            Column(
+                (if (desktop) Modifier.widthIn(max = 184.dp) else Modifier).fillMaxWidth().combinedClickable(
+                    interactionSource = interaction, indication = null, enabled = enabled,
+                    role = Role.Button,
+                    onClickLabel = if (downloadMode) "下载这一卷" else "阅读这一卷",
+                    onLongClickLabel = "单行本详情和操作",
+                    onClick = if (downloadMode) onDownload else onRead,
+                    onLongClick = if (desktop) null else onActions,
+                ).motionPress(interaction, enabled = enabled).semantics {
+                    contentDescription = chapter.title + "，" + chapter.group
+                    stateDescription = listOf(chapterReadingStatus(progress, progressKnown), chapterStatus(entry, null))
+                        .filter(String::isNotBlank).joinToString("，")
+                },
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                // Reuse the browse cover's stable book frame; changing image dimensions cannot move this grid.
+                Box(Modifier.fillMaxWidth().aspectRatio(.70f).mangaCoverCard()
+                    .then(if (!imageReady) Modifier.background(DetailSurface) else Modifier),
+                    contentAlignment = Alignment.Center) {
+                    if (!imageReady && !busy && cover.error == null) Icon(Icons.AutoMirrored.Outlined.MenuBook, null,
+                        Modifier.size(25.dp), tint = DetailMuted.copy(alpha = .35f))
+                    if (request != null && cover.error == null) AsyncImage(
+                        model = request, contentDescription = null, contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                        onLoading = { imageLoading = true },
+                        onSuccess = { imageLoading = false; imageReady = true },
+                        onError = { imageLoading = false; onCoverError() },
+                    )
+                    if (cover.error != null) DetailAction(Icons.Outlined.Refresh, "重试这一卷封面", onClick = onRetryCover)
+                    else if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = DetailMuted, strokeWidth = 1.5.dp)
+                }
+                Text(chapter.title, color = if (current) DetailForeground else DetailSecondary,
+                    fontSize = 12.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    fontWeight = if (current) FontWeight.SemiBold else FontWeight.Medium,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 1.dp))
+                Row(Modifier.fillMaxWidth().padding(horizontal = 1.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) { sourceMarks() }
+                    ChapterReadMark(progress, progressKnown, size = 12.dp)
+                    ChapterDownloadMark(entry, downloadMode, size = 12.dp)
+                    if (desktop) Box(Modifier.size(32.dp)) {
+                        DesktopMoreButton(desktopActions, label = chapter.title + "的操作")
+                    }
+                }
+            }
         }
     }
 }

@@ -131,7 +131,7 @@ internal fun BookshelfBook(
     Box(modifier.widthIn(min = 48.dp).heightIn(min = 64.dp)
         .onGloballyPositioned { rootOrigin = it.positionInRoot() }
         .pointerInput(manga.id) {
-            detectDragGesturesAfterLongPress(
+            if (platformKind != PlatformKind.DESKTOP) detectDragGesturesAfterLongPress(
                 onDragStart = { local ->
                     val caught = if (returning) returnPosition.value else Offset.Zero
                     settleJob?.cancel()

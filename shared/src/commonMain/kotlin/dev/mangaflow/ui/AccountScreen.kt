@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -113,6 +114,7 @@ fun AccountScreen(
     onRetrySync: () -> Unit,
     contentTopPadding: Dp = 0.dp,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
     val profile = state.profile
     val bottomInset = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
     val colors = MaterialTheme.colorScheme
@@ -170,9 +172,11 @@ fun AccountScreen(
     if (profile == null) {
         BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
         val accountHeight = maxHeight
+        val loginScroll = rememberScrollState()
         Column(
-            modifier = Modifier.fillMaxWidth().heightIn(max = accountHeight)
-                .verticalScroll(rememberScrollState())
+            modifier = Modifier.widthIn(max = if (desktop) 480.dp else Dp.Infinity).fillMaxWidth()
+                .align(Alignment.TopCenter).heightIn(max = accountHeight)
+                .verticalScroll(loginScroll)
                 .padding(start = 24.dp, end = 24.dp, top = contentTopPadding + 4.dp, bottom = 16.dp + bottomInset),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -236,17 +240,22 @@ fun AccountScreen(
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
             ) { Text(if (cookieMode) "使用账号密码" else "导入 Cookie / Token", style = MaterialTheme.typography.bodySmall) }
         }
+        if (desktop) Box(Modifier.widthIn(max = 480.dp).fillMaxSize().align(Alignment.TopCenter)) {
+            DesktopVerticalScrollbar(loginScroll,
+                Modifier.align(Alignment.CenterEnd).padding(top = contentTopPadding, bottom = bottomInset))
+        }
         }
     } else {
         key(profile.username) {
             val favoritesPosition = rememberLazyGridState()
             val historyPosition = rememberLazyGridState()
             BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
-                // Long account errors remain reachable without consuming the tabs or list viewport.
-                val profileMaxHeight = (maxHeight - 48.dp).coerceAtLeast(0.dp) * .45f
-                Column(Modifier.fillMaxSize()) {
-                    Column(Modifier.fillMaxWidth().heightIn(max = profileMaxHeight)
-                        .verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = contentTopPadding + 4.dp)) {
+                val splitAccount = desktop && maxWidth >= 1040.dp
+                val profileMaxHeight = if (splitAccount) (maxHeight - contentTopPadding - 24.dp).coerceAtLeast(1.dp)
+                    else (maxHeight - 48.dp).coerceAtLeast(0.dp) * .45f
+                val profileContent: @Composable (Modifier) -> Unit = { profileModifier ->
+                    Column(profileModifier.fillMaxWidth().heightIn(max = profileMaxHeight)
+                        .verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = if (splitAccount) 4.dp else contentTopPadding + 4.dp)) {
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.size(42.dp).clip(CircleShape).background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
@@ -260,8 +269,16 @@ fun AccountScreen(
                                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
                                 }
-                                IconButton(onClick = onRefresh, enabled = !state.busy) {
+                                if (!splitAccount) IconButton(onClick = onRefresh, enabled = !state.busy) {
                                     Icon(Icons.Outlined.Refresh, "刷新账号", Modifier.size(21.dp))
+                                }
+                                if (!splitAccount) TextButton(onClick = { clearInputs(); removeFavorite = null; onLogout() }) { Text("退出") }
+                            }
+                            if (splitAccount) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = onRefresh, enabled = !state.busy) {
+                                    Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("刷新")
                                 }
                                 TextButton(onClick = { clearInputs(); removeFavorite = null; onLogout() }) { Text("退出") }
                             }
@@ -277,6 +294,10 @@ fun AccountScreen(
                             }
                         }
                     }
+
+                }
+                val collectionContent: @Composable (Modifier) -> Unit = { collectionModifier ->
+                    Column(collectionModifier) {
                     BrowseTabs(
                         selected = if (showHistory) 1 else 0,
                         labels = listOf("云端收藏", "云端记录"),
@@ -284,6 +305,7 @@ fun AccountScreen(
                     ) { showHistory = it == 1 }
                     MotionTabContent(if (showHistory) 1 else 0, Modifier.weight(1f).fillMaxWidth()) { tab ->
                         val historyTab = tab == 1
+                        Box(Modifier.fillMaxSize()) {
                         LazyVerticalGrid(
                             columns = GridCells.Adaptive(144.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
                             state = if (historyTab) historyPosition else favoritesPosition,
@@ -324,20 +346,28 @@ fun AccountScreen(
                                 } else {
                                     items(cloudFavorites, key = { "cloud-favorite-${it.id}" }, contentType = { "cloud-book" }) { manga ->
                                         val syncing = manga.id in state.syncingFavorites
+                                        val cloudActions = listOf(
+                                            DesktopMenuAction("详情与目录") { onOpen(manga) },
+                                            DesktopMenuAction("移除云端收藏", enabled = !syncing) { removeFavorite = manga })
+                                        DesktopContextMenuArea(cloudActions) {
                                         Box {
                                             CoverTile(manga, repository,
                                                 onLongClick = { managedFavorite = manga }) { onOpen(manga) }
-                                            if (syncing) Box(Modifier.align(Alignment.TopEnd).padding(6.dp).size(22.dp)
+                                            if (syncing) Box(Modifier.align(if (desktop) Alignment.TopStart else Alignment.TopEnd).padding(6.dp).size(22.dp)
                                                 .background(colors.surface.copy(alpha = .94f), CircleShape),
                                                 contentAlignment = Alignment.Center) {
                                                 CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp,
                                                     color = colors.onSurfaceVariant)
+                                            }
+                                            if (desktop) Box(Modifier.align(Alignment.TopEnd).padding(4.dp)) {
+                                                DesktopMoreButton(cloudActions, "云端收藏操作")
                                             }
                                             CloudFavoriteActionsMenu(managedFavorite?.id == manga.id,
                                                 onDismiss = { managedFavorite = null },
                                                 onDetails = { onOpen(manga) },
                                                 onRemove = { removeFavorite = manga },
                                                 removeEnabled = !syncing, removeLabel = "移除云端收藏")
+                                        }
                                         }
                                     }
                                     if (state.favoritesLoading || state.favoritesError != null || state.favoritesHasMore) {
@@ -348,7 +378,23 @@ fun AccountScreen(
                                 }
                             }
                         }
+                        if (desktop) DesktopVerticalScrollbar(
+                            if (historyTab) historyPosition else favoritesPosition,
+                            Modifier.align(Alignment.CenterEnd).padding(bottom = bottomInset))
+                        }
                     }
+
+                    }
+                }
+                if (splitAccount) {
+                    Row(Modifier.fillMaxSize().padding(top = contentTopPadding + 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Box(Modifier.width(264.dp)) { profileContent(Modifier) }
+                        collectionContent(Modifier.weight(1f).fillMaxSize())
+                    }
+                } else Column(Modifier.fillMaxSize()) {
+                    profileContent(Modifier)
+                    collectionContent(Modifier.weight(1f).fillMaxWidth())
                 }
             }
         }

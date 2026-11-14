@@ -10,6 +10,9 @@ import dev.mangaflow.data.sources.materializeJmPage
 
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.MangaLayout
+import dev.mangaflow.ui.DesktopVerticalScrollbar
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.captionBar
@@ -29,7 +32,9 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.stopScroll
@@ -41,6 +46,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -99,7 +105,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -208,6 +216,7 @@ import dev.mangaflow.ui.motion.bottomPullLoad
 import dev.mangaflow.ui.motion.rememberBottomPullLoadState
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.CompactDownloadIcon
@@ -343,6 +352,24 @@ fun ReaderScreen(
     }
     var chapterChangeRequested by remember(chapterId) { mutableStateOf(false) }
     var showChapters by rememberSaveable { mutableStateOf(false) }
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val readerWindow = LocalMangaWindow.current
+    val readerFontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val dockedPanels = desktop && readerWindow.width >= 960.dp * readerFontScale &&
+        readerWindow.height >= 480.dp
+    val panelWidth = (if (readerWindow.width >= 1280.dp * readerFontScale) 336.dp else 304.dp) * readerFontScale
+    val panelBlocksReading = !dockedPanels && (showSettings || showChapters)
+    var retainedInspector by remember { mutableIntStateOf(0) }
+    val inspector = if (showSettings) 1 else if (showChapters) 0 else retainedInspector
+    SideEffect { if (showSettings || showChapters) retainedInspector = inspector }
+    val topChromeInteraction = remember { MutableInteractionSource() }
+    val bottomChromeInteraction = remember { MutableInteractionSource() }
+    val topChromeHovered by topChromeInteraction.collectIsHoveredAsState()
+    val bottomChromeHovered by bottomChromeInteraction.collectIsHoveredAsState()
+    var topChromeFocused by remember { mutableStateOf(false) }
+    var bottomChromeFocused by remember { mutableStateOf(false) }
+    val chromeEngaged = desktop && (topChromeHovered || bottomChromeHovered || topChromeFocused || bottomChromeFocused)
+    var keyboardFocusRestore by remember { mutableIntStateOf(0) }
     var downloadMessage by remember(chapterId) { mutableStateOf<String?>(null) }
     var displayedDownloadMessage by remember(chapterId) { mutableStateOf("") }
     var progressInteracting by remember(chapterId) { mutableStateOf(false) }
@@ -447,7 +474,7 @@ fun ReaderScreen(
 
     val clock = rememberReaderClock(active && !leavingReader)
     val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
-        !showSettings && !showPanelModels && !showChapters && !showComments && !showSpreadAdjustment && !showPageNavigator &&
+        !panelBlocksReading && !showPanelModels && !showComments && !showSpreadAdjustment && !showPageNavigator &&
         !showReaderActions && !readerActionsPresent && !sourcePickerBlocking
     RecordReaderActivity(manga, readingEligible, libraryStore, chapterId) { owner, confirmedChapter ->
         if (owner == manga.id && confirmedChapter == chapterId && readingEligible) {
@@ -499,6 +526,54 @@ fun ReaderScreen(
             libraryStore.togglePageCollection(collection)
             downloadMessage = if (existed) "已取消画面收藏" else if (collection.spread) "已收藏跨页画面" else "已收藏画面"
         }
+    }
+
+    fun closeReaderSettings() {
+        dimPreview.value?.takeIf { it != preferences.dimAmount }?.let { amount ->
+            updatePreferences(preferences.copy(dimAmount = amount))
+        }
+        showSettings = false
+        keyboardFocusRestore++
+    }
+    fun toggleReaderSettings() {
+        if (showSettings) closeReaderSettings() else {
+            showChapters = false
+            showSettings = true
+            controlsVisible = true
+        }
+    }
+    fun toggleReaderChapters() {
+        if (showSettings) closeReaderSettings()
+        showChapters = !showChapters
+        controlsVisible = true
+        if (!showChapters) keyboardFocusRestore++
+    }
+    val settingsPanel: @Composable (Boolean) -> Unit = { embedded ->
+        ReaderSettingsDialog(
+            visible = showSettings && !showPanelModels, preferences = preferences, backdrop = readerBackdrop,
+            onModels = { showPanelModels = true }, embedded = embedded,
+            sourceResumePolicy = sourceResumePolicy, onSourceResumePolicy = onSourceResumePolicy,
+            onDimPreview = { dimPreview.value = it }, update = { next ->
+                if (next.mode != preferences.mode || next.doublePage != preferences.doublePage ||
+                    next.coverAlone != preferences.coverAlone) cursor.scrollOffset = 0
+                updatePreferences(next)
+            }, onDismiss = ::closeReaderSettings,
+        )
+    }
+    val chaptersPanel: @Composable (Boolean) -> Unit = { embedded ->
+        ReaderChaptersDialog(
+            visible = showChapters, chapters = chapters, currentId = chapterId,
+            manga = manga, library = libraryStore, backdrop = readerBackdrop,
+            downloadStore = downloadStore, loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
+            embedded = embedded,
+            onSelect = {
+                chapterId = it
+                if (!dockedPanels) showChapters = false
+                controlsVisible = true
+                keyboardFocusRestore++
+            },
+            onDismiss = { showChapters = false; keyboardFocusRestore++ },
+        )
     }
 
     if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showPanelModels || showChapters || showSpreadAdjustment || showComments || sourcePickerBlocking, lightChrome)
@@ -561,10 +636,10 @@ fun ReaderScreen(
     }
 
     LaunchedEffect(controlsVisible, showSettings, showChapters, showSpreadAdjustment, showComments,
-        showPageNavigator, showReaderActions, readerActionsPresent, sourcePickerBlocking, loading, error, progressInteracting, touchExploration) {
+        showPageNavigator, showReaderActions, readerActionsPresent, sourcePickerBlocking, loading, error, progressInteracting, touchExploration, chromeEngaged) {
         if (controlsVisible && !showSettings && !showChapters && !showSpreadAdjustment && !showComments &&
             !showPageNavigator && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking &&
-            !loading && error == null && !progressInteracting && !touchExploration) {
+            !loading && error == null && !progressInteracting && !touchExploration && !chromeEngaged) {
             delay(5000)
             controlsVisible = false
         }
@@ -587,7 +662,7 @@ fun ReaderScreen(
         }
     }
     LaunchedEffect(atChapterEnd, touchExploration) {
-        if (atChapterEnd && !touchExploration) controlsVisible = false
+        if (atChapterEnd && !touchExploration && !chromeEngaged) controlsVisible = false
     }
 
     val keyboard = LocalReaderKeyboard.current
@@ -597,7 +672,13 @@ fun ReaderScreen(
     var keyboardRequest by remember(chapterId) { mutableStateOf<ReaderKeyboardRequest?>(null) }
     val keyboardReady = keyboard != null && readingEligible && !showPageNavigator &&
         preferences.panelEngine == PanelEngine.OFF
-    LaunchedEffect(keyboardReady) { if (keyboardReady) keyboardFocus.requestFocus() }
+    LaunchedEffect(keyboardReady, keyboardFocusRestore) {
+        // Let closing chrome settle first. An open inspector keeps its own focused editor.
+        if (keyboardReady && !showSettings && !showChapters) {
+            withFrameNanos { }
+            keyboardFocus.requestFocus()
+        }
+    }
     val keyboardModifier = if (keyboard == null) Modifier else Modifier
         .focusRequester(keyboardFocus)
         .onFocusChanged { keyboardFocused = it.isFocused }
@@ -612,6 +693,20 @@ fun ReaderScreen(
             } ?: false
         }.focusable(enabled = keyboardReady)
 
+    CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ }) {
+    ReaderWorkspace(
+        panelVisible = dockedPanels && (showSettings || showChapters),
+        panelWidth = panelWidth,
+        panel = {
+            MotionTabContent(selected = inspector, modifier = Modifier.fillMaxSize(), soft = true) { target ->
+                if (target == 1) settingsPanel(true) else chaptersPanel(true)
+            }
+            BackHandler(active && (showSettings || showChapters)) {
+                if (showSettings) closeReaderSettings()
+                else { showChapters = false; keyboardFocusRestore++ }
+            }
+        },
+    ) {
     Box(Modifier.fillMaxSize().then(keyboardModifier)) {
         // Sample the existing artwork and dim layer; controls stay outside their own backdrop.
         Box(Modifier.fillMaxSize().graphicsLayer {
@@ -671,7 +766,7 @@ fun ReaderScreen(
                         onAtEndChanged = { atChapterEnd = it },
                         onTap = { controlsVisible = !controlsVisible }, onNext = openNextChapter,
                         onDisable = { updatePreferences(preferences.copy(panelEngine = PanelEngine.OFF)) },
-                        active = readerForeground && !leavingReader && !showSettings && !showPanelModels && !showChapters &&
+                        active = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
                             !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking && !chapterChangeRequested,
                         backdrop = readerBackdrop,
                         bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
@@ -715,7 +810,7 @@ fun ReaderScreen(
                             if (keyboardReady) keyboardFocus.requestFocus()
                             controlsVisible = !controlsVisible
                         },
-                        active = readerForeground && !leavingReader && !showSettings && !showChapters &&
+                        active = readerForeground && !leavingReader && !panelBlocksReading &&
                             !showSpreadAdjustment && !showComments && !sourcePickerBlocking && !chapterChangeRequested,
                         onAtEndChanged = { atChapterEnd = it },
                         onNext = openNextChapter,
@@ -780,6 +875,8 @@ fun ReaderScreen(
                 trackPointer = true,
                 softCard = true,
                 modifier = Modifier.widthIn(max = MangaLayout.ListWidth).fillMaxWidth()
+                    .hoverable(topChromeInteraction, enabled = desktop)
+                    .then(if (desktop) Modifier.onFocusChanged { topChromeFocused = it.hasFocus }.focusGroup() else Modifier)
                     .windowInsetsPadding(dev.mangaflow.reader.readerStatusInsets().union(WindowInsets.displayCutout)
                         .union(WindowInsets.captionBar).only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
                     .padding(horizontal = 12.dp, vertical = 4.dp),
@@ -800,11 +897,17 @@ fun ReaderScreen(
                         TextButton(enabled = controlsVisible, onClick = {
                             cursor.scrollOffset = 0
                             updatePreferences(preferences.copy(doublePage = !preferences.doublePage))
+                            keyboardFocusRestore++
                         }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                             Text(if (preferences.doublePage) "双页" else "单页", color = colors.onSurface, fontSize = 12.sp)
                         }
                     }
-                    ReaderIcon(Icons.Rounded.Tune, "阅读设置", interactive = controlsVisible) { showSettings = true }
+                    if (desktop) ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook,
+                        if (showChapters) "收起章节目录" else "章节目录", interactive = controlsVisible,
+                        emphasis = if (showChapters) 1f else .82f, onClick = ::toggleReaderChapters)
+                    ReaderIcon(Icons.Rounded.Tune, if (desktop) "阅读设置与快捷键" else "阅读设置",
+                        interactive = controlsVisible, emphasis = if (showSettings) 1f else .82f,
+                        onClick = ::toggleReaderSettings)
                 }
             }
         }
@@ -816,7 +919,9 @@ fun ReaderScreen(
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
                 slideOutVertically(tween(if (motionEnabled) MangaMotion.Exit else 0, easing = MangaMotion.EnterEasing)) { toolbarTravel },
         ) {
-            Box(Modifier.windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
+            Box(Modifier.hoverable(bottomChromeInteraction, enabled = desktop)
+                .then(if (desktop) Modifier.onFocusChanged { bottomChromeFocused = it.hasFocus }.focusGroup() else Modifier)
+                .windowInsetsPadding(dev.mangaflow.reader.readerNavigationInsets().union(WindowInsets.displayCutout)
                     .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 12.dp)
                 .widthIn(max = 440.dp).fillMaxWidth()) {
@@ -842,7 +947,7 @@ fun ReaderScreen(
                                     }
                                 },
                                 onOpenNavigator = { showPageNavigator = true },
-                                onInteractionChanged = { progressInteracting = it },
+                                onInteractionChanged = { progressInteracting = it; if (!it) keyboardFocusRestore++ },
                                 sourceContent = {
                                     if (canChooseSource || sourceLoading) Box(
                                         Modifier.width(44.dp).heightIn(min = 44.dp)
@@ -873,9 +978,10 @@ fun ReaderScreen(
                             val reserveSecondarySlot = maxWidth < 264.dp || canCorrectSpread ||
                                 returnLocation != null || (canChooseSource && pages.isEmpty())
                             val finalSlots = if (reserveSecondarySlot) 2 else 1
-                            val inlineChapterNavigation = maxWidth >= ((3 + finalSlots) * 44).dp
-                            val inlineCatalog = maxWidth >= ((1 + finalSlots) * 44).dp
-                            val chapterSlots = if (inlineChapterNavigation) 3 else if (inlineCatalog) 1 else 0
+                            val inlineChapterNavigation = maxWidth >= (((if (desktop) 2 else 3) + finalSlots) * 44).dp
+                            val inlineCatalog = !desktop && maxWidth >= ((1 + finalSlots) * 44).dp
+                            val chapterSlots = if (inlineChapterNavigation) (if (desktop) 2 else 3)
+                                else if (inlineCatalog) 1 else 0
                             val extraSlots = ((maxWidth.value - (chapterSlots + finalSlots) * 44f) / 44f)
                                 .toInt().coerceIn(0, 2)
                             val inlinePicture = extraSlots >= 1
@@ -907,7 +1013,7 @@ fun ReaderScreen(
                                 activeDownload?.status == DownloadStatus.FAILED -> "重试下载"
                                 else -> "保存本章"
                             }
-                            val secondaryActions = !inlineChapterNavigation || !inlineCatalog ||
+                            val secondaryActions = !inlineChapterNavigation || (!inlineCatalog && !desktop) ||
                                 (!inlinePicture && currentPicture != null) ||
                                 (!inlineComments && pages.isNotEmpty() && !localImport) ||
                                 (canChooseSource && pages.isEmpty()) || canCorrectSpread || returnLocation != null
@@ -943,7 +1049,7 @@ fun ReaderScreen(
                                     buttonSize = 44.dp, onClick = openPrevious)
                                 if (inlineCatalog) ReaderIcon(
                                     Icons.AutoMirrored.Outlined.MenuBook, "章节目录", interactive = controlsVisible,
-                                    buttonSize = 44.dp, onClick = { showChapters = true })
+                                    buttonSize = 44.dp, onClick = ::toggleReaderChapters)
                                 if (inlineChapterNavigation) ReaderIcon(
                                     Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
                                     enabled = openNextChapter != null && !chapterChangeRequested,
@@ -973,10 +1079,10 @@ fun ReaderScreen(
                                                     openPrevious()
                                                 }
                                             }
-                                            if (!inlineCatalog) CompactMenuAction(Icons.AutoMirrored.Outlined.MenuBook, "章节目录",
+                                            if (!inlineCatalog && !desktop) CompactMenuAction(Icons.AutoMirrored.Outlined.MenuBook, "章节目录",
                                                 enabled = showReaderActions) {
                                                 showReaderActions = false
-                                                showChapters = true
+                                                toggleReaderChapters()
                                             }
                                             if (!inlineChapterNavigation) {
                                                 CompactMenuAction(Icons.AutoMirrored.Rounded.KeyboardArrowRight, "下一章",
@@ -1057,6 +1163,8 @@ fun ReaderScreen(
             }
         }
     }
+    }
+    }
     ReaderPageNavigatorDialog(
         visible = showPageNavigator,
         pages = pages,
@@ -1076,20 +1184,7 @@ fun ReaderScreen(
         },
         onDismiss = { showPageNavigator = false },
     )
-    ReaderSettingsDialog(visible = showSettings && !showPanelModels, preferences = preferences, backdrop = readerBackdrop,
-        onModels = { showPanelModels = true },
-        sourceResumePolicy = sourceResumePolicy, onSourceResumePolicy = onSourceResumePolicy,
-        onDimPreview = { dimPreview.value = it }, update = { next ->
-        if (next.mode != preferences.mode || next.doublePage != preferences.doublePage || next.coverAlone != preferences.coverAlone) {
-            cursor.scrollOffset = 0
-        }
-        updatePreferences(next)
-    }) {
-        dimPreview.value?.takeIf { it != preferences.dimAmount }?.let { amount ->
-            updatePreferences(preferences.copy(dimAmount = amount))
-        }
-        showSettings = false
-    }
+    if (!dockedPanels) settingsPanel(false)
     PanelModelsDialog(visible = showPanelModels, backdrop = readerBackdrop) { showPanelModels = false }
     ReaderSpreadDialog(
         visible = showSpreadAdjustment && pages.isNotEmpty(),
@@ -1109,15 +1204,7 @@ fun ReaderScreen(
         },
         onDismiss = { showSpreadAdjustment = false },
     )
-    ReaderChaptersDialog(
-        visible = showChapters, chapters = chapters, currentId = chapterId,
-        manga = manga, library = libraryStore,
-        backdrop = readerBackdrop,
-        downloadStore = downloadStore,
-        loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
-        onSelect = { chapterId = it; showChapters = false; controlsVisible = true },
-        onDismiss = { showChapters = false },
-    )
+    if (!dockedPanels) chaptersPanel(false)
     val sourcePositions = rememberChapterPositions(manga, libraryStore, active = sourcePickerBlocking)
     val sourceDownloads = if (sourcePickerBlocking) {
         val flow = remember(downloadStore, manga.id) { downloadStore.observeManga(manga.id) }
@@ -2146,9 +2233,11 @@ private fun ReaderChaptersDialog(
     error: String?,
     onRetry: () -> Unit,
     onSelect: (String) -> Unit,
+    embedded: Boolean = false,
     onDismiss: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    val desktop = platformKind == PlatformKind.DESKTOP
     val groups = remember(chapters) { chapters.map(Chapter::group).distinct() }
     val positions = rememberChapterPositions(manga, library, active = visible)
     val currentGroup = chapters.firstOrNull { it.id == currentId }?.group ?: groups.firstOrNull().orEmpty()
@@ -2158,16 +2247,18 @@ private fun ReaderChaptersDialog(
     val catalogBusy = rememberDelayedBusy(visible && loading)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     LaunchedEffect(visible, currentId, currentGroup) { if (visible) selectedGroup = currentGroup }
-    MotionDialog(visible = visible, onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    val panel: @Composable () -> Unit = {
         val downloadFlow = remember(downloadStore, manga.id) { downloadStore.observeManga(manga.id) }
         val initialDownloads = remember(downloadStore, manga.id) {
             downloadStore.entries.value.filter { it.manga.id == manga.id }
         }
         val downloads by downloadFlow.collectAsStateWithLifecycle(initialValue = initialDownloads)
         val saved = remember(downloads) { downloads.associateBy { it.chapter.id } }
-        ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth(), backdrop) {
-            Column(Modifier.heightIn(max = LocalMangaWindow.current.panelHeight)
-                .padding(horizontal = 16.dp, vertical = 10.dp)) {
+        val surface = if (embedded) Modifier.fillMaxSize().motionInputGate(visible)
+            else Modifier.padding(horizontal = 16.dp).widthIn(max = 600.dp).fillMaxWidth()
+        ReaderDialogSurface(surface, backdrop, dialogWindow = !embedded) {
+            Column((if (embedded) Modifier.fillMaxSize() else Modifier.heightIn(max = LocalMangaWindow.current.panelHeight))
+                .padding(horizontal = if (embedded) 12.dp else 16.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("章节", fontSize = 17.sp, fontWeight = FontWeight.Medium)
                     Text("${visibleChapters.size} 章", Modifier.weight(1f).padding(start = 8.dp),
@@ -2188,9 +2279,10 @@ private fun ReaderChaptersDialog(
                     color = colors.onSurfaceVariant, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 MotionTabContent(
                     selected = group,
-                    modifier = Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 450.dp),
+                    modifier = (if (embedded) Modifier.weight(1f).fillMaxWidth()
+                        else Modifier.weight(1f, fill = false).fillMaxWidth().heightIn(max = 450.dp)),
                     contentKey = { it }, order = { groups.indexOf(it) },
-                    fillContent = false,
+                    fillContent = embedded,
                 ) { targetGroup ->
                     val active = visible && targetGroup == group
                     val targetChapters = remember(chapters, targetGroup) {
@@ -2203,9 +2295,11 @@ private fun ReaderChaptersDialog(
                             state.scrollToItem((index - 6).coerceAtLeast(0))
                         } else state.stopScroll()
                     }
+                    Box(Modifier.fillMaxWidth()) {
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(68.dp * fontScale), state = state,
-                        modifier = Modifier.fillMaxWidth(), userScrollEnabled = active,
+                        columns = GridCells.Adaptive((if (embedded) 112.dp else 68.dp) * fontScale), state = state,
+                        modifier = Modifier.fillMaxWidth().padding(end = if (desktop) 10.dp else 0.dp),
+                        userScrollEnabled = active,
                         contentPadding = PaddingValues(top = 10.dp, bottom = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
@@ -2240,10 +2334,15 @@ private fun ReaderChaptersDialog(
                             }
                         }
                     }
+                    DesktopVerticalScrollbar(state, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+                    }
                 }
             }
         }
     }
+    if (embedded) panel()
+    else MotionDialog(visible = visible, onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false), content = panel)
 }
 
 @Composable
@@ -2278,7 +2377,9 @@ private fun ReaderDownloadAction(
     val progress = entry?.takeIf { it.totalPages > 0 }?.let {
         it.completedPages.toFloat() / it.totalPages
     }
-    MotionIconButton(onClick, enabled = enabled && interactive, modifier = Modifier.size(44.dp)) {
+    val actionFinished = LocalReaderActionFinished.current
+    MotionIconButton({ onClick(); actionFinished() }, enabled = enabled && interactive,
+        modifier = Modifier.size(44.dp), tooltip = label) {
         key(chapterId) {
             CompactDownloadIcon(state, progress = if (submitting) null else progress,
                 contentDescription = label,
@@ -2291,7 +2392,9 @@ private fun ReaderDownloadAction(
 private fun ReaderIcon(icon: ImageVector, label: String, enabled: Boolean = true, interactive: Boolean = true,
     emphasis: Float = .82f, buttonSize: Dp = 48.dp, onClick: () -> Unit) {
     val tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) emphasis else .25f)
-    MotionIconButton(onClick = onClick, enabled = enabled && interactive, modifier = Modifier.size(buttonSize)) {
+    val actionFinished = LocalReaderActionFinished.current
+    MotionIconButton(onClick = { onClick(); actionFinished() }, enabled = enabled && interactive,
+        modifier = Modifier.size(buttonSize), tooltip = label) {
         Icon(icon, label, Modifier.size(21.dp), tint = tint)
     }
 }

@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -169,6 +170,13 @@ fun SettingsScreen(
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
+    val desktop = platformKind == PlatformKind.DESKTOP
+    var settingsCategory by rememberSaveable { mutableStateOf(0) }
+    val settingsFocus = androidx.compose.ui.platform.LocalFocusManager.current
+    val settingsScroll = rememberLazyListState()
+    LaunchedEffect(settingsCategory, desktop) {
+        if (desktop) { settingsFocus.clearFocus(); settingsScroll.scrollToItem(0) }
+    }
     val cacheScope = rememberCoroutineScope()
     val imageLoader = remember(context) { SingletonImageLoader.get(imagePlatformContext(context)) }
     var cacheSizes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
@@ -330,14 +338,17 @@ fun SettingsScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LazyColumn(
+    val settingsContent: @Composable (Dp) -> Unit = { paneTopPadding ->
+    Box(Modifier.fillMaxSize()) {
+    LazyColumn(state = settingsScroll,
         modifier = Modifier.fillMaxSize().imePadding().background(
             if (LocalWallpaperActive.current) Color.Transparent else colors.background),
-        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = contentTopPadding, bottom = 32.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = paneTopPadding, bottom = 32.dp + screenFitContentInsets().asPaddingValues().calculateBottomPadding()),
     ) {
         item {
             // Keep the import controls composed while scrolling; their in-progress copy owns this lifetime.
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(if (desktop) 0.dp else 16.dp)) {
+                RetainedSettingsCategory(!desktop || settingsCategory == 0) {
                 SettingsSection("阅读", sourceBackdrop) {
                     SettingsDisclosure("翻页方式", when (preferences.mode) {
                         ReadingMode.VERTICAL -> "纵向滚动"
@@ -369,6 +380,8 @@ fun SettingsScreen(
                         }
                     }
                 }
+                }
+                RetainedSettingsCategory(!desktop || settingsCategory == 1) {
                 SettingsSection("外观", sourceBackdrop) {
                     DetailAppearanceSettings()
                     SettingsDisclosure("字体", "", Icons.Outlined.TextFields,
@@ -385,6 +398,8 @@ fun SettingsScreen(
                         WallpaperSettings(store = wallpaperStore, backdrop = sourceBackdrop)
                     }
                 }
+                }
+                RetainedSettingsCategory(!desktop || settingsCategory == 2) {
                 SettingsSection("数据", sourceBackdrop) {
                     sourceRegistry?.let { registry ->
                         val sources by registry.entries.collectAsStateWithLifecycle()
@@ -457,6 +472,8 @@ fun SettingsScreen(
                     webDavNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
                         modifier = Modifier.padding(vertical = 6.dp)) }
                 }
+                }
+                RetainedSettingsCategory(!desktop || settingsCategory == 3) {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SettingsSection("应用", sourceBackdrop) {
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
@@ -572,9 +589,17 @@ fun SettingsScreen(
                         SettingsLinkRow("项目主页", "", Icons.Outlined.Code, external = true, compact = true) { if (!openUrl(context, "https://github.com/${UpdateManager.REPOSITORY}")) showPlatformMessage(context, "暂时无法打开项目主页") }
                     }
                 }
+                }
             }
         }
     }
+    if (desktop) DesktopVerticalScrollbar(settingsScroll,
+        Modifier.align(Alignment.CenterEnd).padding(top = paneTopPadding))
+    }
+    }
+    if (desktop) {
+        DesktopSettingsLayout(settingsCategory, { settingsCategory = it }, contentTopPadding, settingsContent)
+    } else settingsContent(contentTopPadding)
 
     if (showBodySources && sourceRegistry != null) {
         BodySourceSettingsSheet(sourceRegistry, sourceBackdrop, plugins = sourcePlugins,

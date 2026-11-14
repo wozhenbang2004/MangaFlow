@@ -447,7 +447,28 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             mode = previous.mode, period = previous.period, audience = previous.audience))
     }
 
+    // One suspended selection, not a second results store. The existing browse cache owns pages.
+    private var retainedSearchSelection: BrowseState? = null
+
+    fun suspendBrowseSearch() {
+        val previous = _browse.value
+        if (previous.isSearch || previous.query.isNotBlank() || previous.searchTarget == SearchTarget.TAG) {
+            retainedSearchSelection = BrowseState(query = previous.query, searchTarget = previous.searchTarget,
+                selectedTags = previous.selectedTags, mode = previous.mode, period = previous.period,
+                audience = previous.audience)
+        }
+        cancelTagLookup()
+        showBrowse(BrowseState(mode = previous.mode, period = previous.period, audience = previous.audience))
+    }
+
+    fun resumeBrowseSearch() {
+        val selection = retainedSearchSelection ?: return
+        retainedSearchSelection = null
+        showBrowse(selection)
+    }
+
     fun clearSearch() {
+        retainedSearchSelection = null
         cancelTagLookup()
         val previous = _browse.value
         showBrowse(BrowseState(mode = previous.mode, period = previous.period, audience = previous.audience))

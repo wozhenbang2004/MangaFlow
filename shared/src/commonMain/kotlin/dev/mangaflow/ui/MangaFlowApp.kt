@@ -72,6 +72,7 @@ import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Lock
@@ -117,6 +118,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerType
@@ -281,10 +283,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val snackbar = remember { SnackbarHostState() }
     val savedState = rememberSaveableStateHolder()
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
+    var desktopNavigationMode by rememberSaveable { mutableIntStateOf(0) }
+    var desktopSearchRequest by remember { mutableIntStateOf(0) }
     var tagSearchVisible by rememberSaveable { mutableStateOf(false) }
     var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
     val browse by model.browse.collectVisibleAsState(
-        reading == null && detail == null || tagSearchVisible || searchExpanded)
+        reading == null && detail == null || tagSearchVisible ||
+            searchExpanded && platformKind != PlatformKind.DESKTOP)
     val favorites by model.library.favorites.collectVisibleAsState(reading == null)
     val history by model.library.history.collectVisibleAsState(reading == null || recentReadingOpen)
     val preferences by model.library.preferences.collectVisibleAsState(reading == null)
@@ -369,6 +374,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detailFrame ?: Frame.Root(section)
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val desktopNavigationVisible = desktop && reading == null && windowSize.width >= 760.dp
+    val desktopNavigationWide = when (desktopNavigationMode) {
+        1 -> true
+        2 -> false
+        else -> windowSize.width >= 1060.dp * windowSize.fontScale.coerceAtLeast(1f)
+    }
+    val desktopDestinations = remember { Section.entries.map { DesktopDestination(it.title, it.icon) } }
     sourceManagement?.let { state ->
         UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
             onSearch = model::searchBodySource, onAttach = { candidate -> model.attachBodySource(state.work.id, candidate) },
@@ -381,6 +394,18 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val focus = LocalFocusManager.current
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
+    val openDesktopSearch: () -> Unit = {
+        // The regular reader/detail close paths retain their own positions and cancellation.
+        model.closeReader()
+        model.closeDetail()
+        tagSearchVisible = false
+        recentReadingOpen = false
+        drawerAction = null
+        sectionName = Section.DISCOVER.name
+        model.resumeBrowseSearch()
+        searchExpanded = true
+        desktopSearchRequest++
+    }
     if (recentReadingOpen) {
         RecentReadingSheet(ordinaryHistory, model.repository, model.library,
             onDismiss = { recentReadingOpen = false },
@@ -458,12 +483,48 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         LocalMangaMetrics provides metricState,
         LocalWallpaperActive provides (frame is Frame.Root && wallpaper.mediaPath != null),
     ) {
+    DesktopNavigationWorkspace(
+        visible = desktopNavigationVisible, expanded = desktopNavigationWide,
+        destinations = desktopDestinations, selectedIndex = section.ordinal,
+        version = "MangaFlow " + platformVersion(LocalContext.current), backdrop = drawerBackdrop,
+        onToggle = { desktopNavigationMode = if (desktopNavigationWide) 2 else 1 },
+        onNavigate = { index ->
+            val destination = Section.entries[index]
+            model.closeDetail()
+            tagSearchVisible = false
+            recentReadingOpen = false
+            searchExpanded = destination == Section.DISCOVER && browse.isSearch
+            changeSection(destination)
+        },
+        onSearch = openDesktopSearch,
+        modifier = Modifier.onPreviewKeyEvent { event ->
+            if (desktop && event.isCtrlPressed && !event.isAltPressed &&
+                (event.key == Key.K || event.key == Key.F)) {
+                if (event.type == KeyEventType.KeyDown) openDesktopSearch()
+                true
+            } else false
+        }.onKeyEvent { event ->
+            // A focused control or temporary popup gets first refusal.
+            val canGoBack = desktop && event.isAltPressed && event.key == Key.DirectionLeft &&
+                sourceManagement == null && sourceResumeChoice == null && authorWorks == null &&
+                !recentReadingOpen && !tagSearchVisible && !drawerVisible
+            if (canGoBack) {
+                if (event.type == KeyEventType.KeyUp) when {
+                    reading != null -> model.closeReader()
+                    detail != null -> model.closeDetail()
+                    searchExpanded -> { searchExpanded = false; model.suspendBrowseSearch(); focus.clearFocus(force = true) }
+                    section != Section.DISCOVER -> changeSection(Section.DISCOVER)
+                }
+                true
+            } else false
+        },
+    ) {
     ModalNavigationDrawer(
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant)
             .drawerSelectionTapInput(drawerTargets, canSelectDrawer,
                 { drawer.isAnimationRunning && !drawerScroll.isScrollInProgress }, selectDrawer),
         drawerState = drawer,
-        gesturesEnabled = frame is Frame.Root,
+        gesturesEnabled = frame is Frame.Root && !desktopNavigationVisible,
         scrimColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.14f),
         drawerContent = {
             ModalDrawerSheet(
@@ -598,7 +659,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 LaunchedEffect(current.key, entry.currentState, entry.isRunning) {
                     if (current is Frame.Detail && current.key == frame.key &&
                         entry.currentState == EnterExitState.Visible && !entry.isRunning &&
-                        searchExpanded && selectedCover?.placement?.startsWith("search-") == true) {
+                        !desktop && searchExpanded && selectedCover?.placement?.startsWith("search-") == true) {
                         searchExpanded = false
                         model.clearSearch()
                     }
@@ -728,10 +789,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             labelSlot * DiscoveryMode.entries.size + 8.dp
                         }
                         var searchPresent by remember { mutableStateOf(searchExpanded) }
-                        val searchVisible = searchExpanded || searchPresent
+                        val searchVisible = if (desktop) searchExpanded else searchExpanded || searchPresent
+                        val desktopSearchContent = desktop && searchExpanded && (browse.query.isNotBlank() ||
+                            browse.selectedTags.isNotEmpty() || browse.searchTarget == SearchTarget.TAG)
                         var searchForeground by remember { mutableStateOf<State<Float>?>(null) }
                         val chromeReady by remember {
-                            derivedStateOf { !searchExpanded && (searchForeground?.value ?: 0f) <= .02f }
+                            derivedStateOf { desktop || !searchExpanded && (searchForeground?.value ?: 0f) <= .02f }
                         }
                         val rootActive = current.key == frame.key && !drawerVisible && !rootHandoff && !recentReadingOpen && authorWorks == null && !tagSearchVisible &&
                             !currentBack.gesturing && !currentBack.completed
@@ -739,7 +802,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             keyboard?.hide()
                             focus.clearFocus(force = true)
                             searchExpanded = false
-                            model.clearSearch()
+                            if (desktop) model.suspendBrowseSearch() else model.clearSearch()
                         }
                         // The backdrop reaches every edge; only foreground controls
                         // consume the system/cutout safe area.
@@ -750,11 +813,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             .background(MaterialTheme.colorScheme.background)) {
                             AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = rootWallpaperActive)
                         }
-                        val contentWidth = when (current.section) {
+                        val contentWidth = if (desktop && current.section != Section.DISCOVER && current.section != Section.ADULT) {
+                            MangaLayout.DesktopWorkspaceWidth
+                        } else when (current.section) {
                             Section.SETTINGS -> MangaLayout.SettingsWidth
                             Section.ACCOUNT -> MangaLayout.AccountWidth
                             Section.DOWNLOADS -> MangaLayout.ListWidth
-                            Section.DISCOVER, Section.ADULT -> if (platformKind == PlatformKind.DESKTOP)
+                            Section.DISCOVER, Section.ADULT -> if (desktop)
                                 MangaLayout.desktopBrowseWidth(windowSize.width) else MangaLayout.BrowseWidth
                             else -> MangaLayout.BrowseWidth
                         }
@@ -773,7 +838,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             }
                             val discoveryChromeBase = (if (discoveryStacked) 44.dp + 4.dp + discoveryTabHeight
                                 else maxOf(44.dp, discoveryTabHeight)) + 4.dp + chromeTopInset
-                            val chromePadding = (if (current.section == Section.DISCOVER) {
+                            val chromePadding = (if (desktop) with(chromeDensity) { chromeHeightPx.toDp() }
+                            else if (current.section == Section.DISCOVER) {
                                 // Recommendation/update content must not follow the old ranking
                                 // subbar's exit measurement or a first-frame header estimate.
                                 if (rankingExpanded) maxOf(discoveryChromeBase, with(chromeDensity) { chromeHeightPx.toDp() })
@@ -781,7 +847,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             } else with(chromeDensity) { chromeHeightPx.toDp() }) + HeaderContentGap
                             val hasUpdate = update.phase in setOf(UpdatePhase.AVAILABLE, UpdatePhase.READY)
                             val navigation: @Composable () -> Unit = {
-                                Box {
+                                if (!desktopNavigationVisible) Box {
                                     MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
                                         closeSearch()
                                         model.cancelLibraryReading()
@@ -815,35 +881,63 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 Box(Modifier.fillMaxSize()) {
                                 savedState.SaveableStateProvider(current.key) {
                                 when (current.section) {
-                                    Section.DISCOVER -> DiscoverScreen(
-                                        state = browse, repository = model.repository,
-                                        discoverColumns = if (platformKind == PlatformKind.DESKTOP)
-                                            preferences.desktopDiscoverColumns else preferences.discoverColumns,
-                                        updateColumns = if (platformKind == PlatformKind.DESKTOP)
-                                            preferences.desktopUpdateColumns else preferences.updateColumns,
-                                        onDiscoverColumnsChange = { columns ->
-                                            val current = model.library.preferences.value
-                                            model.library.updatePreferences(if (platformKind == PlatformKind.DESKTOP)
-                                                current.copy(desktopDiscoverColumns = columns) else current.copy(discoverColumns = columns))
-                                        },
-                                        onUpdateColumnsChange = { columns ->
-                                            val current = model.library.preferences.value
-                                            model.library.updatePreferences(if (platformKind == PlatformKind.DESKTOP)
-                                                current.copy(desktopUpdateColumns = columns) else current.copy(updateColumns = columns))
-                                        },
-                                        backgroundState = discoveryBackground,
-                                        searchExpanded = searchVisible,
-                                        searchBackdrop = searchBackdrop,
-                                        backgroundInParent = true,
-                                        contentTopPadding = chromePadding,
-                                        active = rootActive,
-                                        canAutoAdvance = rootActive && !searchVisible,
-                                        onRefresh = model::refresh,
-                                        onRetry = model::retryBrowse, onMore = model::loadMore,
-                                        onOpen = { model.openManga(it) },
-                                        isFavorite = { manga -> favorites.any { it.id == manga.id } },
-                                        onToggleFavorite = model::toggleFavorite,
-                                    )
+                                    Section.DISCOVER -> {
+                                        val gallery: @Composable () -> Unit = {
+                                            DiscoverScreen(
+                                                state = browse, repository = model.repository,
+                                                discoverColumns = if (platformKind == PlatformKind.DESKTOP)
+                                                    preferences.desktopDiscoverColumns else preferences.discoverColumns,
+                                                updateColumns = if (platformKind == PlatformKind.DESKTOP)
+                                                    preferences.desktopUpdateColumns else preferences.updateColumns,
+                                                onDiscoverColumnsChange = { columns ->
+                                                    val current = model.library.preferences.value
+                                                    model.library.updatePreferences(if (platformKind == PlatformKind.DESKTOP)
+                                                        current.copy(desktopDiscoverColumns = columns) else current.copy(discoverColumns = columns))
+                                                },
+                                                onUpdateColumnsChange = { columns ->
+                                                    val current = model.library.preferences.value
+                                                    model.library.updatePreferences(if (platformKind == PlatformKind.DESKTOP)
+                                                        current.copy(desktopUpdateColumns = columns) else current.copy(updateColumns = columns))
+                                                },
+                                                backgroundState = discoveryBackground,
+                                                searchExpanded = if (desktop) false else searchVisible,
+                                                searchBackdrop = searchBackdrop,
+                                                backgroundInParent = true,
+                                                contentTopPadding = chromePadding,
+                                                active = rootActive,
+                                                canAutoAdvance = rootActive && !searchVisible,
+                                                onRefresh = model::refresh,
+                                                onRetry = model::retryBrowse, onMore = model::loadMore,
+                                                onOpen = { model.openManga(it) },
+                                                isFavorite = { manga -> favorites.any { it.id == manga.id } },
+                                                onToggleFavorite = model::toggleFavorite,
+                                            )
+                                        }
+                                        if (desktop) DesktopDiscoveryWorkspace(desktopSearchContent, browse = gallery, results = {
+                                            BoxWithConstraints(Modifier.fillMaxSize().padding(top = chromePadding)
+                                                .mangaHazeSource(searchBackdrop)) {
+                                                DiscoverySearchResults(
+                                                    state = browse, expanded = true, active = rootActive,
+                                                    maxHeight = maxHeight, repository = model.repository,
+                                                    backdrop = searchBackdrop, scopeInToolbar = true,
+                                                    desktopMainContent = true,
+                                                    desktopActions = { manga -> listOf(
+                                                        DesktopMenuAction("详情与目录", onClick = { model.openManga(manga) }),
+                                                        DesktopMenuAction(if (favorites.any { it.id == manga.id }) "移出书架" else "加入书架",
+                                                            onClick = { model.toggleFavorite(manga) }),
+                                                    ) },
+                                                    onRetry = model::retryBrowse, onMore = model::loadMore,
+                                                    onTarget = model::setSearchTarget, onTag = model::toggleSearchTag,
+                                                    onRetryTags = model::retrySearchTags,
+                                                    onOpen = { manga ->
+                                                        keyboard?.hide()
+                                                        focus.clearFocus(force = true)
+                                                        model.openManga(manga)
+                                                    },
+                                                )
+                                            }
+                                        }) else gallery()
+                                    }
                                     Section.ADULT -> AdultZoneScreen(
                                         confirmed = adultConfirmed, onConfirm = { adultConfirmed = true },
                                         onExit = { changeSection(Section.DISCOVER) },
@@ -869,7 +963,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onRetryOpen = model::retryLibraryReading, onCancelOpen = model::cancelLibraryReading,
                                     )
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, repository = model.repository, onRead = model::openDownload,
-                                        onRetry = model::retryDownload, backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
+                                        onRetry = model::retryDownload, onDetails = model::openManga,
+                                        backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         backgroundInParent = true,
                                         active = rootActive && !searchVisible, refreshingIds = refreshingDownloads,
                                         history = ordinaryHistory, excludedSourceIds = privateSourceIds)
@@ -896,13 +991,70 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 }
                             }
                             if (current.section in setOf(Section.ACCOUNT, Section.SETTINGS, Section.ADULT)) {
-                                PageTitleHeader(when (current.section) {
+                                if (desktop) DesktopManagementToolbar(
+                                    title = when (current.section) {
+                                        Section.ACCOUNT -> "账号"; Section.ADULT -> "成人专区"; else -> "设置"
+                                    },
+                                    modifier = Modifier.align(Alignment.TopCenter)
+                                        .onSizeChanged { chromeHeightPx = it.height }
+                                        .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top)),
+                                ) {
+                                    Spacer(Modifier.weight(1f))
+                                    navigation()
+                                    if (!desktopNavigationVisible) MotionIconButton(
+                                        onClick = openDesktopSearch, modifier = Modifier.size(36.dp),
+                                        tooltip = "搜索 · Ctrl+K",
+                                    ) { Icon(Icons.Outlined.Search, "搜索", Modifier.size(20.dp)) }
+                                } else PageTitleHeader(when (current.section) {
                                         Section.ACCOUNT -> "账号"; Section.ADULT -> "成人专区"; else -> "设置"
                                     },
                                     searchBackdrop, navigation,
                                     modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { chromeHeightPx = it.height }
                                         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
                                         .padding(horizontal = 8.dp, vertical = 2.dp))
+                            } else if (current.section == Section.DISCOVER && desktop) {
+                                DesktopDiscoveryHeader(
+                                    searching = desktopSearchContent, backdrop = searchBackdrop,
+                                    onLeaveSearch = closeSearch, navigation = navigation,
+                                    tabs = { tabModifier ->
+                                        BrowseTabs(displayedDiscovery.mode.ordinal, DiscoveryMode.entries.map { it.label }, tabModifier) { index ->
+                                            closeSearch()
+                                            model.selectDiscovery(DiscoveryMode.entries[index], clearQuery = true)
+                                        }
+                                    },
+                                    input = { inputModifier ->
+                                        DesktopSearchField(
+                                            query = browse.query, target = browse.searchTarget,
+                                            copyOnly = browse.selectedTags.isNotEmpty(),
+                                            active = rootActive, focusRequest = desktopSearchRequest,
+                                            backdrop = searchBackdrop, modifier = inputModifier,
+                                            onOpen = { model.resumeBrowseSearch(); searchExpanded = true },
+                                            onQuery = model::setQuery,
+                                            onSubmit = model::submitSearch,
+                                            onTarget = model::setSearchTarget,
+                                            onClear = { model.clearSearch(); searchExpanded = false },
+                                        )
+                                    },
+                                    recent = {
+                                        if (ordinaryHistory.isNotEmpty()) MotionIconButton(
+                                            modifier = Modifier.size(36.dp), tooltip = "最近阅读",
+                                            onClick = { feedback.perform(FeelEvent.Selection); recentReadingOpen = true },
+                                        ) {
+                                            HistoryActionIcon(active = recentReadingOpen, description = "最近阅读",
+                                                modifier = Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurface)
+                                        }
+                                    },
+                                    ranking = {
+                                        if (rankingExpanded) RankingControls(displayedDiscovery,
+                                            onPeriod = { model.selectDiscovery(DiscoveryMode.RANKING, period = it) },
+                                            onAudience = { model.selectDiscovery(DiscoveryMode.RANKING, audience = it) },
+                                            onRefresh = model::refresh)
+                                    },
+                                    modifier = Modifier.align(Alignment.TopCenter)
+                                        .onSizeChanged { chromeHeightPx = it.height }
+                                        .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
+                                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                                )
                             } else if (current.section == Section.DISCOVER) {
                                 SegmentedGlassHeader(searchBackdrop, navigation,
                                     controlsWidth = discoveryTabsWidth,
@@ -956,7 +1108,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     }
                                 }
                             }
-                        if (current.section == Section.DISCOVER) ExpandingSearchBar(
+                        if (current.section == Section.DISCOVER && !desktop) ExpandingSearchBar(
                             expanded = searchExpanded,
                             query = browse.query,
                             placeholder = "搜索",
@@ -999,6 +1151,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             }
         }
     }
+}
 }
 }
 }

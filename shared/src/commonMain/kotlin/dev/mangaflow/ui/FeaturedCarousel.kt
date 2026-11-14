@@ -10,6 +10,27 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionTabContent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.pager.HorizontalPager
@@ -17,6 +38,7 @@ import androidx.compose.foundation.pager.PageSize
 import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -107,8 +129,13 @@ import kotlin.math.floor
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, visible: Boolean,
-    onOpen: (Manga) -> Unit, onRatings: ((Manga) -> Unit)? = null, loading: Boolean = false) {
+    onOpen: (Manga) -> Unit, onRatings: ((Manga) -> Unit)? = null, loading: Boolean = false,
+    desktopActions: ((Manga) -> List<DesktopMenuAction>)? = null) {
     if (manga.isEmpty() && !loading) return
+    if (platformKind == PlatformKind.DESKTOP) {
+        DesktopFeaturedRecommendations(manga, repository, visible, onOpen, onRatings, loading, desktopActions)
+        return
+    }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val galleryWidth = maxWidth
         val density = LocalDensity.current
@@ -210,6 +237,129 @@ internal fun FeaturedCarousel(manga: List<Manga>, repository: MangaRepository, v
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Desktop combines the existing rounded artwork/material card with explicit groups.
+ * Every visible book opens in one click; only the arrows and page controls change groups.
+ */
+@Composable
+private fun DesktopFeaturedRecommendations(
+    manga: List<Manga>,
+    repository: MangaRepository,
+    visible: Boolean,
+    onOpen: (Manga) -> Unit,
+    onRatings: ((Manga) -> Unit)?,
+    loading: Boolean,
+    desktopActions: ((Manga) -> List<DesktopMenuAction>)?,
+) {
+    val window = LocalMangaWindow.current
+    val density = LocalDensity.current
+    val fontScale = density.fontScale.coerceAtLeast(1f)
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val coverUrls = remember(manga) { manga.map { it.coverUrl } }
+    val extracted = remember(coverUrls) { mutableStateMapOf<String, Color>() }
+    val fallback = MaterialTheme.colorScheme.surfaceVariant
+    var firstIndex by rememberSaveable { mutableStateOf(0) }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val perGroup = when {
+            maxWidth >= 960.dp * fontScale -> 3
+            maxWidth >= 600.dp * fontScale -> 2
+            else -> 1
+        }
+        val pageCount = ((manga.size + perGroup - 1) / perGroup).coerceAtLeast(1)
+        val page = (firstIndex / perGroup).coerceIn(0, pageCount - 1)
+        val selectPage: (Int) -> Unit = { firstIndex = it.coerceIn(0, pageCount - 1) * perGroup }
+        LaunchedEffect(manga.size) {
+            if (manga.isNotEmpty()) firstIndex = firstIndex.coerceIn(0, manga.lastIndex)
+        }
+        val cardHeight = if (window.shortHeight) 152.dp
+            else (window.height * .24f).coerceIn(176.dp, 224.dp)
+        val gap = 12.dp
+        val galleryHeight = cardHeight + 20.dp
+        val cardWidth = ((maxWidth - 16.dp - gap * (perGroup - 1)) / perGroup).coerceAtLeast(1.dp)
+        val inlineInformation = cardWidth >= 224.dp && fontScale <= 1.3f
+        val titleLines = if (window.shortHeight || fontScale > 1.3f) 1 else 2
+        val captionHeight = if (inlineInformation) 0.dp else
+            (10f + (17f * titleLines + 22f) * fontScale).dp.coerceAtMost(cardHeight - 96.dp)
+        val inlinePages = maxWidth >= 480.dp
+        Column(Modifier.fillMaxWidth().semantics { paneTitle = "精选推荐" }
+            .onPreviewKeyEvent { event ->
+                if (!visible || pageCount <= 1 || event.type != KeyEventType.KeyDown || event.isAltPressed ||
+                    event.isCtrlPressed || event.isMetaPressed) false
+                else when (event.key) {
+                    Key.DirectionLeft -> { selectPage(page + if (rtl) 1 else -1); true }
+                    Key.DirectionRight -> { selectPage(page + if (rtl) -1 else 1); true }
+                    else -> false
+                }
+            }.focusGroup(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("精选", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (pageCount > 1) {
+                    MotionIconButton(onClick = { selectPage(page - 1) }, enabled = visible && page > 0,
+                        modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "上一组推荐", Modifier.size(18.dp))
+                    }
+                    if (inlinePages) DesktopRecommendationPages(pageCount, page, visible, selectPage)
+                    MotionIconButton(onClick = { selectPage(page + 1) }, enabled = visible && page < pageCount - 1,
+                        modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowForward, "下一组推荐", Modifier.size(18.dp))
+                    }
+                }
+            }
+            if (manga.isEmpty() && loading) Box(Modifier.fillMaxWidth().height(galleryHeight),
+                contentAlignment = Alignment.Center) { QuietLoading("正在翻开书页…") }
+            else MotionTabContent(selected = page to perGroup, modifier = Modifier.fillMaxWidth().height(galleryHeight),
+                contentKey = { it }, order = { it.first }, fillContent = false) { group ->
+                val entries = manga.drop(group.first * group.second).take(group.second)
+                Row(Modifier.fillMaxWidth().height(galleryHeight).padding(horizontal = 8.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    repeat(group.second) { index ->
+                        val entry = entries.getOrNull(index)
+                        if (entry == null) Spacer(Modifier.weight(1f).fillMaxHeight())
+                        else key(entry.id, entry.coverUrl) {
+                            val color = animateColorAsState(
+                                extracted[entry.coverUrl] ?: FeaturedCoverColors.get(entry.coverUrl) ?: fallback,
+                                if (LocalMotionEnabled.current) tween(420, easing = MangaMotion.EnterEasing) else snap(),
+                                label = "desktop-featured-color")
+                            Box(Modifier.weight(1f).fillMaxHeight()) {
+                                DesktopBrowseActions(desktopActions?.invoke(entry).orEmpty(), visible) {
+                                    FeaturedManga(entry, repository, captionHeight, titleLines, inlineInformation,
+                                        with(density) { cardWidth.roundToPx() }.coerceAtLeast(1),
+                                        with(density) { cardHeight.roundToPx() }.coerceAtLeast(1),
+                                        color = color, atmosphere = color,
+                                        onColor = { extracted[entry.coverUrl] = it }, onReady = {},
+                                        modifier = Modifier.fillMaxSize().mangaCoverCard(22.dp),
+                                        emphasis = { 1f }, offset = { 0f }, onPreview = {},
+                                        enabled = visible, onOpen = onOpen, onRatings = onRatings)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!inlinePages && pageCount > 1) Row(Modifier.fillMaxWidth()
+                .horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.Center) {
+                DesktopRecommendationPages(pageCount, page, visible, selectPage)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DesktopRecommendationPages(count: Int, page: Int, enabled: Boolean, onPage: (Int) -> Unit) {
+    repeat(count) { index ->
+        MotionIconButton(onClick = { onPage(index) }, enabled = enabled, modifier = Modifier.size(44.dp)
+            .semantics {
+                contentDescription = "第${index + 1}组推荐，共${count}组"
+                selected = page == index
+            }) {
+            Box(Modifier.size(width = if (page == index) 16.dp else 4.dp, height = 4.dp)
+                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = if (page == index) .58f else .16f),
+                    RoundedCornerShape(2.dp)))
         }
     }
 }

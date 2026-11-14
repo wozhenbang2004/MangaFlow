@@ -34,6 +34,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Pause
@@ -90,7 +92,18 @@ internal fun DownloadBookRow(
     onExpand: () -> Unit,
     onPause: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
+    onDetails: (() -> Unit)? = null,
+    onRemove: (() -> Unit)? = null,
+    inspectMode: Boolean = false,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val actions = buildList {
+        add(DesktopMenuAction("继续阅读", onClick = onRead))
+        onDetails?.let { add(DesktopMenuAction("详情与目录", onClick = it)) }
+        add(DesktopMenuAction("查看章节", onClick = onExpand))
+        add(DesktopMenuAction("选择下载", onClick = onManage))
+        onRemove?.let { add(DesktopMenuAction("删除下载", onClick = it)) }
+    }
     val manga = entries.first().manga
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
@@ -101,8 +114,11 @@ internal fun DownloadBookRow(
     val completedPages = entries.sumOf { it.completedPages }
     val rotation by animateFloatAsState(if (expanded) 180f else 0f,
         tween(if (LocalMotionEnabled.current) MangaMotion.Content else 0), label = "download-book-disclosure")
+    DesktopContextMenuArea(actions) {
     Column {
-        Row(Modifier.fillMaxWidth().combinedClickable(
+        Row(Modifier.fillMaxWidth().then(if (desktop && inspectMode && expanded)
+            Modifier.clip(RoundedCornerShape(12.dp)).background(colors.onSurface.copy(alpha = .045f))
+            else Modifier).combinedClickable(
             interactionSource = interaction, indication = null,
             onClickLabel = if (managing) "选择这部作品的章节" else "继续阅读 ${manga.title}",
             onClick = if (managing) onSelect else onRead,
@@ -144,9 +160,17 @@ internal fun DownloadBookRow(
             }
             if (managing) DownloadSelection(selected, onSelect)
             else DownloadTransferAction(entries, refreshingIds, onPause, onRetry)
-            if (entries.size > 1) MotionIconButton(onClick = onExpand, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Outlined.KeyboardArrowDown, if (expanded) "收起章节" else "展开 ${entries.size} 话",
-                    Modifier.size(20.dp).graphicsLayer { rotationZ = rotation }, tint = colors.onSurfaceVariant)
+            if (entries.size > 1 || desktop) MotionIconButton(onClick = onExpand, modifier = Modifier.size(if (desktop) 36.dp else 40.dp)) {
+                Icon(if (inspectMode) Icons.Outlined.ChevronRight else Icons.Outlined.KeyboardArrowDown,
+                    if (inspectMode) "查看章节" else if (expanded) "收起章节" else "展开 ${entries.size} 话",
+                    Modifier.size(20.dp).graphicsLayer { rotationZ = if (inspectMode) 0f else rotation },
+                    tint = if (inspectMode && expanded) colors.onSurface else colors.onSurfaceVariant)
+            }
+            if (desktop) {
+                if (onDetails != null) MotionIconButton(onClick = onDetails, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.AutoMirrored.Outlined.MenuBook, "详情与目录", Modifier.size(17.dp))
+                }
+                DesktopMoreButton(actions, "作品下载操作")
             }
         }
         val failure = remember(entries) {
@@ -154,6 +178,7 @@ internal fun DownloadBookRow(
         }
         if (!expanded && failure.isNotBlank()) DownloadFailureDetails(failure, Modifier.padding(start = 60.dp))
 
+    }
     }
 }
 
@@ -169,9 +194,17 @@ internal fun DownloadChapterRow(
     onManage: () -> Unit,
     onPause: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
+    onRemove: (() -> Unit)? = null,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val actions = buildList {
+        add(DesktopMenuAction("阅读这一话", onClick = onRead))
+        add(DesktopMenuAction("选择这一话", onClick = onManage))
+        onRemove?.let { add(DesktopMenuAction("删除这一话", onClick = it)) }
+    }
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
+    DesktopContextMenuArea(actions) {
     Column(Modifier.fillMaxWidth().combinedClickable(interactionSource = interaction, indication = null,
         onClickLabel = if (managing) "选择 ${entry.chapter.title}" else "阅读 ${entry.chapter.title}",
         onClick = if (managing) onSelect else onRead,
@@ -182,7 +215,7 @@ internal fun DownloadChapterRow(
         .padding(horizontal = 8.dp, vertical = 6.dp)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 28.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(entry.chapter.title, fontSize = 12.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
+                Text(entry.chapter.title, fontSize = if (desktop) 14.sp else 12.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium,
                     color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val source = dev.mangaflow.data.sourceDisplayName(
                     dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id).sourceId)
@@ -196,8 +229,10 @@ internal fun DownloadChapterRow(
             if (managing) Icon(if (selected) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
                 if (selected) "已选择" else "未选择", Modifier.size(14.dp), tint = colors.primary)
             else DownloadTransferAction(listOf(entry), refreshingIds, onPause, onRetry)
+            if (desktop) DesktopMoreButton(actions, "章节下载操作")
         }
         if (entry.error.isNotBlank()) DownloadFailureDetails(entry.error)
+    }
     }
 }
 

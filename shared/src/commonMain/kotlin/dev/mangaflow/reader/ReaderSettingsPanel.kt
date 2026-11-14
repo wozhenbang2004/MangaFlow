@@ -1,6 +1,9 @@
 package dev.mangaflow.reader
 
 import dev.mangaflow.ui.LocalMangaWindow
+import dev.mangaflow.ui.DesktopVerticalScrollbar
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -13,9 +16,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -55,6 +61,7 @@ import dev.mangaflow.reader.panels.PanelReadingAvailable
 import dev.mangaflow.ui.PaperThemePicker
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
+import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabTreatment
@@ -72,24 +79,31 @@ internal fun ReaderSettingsDialog(
     onModels: () -> Unit,
     sourceResumePolicy: String = "ask",
     onSourceResumePolicy: (String) -> Unit = {},
+    embedded: Boolean = false,
     onDismiss: () -> Unit,
 ) {
     var dimAmount by remember { mutableFloatStateOf(preferences.dimAmount) }
     var sourceResumeExpanded by rememberSaveable { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
+    val desktop = platformKind == PlatformKind.DESKTOP
     val modes = listOf(ReadingMode.VERTICAL to "纵向",
         ReadingMode.RIGHT_TO_LEFT to "右翻", ReadingMode.LEFT_TO_RIGHT to "左翻")
     LaunchedEffect(visible, preferences.dimAmount) { if (visible) dimAmount = preferences.dimAmount }
 
-    MotionDialog(visible = visible, onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    val panel: @Composable () -> Unit = {
         val availableHeight = LocalMangaWindow.current.panelHeight
-        ReaderDialogSurface(Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth(), backdrop) {
-            Column(Modifier.heightIn(max = availableHeight).padding(horizontal = 18.dp)) {
+        val surface = if (embedded) Modifier.fillMaxSize().motionInputGate(visible)
+            else Modifier.padding(horizontal = 16.dp).widthIn(max = 520.dp).fillMaxWidth()
+        ReaderDialogSurface(surface, backdrop, dialogWindow = !embedded) {
+            Column((if (embedded) Modifier.fillMaxSize() else Modifier.heightIn(max = availableHeight))
+                .padding(horizontal = if (embedded) 14.dp else 18.dp)) {
                 ReaderPanelHeading("阅读设置", "关闭设置", onDismiss)
-                Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())
-                    .padding(bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                val scroll = rememberScrollState()
+                Box(Modifier.weight(1f, fill = false)) {
+                Column(Modifier.fillMaxWidth().verticalScroll(scroll)
+                    .padding(end = if (desktop) 10.dp else 0.dp, bottom = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp)) {
                     ReaderSettingsSection("阅读") {
                         MotionTabs(
                             selected = modes.indexOfFirst { it.first == preferences.mode },
@@ -197,9 +211,14 @@ internal fun ReaderSettingsDialog(
                         }
                     }
                 }
+                DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+                }
             }
         }
     }
+    if (embedded) panel()
+    else MotionDialog(visible = visible, onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false), content = panel)
 }
 
 @Composable

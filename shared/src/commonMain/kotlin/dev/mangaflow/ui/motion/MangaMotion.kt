@@ -32,6 +32,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +41,8 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -47,7 +51,12 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.contentColorFor
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -65,22 +74,30 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import dev.mangaflow.ui.DesktopIconTooltip
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import kotlinx.coroutines.Job
@@ -122,6 +139,10 @@ internal fun Modifier.motionPress(
     pressedScale: Float = MangaMotion.SurfacePressScale,
 ): Modifier {
     val interactionPressed by interaction.collectIsPressedAsState()
+    val desktop = platformKind == PlatformKind.DESKTOP
+    val hovered = if (desktop) interaction.collectIsHoveredAsState().value else false
+    val focused = if (desktop) interaction.collectIsFocusedAsState().value && LocalWindowInfo.current.isWindowFocused else false
+    val feedbackColor = MaterialTheme.colorScheme.onSurface
     var down by remember(interaction) { mutableStateOf(false) }
     var directPress by remember(interaction) { mutableStateOf(false) }
     var release by remember(interaction) { mutableStateOf<Job?>(null) }
@@ -183,7 +204,15 @@ internal fun Modifier.motionPress(
             }
         }
     } else Modifier
-    return then(input).graphicsLayer {
+    // Foundation owns hover/focus dispatch; draw those existing states only on desktop.
+    val desktopFeedback = if (desktop) Modifier.drawBehind {
+        val radius = CornerRadius(minOf(12.dp.toPx(), size.minDimension / 2f))
+        if (enabled && (hovered || focused)) drawRoundRect(
+            feedbackColor.copy(alpha = if (focused) .075f else .045f), cornerRadius = radius)
+        if (enabled && focused) drawRoundRect(feedbackColor.copy(alpha = .36f),
+            cornerRadius = radius, style = Stroke(1.25.dp.toPx()))
+    } else Modifier
+    return then(input).then(desktopFeedback).graphicsLayer {
         scaleX = scale.value
         scaleY = scale.value
         if (!motion) alpha = if (pressed) .72f else 1f
@@ -203,6 +232,7 @@ internal fun MotionIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    tooltip: String? = null,
     content: @Composable () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -212,6 +242,7 @@ internal fun MotionIconButton(
         .motionPress(interaction, enabled, MangaMotion.IconPressScale), contentAlignment = Alignment.Center) {
         Box(Modifier.graphicsLayer { alpha = if (enabled) 1f else .38f },
             contentAlignment = Alignment.Center) { content() }
+        DesktopIconTooltip(tooltip, interaction, enabled)
     }
 }
 
@@ -287,6 +318,7 @@ internal fun MotionDialog(
     visible: Boolean,
     onDismissRequest: () -> Unit,
     properties: DialogProperties = DialogProperties(),
+    maximumWidth: Dp = MangaLayout.PanelWidth,
     content: @Composable () -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -314,7 +346,7 @@ internal fun MotionDialog(
             BoxWithConstraints(Modifier.safeDrawingPadding().imePadding()) {
             val panelWindow = MangaWindowSize(maxWidth, maxHeight, LocalDensity.current.fontScale.coerceAtLeast(1f))
             CompositionLocalProvider(LocalMangaWindow provides panelWindow) {
-            Box(Modifier.widthIn(max = MangaLayout.PanelWidth).heightIn(max = maxHeight)
+            Box(Modifier.widthIn(max = maximumWidth).heightIn(max = maxHeight)
                 .motionInputGate(visible).graphicsLayer {
                 this.alpha = alpha.value
                 val offset = if (motion) position.value else 0f
@@ -337,8 +369,13 @@ internal fun MotionBottomSheet(
     containerColor: Color = MaterialTheme.colorScheme.surface,
     contentColor: Color = contentColorFor(containerColor),
     backdrop: HazeState? = null,
+    desktopCloseButton: Boolean = false,
     content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
+    if (platformKind == PlatformKind.DESKTOP) {
+        DesktopSheet(onDismissRequest, modifier, containerColor, contentColor, backdrop, desktopCloseButton, content)
+        return
+    }
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     val onDismiss by rememberUpdatedState(onDismissRequest)
@@ -388,5 +425,64 @@ private fun MotionSheetHandle(color: Color) {
     Box(Modifier.fillMaxWidth().height(26.dp), contentAlignment = Alignment.Center) {
         Box(Modifier.size(width = 32.dp, height = 4.dp).clip(RoundedCornerShape(2.dp))
             .background(color.copy(alpha = .42f)))
+    }
+}
+
+
+/** The same retained PANEL content, presented as a window-sized desktop dialog. */
+@Composable
+private fun DesktopSheet(
+    onDismissRequest: () -> Unit,
+    modifier: Modifier,
+    containerColor: Color,
+    contentColor: Color,
+    backdrop: HazeState?,
+    closeButton: Boolean,
+    content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
+) {
+    var visible by remember { mutableStateOf(true) }
+    val onDismiss by rememberUpdatedState(onDismissRequest)
+    val motion = LocalMotionEnabled.current
+    val dismiss: () -> Unit = { visible = false }
+    LaunchedEffect(visible) {
+        if (!visible) {
+            if (motion) delay(maxOf(MangaMotion.Exit, MangaMotion.Quick).toLong())
+            onDismiss()
+        }
+    }
+    MotionDialog(
+        visible = visible,
+        onDismissRequest = dismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        maximumWidth = 760.dp,
+    ) {
+        val panelWindow = LocalMangaWindow.current
+        val foreground: @Composable () -> Unit = {
+            CompositionLocalProvider(LocalContentColor provides contentColor) {
+                Column(Modifier.fillMaxWidth().motionInputGate(visible)) {
+                    if (closeButton) Row(Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f))
+                        MotionIconButton(onClick = dismiss, modifier = Modifier.size(32.dp), tooltip = "关闭") {
+                            Icon(Icons.Outlined.Close, "关闭", Modifier.size(18.dp), tint = contentColor)
+                        }
+                    }
+                    // The optional close row is part of the content height budget.
+                    val clearance = if (closeButton) 64.dp else 24.dp
+                    Box(Modifier.heightIn(max = (panelWindow.height - clearance).coerceAtLeast(1.dp))) {
+                        Column(Modifier.fillMaxWidth(), content = { content(dismiss) })
+                    }
+                }
+            }
+        }
+        val bounds = Modifier.padding(12.dp)
+            .widthIn(max = 760.dp).fillMaxWidth()
+            .heightIn(max = (panelWindow.height - 24.dp).coerceAtLeast(1.dp))
+        if (backdrop != null) LiquidGlassSurface(backdrop, bounds.then(modifier),
+            cornerRadius = 22.dp, role = GlassSurfaceRole.PANEL, surfaceColor = containerColor,
+            elevation = 0.dp, softCard = true) { foreground() }
+        else Surface(modifier = bounds.then(modifier), shape = RoundedCornerShape(22.dp),
+            color = containerColor, contentColor = contentColor, tonalElevation = 0.dp,
+            shadowElevation = 4.dp) { foreground() }
     }
 }

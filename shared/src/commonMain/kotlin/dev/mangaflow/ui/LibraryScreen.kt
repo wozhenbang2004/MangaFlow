@@ -28,8 +28,11 @@ import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -62,6 +65,7 @@ import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
@@ -84,6 +88,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.geometry.Offset
@@ -141,6 +146,7 @@ fun LibraryScreen(
     wallpaper: @Composable () -> Unit = {},
     backgroundInParent: Boolean = false,
 ) {
+    val desktop = platformKind == PlatformKind.DESKTOP
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
     val haptics = rememberFeelFeedback()
@@ -245,7 +251,7 @@ fun LibraryScreen(
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val shelfWidth = preferredShelfWidth.coerceAtMost((maxWidth - 180.dp).coerceAtLeast(70.dp))
-    val historyInset = 16.dp + ((maxWidth - MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp)
+    val historyInset = 16.dp + ((maxWidth - if (desktop) 1040.dp else MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp)
     Box(Modifier.fillMaxSize().mangaHazeSource(backdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
         wallpaper()
@@ -264,17 +270,31 @@ fun LibraryScreen(
                             EmptyMessage("从第一页开始", "读过的章节会留在这里，下次接着看。", "去发现", onDiscover)
                         }
                         items(visibleHistory, key = { "history-${it.manga.id}" }, contentType = { "reading-history" }) { progress ->
-                            SwipeToRemove(onRemove = { removeHistoryWithUndo(progress.manga.id) }, label = "删除阅读记录",
+                            val historyActions = listOf(
+                                DesktopMenuAction("继续阅读") { onContinue(progress) },
+                                DesktopMenuAction("详情与目录") { onDetails(progress.manga) },
+                                DesktopMenuAction("章节记录") { chapterHistoryManga = progress.manga },
+                                DesktopMenuAction("移除阅读记录") { removeHistoryWithUndo(progress.manga.id) })
+                            DesktopContextMenuArea(historyActions) {
+                            Box {
+                            SwipeToRemove(enabled = !desktop, onRemove = { removeHistoryWithUndo(progress.manga.id) }, label = "删除阅读记录",
                                 modifier = Modifier.animateItem(
                                     fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
                                     placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
                                     fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null)) {
+                                Box(Modifier.padding(end = if (desktop) 40.dp else 0.dp)) {
                                 ContinueRow(progress, repository, onContinue,
                                     onManage = { onCancelOpen(); managedId = progress.manga.id },
                                     onHistory = { onCancelOpen(); managedId = null; chapterHistoryManga = progress.manga })
+                                }
                                 RecordActionsMenu(managedId == progress.manga.id,
                                     onDismiss = { managedId = null },
                                     onDetails = { onDetails(progress.manga) })
+                            }
+                            if (desktop) Box(Modifier.align(Alignment.CenterEnd)) {
+                                DesktopMoreButton(historyActions, "阅读记录操作")
+                            }
+                            }
                             }
                         }
                     }
@@ -285,7 +305,8 @@ fun LibraryScreen(
                         val gap = 12.dp
                         val minimumWidth = 94.dp * fontScale
                         val maximum = if (maxWidth >= 840.dp) 6 else if (maxWidth >= 600.dp) 4 else 3
-                        val perShelf = MangaLayout.columns(maxWidth, maximum, minimumWidth, gap, 16.dp)
+                        val perShelf = if (desktop) MangaLayout.automaticDesktopColumns(maxWidth, fontScale, gap, 16.dp)
+                            else MangaLayout.columns(maxWidth, maximum, minimumWidth, gap, 16.dp)
                         val bookWidth = (available - gap * (perShelf - 1)) / perShelf
                         val bookHeight = bookWidth / .7f
                         LazyVerticalGrid(
@@ -304,12 +325,24 @@ fun LibraryScreen(
                                 val saved = progressById[manga.id]
                                 val dragged = draggedFavorite?.id == manga.id
                                 val interaction = remember(manga.id) { MutableInteractionSource() }
-                                Column(Modifier.fillMaxWidth().animateItem(
+                                val hovered by interaction.collectIsHoveredAsState()
+                                var cardFocused by remember(manga.id) { mutableStateOf(false) }
+                                var bookMenuOpen by remember(manga.id) { mutableStateOf(false) }
+                                val bookActions = listOf(
+                                    DesktopMenuAction(if (saved == null) "开始阅读" else "继续阅读") { onOpen(manga) },
+                                    DesktopMenuAction("详情与目录") { onCancelOpen(); onDetails(manga) },
+                                    DesktopMenuAction("章节记录") { onCancelOpen(); chapterHistoryManga = manga },
+                                    DesktopMenuAction("移出书架") { removeFavoriteWithUndo(manga) })
+                                DesktopContextMenuArea(bookActions) {
+                                Column(Modifier.fillMaxWidth().then(if (desktop) Modifier
+                                    .hoverable(interaction).onFocusChanged { cardFocused = it.hasFocus }.focusGroup()
+                                    else Modifier).animateItem(
                                     fadeInSpec = if (motion) tween(MangaMotion.Content) else null,
                                     placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
                                     fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null).zIndex(if (dragged) 8f else 0f)) {
+                                    Box(Modifier.fillMaxWidth()) {
                                     SwipeToRemove(onRemove = { removeFavoriteWithUndo(manga) },
-                                        label = "删除收藏", enabled = !dragged) {
+                                        label = "删除收藏", enabled = !dragged && !desktop) {
                                         BookshelfBook(
                                             manga, repository, saved,
                                             opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
@@ -335,6 +368,20 @@ fun LibraryScreen(
                                             },
                                             modifier = Modifier.fillMaxWidth().height(bookHeight),
                                         )
+                                    }
+                                    if (desktop && (hovered || cardFocused || bookMenuOpen)) Row(Modifier.align(Alignment.TopEnd).padding(4.dp),
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        Surface(shape = RoundedCornerShape(10.dp),
+                                            color = MaterialTheme.colorScheme.surface.copy(alpha = .94f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                MotionIconButton(onClick = { onCancelOpen(); onDetails(manga) },
+                                                    modifier = Modifier.size(32.dp)) {
+                                                    Icon(Icons.AutoMirrored.Outlined.MenuBook, "详情与目录", Modifier.size(17.dp))
+                                                }
+                                                DesktopMoreButton(bookActions, "书架作品操作", onExpandedChange = { bookMenuOpen = it })
+                                            }
+                                        }
+                                    }
                                     }
                                     Box(Modifier.fillMaxWidth()) {
                                         Column(Modifier.fillMaxWidth().heightIn(min = 48.dp)
@@ -363,17 +410,41 @@ fun LibraryScreen(
                                             onDetails = { onDetails(manga) })
                                     }
                                 }
+                                }
                             }
                         }
                     }
                 }
+            }
+            if (desktop && libraryReady) {
+                val track = Modifier.align(Alignment.CenterEnd).padding(top = headerPadding, bottom = bottomInset)
+                if (showHistory) DesktopVerticalScrollbar(historyPosition, track)
+                else DesktopVerticalScrollbar(favoritesPosition, track)
             }
             if (!showHistory) LibraryOpeningNotice(opening, onRetryOpen, onCancelOpen,
                 Modifier.align(Alignment.BottomCenter).padding(16.dp))
         }
         }
     }
-        Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
+        if (desktop) {
+            DesktopManagementToolbar("书架", Modifier.align(Alignment.TopCenter)
+                .onSizeChanged { headerHeightPx = it.height },
+                navigation = navigation, minimumToolsWidth = 680.dp) {
+                val stackedTools = maxWidth < 680.dp * density.fontScale.coerceAtLeast(1f)
+                MotionTabs(if (showHistory) 1 else 0, listOf("收藏", "最近阅读"),
+                    { index -> if (showHistory != (index == 1)) onCancelOpen(); showHistory = index == 1 },
+                    modifier = if (stackedTools) Modifier.width(260.dp * density.fontScale.coerceAtLeast(1f))
+                        else Modifier.widthIn(max = 320.dp).weight(1f, fill = false),
+                    treatment = MotionTabTreatment.Soft, controlHeight = 36.dp)
+                if (!stackedTools) Spacer(Modifier.weight(1f))
+                MotionIconButton(onClick = { showCollections = true }, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Outlined.Collections, "画面收藏", Modifier.size(19.dp))
+                }
+                MotionIconButton(onClick = { showStats = true }, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Outlined.BarChart, "阅读统计", Modifier.size(19.dp))
+                }
+            }
+        } else Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
             .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
             .padding(horizontal = 8.dp, vertical = 2.dp)) {
             PageTitleHeader("书架", backdrop, navigation,
@@ -420,7 +491,7 @@ fun LibraryScreen(
                     }
                 })
         }
-        MorphGlassTabSelector(backdrop, shelfTabs, if (showHistory) 1 else 0, shelfWidth,
+        if (!desktop) MorphGlassTabSelector(backdrop, shelfTabs, if (showHistory) 1 else 0, shelfWidth,
             maximumHeight = maxHeight,
             onToggle = { shelfMenuExpanded = !shelfMenuExpanded; libraryActionsOpen = false }, enabled = active,
             expanded = shelfMenuExpanded, onDismiss = { shelfMenuExpanded = false },

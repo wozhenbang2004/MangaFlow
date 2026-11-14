@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -312,6 +313,78 @@ fun DetailScreen(
     val artworkBackdrop = rememberHazeState()
     val readingBackdrop = rememberHazeState()
 
+    // Both layouts keep one catalogue/comment implementation and the same saved section state.
+    val sectionPane: @Composable (Modifier, Dp) -> Unit = { paneModifier, paneBottomPadding ->
+        Column(paneModifier) {
+            DetailSections(
+                selected = activeSection,
+                chapterCount = chapters.size, commentCount = commentCount,
+                onSelect = { section = it; commentFilterOpen = false; dockHidden = false; dockTravel[0] = 0f },
+                filterOpen = commentFilterOpen, filterChanged = commentFilterChanged,
+                onToggleFilter = { commentFilterOpen = !commentFilterOpen },
+                downloadMode = chapterDownloadMode,
+                onToggleDownload = { chapterDownloadMode = !chapterDownloadMode },
+                sourceId = current.sourceId,
+                sourceName = current.sourceName.ifBlank { sourceDisplayName(current.sourceId) },
+                sourceCount = sourceCount, sourceLoading = sourceLoading,
+                sourcesChecking = sourcesChecking, pendingSourceCount = pendingSourceCount,
+                onManageSources = onManageSources,
+            )
+            // Let content draw behind the floating dock to the physical bottom edge.
+            // Reserve its stable clearance inside each list so the last item stays reachable.
+            MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth(),
+                contentKey = { it }, order = { it }, soft = true) { targetSection ->
+                sections.SaveableStateProvider(targetSection) {
+                    when (targetSection) {
+                        0 -> DetailCatalog(
+                            mangaId = current.id, chapters = chapters, downloaded = downloaded,
+                            repository = repository,
+                            progress = resume, chapterPositions = chapterPositions,
+                            loading = loading, error = error,
+                            active = active && targetSection == activeSection,
+                            onScrollTarget = { catalogGrid = it },
+                            onRetry = onRetry, onRead = onRead,
+                            onDownload = { chapter, anchor -> if (active) {
+                                pendingDownloadAnchor = anchor
+                                pendingDownload = chapter
+                            } },
+                            loadVolumeCover = loadVolumeCover, volumeImageHeaders = volumeImageHeaders,
+                            bottomPadding = paneBottomPadding,
+                            downloadMode = chapterDownloadMode,
+                            backdrop = readingBackdrop,
+                            onReadVariant = onReadVariant,
+                            onSetPreferredSource = onSetPreferredSource,
+                            onClearChapterSource = onClearChapterSource,
+                            onSplitVariant = onSplitVariant,
+                            onRelinkVariant = onRelinkVariant,
+                            onCancelSourceSelection = onCancelSourceSelection,
+                            sourceLoading = sourceLoading, sourceError = sourceError,
+                        )
+                        else -> Box(Modifier.fillMaxSize()) {
+                            Box(Modifier.fillMaxSize().padding(end =
+                                if (platformKind == PlatformKind.DESKTOP) 12.dp else 0.dp)) {
+                                CommunityPanel(
+                                    mangaId = current.id, sources = reviews, loading = reviewsLoading,
+                                    onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
+                                    onRelink = onReviewRelink, loadReplies = loadReplies,
+                                    onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
+                                    captureBackdrop = false,
+                                    active = active && targetSection == activeSection, bottomPadding = paneBottomPadding,
+                                    filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
+                                    onFilterChanged = { commentFilterChanged = it },
+                                )
+                            }
+                            if (platformKind == PlatformKind.DESKTOP) commentsList?.let { list ->
+                                DesktopVerticalScrollbar(list,
+                                    Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(informationTone)) {
     BoxWithConstraints(
         Modifier.fillMaxSize().align(Alignment.TopCenter)
@@ -320,14 +393,18 @@ fun DetailScreen(
         val density = LocalDensity.current
         val viewportWidth = minOf(maxWidth, MangaLayout.DetailWidth)
         val fontScale = density.fontScale.coerceAtLeast(1f)
+        val desktopDetail = platformKind == PlatformKind.DESKTOP &&
+            maxWidth >= 840.dp * fontScale.coerceAtMost(1.5f)
+        val desktopWidth = minOf(maxWidth, 1440.dp)
+        val summaryWidth = (desktopWidth * .34f).coerceIn(300.dp, 380.dp)
         // Retain the largest real dock clearance: condensing must not move the last chapter rows.
         val bottomInset = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
         val readingInset = maxOf((38f * fontScale + 10f).coerceAtLeast(56f).dp,
             with(density) { measuredDockHeight.toDp() }) + 16.dp + bottomInset
         val statusInset = screenFitContentInsets().asPaddingValues().calculateTopPadding()
         val availableHeight = (maxHeight - statusInset).coerceAtLeast(0.dp)
-        val compactHero = availableHeight < 600.dp
-        val collapsedHero = availableHeight < 420.dp
+        val compactHero = desktopDetail || availableHeight < 600.dp
+        val collapsedHero = !desktopDetail && availableHeight < 420.dp
         val seamHeight = if (collapsedHero) 0.dp else 6.dp
         // Safety belongs to the artwork's content, not a clipped viewport below the toolbar.
         val toolbarClearance = statusInset + 56.dp
@@ -338,9 +415,9 @@ fun DetailScreen(
         // measure afterwards and draw behind it, without a zero-height first-frame handoff.
         val header = key(current.id) { rememberTopAppBarState(initialHeightOffsetLimit = 0f) }
         val dockScrollTravel = with(density) { 96.dp.toPx() }
-        val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel, naturalHeroHeight) {
+        val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel, naturalHeroHeight, desktopDetail) {
             derivedStateOf {
-                if (activeSection != 0) 0f else {
+                if (desktopDetail || activeSection != 0) 0f else {
                     // Start with the first actual pixel; an unmeasured header is not a scroll.
                     val heroPixels = naturalHeroHeight.intValue.toFloat()
                     val coverTravel = if (heroPixels > 0f)
@@ -383,7 +460,7 @@ fun DetailScreen(
             section = 0
             dockHidden = false
             contentsJump?.cancel()
-            contentsJump = scope.launch {
+            if (!desktopDetail) contentsJump = scope.launch {
                 animate(header.heightOffset, header.heightOffsetLimit, animationSpec = tween(if (motion) 320 else 0, easing = MangaMotion.EnterEasing)) { value, _ ->
                     header.heightOffset = value
                 }
@@ -392,135 +469,149 @@ fun DetailScreen(
         // A fixed atmosphere sits behind the moving book and opaque catalogue plane.
         // Floating controls sample the final composed scene through the existing Haze source.
         Box(Modifier.fillMaxSize().mangaHazeSource(readingBackdrop).background(informationTone)) {
-            Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
-                .align(Alignment.TopCenter).nestedScroll(scrolling)) {
-                Box(
-                    Modifier.fillMaxWidth()
-                        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                        .drawWithContent {
-                            drawContent()
-                            if (size.height > 0f) {
-                                // The sharp poster passes behind the controls and fades only at the window edge.
-                                drawRect(Brush.verticalGradient(
-                                    colors = listOf(Color.Transparent, Color.Black),
-                                    endY = minOf(size.height, 28.dp.toPx()).coerceAtLeast(1f),
-                                ), blendMode = BlendMode.DstIn)
+            if (desktopDetail) {
+                Row(Modifier.width(desktopWidth).fillMaxHeight().align(Alignment.TopCenter)
+                    .padding(start = 20.dp, end = 20.dp, top = toolbarClearance + 8.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                    Column(Modifier.width(summaryWidth).fillMaxHeight(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        val summaryScroll = rememberScrollState()
+                        Box(Modifier.weight(1f).fillMaxWidth()) {
+                            Column(Modifier.fillMaxSize().verticalScroll(summaryScroll).padding(end = 12.dp)) {
+                                HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
+                                    compact = true, artworkHeadroom = 0.dp,
+                                    onIntroduction = { fullIntroduction = true },
+                                    onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
+                                    onTag = { onTag(current, it) }, collapse = { 0f })
+                            }
+                            DesktopVerticalScrollbar(summaryScroll,
+                                Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
+                        }
+                        DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
+                            resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
+                            hidden = false, active = active, persistent = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            onContinue = onContinue, onRead = onRead, onRestart = onRestart,
+                            onContents = openContents)
+                    }
+                    sectionPane(Modifier.weight(1f).fillMaxHeight().background(informationTone),
+                        16.dp + bottomInset)
+                }
+                Box(Modifier.width(desktopWidth).align(Alignment.TopCenter)) {
+                    ArtworkToolbar(header = header, compact = true, title = current.title,
+                        backdrop = readingBackdrop, favorite = isFavorite,
+                        coverFailed = coverFailed, active = active, coverLight = lightDetail,
+                        comments = activeSection == 1, commentCount = commentCount,
+                        sceneColor = informationTone.copy(alpha = .80f),
+                        onBack = onBack, onIntroduction = { fullIntroduction = true },
+                        onToggleFavorite = {
+                            feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm)
+                            onToggleFavorite()
+                        }, onRetryCover = { coverFailed = false; coverRetry++ })
+                }
+            } else {
+                Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
+                    .align(Alignment.TopCenter).nestedScroll(scrolling)) {
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                            .drawWithContent {
+                                drawContent()
+                                if (size.height > 0f) {
+                                    // The sharp poster passes behind the controls and fades only at the window edge.
+                                    drawRect(Brush.verticalGradient(
+                                        colors = listOf(Color.Transparent, Color.Black),
+                                        endY = minOf(size.height, 28.dp.toPx()).coerceAtLeast(1f),
+                                    ), blendMode = BlendMode.DstIn)
+                                }
+                            }
+                            .scrollable(artworkScroll, Orientation.Vertical,
+                                reverseDirection = true, enabled = active)
+                            .layout { measurable, constraints ->
+                                // Read the moving offset during layout, without recomposing the whole detail.
+                                // Measure the actual book content independently of the previous
+                                // header height. Long titles/type remain reachable by this scroll.
+                                val foreground = measurable.measure(
+                                    constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity),
+                                )
+                                val expanded = if (collapsedHero) 0 else foreground.height
+                                if (naturalHeroHeight.intValue != expanded) naturalHeroHeight.intValue = expanded
+                                val limit = -expanded.toFloat()
+                                if (header.heightOffsetLimit != limit) {
+                                    contentsJump?.cancel()
+                                    val offset = header.heightOffset.coerceIn(limit, 0f)
+                                    header.heightOffsetLimit = limit
+                                    header.heightOffset = offset
+                                }
+                                val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
+                                val visibleHeight = maxOf(toolbarPixels, expanded + offset)
+                                    .coerceIn(constraints.minHeight, constraints.maxHeight)
+                                layout(foreground.width, visibleHeight) {
+                                    foreground.placeRelative(0, offset)
+                                }
+                            },
+                    ) {
+                        if (!collapsedHero) {
+                            key(current.id, viewportWidth, density) {
+                                HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
+                                    compact = compactHero, artworkHeadroom = artworkHeadroom,
+                                    onIntroduction = { fullIntroduction = true },
+                                    onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
+                                    onTag = { onTag(current, it) },
+                                    collapse = { header.collapsedFraction })
                             }
                         }
-                        .scrollable(artworkScroll, Orientation.Vertical,
-                            reverseDirection = true, enabled = active)
-                        .layout { measurable, constraints ->
-                            // Read the moving offset during layout, without recomposing the whole detail.
-                            // Measure the actual book content independently of the previous
-                            // header height. Long titles/type remain reachable by this scroll.
-                            val foreground = measurable.measure(
-                                constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity),
-                            )
-                            val expanded = if (collapsedHero) 0 else foreground.height
-                            if (naturalHeroHeight.intValue != expanded) naturalHeroHeight.intValue = expanded
-                            val limit = -expanded.toFloat()
-                            if (header.heightOffsetLimit != limit) {
-                                contentsJump?.cancel()
-                                val offset = header.heightOffset.coerceIn(limit, 0f)
-                                header.heightOffsetLimit = limit
-                                header.heightOffset = offset
-                            }
-                            val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
-                            val visibleHeight = maxOf(toolbarPixels, expanded + offset)
-                                .coerceIn(constraints.minHeight, constraints.maxHeight)
-                            layout(foreground.width, visibleHeight) {
-                                foreground.placeRelative(0, offset)
-                            }
-                        },
-                ) {
-                    if (!collapsedHero) {
-                        key(current.id, viewportWidth, density) {
-                            HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
-                                compact = compactHero, artworkHeadroom = artworkHeadroom,
-                                onIntroduction = { fullIntroduction = true },
-                                onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
-                                onTag = { onTag(current, it) },
-                                collapse = { header.collapsedFraction })
-                        }
+                    }
+                    Column(
+                        Modifier.weight(1f).fillMaxWidth().background(informationTone)
+                            // Share the grid's scroll mutex as well as its position: a new drag
+                            // on the surrounding surface must cancel an existing grid fling.
+                            .scrollable(artworkScroll, Orientation.Vertical,
+                                reverseDirection = true, enabled = active),
+                    ) {
+                        Spacer(Modifier.fillMaxWidth().layout { _, constraints ->
+                            val seam = (if (collapsedHero) 0f else seamHeight.toPx() * (1f - header.collapsedFraction)).roundToInt()
+                                .coerceIn(0, constraints.maxHeight)
+                            layout(constraints.maxWidth, seam) {}
+                        })
+                        sectionPane(Modifier.weight(1f).fillMaxWidth(), readingInset + 16.dp)
                     }
                 }
-                Column(
-                    Modifier.weight(1f).fillMaxWidth().background(informationTone)
-                        // Share the grid's scroll mutex as well as its position: a new drag
-                        // on the surrounding surface must cancel an existing grid fling.
-                        .scrollable(artworkScroll, Orientation.Vertical,
-                            reverseDirection = true, enabled = active),
-                ) {
-                    Spacer(Modifier.fillMaxWidth().layout { _, constraints ->
-                        val seam = (if (collapsedHero) 0f else seamHeight.toPx() * (1f - header.collapsedFraction)).roundToInt()
-                            .coerceIn(0, constraints.maxHeight)
-                        layout(constraints.maxWidth, seam) {}
-                    })
-                    DetailSections(
-                        selected = activeSection,
-                        chapterCount = chapters.size, commentCount = commentCount,
-                        onSelect = { section = it; commentFilterOpen = false; dockHidden = false; dockTravel[0] = 0f },
-                        filterOpen = commentFilterOpen, filterChanged = commentFilterChanged,
-                        onToggleFilter = { commentFilterOpen = !commentFilterOpen },
-                        downloadMode = chapterDownloadMode,
-                        onToggleDownload = { chapterDownloadMode = !chapterDownloadMode },
-                        sourceId = current.sourceId,
-                        sourceName = current.sourceName.ifBlank { sourceDisplayName(current.sourceId) },
-                        sourceCount = sourceCount, sourceLoading = sourceLoading,
-                        sourcesChecking = sourcesChecking, pendingSourceCount = pendingSourceCount,
-                        onManageSources = onManageSources,
+                // Keep toolbar hit targets safe while the real clear artwork scrolls under them.
+                Box(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxWidth()
+                    .height(toolbarClearance + 24.dp).align(Alignment.TopCenter)
+                    .drawBehind {
+                        val reveal = if (collapsedHero) 1f
+                            else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
+                        val end = size.height.coerceAtLeast(1f)
+                        val solidEnd = (toolbarClearance.toPx() / end).coerceIn(0f, .99f)
+                        drawRect(Brush.verticalGradient(
+                            0f to informationTone.copy(alpha = reveal),
+                            solidEnd to informationTone.copy(alpha = reveal),
+                            1f to informationTone.copy(alpha = 0f),
+                        ))
+                    }) {
+                    ArtworkToolbar(
+                        header = header, compact = collapsedHero, title = current.title, backdrop = artworkBackdrop,
+                        favorite = isFavorite, coverFailed = coverFailed, active = active,
+                        coverLight = lightDetail,
+                        comments = activeSection == 1, commentCount = commentCount,
+                        sceneColor = Color.Transparent,
+                        onBack = onBack, onIntroduction = { fullIntroduction = true },
+                        onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() }, onRetryCover = {
+                            coverFailed = false
+                            coverRetry++
+                        },
                     )
-                    // Let content draw behind the floating dock to the physical bottom edge.
-                    // Reserve its stable clearance inside each list so the last item stays reachable.
-                    MotionTabContent(activeSection, Modifier.weight(1f).fillMaxWidth(),
-                        contentKey = { it }, order = { it }, soft = true) { targetSection ->
-                        sections.SaveableStateProvider(targetSection) {
-                            when (targetSection) {
-                                0 -> DetailCatalog(
-                                    mangaId = current.id, chapters = chapters, downloaded = downloaded,
-                                    repository = repository,
-                                    progress = resume, chapterPositions = chapterPositions,
-                                    loading = loading, error = error,
-                                    active = active && targetSection == activeSection,
-                                    onScrollTarget = { catalogGrid = it },
-                                    onRetry = onRetry, onRead = onRead,
-                                    onDownload = { chapter, anchor -> if (active) {
-                                        pendingDownloadAnchor = anchor
-                                        pendingDownload = chapter
-                                    } },
-                                    loadVolumeCover = loadVolumeCover, volumeImageHeaders = volumeImageHeaders,
-                                    bottomPadding = readingInset + 16.dp,
-                                    downloadMode = chapterDownloadMode,
-                                    backdrop = readingBackdrop,
-                                    onReadVariant = onReadVariant,
-                                    onSetPreferredSource = onSetPreferredSource,
-                                    onClearChapterSource = onClearChapterSource,
-                                    onSplitVariant = onSplitVariant,
-                                    onRelinkVariant = onRelinkVariant,
-                                    onCancelSourceSelection = onCancelSourceSelection,
-                                    sourceLoading = sourceLoading, sourceError = sourceError,
-                                )
-                                else -> CommunityPanel(
-                                    mangaId = current.id, sources = reviews, loading = reviewsLoading,
-                                    onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
-                                    onRelink = onReviewRelink, loadReplies = loadReplies,
-                                    onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
-                                    captureBackdrop = false,
-                                    active = active && targetSection == activeSection, bottomPadding = readingInset + 16.dp,
-                                    filterOpen = commentFilterOpen, onFilterDismiss = { commentFilterOpen = false },
-                                    onFilterChanged = { commentFilterChanged = it },
-                                )
-                            }
-                        }
-                    }
                 }
             }
             // Measure after the foreground, paint before it and its toolbar.
             Box(
                 Modifier.fillMaxWidth().zIndex(-1f)
                     .layout { measurable, constraints ->
-                        val height = (naturalHeroHeight.intValue + seamHeight.roundToPx())
-                            .coerceIn(constraints.minHeight, constraints.maxHeight)
+                        val height = if (desktopDetail) constraints.maxHeight
+                            else (naturalHeroHeight.intValue + seamHeight.roundToPx())
+                                .coerceIn(constraints.minHeight, constraints.maxHeight)
                         val layer = measurable.measure(constraints.copy(minHeight = height, maxHeight = height))
                         layout(layer.width, layer.height) { layer.placeRelative(0, 0) }
                     }
@@ -554,40 +645,13 @@ fun DetailScreen(
                 })
             }
             // The catalogue's surface rises over the stationary atmosphere, including wide-window gutters.
-            Box(Modifier.matchParentSize().zIndex(-1f).drawBehind {
+            if (!desktopDetail) Box(Modifier.matchParentSize().zIndex(-1f).drawBehind {
                 val chapterTop = (naturalHeroHeight.intValue + header.heightOffset).coerceIn(0f, size.height)
                 drawRect(informationTone, topLeft = Offset(0f, chapterTop),
                     size = androidx.compose.ui.geometry.Size(size.width, size.height - chapterTop))
             })
-            // Keep toolbar hit targets safe while the real clear artwork scrolls under them.
-            Box(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxWidth()
-                .height(toolbarClearance + 24.dp).align(Alignment.TopCenter)
-                .drawBehind {
-                    val reveal = if (collapsedHero) 1f
-                        else ((header.collapsedFraction - .68f) / .32f).coerceIn(0f, 1f)
-                    val end = size.height.coerceAtLeast(1f)
-                    val solidEnd = (toolbarClearance.toPx() / end).coerceIn(0f, .99f)
-                    drawRect(Brush.verticalGradient(
-                        0f to informationTone.copy(alpha = reveal),
-                        solidEnd to informationTone.copy(alpha = reveal),
-                        1f to informationTone.copy(alpha = 0f),
-                    ))
-                }) {
-                ArtworkToolbar(
-                    header = header, compact = collapsedHero, title = current.title, backdrop = artworkBackdrop,
-                    favorite = isFavorite, coverFailed = coverFailed, active = active,
-                    coverLight = lightDetail,
-                    comments = activeSection == 1, commentCount = commentCount,
-                    sceneColor = Color.Transparent,
-                    onBack = onBack, onIntroduction = { fullIntroduction = true },
-                    onToggleFavorite = { feedback.perform(dev.mangaflow.ui.motion.FeelEvent.Confirm); onToggleFavorite() }, onRetryCover = {
-                        coverFailed = false
-                        coverRetry++
-                    },
-                )
-            }
         }
-        DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
+        if (!desktopDetail) DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
             resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
             hidden = dockHidden, collapseProgress = dockCollapse, active = active,
             modifier = Modifier.align(Alignment.BottomCenter)
@@ -690,6 +754,7 @@ private fun ArtworkAction(icon: ImageVector, description: String, backdrop: Haze
                 Icon(shown, description, tint = tint, modifier = Modifier.size(21.dp))
             }
         }
+        DesktopIconTooltip(description, interaction, enabled = true)
     }
 }
 
@@ -835,7 +900,7 @@ private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: (Str
     onTag: (String) -> Unit, onDismiss: () -> Unit) {
     MotionBottomSheet(
         onDismissRequest = onDismiss,
-        backdrop = backdrop,
+        backdrop = backdrop, desktopCloseButton = true,
         containerColor = MaterialTheme.colorScheme.surface, contentColor = DetailForeground,
     ) { _ ->
         SelectionContainer {

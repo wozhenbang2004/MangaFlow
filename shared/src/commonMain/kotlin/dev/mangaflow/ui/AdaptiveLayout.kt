@@ -24,6 +24,7 @@ val LocalMangaWindow = staticCompositionLocalOf {
 
 /** These bounds keep artwork and text readable without stretching phone-sized controls. */
 object MangaLayout {
+    val DesktopWorkspaceWidth = 1440.dp
     val BrowseWidth = 1120.dp
     val DetailWidth = 960.dp
     val ListWidth = 880.dp
