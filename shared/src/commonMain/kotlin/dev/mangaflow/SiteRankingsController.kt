@@ -25,7 +25,8 @@ data class SiteRankingsState(
     val restoringSelection: Boolean = false,
     val preferenceError: String? = null,
 )
-data class RankedReadingSource(val manga: Manga, val verified: Boolean)
+data class RankedReadingSource(val manga: Manga, val verified: Boolean, val relevant: Boolean = true)
+data class RankedSourcePreview(val selected: Manga, val canonical: Manga, val request: Long)
 
 /** Session positions live in the existing save-state owner; each query owns its complete snapshot. */
 class SiteRankingsController(
@@ -37,7 +38,7 @@ class SiteRankingsController(
     private val snapshots = LinkedHashMap<String, SiteRankingsState>()
     private val selections = mutableMapOf<RankingSite, SiteRankingSelection>()
     private val readingLinks = mutableMapOf<String, Manga>()
-    fun cachedLink(work: SiteRankedWork): Manga? = readingLinks[work.key]
+    fun cachedLink(work: SiteRankedWork): Manga? = readingLinks[work.key]?.takeIf { repository.acceptsSource(work, it) }
     private var request = 0L
     private var job: Job? = null
     private var visible = false
@@ -196,13 +197,26 @@ class SiteRankingsController(
     }
 
     fun recordLink(work: SiteRankedWork, manga: Manga) {
+        if (!repository.acceptsSource(work, manga)) return
         readingLinks[work.key] = manga
         mutable.update { it.copy(linkedIds = it.linkedIds + work.key) }
+        snapshots.toMap().forEach { (key, snapshot) ->
+            snapshots[key] = snapshot.copy(linkedIds = snapshot.linkedIds + work.key)
+        }
+    }
+
+    fun forgetLink(work: SiteRankedWork) {
+        readingLinks.remove(work.key)
+        mutable.update { it.copy(linkedIds = it.linkedIds - work.key) }
+        snapshots.toMap().forEach { (key, snapshot) ->
+            snapshots[key] = snapshot.copy(linkedIds = snapshot.linkedIds - work.key)
+        }
     }
 
     private suspend fun publishLinks(token: Long, rows: List<SiteRankingEntry>) {
         val links = rows.mapNotNull { row -> repository.linked(row.work)?.let { row.work.key to it } }.toMap()
         if (token == request) {
+            rows.forEach { readingLinks.remove(it.work.key) }
             readingLinks.putAll(links)
             mutable.update { it.copy(linkedIds = links.keys) }
         }

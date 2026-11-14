@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Native rankings: association and UI repair · 2026-11-14
+
+Active user complaint and three screenshots are recorded in DESIGN.md SITE-RANK-REPAIR-20261114 through 2026-11-14T08:53:29.677Z. This corrects the previous unverified native-ranking design: weak legacy associations no longer bypass selection, and real canonical source data is checked before a new association. Native title/author/ID proof can open directly; uncertain relations require one actual-data comparison/confirmation bound to work/source/request. Source failures keep lookup actionable, unlink/change are visible and local only, and body metadata/cache/projection preserve the ranked identity guard. No ranking ID becomes a body ID or chapter-number merge.
+
+UI uses one readable content backing, a compact site/header/kind layout,56×80dp ranking covers, real source thumbnails and on-demand failure details. Independent query positions, existing Ovio/cover/popover/press motion and same-pass header measurement remain. Retain unknown-source confirmation through its actual handoff. Runtime ghosting has no uniquely proven source cause; wallpaper/frame possibilities are recorded honestly, rather than calling the static patch a reproduced runtime fix.
+
+Five source files plus these existing records form one cloud/main/expected-head batch, preserving ce30fddb's account, adaptive, download-preparation and all earlier routing/profile/login work. No tests/local builds/device/browser/service/account probes or added gate. Independent source review identified the missing relevance-helper import; corrected before integration. Confirm normal CI trigger only, then leave packaging/installed first→second-click flow, narrow/large-font UI, layers and hand feel for user evidence. No status-only follow-up push.
+
 ## Current completed source batch · 2026-11-14
 
 User's current account/menu rejection and earlier upgrade-login/adaptive requests are DESIGN ACCOUNT-CLARITY-156 / LOGIN-KEEP-157 / EXPERIENCE-158; network/loading scope remains NETWORK-WORKSPACE-150–155. Account navigation is now拷贝书架 with书架/最近阅读, avatar identity/settings, compact management menus and an entire readable account content plane. Preserve exact cloud chapter/local-page lookup and explicit different-local continuation. Steam retains stored sessions through local/network recovery. Adaptive policy actuals and cache/reader/download/frame consumers are implemented, with unknown sensors and asynchronous startup limits explicit. Independent source reviews found no remaining definite blocker; no builds/tests/probes were run.

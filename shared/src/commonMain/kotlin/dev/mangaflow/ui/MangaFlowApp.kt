@@ -860,8 +860,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     )
                     is Frame.Detail -> savedState.SaveableStateProvider(current.key) {
                         if (current.state.rankedWork != null) {
-                            RankedWorkDetailScreen(current.state, onBack = model::closeDetail,
-                                onSearch = model::searchRankedSources, onUseSource = model::useRankedSource,
+                            RankedWorkDetailScreen(current.state, repository = model.repository, onBack = model::closeDetail,
+                                onSearch = model::searchRankedSources,
+                                onUseSource = { workKey, manga ->
+                                    selectedCover = null
+                                    model.useRankedSource(workKey, manga)
+                                },
+                                onClearSource = model::clearRankedSource,
+                                onConfirmSource = model::confirmRankedSource, onCancelPreview = model::cancelRankedSourcePreview,
                                 active = current.key == frame.key && !currentBack.gesturing && !currentBack.completed,
                                 wallpaper = {
                                     if (wallpaper.mediaPath != null) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),

@@ -41,6 +41,7 @@ import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.data.bodySourceSearchTerms
 import dev.mangaflow.data.normalizedBodySourceTitle
 import dev.mangaflow.data.SiteRankedWork
+import dev.mangaflow.data.rankedCandidateRelevant
 import dev.mangaflow.data.SiteRankingsRepository
 import dev.mangaflow.data.SourceDiscoveryIdentity
 import dev.mangaflow.data.SourceDiscoveryResult
@@ -156,6 +157,11 @@ data class DetailState(
     val rankedSources: List<RankedReadingSource> = emptyList(),
     val rankedSourcesLoading: Boolean = false,
     val rankedSourcesError: String? = null,
+    val rankedLinkedSource: Manga? = null,
+    val rankedOpeningSourceId: String? = null,
+    val rankedSourceError: String? = null,
+    val rankedSourceWork: SiteRankedWork? = null,
+    val rankedSourcePreview: RankedSourcePreview? = null,
 )
 
 data class ChapterSourceOperation(val loading: Boolean = false, val error: String? = null,
@@ -229,6 +235,8 @@ data class AccountUiState(
     val canRetrySync: Boolean = false,
     val syncingFavorites: Set<String> = emptySet(),
 )
+
+private class RankedSourceIdentityMismatch : IllegalArgumentException("来源资料与所选作品不一致。")
 
 class MangaViewModel(context: PlatformContext) : ViewModel() {
     private val application = applicationContext(context)
@@ -977,23 +985,27 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     fun inspectRankedWork(work: SiteRankedWork) = openRankedWork(work, true)
 
-    private fun openRankedWork(work: SiteRankedWork, chooseSource: Boolean) {
-        (if (chooseSource) null else siteRankings.cachedLink(work))?.takeIf { it.sourceId in bodySources.enabledSourceIds && !siteRankingsRepository.conflicts(work, it) }?.let {
-            openManga(it)
-            return
+    private fun rankedSourceEnabled(work: SiteRankedWork, manga: Manga): Boolean =
+        siteRankingsRepository.acceptsSource(work, manga) && bodySources.entries.value.any {
+            it.source.id == manga.sourceId && it.enabled && it.isInstalled && !it.adult && !it.removed
         }
-        cancelLibraryReading()
+
+    private fun openRankedWork(work: SiteRankedWork, chooseSource: Boolean) {
+        // A catalogue route owns no old reader, chapter request or source overlay.
+        closeReader()
         closeDetail()
         val token = ++rankedWorkRequest
         _detail.value = DetailState(work.manga, loading = false, reviewsLoading = false,
             rankedWork = work, rankedSourcesLoading = true)
         rankedWorkJob = viewModelScope.launch {
-            val linked = if (chooseSource) null else siteRankingsRepository.linked(work)
+            val saved = siteRankings.cachedLink(work) ?: siteRankingsRepository.linked(work)
             if (!rankedWorkCurrent(token, work)) return@launch
-            if (linked != null && linked.sourceId in bodySources.enabledSourceIds) {
-                siteRankings.recordLink(work, linked)
-                openManga(linked)
-                return@launch
+            _detail.update { it?.copy(rankedLinkedSource = saved) }
+            if (!chooseSource && saved != null && rankedSourceEnabled(work, saved)) {
+                _detail.update { it?.copy(rankedSources = listOf(RankedReadingSource(saved, true)),
+                    rankedSourcesLoading = false) }
+                if (connectRankedSource(work, saved, token, confirmed = saved)) return@launch
+                if (!rankedWorkCurrent(token, work)) return@launch
             }
             val enriched = try { withTimeout(4_000L) { siteRankingsRepository.enrich(work) } }
             catch (cancel: CancellationException) {
@@ -1002,19 +1014,19 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             catch (_: Exception) { work }
             if (!rankedWorkCurrent(token, work)) return@launch
             _detail.update { current -> if (current?.rankedWork?.key == work.key)
-                current.copy(manga = enriched.manga, rankedWork = enriched) else current }
+                current.copy(manga = enriched.manga, rankedWork = enriched, rankedSourcesLoading = true) else current }
             findRankedSources(enriched, enriched.manga.title.take(120), token)
         }
     }
 
-    fun searchRankedSources(query: String) {
-        val work = _detail.value?.rankedWork ?: return
+    fun searchRankedSources(workKey: String, query: String) {
+        val work = _detail.value?.rankedWork?.takeIf { it.key == workKey } ?: return
         val title = query.trim()
         if (title.length !in 1..120) return
         val token = ++rankedWorkRequest
         rankedWorkJob?.cancel()
         _detail.update { it?.copy(rankedSources = emptyList(), rankedSourcesLoading = true,
-            rankedSourcesError = null) }
+            rankedSourcesError = null, rankedOpeningSourceId = null, rankedSourceError = null, rankedSourcePreview = null) }
         rankedWorkJob = viewModelScope.launch { findRankedSources(work, title, token) }
     }
 
@@ -1066,7 +1078,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                         if (!rankedWorkCurrent(token, work) || source.source.id !in bodySources.enabledSourceIds)
                             return@withPermit
                         val candidates = collected.distinctBy(Manga::id)
-                            .filter { it.sourceId == source.source.id && !siteRankingsRepository.conflicts(work, it) }
+                            .filter { it.sourceId == source.source.id && siteRankingsRepository.acceptsSource(work, it) }
                             .sortedByDescending {
                                 SourceDiscoveryIdentity.titleMatches(work.manga, it, work.manga.alternativeTitles)
                             }.take(12).map { it.copy(sourceName = source.source.name) }
@@ -1076,7 +1088,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                         }
                         // Several editions remain explicit choices; query spelling alone is never identity proof.
                         val confirmed = exact.singleOrNull()?.id
-                        val rows = candidates.map { RankedReadingSource(it, it.id == confirmed) }
+                        val rows = candidates.map { RankedReadingSource(it, it.id == confirmed,
+                            it.id == confirmed || rankedCandidateRelevant(work, query, it)) }
                         if (rows.isNotEmpty()) _detail.update { current ->
                             if (current?.rankedWork?.key != work.key || token != rankedWorkRequest) current
                             else current.copy(rankedSources = (current.rankedSources + rows).distinctBy { it.manga.id })
@@ -1088,42 +1101,150 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (!rankedWorkCurrent(token, work)) return
         _detail.update { it?.copy(rankedSourcesLoading = false,
             rankedSourcesError = failures.takeIf { list -> list.isNotEmpty() }?.joinToString("；")) }
-        val verified = _detail.value?.rankedSources.orEmpty().filter { it.verified }
-        val preferred = verified.firstOrNull { it.manga.sourceId == "copy" } ?: verified.firstOrNull()
-        if (preferred != null && preferred.manga.sourceId in bodySources.enabledSourceIds) {
-            try {
-                val saved = siteRankingsRepository.rememberLink(work, preferred.manga, onlyIfAbsent = true)
-                if (saved && rankedWorkCurrent(token, work)) siteRankings.recordLink(work, preferred.manga)
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { /* The displayed source remains selectable if local association storage is full. */ }
-        }
     }
 
-    /** Selecting an uncertain row is an explicit work association, never a chapter-number merge. */
-    fun useRankedSource(manga: Manga) {
-        val work = _detail.value?.rankedWork ?: return
-        if (manga.sourceId !in bodySources.enabledSourceIds || siteRankingsRepository.conflicts(work, manga)) {
-            viewModelScope.launch { messages.send("此来源已停用或作品编号有冲突，请重新查找。") }
+    /** Work identity is supplied by the displayed pane, never inferred from a newer global route. */
+    fun useRankedSource(workKey: String, manga: Manga) {
+        val state = _detail.value ?: return
+        val work = state.rankedWork?.takeIf { it.key == workKey } ?: return
+        if (state.rankedOpeningSourceId != null) return
+        val selected = state.rankedSources.firstOrNull {
+            it.manga.id == manga.id && it.manga.sourceId == manga.sourceId
+        }?.manga ?: state.rankedLinkedSource?.takeIf { it.id == manga.id && it.sourceId == manga.sourceId } ?: return
+        if (!rankedSourceEnabled(work, selected)) {
+            _detail.update { it?.copy(rankedSourceError = "此来源已停用或作品编号有冲突，请重新选择。") }
             return
         }
-        val selected = _detail.value?.rankedSources?.firstOrNull { it.manga.id == manga.id } ?: return
-        val linked = selected.manga
         rankedWorkJob?.cancel()
         val token = ++rankedWorkRequest
-        rankedWorkJob = viewModelScope.launch {
-            var storageError = false
+        _detail.update { it?.copy(rankedSourcesLoading = false, rankedSourceError = null, rankedSourcePreview = null) }
+        val confirmed = state.rankedLinkedSource?.takeIf { it.id == selected.id && it.sourceId == selected.sourceId }
+        rankedWorkJob = viewModelScope.launch { connectRankedSource(work, selected, token, confirmed) }
+    }
+
+    private suspend fun connectRankedSource(work: SiteRankedWork, selected: Manga, token: Long, confirmed: Manga? = null): Boolean {
+        if (!rankedWorkCurrent(token, work)) return false
+        if (!rankedSourceEnabled(work, selected)) {
+            _detail.update { it?.copy(rankedSourceError = "此来源已停用，请重新选择。") }
+            return false
+        }
+        _detail.update { it?.copy(rankedOpeningSourceId = selected.id, rankedSourceError = null) }
+        try {
+            // Reuse the real source catalogue/cache once. Nothing blocks scrolling, Back or a new search.
+            val cached = withContext(Dispatchers.Default) {
+                repository.cachedDetail(selected.id)?.takeIf { repository.isCatalogFresh(selected.id) }
+            }
+            val retained = if (cached == null) readerCatalogs.read(selected.id)?.takeIf {
+                siteRankingsRepository.sameSourceResult(work, selected, it.manga)
+            } else null
+            val catalogue = cached ?: retained ?: withTimeout(35_000L) { repository.detail(selected.id) }
+            val canonical = catalogue.manga.copy(sourceName = bodySources.entries.value
+                .firstOrNull { it.source.id == selected.sourceId }?.source?.name
+                ?: selected.sourceName.ifBlank { sourceDisplayName(selected.sourceId) })
+            if (!rankedWorkCurrent(token, work)) return false
+            if (!rankedSourceEnabled(work, selected)) {
+                _detail.update { it?.copy(rankedSourceError = "此来源已停用，请重新选择。") }
+                return false
+            }
+            if (!siteRankingsRepository.sameSourceResult(work, selected, canonical)) {
+                try { siteRankingsRepository.forgetLink(work, selected.id) }
+                catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) { /* Future opens still validate the canonical source before routing. */ }
+                if (rankedWorkCurrent(token, work)) {
+                    siteRankings.forgetLink(work)
+                    _detail.update { current -> current?.copy(rankedLinkedSource = null,
+                        rankedSources = current.rankedSources.filterNot { it.manga.id == selected.id },
+                        rankedSourcePreview = null,
+                        rankedSourceError = "来源返回的作品与所选结果不一致，已停止关联。请重新选择。") }
+                }
+                return false
+            }
+            if (cached == null && retained == null) {
+                try { readerCatalogs.save(catalogue) }
+                catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) { /* Optional catalogue persistence cannot block a valid source. */ }
+            }
+            val nativeMatch = SourceDiscoveryIdentity.workMatches(work.manga, canonical,
+                work.manga.alternativeTitles, sameChapterSystem = false)
+            if (!nativeMatch && (confirmed == null || !siteRankingsRepository.sameSourceResult(work, confirmed, canonical))) {
+                if (rankedWorkCurrent(token, work)) _detail.update {
+                    it?.copy(rankedSourcePreview = RankedSourcePreview(selected, canonical, token))
+                }
+                return false
+            }
+            var stored = false
             try {
-                siteRankingsRepository.rememberLink(work, linked)
+                stored = siteRankingsRepository.rememberLink(work, selected, canonical) {
+                    rankedWorkCurrent(token, work) && rankedSourceEnabled(work, selected)
+                }
             } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { storageError = true }
-            if (!rankedWorkCurrent(token, work) || linked.sourceId !in bodySources.enabledSourceIds) return@launch
-            siteRankings.recordLink(work, linked)
-            if (storageError) messages.trySend("阅读来源尚未保存，下次可能需要重新关联。")
-            openManga(linked)
+            catch (_: Exception) { messages.trySend("阅读来源尚未保存，下次可能需要重新选择。") }
+            if (!rankedWorkCurrent(token, work)) return false
+            if (!rankedSourceEnabled(work, canonical)) {
+                _detail.update { it?.copy(rankedSourceError = "此来源已停用，请重新选择。") }
+                return false
+            }
+            if (stored) siteRankings.recordLink(work, canonical)
+            // The destination owns its new detail job. Never cancel this handoff from inside itself.
+            rankedWorkJob = null
+            openManga(canonical, null, false, work)
+            return true
+        } catch (cancel: CancellationException) {
+            if (cancel !is kotlinx.coroutines.TimeoutCancellationException) throw cancel
+            if (rankedWorkCurrent(token, work)) _detail.update { it?.copy(
+                rankedSourceError = "读取来源超时，可以重试或选择其他来源。") }
+        } catch (failure: Exception) {
+            if (rankedWorkCurrent(token, work)) _detail.update { it?.copy(
+                rankedSourceError = failure.message ?: "暂时无法读取这个来源，请重试或更换。") }
+        } finally {
+            if (rankedWorkCurrent(token, work)) _detail.update { it?.copy(rankedOpeningSourceId = null) }
+        }
+        return false
+    }
+
+    fun confirmRankedSource(workKey: String, sourceId: String, request: Long) {
+        val state = _detail.value ?: return
+        val work = state.rankedWork?.takeIf { it.key == workKey } ?: return
+        val preview = state.rankedSourcePreview?.takeIf {
+            it.request == request && request == rankedWorkRequest && it.canonical.id == sourceId
+        } ?: return
+        rankedWorkJob?.cancel()
+        val token = ++rankedWorkRequest
+        _detail.update { it?.copy(rankedSourcePreview = preview.copy(request = token), rankedSourceError = null) }
+        rankedWorkJob = viewModelScope.launch { connectRankedSource(work, preview.selected, token, preview.canonical) }
+    }
+
+    fun cancelRankedSourcePreview(workKey: String, request: Long) {
+        _detail.update { state ->
+            if (state?.rankedWork?.key == workKey && state.rankedSourcePreview?.request == request)
+                state.copy(rankedSourcePreview = null) else state
         }
     }
 
-    fun openManga(manga: Manga, continueChapterId: String? = null, forceRefresh: Boolean = false) {
+    fun clearRankedSource(workKey: String) {
+        val work = _detail.value?.rankedWork?.takeIf { it.key == workKey } ?: return
+        rankedWorkJob?.cancel()
+        val token = ++rankedWorkRequest
+        _detail.update { it?.copy(rankedOpeningSourceId = null, rankedSourceError = null, rankedSourcesLoading = false, rankedSourcePreview = null) }
+        rankedWorkJob = viewModelScope.launch {
+            try {
+                siteRankingsRepository.forgetLink(work)
+                if (!rankedWorkCurrent(token, work)) return@launch
+                siteRankings.forgetLink(work)
+                _detail.update { it?.copy(rankedLinkedSource = null) }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                if (rankedWorkCurrent(token, work)) _detail.update { it?.copy(
+                    rankedSourceError = failure.message ?: "阅读关联未能移除，请重试。") }
+            }
+        }
+    }
+
+    fun openManga(manga: Manga, continueChapterId: String? = null, forceRefresh: Boolean = false) =
+        openManga(manga, continueChapterId, forceRefresh,
+            _detail.value?.takeIf { it.manga.id == manga.id }?.rankedSourceWork)
+
+    private fun openManga(manga: Manga, continueChapterId: String?, forceRefresh: Boolean, rankedFrom: SiteRankedWork?) {
         rankedWorkRequest++
         rankedWorkJob?.cancel()
         cancelSourceResumeChoice()
@@ -1144,14 +1265,18 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         reviewOverrides.clear()
         val requestId = ++detailRequestId
         val previous = _detail.value?.takeIf { it.manga.id == manga.id }
-        val initialManga = (previous?.manga ?: manga).let {
+        val initialManga = (if (rankedFrom != null) manga else previous?.manga ?: manga).let {
             val totalHeat = it.totalHeat() ?: manga.totalHeat()
             it.copy(popularity = totalHeat, totalPopularity = totalHeat, rank = null)
         }
         // Navigation starts before a potentially large multi-source projection is built.
         _detail.value = DetailState(initialManga, detail = previous?.detail,
-            reviews = previous?.reviews.orEmpty(), loading = true)
+            reviews = previous?.reviews.orEmpty(), loading = true, rankedSourceWork = rankedFrom)
         detailJob = viewModelScope.launch {
+            fun checkRankedIdentity(candidate: Manga) {
+                if (rankedFrom != null && !siteRankingsRepository.sameSourceResult(rankedFrom, manga, candidate))
+                    throw RankedSourceIdentityMismatch()
+            }
             var supplementaryStarted = false
             try {
                 val offline = downloadedChapters(manga.id)
@@ -1161,6 +1286,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     val totalHeat = it.totalHeat() ?: manga.totalHeat()
                     it.copy(popularity = totalHeat, totalPopularity = totalHeat, rank = null)
                 }
+                checkRankedIdentity(restoredManga)
                 if (cached == null) repository.retainWork(MangaDetail(restoredManga, initialChapters))
                 val reuseCatalog = cached != null && cached.chapters.isNotEmpty() && !forceRefresh &&
                     repository.isCatalogFresh(manga.id) &&
@@ -1183,7 +1309,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     // A stale saved directory stays readable while the real source is refreshed.
                     val stored = readerCatalogs.read(manga.id)
                     if (requestId != detailRequestId) return@launch
-                    if (stored != null) repository.retainWork(stored)
+                    if (stored != null) { checkRankedIdentity(stored.manga); repository.retainWork(stored) }
                     if (stored != null) _detail.update { current ->
                         if (current?.manga?.id != manga.id || requestId != detailRequestId) current
                         else current.copy(detail = MangaDetail(current.manga,
@@ -1191,6 +1317,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     }
                 }
                 val loaded = repository.detail(manga.id) { metadata ->
+                    checkRankedIdentity(metadata)
                     _detail.update { current ->
                         if (current?.manga?.id != manga.id || requestId != detailRequestId) current
                         else {
@@ -1203,6 +1330,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     }
                 }
                 if (requestId != detailRequestId) return@launch
+                checkRankedIdentity(loaded.manga)
                 _detail.update { current ->
                     if (requestId != detailRequestId || current?.manga?.id != manga.id) current
                     else {
@@ -1223,6 +1351,21 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
+                if (failure is RankedSourceIdentityMismatch && rankedFrom != null) {
+                    if (requestId != detailRequestId) return@launch
+                    try { siteRankingsRepository.forgetLink(rankedFrom, manga.id) }
+                    catch (cancel: CancellationException) { throw cancel }
+                    catch (_: Exception) { /* The route guard remains in force even if local removal fails. */ }
+                    if (requestId != detailRequestId) return@launch
+                    siteRankings.forgetLink(rankedFrom)
+                    detailJob = null
+                    inspectRankedWork(rankedFrom)
+                    _detail.update { current ->
+                        if (current?.rankedWork?.key == rankedFrom.key)
+                            current.copy(rankedSourceError = "来源资料与所选作品不一致，已停止打开。请更换来源。") else current
+                    }
+                    return@launch
+                }
                 if (!supplementaryStarted && requestId == detailRequestId) {
                     _detail.value?.manga?.let { current ->
                         discoverWorkSources(current)
@@ -1508,7 +1651,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (detailWorkId != null && detailRequestId == detailEpoch &&
             currentDetail != null && currentDetail.manga.id == detailWorkId) {
             catalogs[detailWorkId]?.let { catalog ->
-                if (currentDetail.detail != catalog) {
+                val ranked = currentDetail.rankedSourceWork
+                if (currentDetail.detail != catalog && (ranked == null ||
+                    siteRankingsRepository.sameSourceResult(ranked, currentDetail.manga, catalog.manga))) {
                     _detail.value = currentDetail.copy(detail = catalog)
                     changedCatalog = catalog
                 }

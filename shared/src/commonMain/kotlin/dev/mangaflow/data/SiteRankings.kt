@@ -10,6 +10,8 @@ import dev.mangaflow.platform.storage.*
 import dev.mangaflow.storage.readManga
 import dev.mangaflow.storage.toJson
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -90,6 +92,23 @@ data class SiteRankingSnapshot(
     val fetchedAt: Long,
 )
 data class SiteRankingPage(val entries: List<SiteRankingEntry>, val hasMore: Boolean)
+
+/** Only prioritize visible search relevance. This never grants canonical identity or writes an association. */
+internal fun rankedCandidateRelevant(work: SiteRankedWork, query: String, manga: Manga): Boolean {
+    if (SourceDiscoveryIdentity.titleMatches(work.manga, manga, work.manga.alternativeTitles)) return true
+    val names = (listOf(work.manga.title, query) + work.manga.alternativeTitles).filter(String::isNotBlank)
+    val candidate = (listOf(manga.title) + manga.alternativeTitles).map(::normalizedBodySourceTitle)
+    if (names.map(::normalizedBodySourceTitle).any { full ->
+            full.length >= 4 && candidate.any { target -> target.length >= 4 && (target.contains(full) || full.contains(target)) }
+        }) return true
+    val ignored = setOf("manga", "comic", "part", "volume", "book", "the", "with")
+    val words = names.flatMap { Regex("[A-Za-z0-9]+").findAll(it).map { match -> match.value.lowercase() }.toList() }
+        .filter { it.length >= 4 && it !in ignored }.toSet()
+    val found = (listOf(manga.title) + manga.alternativeTitles).flatMap {
+        Regex("[A-Za-z0-9]+").findAll(it).map { match -> match.value.lowercase() }.toList()
+    }.toSet()
+    return words.intersect(found).isNotEmpty()
+}
 
 /** Anonymous native rankings; the Copy ranking repository and its keys are not used here. */
 class SiteRankingsRepository(context: PlatformContext) {
@@ -304,28 +323,62 @@ class SiteRankingsRepository(context: PlatformContext) {
         return SiteRankedWork(site, id, manga, score, scale, count, popularity, trending, favourites, ratingRank)
     }
 
-    /** Exact user-confirmed/verified work mapping survives disposable list cache clearing. */
+    /** A native catalogue ID is never usable as a body route, even in a saved association. */
+    fun acceptsSource(work: SiteRankedWork, manga: Manga): Boolean =
+        manga.id.isNotBlank() && !manga.id.startsWith("catalog:") && manga.title.isNotBlank() &&
+            manga.sourceId !in setOf("catalog", "local") &&
+            runCatching { SourceKeys.decodeManga(manga.id).sourceId == manga.sourceId }.getOrDefault(false) &&
+            !conflicts(work, manga)
+
+    fun sameSourceResult(work: SiteRankedWork, selected: Manga, canonical: Manga): Boolean =
+        acceptsSource(work, canonical) && selected.id == canonical.id && selected.sourceId == canonical.sourceId &&
+            SourceDiscoveryIdentity.titleMatches(selected, canonical, selected.alternativeTitles) &&
+            SourceDiscoveryIdentity.authorEvidence(selected, canonical) != SourceDiscoveryIdentity.AuthorEvidence.CONFLICT
+
+    /** Keep old bytes, but an unverified fuzzy legacy link cannot silently become a direct reading entry. */
     suspend fun linked(work: SiteRankedWork): Manga? = withContext(Dispatchers.IO) {
         runCatching {
             val raw = links.getString("link:" + work.key, null) ?: return@runCatching null
             val saved = JSONObject(raw)
             if (saved.getString("work") != work.key) return@runCatching null
-            readManga(saved.getJSONObject("manga")).takeIf {
-                it.id.isNotBlank() && it.title.isNotBlank() && it.sourceId != "catalog" &&
-                    !conflicts(work, it)
+            val manga = readManga(saved.getJSONObject("manga"))
+            manga.takeIf {
+                acceptsSource(work, it) && (saved.optInt("version", 1) == 2 && saved.optBoolean("identityChecked", false) ||
+                    SourceDiscoveryIdentity.workMatches(work.manga, it, work.manga.alternativeTitles, sameChapterSystem = false))
             }
         }.getOrNull()
     }
 
-    suspend fun rememberLink(work: SiteRankedWork, manga: Manga, onlyIfAbsent: Boolean = false): Boolean =
+    /** Only the actual canonical source result, checked against the selected row, can create a new link. */
+    suspend fun rememberLink(work: SiteRankedWork, selected: Manga, canonical: Manga,
+        stillSelected: () -> Boolean): Boolean =
         withContext(Dispatchers.IO) {
             linkLock.withLock {
-                require(manga.sourceId != "catalog" && !conflicts(work, manga)) { "阅读来源的作品编号与榜单作品冲突。" }
-                if (onlyIfAbsent && links.getString("link:" + work.key, null) != null) return@withLock false
+                require(acceptsSource(work, selected) && sameSourceResult(work, selected, canonical)) {
+                    "来源返回的作品与所选结果不一致，请重新选择。"
+                }
+                currentCoroutineContext().ensureActive()
+                if (!stillSelected()) return@withLock false
                 check(links.edit().putString("link:" + work.key,
-                    JSONObject().put("work", work.key).put("manga", manga.toJson()).toString()).commit()) {
+                    JSONObject().put("version", 2).put("identityChecked", true).put("work", work.key)
+                        .put("manga", canonical.toJson()).toString()).commit()) {
                     "阅读来源未能保存，请检查存储空间。"
                 }
+                true
+            }
+        }
+
+    /** Remove this work association only; favorites, catalogues, downloads and progress are independent. */
+    suspend fun forgetLink(work: SiteRankedWork, expectedMangaId: String? = null): Boolean =
+        withContext(Dispatchers.IO) {
+            linkLock.withLock {
+                val key = "link:" + work.key
+                val raw = links.getString(key, null) ?: return@withLock false
+                if (expectedMangaId != null) {
+                    val storedId = runCatching { readManga(JSONObject(raw).getJSONObject("manga")).id }.getOrNull()
+                    if (storedId != expectedMangaId) return@withLock false
+                }
+                check(links.edit().remove(key).commit()) { "阅读关联未能移除，请重试。" }
                 true
             }
         }
