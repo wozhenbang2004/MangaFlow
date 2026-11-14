@@ -6,7 +6,7 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.storage.cacheDirectory
 import platform.Foundation.*
 import platform.UIKit.UIApplicationDidReceiveMemoryWarningNotification
-import coil3.network.NetworkClient
+import dev.mangaflow.net.DownloadRouteSnapshot
 import coil3.network.ktor3.asNetworkClient
 import dev.mangaflow.net.platformHttpClient
 import io.ktor.client.plugins.HttpTimeout
@@ -29,13 +29,16 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
     )
 }
 
-internal actual fun createExperienceNetworkClient(): NetworkClient = platformHttpClient(false, null) {
+internal actual fun createExperienceNetworkClient(route: DownloadRouteSnapshot?): ExperienceNetworkTransport {
+    val client = platformHttpClient(false, route) {
     install(HttpTimeout) {
         // Darwin supports socket/request timeouts; it has no separate Ktor connect timeout.
         socketTimeoutMillis = 45_000L
         requestTimeoutMillis = 30L * 60_000L
     }
-}.asNetworkClient()
+    }
+    return ExperienceNetworkTransport(client.asNetworkClient()) { client.close() }
+}
 
 internal actual fun observeExperienceResources(context: PlatformContext, changed: (Boolean) -> Unit): () -> Unit {
     val center = NSNotificationCenter.defaultCenter

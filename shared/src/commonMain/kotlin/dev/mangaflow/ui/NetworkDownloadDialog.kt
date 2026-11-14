@@ -33,6 +33,8 @@ import androidx.lifecycle.compose.currentStateAsState
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.net.*
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.data.UnifiedMangaRepository
+import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.ui.motion.*
@@ -52,7 +54,9 @@ internal enum class NetworkDownloadScene(val label: String) {
 
 /** Retained scenes share one content-size owner inside the bounded scrolling viewport. */
 @Composable
-internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDismiss: () -> Unit) {
+internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDismiss: () -> Unit,
+    repository: UnifiedMangaRepository? = null, registry: BodySourceRegistry? = null,
+) {
     val context = LocalMangaContext.current
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     val foreground = lifecycle.isAtLeast(Lifecycle.State.RESUMED)
@@ -136,11 +140,11 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                             NetworkDownloadSettings(shown, backdrop, active = active && shown == scene,
                                 environment = environment, suggestedProxy = suggestedProxy,
                                 suggestionRevision = suggestionRevision,
-                                onSuggestionConsumed = { suggestedProxy = null })
+                                onSuggestionConsumed = { suggestedProxy = null }, repository = repository, registry = registry)
                             if (showInfo) NetworkConnectionHelp()
                         }
                     }
-                    Text("新任务使用此设置 · 已有任务保留原线路", Modifier.padding(top = 3.dp, bottom = 4.dp),
+                    Text("新请求使用此设置 · 进行中任务保留原线路", Modifier.padding(top = 3.dp, bottom = 4.dp),
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 }
             }
@@ -267,7 +271,7 @@ private fun NetworkConnectionHelp() {
             "识别系统公开的 VPN、代理地址和自动代理配置；不读取外部节点、分流规则或未公开端口。检测到配置不代表请求一定使用它。",
             "直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。需要按下载分别直连或代理时，外部软件须支持应用排除与本地代理监听。",
             "Steam 连接沿用系统网络；指定 HTTP / SOCKS 出口需配置地址。部分扩展安装与 iOS 连接不支持 HTTP 代理，会明确提示。",
-            "这里不改变普通搜索、在线阅读和登录。进行中任务保留已选策略，系统网络变化仍可能影响传输。",
+            "每个漫画源可单独设置搜索、阅读、账号接口与新下载线路；网页认证仍遵循系统网络，进行中任务保留原线路。",
         ).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
     }
 }

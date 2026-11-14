@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.experience.sourceNetwork
+
 import dev.mangaflow.typography.MangaFontScene
 
 import androidx.compose.animation.core.MutableTransitionState
@@ -1324,6 +1326,7 @@ internal fun MangaCover(manga: Manga, repository: MangaRepository, modifier: Mod
     val request = remember(context, repository, manga.id, manga.coverUrl, manga.sourceUrl, identity, motion) {
         manga.coverUrl.takeIf(String::isNotBlank)?.let { url ->
             ImageRequest.Builder(imagePlatformContext(context)).data(url)
+                .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeManga(manga.id).sourceId)
                 .memoryCacheKey("manga-cover:" + identity.cacheKey)
                 .diskCacheKey(identity.cacheKey)
                 .httpHeaders(NetworkHeaders.Builder().apply {

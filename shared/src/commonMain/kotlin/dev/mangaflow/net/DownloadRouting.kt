@@ -1,5 +1,7 @@
 package dev.mangaflow.net
 
+import dev.mangaflow.json.JSONObject
+import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.storage.StorageLock
@@ -24,10 +26,14 @@ data class DownloadRouteSnapshot(
     val proxy: DownloadProxyEndpoint? = null,
 )
 
+/** A source owns its endpoint; edits to another source or the download proxy cannot change it. */
+data class SourceNetworkSettings(val mode: DownloadRouteMode, val proxy: DownloadProxyEndpoint? = null)
+
 data class DownloadRoutingSettings(
     val defaultMode: DownloadRouteMode = DownloadRouteMode.SYSTEM,
     val categoryOverrides: Map<DownloadCategory, DownloadRouteMode> = emptyMap(),
     val proxy: DownloadProxyEndpoint? = null,
+    val sourceOverrides: Map<String, SourceNetworkSettings> = emptyMap(),
 )
 
 /** Invalid or unsupported routes must fail before a request, without falling back to direct. */
@@ -118,6 +124,34 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
         mutableState.value = readSettings()
     }
 
+    fun setSource(sourceId: String, settings: SourceNetworkSettings?) = synchronized(lock) {
+        require(sourceId.matches(Regex("[A-Za-z0-9_.-]{1,96}"))) { "漫画源标识无效。" }
+        val checked = settings?.let {
+            val route = DownloadRouteSnapshot(it.mode, it.proxy).checked()
+            SourceNetworkSettings(route.mode, route.proxy)
+        }
+        val next = mutableState.value.sourceOverrides.toMutableMap()
+        if (checked == null) next.remove(sourceId) else next[sourceId] = checked
+        val encoded = JSONObject()
+        next.toSortedMap().forEach { (id, value) ->
+            encoded.put(id, JSONObject().put("mode", value.mode.name).apply {
+                value.proxy?.let { put("host", it.host); put("port", it.port); put("type", it.type.name) }
+            })
+        }
+        disk.edit().putString("sources", encoded.toString()).apply()
+        mutableState.value = readSettings()
+    }
+
+    /** Explicit task choices are resolved once; source overrides never rewrite a frozen task. */
+    fun sourceSnapshot(sourceId: String, category: DownloadCategory? = null,
+        overrideMode: DownloadRouteMode? = null): DownloadRouteSnapshot {
+        val current = mutableState.value
+        if (overrideMode != null) return DownloadRouteSnapshot(overrideMode, current.proxy).checked()
+        current.sourceOverrides[sourceId]?.let { return DownloadRouteSnapshot(it.mode, it.proxy).checked() }
+        val mode = category?.let { current.categoryOverrides[it] } ?: current.defaultMode
+        return DownloadRouteSnapshot(mode, current.proxy).checked()
+    }
+
     fun snapshot(category: DownloadCategory, overrideMode: DownloadRouteMode? = null): DownloadRouteSnapshot {
         val current = mutableState.value
         val mode = overrideMode ?: current.categoryOverrides[category] ?: current.defaultMode
@@ -135,7 +169,24 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
                 readMode(categoryKey(category))?.let { category to it }
             }.toMap(),
             proxy = proxy,
+            sourceOverrides = readSources(),
         )
+    }
+
+    private fun readSources(): Map<String, SourceNetworkSettings> {
+        val encoded = runCatching { JSONObject(disk.getString("sources") ?: "{}") }.getOrNull() ?: return emptyMap()
+        return buildMap {
+            encoded.keys().forEach { id ->
+                if (id.matches(Regex("[A-Za-z0-9_.-]{1,96}"))) {
+                    val value = encoded.optJSONObject(id) ?: return@forEach
+                    val mode = DownloadRouteMode.entries.firstOrNull { it.name == value.optString("mode") } ?: return@forEach
+                    val type = DownloadProxyType.entries.firstOrNull { it.name == value.optString("type") }
+                    // Retain invalid saved proxy settings so requests fail explicitly; never change them to direct.
+                    val endpoint = if (type != null) DownloadProxyEndpoint(value.optString("host"), value.optInt("port"), type) else null
+                    put(id, SourceNetworkSettings(mode, endpoint))
+                }
+            }
+        }
     }
 
     private fun readMode(key: String): DownloadRouteMode? =
@@ -145,6 +196,18 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
     companion object {
         private val lock = StorageLock()
         private var instance: DownloadRoutingStore? = null
+        internal fun activeSourceSnapshot(sourceId: String): DownloadRouteSnapshot =
+            synchronized(lock) { instance }?.sourceSnapshot(sourceId)
+                ?: DownloadRouteSnapshot(DownloadRouteMode.SYSTEM)
+
+        internal fun sourceRevision(sourceId: String): String {
+            val current = synchronized(lock) { instance }?.state?.value ?: DownloadRoutingSettings()
+            val source = current.sourceOverrides[sourceId]
+            val mode = source?.mode ?: current.defaultMode
+            val endpoint = if (mode == DownloadRouteMode.PROXY) (if (source != null) source.proxy else current.proxy) else null
+            val text = mode.name + "|" + endpoint?.type?.name.orEmpty() + "|" + endpoint?.host.orEmpty() + "|" + endpoint?.port
+            return sha256(text.encodeToByteArray()).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
+        }
         fun get(context: PlatformContext): DownloadRoutingStore = synchronized(lock) {
             instance ?: DownloadRoutingStore(context).also { instance = it }
         }

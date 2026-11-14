@@ -15,13 +15,15 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ExpandMore
@@ -29,7 +31,6 @@ import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.ChevronRight
-import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
@@ -51,6 +52,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -89,10 +91,25 @@ internal fun SiteRankingsScreen(
     }
     var siteMenu by remember { mutableStateOf(false) }
     var filterMenu by remember { mutableStateOf(false) }
-    LaunchedEffect(active) { if (!active) { siteMenu = false; filterMenu = false } }
+    var sitePresent by remember { mutableStateOf(false) }
+    var filterPresent by remember { mutableStateOf(false) }
+    var menuSelection by remember { mutableStateOf(state.selection) }
+    var menuSite by remember { mutableStateOf(state.selection.site) }
+    var menuFetchedAt by remember { mutableLongStateOf(0L) }
+    var menuError by remember { mutableStateOf<String?>(null) }
+    var infoRequested by remember { mutableStateOf(false) }
+    var infoVisible by remember { mutableStateOf(false) }
+    var infoPresent by remember { mutableStateOf(false) }
+    LaunchedEffect(active) {
+        if (!active) {
+            siteMenu = false; filterMenu = false
+            infoRequested = false; infoVisible = false; infoPresent = false
+        }
+    }
     val colors = MaterialTheme.colorScheme
     val positions = rememberSaveableStateHolder()
     val ready = active && !state.restoringSelection
+    val menuWidth = 208.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.4f)
     RankingPageFrame(Modifier.fillMaxSize().background(colors.background.copy(alpha = .97f))
         .semantics { paneTitle = "各站榜单" }, header = {
         Column {
@@ -101,18 +118,28 @@ internal fun SiteRankingsScreen(
                     .padding(horizontal = 8.dp, vertical = 2.dp),
                 summary = {
                     Box {
-                        MotionTextButton(onClick = { siteMenu = !siteMenu; filterMenu = false }, enabled = ready,
-                            modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 4.dp)) {
+                        MotionTextButton(onClick = {
+                            if (!siteMenu) menuSite = state.selection.site
+                            siteMenu = !siteMenu; filterMenu = false
+                        }, enabled = ready, modifier = Modifier.semantics {
+                            stateDescription = if (siteMenu) "站点菜单已展开" else "站点菜单已收起"
+                        }, contentPadding = PaddingValues(horizontal = 4.dp)) {
                             if (!state.restoringSelection) ReviewSourceMark(state.selection.site.id, size = 17.dp)
                             Text(if (state.restoringSelection) "各站榜单" else state.selection.site.title,
-                                Modifier.weight(1f).padding(start = 6.dp), style = MaterialTheme.typography.bodyMedium,
+                                Modifier.weight(1f, fill = false).padding(start = 6.dp),
+                                style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Icon(Icons.Outlined.ExpandMore, "选择榜单站点", Modifier.size(17.dp))
+                            Icon(Icons.Outlined.ExpandMore, "选择榜单站点", Modifier.padding(start = 4.dp).size(17.dp))
                         }
-                        CompactGlassPopover(siteMenu && ready, backdrop, onDismiss = { siteMenu = false }) {
-                            RankingSite.entries.forEach { site ->
-                                CompactMenuAction(if (site == state.selection.site) Icons.Outlined.Check else Icons.Outlined.Language,
-                                    site.title) { siteMenu = false; controller.selectSite(site) }
+                        CompactGlassPopover(siteMenu && ready, backdrop, onDismiss = { siteMenu = false },
+                            onPresenceChange = { sitePresent = it }, alignToStart = true, maximumWidth = menuWidth) {
+                            Column(Modifier.selectableGroup()) {
+                                RankingSite.entries.forEach { site ->
+                                    RankingMenuChoice(site.title, site == menuSite, ready && siteMenu,
+                                        sourceId = site.id) {
+                                        siteMenu = false; controller.selectSite(site)
+                                    }
+                                }
                             }
                         }
                     }
@@ -141,27 +168,43 @@ internal fun SiteRankingsScreen(
                 } else Text("评分", Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 12.dp),
                     style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                 Box {
-                    MotionTextButton(onClick = { filterMenu = !filterMenu; siteMenu = false }, enabled = ready,
-                        contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.heightIn(min = 44.dp)) {
+                    MotionTextButton(onClick = {
+                        if (!filterMenu) {
+                            menuSelection = state.selection
+                            menuFetchedAt = state.fetchedAt
+                            menuError = state.preferenceError
+                        }
+                        filterMenu = !filterMenu; siteMenu = false
+                    }, enabled = ready,
+                        contentPadding = PaddingValues(horizontal = 8.dp), modifier = Modifier.heightIn(min = 44.dp).semantics {
+                            stateDescription = if (filterMenu) "范围菜单已展开" else "范围菜单已收起"
+                        }) {
                         Text(if (state.restoringSelection) "范围" else state.selection.scope.label,
                             style = MaterialTheme.typography.bodySmall, maxLines = 1)
-                        Icon(Icons.Outlined.FilterList, "榜单范围与说明", Modifier.padding(start = 5.dp).size(17.dp))
+                        Icon(Icons.Outlined.FilterList, "选择漫画范围", Modifier.padding(start = 5.dp).size(17.dp))
                     }
                     CompactGlassPopover(filterMenu && ready, backdrop, onDismiss = { filterMenu = false },
-                        maximumWidth = 320.dp) {
-                        state.selection.site.scopes.forEach { value ->
-                            CompactMenuAction(if (value == state.selection.scope) Icons.Outlined.Check
-                                else Icons.AutoMirrored.Outlined.MenuBook, value.label) {
-                                filterMenu = false; controller.selectScope(value)
+                        onPresenceChange = { present ->
+                            filterPresent = present
+                            if (!present && infoRequested) {
+                                infoRequested = false
+                                infoVisible = active
+                            }
+                        }, maximumWidth = menuWidth) {
+                        Column(Modifier.selectableGroup()) {
+                            menuSelection.site.scopes.forEach { value ->
+                                RankingMenuChoice(value.label, value == menuSelection.scope, ready && filterMenu) {
+                                    filterMenu = false; controller.selectScope(value)
+                                }
                             }
                         }
-                        Text(state.selection.explanation, Modifier.padding(12.dp),
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                        state.preferenceError?.let { Text(it, Modifier.padding(12.dp),
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
-                        if (state.fetchedAt > 0) Text("本地获取：" + formatInstantMillis(state.fetchedAt, "MM-dd HH:mm"),
-                            Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        menuError?.let { Text(it, Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            fontSize = 11.sp, lineHeight = 16.sp, color = colors.error) }
+                        Box(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)
+                            .height(1.dp).background(colors.onSurface.copy(alpha = .07f)))
+                        CompactMenuAction(Icons.Outlined.Info, "榜单说明", enabled = ready && filterMenu) {
+                            infoRequested = true; infoPresent = true; filterMenu = false
+                        }
                     }
                 }
             }
@@ -171,9 +214,68 @@ internal fun SiteRankingsScreen(
             order = { it.selection.site.ordinal * 100 + it.selection.kind.ordinal * 10 + it.selection.scope.ordinal },
             soft = true, modifier = Modifier.fillMaxSize()) { pane ->
             positions.SaveableStateProvider(pane.selection.key) {
-                RankingPane(pane, backdrop, 0.dp, active = ready && pane.selection == state.selection && !siteMenu && !filterMenu,
+                RankingPane(pane, backdrop, 0.dp, active = ready && pane.selection == state.selection &&
+                    !siteMenu && !filterMenu && !sitePresent && !filterPresent && !infoPresent,
                     onRetry = controller::retry, onMore = controller::more, onOpen = onOpen, onInspect = onInspect)
             }
+        }
+    }
+    // A help action waits for the actual menu exit; it never stacks two active surfaces.
+    MotionDialog(visible = infoVisible && active, onDismissRequest = { infoVisible = false },
+        maximumWidth = 320.dp, onClosed = { if (!infoVisible) infoPresent = false }) {
+        LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
+            role = GlassSurfaceRole.PANEL, softCard = true) {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(menuSelection.site.title + " · " + menuSelection.kind.label,
+                            style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
+                        Text(menuSelection.scope.label, style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant)
+                    }
+                    MotionIconButton(onClick = { infoVisible = false }, modifier = Modifier.size(44.dp),
+                        tooltip = "关闭榜单说明") {
+                        Icon(Icons.Outlined.Close, "关闭榜单说明", Modifier.size(18.dp))
+                    }
+                }
+                Text(menuSelection.explanation, Modifier.padding(vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                if (menuFetchedAt > 0) Text("本机获取 · " + formatInstantMillis(menuFetchedAt, "MM-dd HH:mm"),
+                    Modifier.padding(bottom = 8.dp), style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+/** Adapt CompactMenuAction's press/material row, with actual single-choice semantics. */
+@Composable
+private fun RankingMenuChoice(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    sourceId: String? = null,
+    onClick: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+        .background(colors.onSurface.copy(alpha = if (selected) .07f else 0f))
+        .selectable(selected, enabled = enabled, role = Role.RadioButton,
+            interactionSource = interaction, indication = null, onClick = onClick)
+        .motionPress(interaction, enabled, pressedScale = .98f)
+        .heightIn(min = 44.dp).padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        if (sourceId != null) {
+            ReviewSourceMark(sourceId, size = 18.dp)
+            Spacer(Modifier.width(10.dp))
+        }
+        Text(label, Modifier.weight(1f), fontSize = 13.sp, lineHeight = 19.sp,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+            maxLines = 2, overflow = TextOverflow.Ellipsis, color = colors.onSurface)
+        Box(Modifier.padding(start = 8.dp).size(18.dp), contentAlignment = Alignment.Center) {
+            if (selected) Icon(Icons.Outlined.Check, null, Modifier.size(17.dp), tint = colors.onSurface)
         }
     }
 }

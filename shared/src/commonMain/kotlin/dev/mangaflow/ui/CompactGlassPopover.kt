@@ -68,6 +68,7 @@ internal fun CompactGlassPopover(
     onPresenceChange: (Boolean) -> Unit = {},
     aboveAnchor: Boolean = false,
     maximumWidth: Dp = 264.dp,
+    alignToStart: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
@@ -84,11 +85,15 @@ internal fun CompactGlassPopover(
     }, label = "reader-actions-scale") { if (it) 1f else .94f }
     val present = presence.currentState || presence.targetState || !presence.isIdle
     val reportPresence by rememberUpdatedState(onPresenceChange)
-    var origin by remember { mutableStateOf(TransformOrigin(if (direction == LayoutDirection.Ltr) 1f else 0f, if (aboveAnchor) 1f else 0f)) }
+    var origin by remember(direction, aboveAnchor, alignToStart) {
+        mutableStateOf(TransformOrigin(
+            if ((direction == LayoutDirection.Ltr) == alignToStart) 0f else 1f,
+            if (aboveAnchor) 1f else 0f))
+    }
     SideEffect { reportPresence(present) }
     DisposableEffect(Unit) { onDispose { reportPresence(false) } }
     if (!present) return
-    val position = remember(density, aboveAnchor) {
+    val position = remember(density, aboveAnchor, alignToStart) {
         val gap = with(density) { 8.dp.roundToPx() }
         val margin = with(density) { 12.dp.roundToPx() }
         object : PopupPositionProvider {
@@ -98,8 +103,9 @@ internal fun CompactGlassPopover(
                 layoutDirection: LayoutDirection,
                 popupContentSize: IntSize,
             ): IntOffset {
-                val x = if (layoutDirection == LayoutDirection.Ltr)
-                    anchorBounds.right - popupContentSize.width else anchorBounds.left
+                val anchorStart = layoutDirection == LayoutDirection.Ltr
+                val x = if (anchorStart == alignToStart) anchorBounds.left
+                    else anchorBounds.right - popupContentSize.width
                 val below = anchorBounds.bottom + gap
                 val above = anchorBounds.top - popupContentSize.height - gap
                 val desiredY = if (aboveAnchor || below + popupContentSize.height > windowSize.height - margin) above else below

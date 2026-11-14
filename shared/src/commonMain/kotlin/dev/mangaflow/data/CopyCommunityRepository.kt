@@ -29,7 +29,7 @@ class CopyCommunityRepository(
     private val webOrigin = checkedOrigin(config.websiteOrigin)
     private val apiOrigin = checkedOrigin(config.apiOrigin)
     private val imageDomains = config.trustedImageDomains.map { it.lowercase().trim('.') }.toSet()
-    private val http = SourceHttp()
+    private val http = SourceHttp(sourceId = "copy")
     private val commentCache = LinkedHashMap<String, CachedComments>()
     private val commentRequests = List(16) { Mutex() }
     @kotlin.concurrent.Volatile private var commentGeneration = 0L

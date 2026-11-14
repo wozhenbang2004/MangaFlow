@@ -3113,7 +3113,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val generation = ++preparationGeneration
         // Freeze before waiting for preparation capacity. Later settings edits apply
         // only to another explicit attempt, never to this attempt's metadata or bytes.
-        val route = try { frozenRoute ?: DownloadRoutingStore.get(application).snapshot(DownloadCategory.CHAPTERS, routeMode) }
+        val route = try { frozenRoute ?: DownloadRoutingStore.get(application).sourceSnapshot(
+            dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(manga.id, chapter), chapter.id).sourceId,
+            DownloadCategory.CHAPTERS, routeMode) }
         catch (failure: Exception) {
             val failed = ChapterPreparationState(key, generation, manga, chapter, routeMode, null,
                 ChapterPreparationPhase.FAILED, preparationError(failure), expectedEntry?.id)

@@ -34,7 +34,7 @@ import dev.mangaflow.net.Request
  */
 class BaoziBodySource : BodySource {
     override val info = BodySourceInfo("baozi", "包子", "简中", SITE, "$HOME/favicon.ico")
-    private val http = SourceHttp()
+    private val http = SourceHttp(sourceId = info.id)
     private val requests = Semaphore(2)
     private val requestStarts = Mutex()
     private var nextRequestAt = 0L

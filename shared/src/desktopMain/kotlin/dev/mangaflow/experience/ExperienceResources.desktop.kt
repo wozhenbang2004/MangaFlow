@@ -5,7 +5,7 @@ import java.io.File
 import java.nio.file.Files
 import java.lang.management.ManagementFactory
 import com.sun.management.OperatingSystemMXBean
-import coil3.network.NetworkClient
+import dev.mangaflow.net.DownloadRouteSnapshot
 import coil3.network.ktor3.asNetworkClient
 import dev.mangaflow.net.platformHttpClient
 import io.ktor.client.plugins.HttpTimeout
@@ -30,10 +30,13 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
 /** No portable event source for desktop OS power/thermal state; leave those values unknown. */
 internal actual fun observeExperienceResources(context: PlatformContext, changed: (Boolean) -> Unit): () -> Unit = {}
 
-internal actual fun createExperienceNetworkClient(): NetworkClient = platformHttpClient(false, null) {
+internal actual fun createExperienceNetworkClient(route: DownloadRouteSnapshot?): ExperienceNetworkTransport {
+    val client = platformHttpClient(false, route) {
     install(HttpTimeout) {
         connectTimeoutMillis = 20_000L
         socketTimeoutMillis = 45_000L
         requestTimeoutMillis = 30L * 60_000L
     }
-}.asNetworkClient()
+    }
+    return ExperienceNetworkTransport(client.asNetworkClient()) { client.close() }
+}

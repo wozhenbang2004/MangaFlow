@@ -471,7 +471,7 @@ class DownloadStore private constructor(context: Context) {
                 // Validate before detaching an older download or replacing any local image.
                 // Callers preparing online metadata pass the same frozen route into this record.
                 val checkedRoute = route?.checked()
-                    ?: DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
+                    ?: DownloadRoutingStore.get(context).sourceSnapshot(imageSource, DownloadCategory.CHAPTERS)
                 old?.let { detachWriter(it) } to checkedRoute
             }
             if (change != null) stopWriter(change)
@@ -536,8 +536,8 @@ class DownloadStore private constructor(context: Context) {
                     generation = record.generation
                     // Ordinary retry and reader recovery keep the frozen route. Only the
                     // separately labelled explicit action adopts the latest defaults.
-                    val route = if (useLatestRoute) DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
-                        else record.route?.checked() ?: DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
+                    val route = if (useLatestRoute) currentChapterRoute(record.entry.manga.id, record.entry.chapter.id)
+                        else record.route?.checked() ?: currentChapterRoute(record.entry.manga.id, record.entry.chapter.id)
                     detachWriter(record) to route
                 }
                 generation = change.detached.generation
@@ -672,6 +672,10 @@ class DownloadStore private constructor(context: Context) {
         }
     }
 
+    private fun currentChapterRoute(mangaId: String, chapterId: String): DownloadRouteSnapshot =
+        DownloadRoutingStore.get(context).sourceSnapshot(
+            dev.mangaflow.data.SourceKeys.decodeChapter(mangaId, chapterId).sourceId, DownloadCategory.CHAPTERS)
+
     /** Validate the same entry before preparing metadata, without altering its writer or route. */
     suspend fun routeForReadingDownload(
         mangaId: String, chapterId: String, expectedEntry: DownloadEntry? = null,
@@ -685,8 +689,8 @@ class DownloadStore private constructor(context: Context) {
                 val record = records[id]
                 if (expectedEntry != null && record?.entry !== expectedEntry)
                     throw CancellationException("下载任务已变化，请重新操作。")
-                if (useLatestDefaults) DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
-                else record?.route?.checked() ?: DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
+                if (useLatestDefaults) currentChapterRoute(mangaId, chapterId)
+                else record?.route?.checked() ?: currentChapterRoute(mangaId, chapterId)
             }
         }
     }
@@ -744,7 +748,7 @@ class DownloadStore private constructor(context: Context) {
                 // Legacy manifests may not yet have a route. Freeze it before either a reader
                 // or worker creates the shared transfer, so the first consumer cannot bypass it.
                 val routed = if (current.route != null) current else current.copy(
-                    route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS),
+                    route = currentChapterRoute(current.entry.manga.id, current.entry.chapter.id),
                 ).also(::save)
                 val pending = pageTransfers[key] ?: scope.async(start = CoroutineStart.LAZY) {
                     try {
@@ -991,7 +995,7 @@ class DownloadStore private constructor(context: Context) {
         if (retryAttempt) transferFailures.remove(id)
         else if (failure != null) throw failure.error
         val prepared = if (record.route != null) record else record.copy(
-            route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS),
+            route = currentChapterRoute(record.entry.manga.id, record.entry.chapter.id),
         ).also(::save)
         writers[id] = ChapterWriter(workId)
         prepared

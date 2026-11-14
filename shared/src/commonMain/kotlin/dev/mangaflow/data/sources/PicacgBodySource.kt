@@ -39,7 +39,7 @@ import kotlin.concurrent.Volatile
  */
 class PicacgBodySource(private val context: PlatformContext) : BodySource {
     override val info = BodySourceInfo("picacg", "哔咔", "简中", HOME, "", adult = true)
-    private val network = SourceHttp()
+    private val network = SourceHttp(sourceId = info.id)
     private val accountLock = Mutex()
     @Volatile private var session: String = readSecret(context, SECRET_KEY).orEmpty()
     private val _signedIn = MutableStateFlow(session.isNotBlank())

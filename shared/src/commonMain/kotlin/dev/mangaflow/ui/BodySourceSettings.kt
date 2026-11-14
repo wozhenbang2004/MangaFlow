@@ -3,6 +3,8 @@ package dev.mangaflow.ui
 import androidx.compose.material.icons.outlined.Tune
 
 import dev.mangaflow.data.UnifiedMangaRepository
+import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.platform.LocalMangaContext
 
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
@@ -86,6 +88,9 @@ internal fun BodySourceSettingsSheet(
     repository: UnifiedMangaRepository? = null,
     starters: StarterSourceInstaller? = null,
 ) {
+    val context = LocalMangaContext.current
+    val routingStore = remember(context) { DownloadRoutingStore.get(context) }
+    val routing by routingStore.state.collectAsStateWithLifecycle()
     val scriptImportSupported = true
     val entries by registry.entries.collectAsStateWithLifecycle()
     val packages = if (plugins != null) {
@@ -192,8 +197,15 @@ internal fun BodySourceSettingsSheet(
                         modifier = Modifier.padding(end = 8.dp, bottom = 6.dp)
                             .semantics { liveRegion = LiveRegionMode.Polite })
                 } }
+                if (repository != null) item(key = "source-connection-checks") {
+                    SourceConnectionChecks(repository,
+                        entries.filter { it.isInstalled && it.enabled && !it.removed }.map { it.source },
+                        active = busyId == null && inspecting == null)
+                }
                 items(added, key = { "added:${it.source.id}" }) { entry ->
                     BodySourceSettingsRow(entry, enabled = busyId == null,
+                        networkLabel = routing.sourceOverrides[entry.source.id]?.let { downloadRouteLabel(it.mode) }
+                            ?: "跟随默认",
                         onDetails = if (repository != null) { { inspecting = entry.source.id } } else null,
                         modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
                             placementSpec = if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap()),
@@ -292,6 +304,7 @@ private fun BodySourceSettingsRow(
     enabled: Boolean,
     modifier: Modifier = Modifier,
     kind: String? = null,
+    networkLabel: String? = null,
     onToggle: (Boolean) -> Unit,
     onDetails: (() -> Unit)? = null,
 ) {
@@ -302,7 +315,7 @@ private fun BodySourceSettingsRow(
         ChapterSourceLogo(entry.source.id, entry.source.name, Modifier.size(24.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(entry.source.name, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(listOf(entry.source.language, kind ?: "内置")
+            Text(listOfNotNull(entry.source.language, kind ?: "内置", networkLabel)
                 .filter { it.isNotBlank() }.joinToString(" · "),
                 fontSize = 11.sp, color = colors.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -16,8 +16,9 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.view.Display
-import coil3.network.NetworkClient
+import dev.mangaflow.net.DownloadRouteSnapshot
 import coil3.network.okhttp.asNetworkClient
+import dev.mangaflow.net.javaProxy
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 import dev.mangaflow.platform.PlatformContext
@@ -121,6 +122,12 @@ internal actual fun observeExperienceResources(context: PlatformContext, changed
     }
 }
 
-internal actual fun createExperienceNetworkClient(): NetworkClient = OkHttpClient.Builder()
-    .connectTimeout(20, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS)
-    .callTimeout(30, TimeUnit.MINUTES).build().asNetworkClient()
+internal actual fun createExperienceNetworkClient(route: DownloadRouteSnapshot?): ExperienceNetworkTransport {
+    val client = OkHttpClient.Builder().proxy(route.javaProxy())
+        .connectTimeout(20, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.MINUTES).build()
+    return ExperienceNetworkTransport(client.asNetworkClient()) {
+        client.dispatcher.executorService.shutdown()
+        client.connectionPool.evictAll()
+    }
+}

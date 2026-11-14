@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Source network, ranking menus and Copy density · 2026-11-15
+
+Current raw requests/screenshots are recorded under Source network and compact review controls in DESIGN: RANK-POPOVER-20261115 and SYNC-DENSITY-20261115, plus the per-source network/one-click-check requirement. Baseline6e12a6e2 and integrated concurrent0bb92a5c retain transfer reliability, adaptive experience, script compatibility, nullable backup materials and all previous sync authority; do not replay them.
+
+Ranking menus now have compact measured triggers,208dp bounded single-choice rows, trailing checks and real source marks; long explanation/time move behind a retained-exit help handoff. Copy comparison combines status/issues, compacts each ordinary work into a roughly69–73dp cover/title/two-side group and shows the action footer only for staged/in-flight work. Independent implementation ownership changed presentation only; real merge and saved reading authority remain in the existing coordinator.
+
+Per-source policies now use the existing routing store with independent endpoints and task/source/category/global precedence; source-owned native/script/Coil requests and chapter preparation/retry consume frozen snapshots with route-sensitive caches. Source-management/details/network checks use captured routes and bounded explicit directory probes; settings/source/run identity rejects stale results. Embedded web authentication remains system-routed, and unsupported proxy protocols report their actual limitation. No CDN/image or installed connectivity success is inferred.
+
+Verification: current source/interface/whitespace review only. No tests, local builds or service/device/account/browser probes; installed density, touch/reversal, accessibility and actual network behavior are unverified. Root owns one complete latest-main batch including all three authorized increments, preserves concurrent changes, confirms ordinary Android/native CI activation once and leaves artifact/user acceptance pending. If this batch is already on main, do not replay it or create a status-only follow-up push; act on concrete CI/user feedback.
+
 ## Reading-first seven-domain redesign · active 2026-11-15
 
 Current user authorizes the full seven-domain experience-policy redesign and explicitly requests subagents. DESIGN READING-CORE-205–214 owns exact raw requirements, screenshot1000121737's ineffective mode feedback, selected design, quality references and observable acceptance. Previous TRANSFER-195–204 source is already published at6e12a6e; do not replay it or reopen publication permission. Six isolated detached implementation worktrees share that base; root alone integrates repository/app glue/docs and publishes one complete latest-main batch.

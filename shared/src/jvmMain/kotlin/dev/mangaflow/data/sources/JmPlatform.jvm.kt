@@ -1,6 +1,7 @@
 package dev.mangaflow.data.sources
 
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.ChapterDownloadTransport
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
@@ -8,6 +9,7 @@ import dev.mangaflow.data.MangaPage
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.javaProxy
 import dev.mangaflow.net.checked
@@ -61,6 +63,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     private val root = StorageFile(cacheDirectory(context), "jm-decoded")
     private var client: JmApiClient? = null
     private var clientConfig: JmConfiguration? = null
+    private var clientRoute: DownloadRouteSnapshot? = null
     private var savedSession: JSONObject? = readSecret(context, SECRET_KEY)?.let {
         runCatching { JSONObject(it) }.getOrNull()
     }
@@ -70,8 +73,16 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     private suspend fun <T> clientCall(operation: (JmApiClient) -> T): T = withContext(Dispatchers.IO) {
         mutex.withLock {
             currentCoroutineContext().ensureActive()
+            val route = currentCoroutineContext()[ChapterDownloadTransport]?.route
+                ?: DownloadRoutingStore.get(context).sourceSnapshot(info.id)
+            if (client != null && clientRoute != route) {
+                val previous = client
+                client = null; clientConfig = null; clientRoute = null
+                photoImages.clear()
+                runInterruptible { previous?.close() }
+            }
             val active = client ?: runInterruptible {
-                val (created, config) = createClient()
+                val (created, config) = createClient(route = route)
                 try {
                     savedSession?.let { session -> runCatching {
                         val host = session.optString("host")
@@ -82,10 +93,12 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         } else accountName = ""
                     }.onFailure { accountName = "" } }
                     clientConfig = config
+                    clientRoute = route
                     created.also { client = it }
                 } catch (failure: Exception) { created.close(); throw failure }
             }
             currentCoroutineContext().ensureActive()
+            if (currentCoroutineContext()[ChapterDownloadTransport]?.connectionCheck == true) clientConfig?.cachePool?.clear()
             try { runInterruptible { operation(active) } }
             catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
@@ -96,11 +109,12 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     }
 
     /** A cookie-only reader never enables the upstream client's cached-password retry. */
-    private fun createClient(pinDomain: Boolean = false): Pair<JmApiClient, JmConfiguration> {
+    private fun createClient(pinDomain: Boolean = false,
+        route: DownloadRouteSnapshot = DownloadRoutingStore.get(context).sourceSnapshot(info.id)): Pair<JmApiClient, JmConfiguration> {
         val config = JmConfiguration.Builder().clientType(ClientType.API).retryTimes(0)
             .cacheSize(24 * 1024 * 1024).closeTimeoutMs(1_000).build()
         val bundle = OkHttpBuilder.build(config)
-        val http = bundle.client.newBuilder().retryOnConnectionFailure(false).build()
+        val http = bundle.client.newBuilder().proxy(route.javaProxy()).retryOnConnectionFailure(false).build()
         val created = JmApiClient(config, http, bundle.cookieManager, bundle.domainManager)
         try {
             created.initializeAsync().get()
@@ -160,9 +174,10 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     override suspend fun login(username: String, password: String): Unit = withContext(Dispatchers.IO) {
         require(username.trim().length in 1..160 && password.length in 1..512) { "请输入禁漫账号和密码。" }
         val caller = currentCoroutineContext()
+        val route = caller[ChapterDownloadTransport]?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(info.id)
         mutex.withLock {
             runInterruptible {
-                val (loginClient, _) = createClient(pinDomain = true)
+                val (loginClient, _) = createClient(pinDomain = true, route = route)
                 try {
                     val user = loginClient.login(username.trim(), password)
                     val owner = user.username()?.takeIf { it.isNotBlank() }
@@ -171,7 +186,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         ?: throw SourceException("禁漫登录未返回会话域名。")
                     val cookies = loginClient.cookies.orEmpty()
                     require(cookies.isNotEmpty()) { "禁漫登录未返回可恢复的会话。" }
-                    val (replacement, config) = createClient()
+                    val (replacement, config) = createClient(route = route)
                     try {
                         replacement.useDomain(host)
                         replacement.cookies = cookies
@@ -181,7 +196,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         caller.ensureActive()
                         writeSecret(context, SECRET_KEY, secret.toString())
                         val previous = client
-                        client = replacement; clientConfig = config
+                        client = replacement; clientConfig = config; clientRoute = route
                         savedSession = secret; accountName = owner
                         previous?.close()
                     } catch (failure: Exception) { replacement.close(); throw failure }
@@ -199,7 +214,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             deleteSecret(context, SECRET_KEY)
             savedSession = null; accountName = ""
             val previous = client
-            client = null; clientConfig = null
+            client = null; clientConfig = null; clientRoute = null
             previous?.let { active -> runInterruptible { active.cookies = emptyList(); active.close() } }
         }
     }

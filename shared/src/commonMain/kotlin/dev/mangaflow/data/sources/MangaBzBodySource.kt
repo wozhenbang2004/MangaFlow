@@ -6,6 +6,7 @@ import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.data.ChapterDownloadTransport
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
@@ -43,7 +44,7 @@ import com.fleeksoft.ksoup.nodes.Document
  */
 class MangaBzBodySource : BodySource {
     override val info = BodySourceInfo("mangabz", "MangaBZ", "简中", HOME, "$HOME/favicon.ico")
-    private val http = SourceHttp()
+    private val http = SourceHttp(sourceId = info.id)
     private val networkSlots = Semaphore(2)
     private val rateGate = Mutex()
     private var nextRequestNanos = 0L
@@ -92,7 +93,7 @@ class MangaBzBodySource : BodySource {
     }
 
     private suspend fun loadDetail(id: String, force: Boolean): MangaDetail {
-        val cacheKey = id + (currentCoroutineContext()[ChapterDownloadTransport]?.cacheKey?.let { "@download/$it" } ?: "")
+        val cacheKey = id + (currentCoroutineContext()[ChapterDownloadTransport]?.cacheKey?.let { "@download/$it" } ?: "@network/" + DownloadRoutingStore.sourceRevision(info.id))
         if (!force) synchronized(mangaBzBodySourceStateLock) {
             catalogs[cacheKey]?.takeIf { (monotonicTimeMillis() * 1_000_000L) - it.at in 0L until CATALOG_TTL }?.detail
         }?.let { return it }
@@ -144,7 +145,7 @@ class MangaBzBodySource : BodySource {
         val manga = nativeManga(mangaId)
         require(ref.sourceId == info.id && ref.mangaId == manga && DIGITS.matches(ref.chapterId)) { "MangaBZ 章节与作品来源不一致。" }
         val key = SourceKeys.chapter(info.id, manga, ref.chapterId) +
-            (currentCoroutineContext()[ChapterDownloadTransport]?.cacheKey?.let { "@download/$it" } ?: "")
+            (currentCoroutineContext()[ChapterDownloadTransport]?.cacheKey?.let { "@download/$it" } ?: "@network/" + DownloadRoutingStore.sourceRevision(info.id))
         chapterLocks[(key.hashCode() and Int.MAX_VALUE) % chapterLocks.size].withLock {
             val catalog = loadDetail(manga, forceRefresh)
             val chapter = catalog.chapters.firstOrNull { it.sourceChapterId == ref.chapterId }

@@ -11,6 +11,7 @@ import dev.mangaflow.experience.PrefetchPromoted
 import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.NetworkClient
@@ -201,7 +202,7 @@ suspend fun resolveScriptPage(
         ?: throw ScriptImageRefreshRequired("图片来源已移除，请重新安装后刷新本章。")
     imageState(original.sourceRevision.isNotBlank() && original.sourceRevision == bundle.digest, "图片来源已更新，请刷新本章后重试。")
     val transport = currentCoroutineContext()[ChapterDownloadTransport]
-    val selectedRoute = route ?: transport?.route
+    val selectedRoute = route ?: transport?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId)
     val routeKey = selectedRoute?.let { it.mode.name + "|" + it.proxy?.type?.name.orEmpty() + "|" +
         it.proxy?.host.orEmpty() + "|" + it.proxy?.port?.toString().orEmpty() } ?: "reader"
     val key = ImageRequestKey(ref.sourceId, owner, bundle.digest, epoch, original.sourceImageToken, routeKey)
@@ -298,7 +299,8 @@ suspend fun materializeScriptPage(
                     var ignoreFeedback = false
                     try {
                         fetchScriptImageBytes(context, page.url, actualHeaders,
-                            route ?: currentCoroutineContext()[ChapterDownloadTransport]?.route,
+                            route ?: currentCoroutineContext()[ChapterDownloadTransport]?.route
+                                ?: DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId),
                             onBytes = { count ->
                                 if (count > 0L) {
                                     received += count

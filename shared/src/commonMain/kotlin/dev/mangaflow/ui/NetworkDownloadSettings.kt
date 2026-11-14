@@ -48,6 +48,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.net.DownloadCategory
@@ -57,6 +58,11 @@ import dev.mangaflow.net.DownloadProxyType
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.SourceNetworkSettings
+import dev.mangaflow.data.UnifiedMangaRepository
+import dev.mangaflow.storage.BodySourceRegistry
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -76,10 +82,16 @@ internal fun NetworkDownloadSettings(
     suggestedProxy: DownloadProxyEndpoint? = null,
     suggestionRevision: Int = 0,
     onSuggestionConsumed: () -> Unit = {},
+    repository: UnifiedMangaRepository? = null,
+    registry: BodySourceRegistry? = null,
 ) {
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
+    val entries = if (registry != null) {
+        val installed by registry.entries.collectAsStateWithLifecycle()
+        installed
+    } else emptyList()
     when (scene) {
         NetworkDownloadScene.CONNECTION -> DownloadConnectionSettings(
             store, active, environment, suggestedProxy, suggestionRevision, onSuggestionConsumed)
@@ -99,9 +111,18 @@ internal fun NetworkDownloadSettings(
                         DownloadRouteControl(category, backdrop = backdrop, enabled = active, compact = true)
                     }
                 }
+                Text("各源单独线路优先用于漫画章节。", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        NetworkDownloadScene.CHECK -> DownloadConnectionDiagnostics(store, active)
+        NetworkDownloadScene.CHECK -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (repository != null) {
+                val sources = if (registry != null) entries.filter { it.isInstalled && it.enabled && !it.removed }.map { it.source }
+                    else repository.sources.filter { it.id in repository.enabledSources() }
+                SourceConnectionChecks(repository, sources, active = active, animateDetails = false)
+            }
+            DownloadConnectionDiagnostics(store, active)
+        }
     }
 }
 
@@ -141,7 +162,7 @@ private fun DownloadConnectionSettings(
         }
     }
     Column(Modifier.fillMaxWidth().motionInputGate(active), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        Text("新任务默认线路", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+        Text("应用默认线路", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
         MotionTabs(settings.defaultMode.ordinal, DownloadRouteMode.entries.map(::downloadRouteLabel),
             onSelect = { index ->
                 notice = null
@@ -241,6 +262,97 @@ private fun DownloadConnectionSettings(
     }
 }
 
+
+/** Per-source drafts stay private until an explicit save; running tasks retain their route snapshot. */
+@Composable
+internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = true) {
+    val context = LocalMangaContext.current
+    val store = remember(context) { DownloadRoutingStore.get(context) }
+    val settings by store.state.collectAsStateWithLifecycle()
+    val saved = settings.sourceOverrides[sourceId]
+    val colors = MaterialTheme.colorScheme
+    var expanded by remember(sourceId) { mutableStateOf(false) }
+    var mode by remember(sourceId, saved) { mutableStateOf(saved?.mode) }
+    var host by remember(sourceId, saved) { mutableStateOf(saved?.proxy?.host.orEmpty()) }
+    var port by remember(sourceId, saved) { mutableStateOf(saved?.proxy?.port?.toString().orEmpty()) }
+    var type by remember(sourceId, saved) { mutableStateOf(saved?.proxy?.type ?: DownloadProxyType.SOCKS) }
+    var notice by remember(sourceId) { mutableStateOf<String?>(null) }
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    fun resetDraft() {
+        mode = saved?.mode
+        host = saved?.proxy?.host.orEmpty()
+        port = saved?.proxy?.port?.toString().orEmpty()
+        type = saved?.proxy?.type ?: DownloadProxyType.SOCKS
+        notice = null
+    }
+    fun close() { expanded = false; focus.clearFocus(force = true); keyboard?.hide() }
+    val routeLabel = runCatching { store.sourceSnapshot(sourceId) }.fold(
+        onSuccess = { if (saved == null) "默认 · " + downloadRouteLabel(it.mode) else downloadRouteLabel(it.mode) },
+        onFailure = { "待配置" })
+    Column(Modifier.fillMaxWidth().motionInputGate(enabled), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        RouteDisclosure("连接线路", routeLabel, expanded) {
+            if (expanded) { resetDraft(); close() } else { resetDraft(); expanded = true }
+        }
+        // This lazy source-details row owns its single retained editor expansion.
+        CopyShelfReveal(expanded) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                val choices: List<DownloadRouteMode?> = listOf(null) + DownloadRouteMode.entries
+                MotionTabs(choices.indexOf(mode), listOf("默认", "系统", "直连", "代理"),
+                    onSelect = { mode = choices[it]; notice = null }, modifier = Modifier.fillMaxWidth(),
+                    treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 36.dp, fontSize = 12.sp,
+                    track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
+                if (mode == DownloadRouteMode.PROXY) {
+                    MotionTabs(if (type == DownloadProxyType.SOCKS) 0 else 1, listOf("SOCKS5", "HTTP"),
+                        onSelect = { type = if (it == 0) DownloadProxyType.SOCKS else DownloadProxyType.HTTP; notice = null },
+                        modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
+                        fullWidthIndicator = true, controlHeight = 36.dp, fontSize = 12.sp,
+                        track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
+                    BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        if (maxWidth < 260.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)) Column(
+                            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ProxyValueField(host, { host = it; notice = null }, "主机名或 IP", Modifier.fillMaxWidth())
+                            ProxyValueField(port, { port = it.filter(Char::isDigit).take(5); notice = null },
+                                "端口", Modifier.fillMaxWidth(), KeyboardType.Number)
+                        } else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ProxyValueField(host, { host = it; notice = null }, "主机名或 IP", Modifier.weight(1f))
+                            ProxyValueField(port, { port = it.filter(Char::isDigit).take(5); notice = null },
+                                "端口", Modifier.width(80.dp), KeyboardType.Number)
+                        }
+                    }
+                    if (sourceId.startsWith("js_") || platformKind == PlatformKind.IOS) Text(
+                        "此来源的指定代理使用 SOCKS5；HTTP 暂不支持。",
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                }
+                if (mode == DownloadRouteMode.DIRECT) Text("直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                Text("用于该源后续请求与新下载；本次下载显式线路优先。网页认证仍遵循系统网络。",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                saved?.proxy?.let { Text("已保存 · " + proxyAddressLabel(it), style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                notice?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    MotionTextButton(onClick = { resetDraft(); close() }, enabled = enabled) { Text("取消") }
+                    MotionTextButton(onClick = {
+                        try {
+                            val selectedMode = mode
+                            if (selectedMode == DownloadRouteMode.PROXY && type == DownloadProxyType.HTTP &&
+                                (sourceId.startsWith("js_") || platformKind == PlatformKind.IOS))
+                                throw DownloadRouteException("此来源暂不支持 HTTP 代理，请选择 SOCKS5。")
+                            val endpoint = if (selectedMode == DownloadRouteMode.PROXY)
+                                DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type) else null
+                            store.setSource(sourceId, selectedMode?.let { SourceNetworkSettings(it, endpoint) })
+                            notice = null
+                            close()
+                        } catch (failure: DownloadRouteException) { notice = failure.message ?: "连接配置未能保存" }
+                        catch (_: Exception) { notice = "连接配置未能保存，请重试" }
+                    }, enabled = enabled) { Text("保存") }
+                }
+            }
+        }
+    }
+}
+
 /** This controls the category default for subsequent transfers; active jobs keep their snapshot. */
 @Composable
 internal fun DownloadRouteControl(
@@ -296,6 +408,7 @@ private fun DownloadRouteSelector(
     compact: Boolean = false,
 ) {
     val effective = selected ?: inherited
+    val followsSource = taskOnly && category == DownloadCategory.CHAPTERS && selected == null
     var expanded by remember(category, taskOnly) { mutableStateOf(false) }
     var notice by remember(category, taskOnly) { mutableStateOf<String?>(null) }
     val colors = MaterialTheme.colorScheme
@@ -315,9 +428,10 @@ private fun DownloadRouteSelector(
             }
             val choices: List<DownloadRouteMode?> = listOf(null) + DownloadRouteMode.entries
             choices.forEach { choice ->
-                val needsProxy = (choice ?: inherited) == DownloadRouteMode.PROXY
+                val sourceDefault = taskOnly && category == DownloadCategory.CHAPTERS && choice == null
+                val needsProxy = !sourceDefault && (choice ?: inherited) == DownloadRouteMode.PROXY
                 RouteChoiceRow(
-                    label = if (choice == null) "跟随默认 · " + downloadRouteLabel(inherited)
+                    label = if (sourceDefault) "跟随所选源" else if (choice == null) "跟随默认 · " + downloadRouteLabel(inherited)
                         else downloadRouteLabel(choice),
                     selected = selected == choice, enabled = enabled && (!needsProxy || hasProxy),
                     detail = if (needsProxy && !hasProxy) "先在设置中配置代理" else null,
@@ -328,7 +442,8 @@ private fun DownloadRouteSelector(
                     },
                 )
             }
-            Text(if (taskOnly) "只用于本次下载，不更改默认线路。"
+            Text(if (taskOnly && category == DownloadCategory.CHAPTERS) "默认按所选漫画源确定；显式选择只用于本次下载。"
+                else if (taskOnly) "只用于本次下载，不更改默认线路。"
                 else "用于之后开始或手动重试的本类下载。",
                 modifier = Modifier.padding(horizontal = 10.dp),
                 style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
@@ -342,11 +457,11 @@ private fun DownloadRouteSelector(
         MotionTextButton(onClick = { notice = null; expanded = !expanded }, enabled = enabled,
             modifier = Modifier.heightIn(min = 44.dp).semantics {
                 contentDescription = downloadCategoryLabel(category) + "的" + heading + "，" +
-                    downloadRouteLabel(effective) + if (selected == null) "，跟随默认" else ""
+                    (if (followsSource) "跟随所选源" else downloadRouteLabel(effective) + if (selected == null) "，跟随默认" else "")
             }) {
             Icon(Icons.Outlined.SwapVert, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             Spacer(Modifier.width(5.dp))
-            Text(if (compact) if (selected == null) "默认" else downloadRouteLabel(effective)
+            Text(if (followsSource) "跟随所选源" else if (compact) if (selected == null) "默认" else downloadRouteLabel(effective)
                 else (if (taskOnly) "本次 · " else if (selected == null) "默认 · " else "本类 · ") +
                     (if (taskOnly && selected == null) "默认（" + downloadRouteLabel(effective) + "）"
                     else downloadRouteLabel(effective)), style = MaterialTheme.typography.labelMedium,

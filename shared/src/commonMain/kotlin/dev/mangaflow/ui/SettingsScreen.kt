@@ -162,6 +162,7 @@ fun SettingsScreen(
     sourceBackdrop: HazeState? = null,
     sourceRegistry: BodySourceRegistry? = null,
     sourcePlugins: SourcePluginStore? = null,
+    sourceRepository: dev.mangaflow.data.UnifiedMangaRepository? = null,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -626,10 +627,11 @@ fun SettingsScreen(
 
     if (showBodySources && sourceRegistry != null) {
         BodySourceSettingsSheet(sourceRegistry, sourceBackdrop, plugins = sourcePlugins,
-            onDismiss = { showBodySources = false })
+            onDismiss = { showBodySources = false }, repository = sourceRepository)
     }
 
-    NetworkDownloadDialog(showNetworkDownloads, sourceBackdrop, onDismiss = { showNetworkDownloads = false })
+    NetworkDownloadDialog(showNetworkDownloads, sourceBackdrop, onDismiss = { showNetworkDownloads = false },
+        repository = sourceRepository, registry = sourceRegistry)
     ExperienceSettingsDialog(showExperience, sourceBackdrop, onDismiss = { showExperience = false })
 
     BackupRestoreDialog(

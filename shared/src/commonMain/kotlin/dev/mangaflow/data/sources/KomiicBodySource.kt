@@ -28,7 +28,7 @@ import dev.mangaflow.data.toPortableDecimalOrNull
 class KomiicBodySource(private val selectedBaseUrl: () -> String = { BASE_URLS.first() }) : BodySource {
     private val home: String get() = selectedBaseUrl().takeIf { it in BASE_URLS } ?: BASE_URLS.first()
     override val info get() = BodySourceInfo("komiic", "Komiic", "繁中", home, "$home/favicon.ico")
-    private val http = SourceHttp()
+    private val http = SourceHttp(sourceId = info.id)
 
     override suspend fun discover(page: Int): MangaPage = withContext(Dispatchers.IO) {
         require(page in 0..333)

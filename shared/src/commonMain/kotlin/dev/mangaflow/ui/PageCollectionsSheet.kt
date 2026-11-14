@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.experience.sourceNetwork
+
 import dev.mangaflow.typography.MangaFontScene
 
 import dev.mangaflow.ui.platform.*
@@ -181,6 +183,7 @@ private fun CollectionPreview(collection: PageCollection, repository: MangaRepos
             val request = remember(context, url, headers, resolved?.headers) {
                 url?.let {
                     ImageRequest.Builder(imagePlatformContext(context)).data(it)
+                        .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeChapter(dev.mangaflow.data.chapterSourceMangaId(collection.manga.id, collection.chapter), collection.chapter.id).sourceId)
                         .httpHeaders(NetworkHeaders.Builder().apply {
                             headers.forEach { (name, value) -> set(name, value) }
                             resolved?.headers.orEmpty().forEach { (name, value) -> set(name, value) }

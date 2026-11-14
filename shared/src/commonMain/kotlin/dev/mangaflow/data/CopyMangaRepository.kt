@@ -19,6 +19,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
@@ -40,7 +41,7 @@ class CopyMangaRepository(
 ) : MangaRepository {
     private val webOrigin = checkedOrigin(config.websiteOrigin)
     private val apiOrigin = checkedOrigin(config.apiOrigin)
-    private val api = SourceHttp()
+    private val api = SourceHttp(sourceId = "copy")
     private val anonymousIdentity by lazy(identityProvider)
     private val imageDomains = config.trustedImageDomains.map { it.lowercase().trim('.') }.toSet()
     private val catalogCache = LinkedHashMap<String, CachedCatalog>()
@@ -624,7 +625,8 @@ class CopyMangaRepository(
         return url
     }
     private data class CachedCatalog(val detail: MangaDetail, val comicUuid: String?, val fetchedAt: Long)
-    private data class PageKey(val mangaId: String, val chapterId: String)
+    private data class PageKey(val mangaId: String, val chapterId: String,
+        val network: String = DownloadRoutingStore.sourceRevision("copy"))
     private data class CachedPages(val pages: List<Page>, val fetchedAt: Long)
     private data class CachedCover(val page: Page, val fetchedAt: Long)
     private class CatalogObserver(val callback: (Manga) -> Unit)

@@ -95,9 +95,9 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("服务响应", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
                 color = colors.onSurfaceVariant)
-            diagnosis?.let { result ->
+            diagnosis?.takeIf { diagnosedSettings === store.state.value }?.let { result ->
                 MotionIconButton(onClick = {
-                    if (latestActive && diagnosedSettings == store.state.value) {
+                    if (latestActive && diagnosedSettings === store.state.value) {
                         clipboard.setText(AnnotatedString(result.safeReport()))
                         notice = "已复制检查结果"
                     }
@@ -144,12 +144,12 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
                     if (!latestActive) return@MotionTextButton
                     invalidate()
                     val started = generation
-                    val saved = settings
+                    val saved = store.state.value
                     val selectedTarget = target
                     job = scope.launch(start = CoroutineStart.LAZY) {
                         try {
                             val result = diagnoseNetwork(context, selectedTarget, saved.proxy)
-                            if (generation == started && latestSettings == saved && store.state.value == saved && latestActive &&
+                            if (generation == started && latestSettings === saved && store.state.value === saved && latestActive &&
                                 result.target == selectedTarget) {
                                 diagnosedSettings = saved
                                 diagnosis = result
@@ -170,7 +170,7 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
                 }
             }
         }
-        diagnosis?.let { result ->
+        diagnosis?.takeIf { diagnosedSettings === store.state.value }?.let { result ->
             result.results.forEach { row ->
                 Column(Modifier.fillMaxWidth()) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
@@ -219,7 +219,7 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
                             color = colors.onSurfaceVariant)
                     } else MotionTextButton(enabled = active && job == null, onClick = {
                         if (!latestActive) return@MotionTextButton
-                        if (store.state.value != diagnosedSettings) {
+                        if (store.state.value !== diagnosedSettings) {
                             invalidate()
                             notice = "连接设置已变化，请重新检查"
                             return@MotionTextButton
@@ -227,7 +227,7 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
                         try {
                             store.setDefault(recommended.mode)
                             diagnosis = null
-                            notice = "默认已更新，分类与进行中的下载保留原设置"
+                            notice = "默认已更新；分类、各源与进行中任务保留原设置"
                         } catch (failure: Exception) {
                             notice = failure.message ?: "暂时无法保存连接设置"
                         }

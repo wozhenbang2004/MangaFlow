@@ -13,6 +13,7 @@ import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
 import dev.mangaflow.data.sources.createJmDownloadSession
 import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.checked
@@ -74,7 +75,8 @@ class UnifiedMangaRepository(
     private val catalogFetchedAt = LinkedHashMap<String, CatalogStamp>()
     private class CatalogGate(val mutex: Mutex = Mutex(), var users: Int = 0)
     private val catalogGates = mutableMapOf<String, CatalogGate>()
-    private data class SearchKey(val source: String, val query: String, val page: Int)
+    private data class SearchKey(val source: String, val query: String, val page: Int,
+        val network: String = DownloadRoutingStore.sourceRevision(source))
     private data class CachedSearch(val storedAt: Long, val generation: Long, val page: MangaPage)
     private val sourceSearchCache = LinkedHashMap<SearchKey, CachedSearch>()
     private val searchLocks = Array(16) { Mutex() }
@@ -123,7 +125,7 @@ class UnifiedMangaRepository(
 
     fun sourceConfigurationKey(): String {
         val snapshot = sourceSnapshot
-        val value = sourceEligibility.ids.sorted().joinToString("|") { "$it:${snapshot.importedDigests[it].orEmpty()}" }
+        val value = sourceEligibility.ids.sorted().joinToString("|") { "$it:${snapshot.importedDigests[it].orEmpty()}:${DownloadRoutingStore.sourceRevision(it)}" }
         return sha256(value.encodeToByteArray())
             .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
     }
@@ -288,7 +290,14 @@ class UnifiedMangaRepository(
         adapter(id).comments(ref.mangaId, page)
     }
     /** Explicit user action; no scheduler, automatic availability probe or account retry. */
-    suspend fun sourceProbe(id: String) { browseSource(id, 0) }
+    suspend fun sourceProbe(id: String, route: DownloadRouteSnapshot? = null) {
+        require(sources.any { it.id == id }) { "这个漫画源尚未安装。" }
+        val selected = (route ?: DownloadRoutingStore.activeSourceSnapshot(id)).checked()
+        val client = NetworkClient(route = selected)
+        try {
+            withContext(Dispatchers.IO + ChapterDownloadTransport(selected, client, connectionCheck = true)) { browseSource(id, 0) }
+        } finally { client.close() }
+    }
 
     /** Each callback is an immutable cumulative snapshot of this requested batch only. */
     suspend fun searchAll(query: String, pages: Map<String, Int>? = null, forceRefresh: Boolean = false,
@@ -834,7 +843,7 @@ class UnifiedMangaRepository(
     override fun cachedPages(mangaId: String, chapterId: String): List<Page>? {
         val ref = runCatching { SourceKeys.decodeChapter(mangaId, chapterId) }.getOrNull() ?: return null
         if (ref.sourceId == "copy") return copy.cachedPages(ref.mangaId, ref.chapterId)
-        val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId)
+        val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId) + "@network/" + DownloadRoutingStore.sourceRevision(ref.sourceId)
         return synchronized(unifiedMangaRepositoryStateLock) {
             val now = repositoryNanoTime()
             pageCache[key]?.takeIf { now - it.storedAtNanos in 0L until PAGE_CACHE_NANOS }?.pages
@@ -845,7 +854,7 @@ class UnifiedMangaRepository(
         currentCoroutineContext().ensureActive()
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         if (ref.sourceId == "copy") return copy.pages(ref.mangaId, ref.chapterId, forceRefresh)
-        val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId)
+        val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId) + "@network/" + DownloadRoutingStore.sourceRevision(ref.sourceId)
         val request = synchronized(unifiedMangaRepositoryStateLock) {
             val generation = pageCacheGenerations[ref.sourceId] ?: 0L
             val now = repositoryNanoTime()
@@ -859,7 +868,7 @@ class UnifiedMangaRepository(
             val shared = pageRequests[key]?.takeIf { it.generation == generation && !it.result.isCompleted }
                 ?: ChapterPageRequest(generation, scope.async(start = CoroutineStart.LAZY) {
                     val loaded = diagnostics.track(ref.sourceId, SourceStage.PAGES) { adapter(ref.sourceId).pages(
-                        SourceKeys.manga(ref.sourceId, ref.mangaId), key, forceRefresh,
+                        SourceKeys.manga(ref.sourceId, ref.mangaId), SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId), forceRefresh,
                     ).toList() }
                     if (loaded.isEmpty()) throw SourceException("这个来源没有返回本章图片，请重试或选择其他来源。")
                     val requestContext = currentCoroutineContext()

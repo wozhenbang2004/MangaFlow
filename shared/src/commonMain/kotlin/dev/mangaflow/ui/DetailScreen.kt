@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.experience.sourceNetwork
+
 import dev.mangaflow.typography.MangaFontScene
 
 import dev.mangaflow.ui.platform.*
@@ -312,6 +314,7 @@ fun DetailScreen(
     val coverDecodeWidth = with(dockDensity) { (window.width * .5f).roundToPx() }.coerceIn(320, 1024)
     val coverRequest = remember(context, current.coverUrl, current.sourceUrl, current.id, coverRetry, motion, coverDecodeWidth) {
         ImageRequest.Builder(imagePlatformContext(context)).data(current.coverUrl)
+            .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeManga(current.id).sourceId)
             .softwareBitmap()
             .size(coverDecodeWidth, coverDecodeWidth * 3 / 2)
             .httpHeaders(NetworkHeaders.Builder().set("User-Agent", "Mozilla/5.0")

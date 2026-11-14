@@ -25,6 +25,9 @@ import coil3.request.Options
 import coil3.size.Scale
 import dev.mangaflow.data.Page
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
+import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.platform.applicationContext
@@ -45,7 +48,8 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okio.*
 
-internal expect fun createExperienceNetworkClient(): NetworkClient
+internal class ExperienceNetworkTransport(val client: NetworkClient, val close: () -> Unit)
+internal expect fun createExperienceNetworkClient(route: DownloadRouteSnapshot? = null): ExperienceNetworkTransport
 internal enum class ExperienceImageWork { VISIBLE, READER, PREFETCH }
 private val workKey = Extras.Key(ExperienceImageWork.VISIBLE)
 private val bytesKey = Extras.Key<PrefetchByteBudget?>(null)
@@ -101,6 +105,9 @@ internal class PrefetchWork(private val promoted: () -> Unit = {}) {
     fun ifOptional(block: () -> Unit) = synchronized(lock) { if (!foreground.value) block() }
 }
 internal class PrefetchPromoted : RuntimeException()
+
+/** Explicit source identity, never inferred from a shared CDN host. */
+internal fun ImageRequest.Builder.sourceNetwork(source: String) = apply { extras[sourceKey] = source }
 
 internal fun ImageRequest.Builder.readerPriority(source: String? = null) = apply {
     extras[workKey] = ExperienceImageWork.READER
@@ -310,6 +317,7 @@ internal suspend fun preflightReaderPage(
 internal fun initializeExperienceImages(context: PlatformContext) {
     val app = applicationContext(context)
     val policy = ExperiencePolicyStore.get(app)
+    DownloadRoutingStore.get(app)
     SingletonImageLoader.setSafe { imageContext ->
         val memory = ExperienceMemoryCache(MemoryCache.Builder().maxSizePercent(imageContext, .32)
             .weakReferencesEnabled(false).build())
@@ -367,7 +375,7 @@ private class ExperienceImageEvents(
  * streaming byte ceiling; foreground originals never inherit a failed prefetch's cap.
  */
 private class ExperienceImageNetworkClient(
-    private val delegate: NetworkClient, private val policy: ExperiencePolicyStore,
+    private val delegate: ExperienceNetworkTransport, private val policy: ExperiencePolicyStore,
 ) : NetworkClient {
     override suspend fun <T> executeRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
         // Coil 3.2's networkCachePolicy adds only-if-cached headers but still calls its client.
@@ -384,8 +392,10 @@ private class ExperienceImageNetworkClient(
         var retry: String? = null
         var failed = false
         var interrupted = false
+        val selectedRoute = request.extras[sourceKey]?.let { DownloadRoutingStore.activeSourceSnapshot(it) }
+        val owned = selectedRoute?.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let(::createExperienceNetworkClient)
         try {
-            return delegate.executeRequest(request) responseBlock@{ response ->
+            return (owned?.client ?: delegate.client).executeRequest(request) responseBlock@{ response ->
                 code = response.code
                 retry = response.headers["Retry-After"]
                 val body = response.body
@@ -447,6 +457,7 @@ private class ExperienceImageNetworkClient(
             failed = true
             throw failure
         } finally {
+            owned?.close?.invoke()
             if (accepted > 0L) policy.releasePrefetchBytes(accepted)
             // Cancellations and local budget stops do not count as a slow/failing source.
             if ((!interrupted || code == 429 || code == 503) && (code != null || failed)) policy.recordTransfer(request.extras[sourceKey] ?: experienceOrigin(request.url), code,

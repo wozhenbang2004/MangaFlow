@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.experience.sourceNetwork
+
 import dev.mangaflow.ui.platform.*
 
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -122,7 +124,8 @@ internal fun VolumeBookTile(
     }
     val request = remember(mangaId, chapter.id, resolvedCover, cover.attempt, motion) {
         resolvedCover?.let { page ->
-            ImageRequest.Builder(imagePlatformContext(context)).data(page.url).apply {
+            ImageRequest.Builder(imagePlatformContext(context)).data(page.url)
+                .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(mangaId, chapter), chapter.id).sourceId).apply {
                 if (!page.url.startsWith("file:")) httpHeaders(NetworkHeaders.Builder().apply {
                     imageHeaders().forEach { (name, value) -> set(name, value) }
                     page.headers.forEach { (name, value) -> set(name, value) }

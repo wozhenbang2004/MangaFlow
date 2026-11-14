@@ -3,11 +3,15 @@ package dev.mangaflow.data
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.Request
 import dev.mangaflow.net.retryAfterMillis
 import dev.mangaflow.platform.ConcurrentMap
 import dev.mangaflow.platform.wallTimeMillis
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlin.math.ceil
@@ -20,8 +24,16 @@ internal fun sourceClient(http1Only: Boolean = false): NetworkClient = NetworkCl
 internal class SourceHttp(
     client: NetworkClient? = null,
     private val pauses: ConcurrentMap<String, Long> = sharedPauses,
+    private val sourceId: String? = null,
+    private val http1Only: Boolean = false,
 ) {
-    private val ordinaryClient by lazy { client ?: sourceClient() }
+    private val ordinaryClient by lazy { client ?: sourceClient(http1Only) }
+    private val transportLock = SynchronizedObject()
+    private val routedClients = mutableSetOf<NetworkClient>()
+    fun cancelAll() {
+        ordinaryClient.cancelAll()
+        synchronized(transportLock) { routedClients.toList() }.forEach { it.cancelAll() }
+    }
     companion object {
         private const val MAX_TEXT_BYTES = 8L * 1024 * 1024
         private val sharedPauses = ConcurrentMap<String, Long>()
@@ -38,11 +50,19 @@ internal class SourceHttp(
             val seconds = ceil(remaining / 1000.0).toLong()
             throw SourceException("$operation 暂时受限，请在 ${seconds} 秒后重试。", publicUrl, seconds)
         }
-        val transport = currentCoroutineContext()[ChapterDownloadTransport]?.client ?: ordinaryClient
+        val frozen = currentCoroutineContext()[ChapterDownloadTransport]
+        val route = if (frozen == null) sourceId?.let { DownloadRoutingStore.activeSourceSnapshot(it) } else null
+        val owned = route?.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let { NetworkClient(http1Only = http1Only, route = it) }
+        if (owned != null) synchronized(transportLock) { routedClients.add(owned) }
+        val transport = frozen?.client ?: owned ?: ordinaryClient
         val response = try { transport.execute(request, MAX_TEXT_BYTES) }
         catch (cancel: CancellationException) { throw cancel }
         catch (failure: DownloadRouteException) { throw failure }
         catch (failure: Exception) { throw SourceException("$operation 连接或数据读取失败，请检查网络后重试。", publicUrl, cause = failure) }
+        finally {
+            if (owned != null) synchronized(transportLock) { routedClients.remove(owned) }
+            owned?.close()
+        }
         val retry = retryAfterMillis(response.header("Retry-After"))?.let { ceil(it / 1000.0).toLong() }
             ?: when (response.code) { 429 -> 60L; 503 -> 30L; else -> 0L }
         when (response.code) {

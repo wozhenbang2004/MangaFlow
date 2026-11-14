@@ -8,6 +8,7 @@ import dev.mangaflow.data.SourceException
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
@@ -79,8 +80,9 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                 var preferenceCalls = 0
                 try {
                     checkPackage()
-                    val network = JavascriptHttpSession(allowNetwork,
-                        currentCoroutineContext()[ChapterDownloadTransport]?.route, MAX_RESPONSE_BYTES, allowRedirects)
+                    val route = if (allowNetwork) currentCoroutineContext()[ChapterDownloadTransport]?.route
+                        ?: DownloadRoutingStore.get(application).sourceSnapshot(bundle.sourceId) else null
+                    val network = JavascriptHttpSession(allowNetwork, route, MAX_RESPONSE_BYTES, allowRedirects)
                     requests = network
                     js.memoryLimit = 48L * 1024 * 1024
                     js.maxStackSize = 256L * 1024

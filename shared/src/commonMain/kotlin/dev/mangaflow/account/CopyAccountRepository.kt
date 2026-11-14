@@ -52,7 +52,7 @@ class CopyAccountRepository(context: Context) {
     private val accountClient = sourceClient(http1Only = true)
     // Owner profile/member requests never inherit public-reader cooldowns.
     private val accountPauses = ConcurrentHashMap<String, Long>()
-    private val accountHttp = SourceHttp(accountClient, accountPauses)
+    private val accountHttp = SourceHttp(accountClient, accountPauses, sourceId = "copy", http1Only = true)
     private val appContext = context.applicationContext
     private val appProtocol by lazy { CopyAppAccountProtocol(CopyAnonymousIdentityStore.load(appContext)) }
     private val requests = Mutex()
@@ -164,7 +164,7 @@ class CopyAccountRepository(context: Context) {
         if (version == expected) {
             version++
             pendingLogin = null
-            accountClient.cancelAll()
+            accountHttp.cancelAll()
         }
     }
 
@@ -185,7 +185,7 @@ class CopyAccountRepository(context: Context) {
         pendingLogin = null
         sessionCredential = null
         mutableProfile.value = null
-        accountClient.cancelAll()
+        accountHttp.cancelAll()
         store.clear()
     }
 
@@ -660,7 +660,7 @@ class CopyAccountRepository(context: Context) {
     private fun beginAttempt(): Long = synchronized(sessionLock) {
         version++
         pendingLogin = null
-        accountClient.cancelAll()
+        accountHttp.cancelAll()
         version
     }
 

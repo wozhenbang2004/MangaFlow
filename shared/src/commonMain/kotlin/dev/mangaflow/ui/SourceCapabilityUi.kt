@@ -353,7 +353,8 @@ internal fun SourceCapabilityDetailsSheet(
                     SourceFeature.DISCOVERY -> "发现"; SourceFeature.SEARCH -> "搜索"; SourceFeature.CATEGORIES -> "分类"
                     SourceFeature.RANKING -> "排行"; SourceFeature.ACCOUNT -> "账号"; SourceFeature.FAVORITES -> "站点收藏"; SourceFeature.COMMENTS -> "评论"
                 } }, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                MotionTextButton(onClick = { operate { repository.sourceProbe(source.id) } }, enabled = !busy) { Text(if (busy) "读取中…" else "检测目录", fontSize = 12.sp) }
+                SourceNetworkSettingsControl(source.id, enabled = !busy)
+                SourceConnectionChecks(repository, listOf(source), active = !busy)
             }
             if (source.id.startsWith("js_") && plugins != null) item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -412,7 +413,7 @@ internal fun SourceCapabilityDetailsSheet(
 private fun SourceHealthSummary(health: SourceHealth?) {
     if (health == null) Text("尚未读取", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     else Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(if (health.checking) health.stage.label + " · 正在读取" else health.message.ifBlank { health.stage.label + " · 已读取" },
+        Text("最近请求 · " + (if (health.checking) health.stage.label + " · 正在读取" else health.message.ifBlank { health.stage.label + " · 已读取" }),
             fontSize = 11.sp, color = if (health.failure != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
         if (health.lastSuccessAt > 0) Text("最近成功 · " + formatInstantMillis(health.lastSuccessAt, "MM-dd HH:mm"),
             fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)

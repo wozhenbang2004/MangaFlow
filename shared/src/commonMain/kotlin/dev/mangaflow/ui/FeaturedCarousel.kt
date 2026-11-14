@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.experience.sourceNetwork
+
 import dev.mangaflow.typography.MangaFontScene
 
 import dev.mangaflow.ui.platform.*
@@ -411,7 +413,8 @@ private fun FeaturedManga(
     }
     val identity = mangaCoverIdentity(manga, repository)
     val request = remember(context, manga.id, manga.coverUrl, manga.sourceUrl, repository, identity, imageWidthPx, imageHeightPx, motion) {
-        ImageRequest.Builder(imagePlatformContext(context)).data(manga.coverUrl).softwareBitmap()
+        ImageRequest.Builder(imagePlatformContext(context)).data(manga.coverUrl)
+            .sourceNetwork(dev.mangaflow.data.SourceKeys.decodeManga(manga.id).sourceId).softwareBitmap()
             .size(imageWidthPx, imageHeightPx)
             .memoryCacheKey("featured-cover:" + identity.cacheKey)
             .placeholderMemoryCacheKey("manga-cover:" + identity.cacheKey)

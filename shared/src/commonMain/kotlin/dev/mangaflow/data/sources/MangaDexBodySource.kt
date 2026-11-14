@@ -26,7 +26,7 @@ import dev.mangaflow.json.JSONObject
  */
 class MangaDexBodySource : BodySource {
     override val info = BodySourceInfo("mangadex", "MangaDex", "多语言", HOME, "$HOME/favicon.ico")
-    private val http = SourceHttp()
+    private val http = SourceHttp(sourceId = info.id)
     // Feed language codes differ from free-form metadata/alternative-title locale keys.
     private val languages = listOf("zh", "zh-hk", "zh-ro", "en")
 

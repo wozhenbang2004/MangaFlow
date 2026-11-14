@@ -12,6 +12,7 @@ data class PreparedChapterDownload(val pages: List<Page>, val headers: Map<Strin
 internal class ChapterDownloadTransport(
     val route: DownloadRouteSnapshot,
     val client: NetworkClient,
+    val connectionCheck: Boolean = false,
 ) : AbstractCoroutineContextElement(Key) {
     // Completed metadata may survive a retry on this exact route; ordinary reads have no scope.
     val cacheKey: String = sha256((route.mode.name + "|" + route.proxy?.type?.name.orEmpty() + "|" +

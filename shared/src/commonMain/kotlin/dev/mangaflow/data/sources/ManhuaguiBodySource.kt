@@ -32,7 +32,7 @@ import com.fleeksoft.ksoup.nodes.Element
  */
 class ManhuaguiBodySource : BodySource {
     override val info = BodySourceInfo("manhuagui", "漫画柜", "中文", HOME, "$HOME/favicon.ico")
-    private val http = SourceHttp()
+    private val http = SourceHttp(sourceId = info.id)
     private val requests = Mutex()
     private var lastRequestAt = 0L
 
