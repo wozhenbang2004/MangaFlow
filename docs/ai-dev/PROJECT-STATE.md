@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Current passive network recognition and workspace refinement · 2026-11-14
+
+User screenshot1000121716 and current raw request are DESIGN NETWORK-REFINE-171–175. Source implements a compact content-sized network dialog, status before default route, on-demand address/help, compact category/check controls and passive Android/Windows/iOS public proxy metadata. Detected endpoints only fill a protocol-preserving draft; PAC/unknown/system-only configurations are not falsely made importable. Do not restore guessed ports, unsupported universal proxy claims or the rejected fixed-height blank space. Independent reviews corrected stale-fill and draft-event replay paths; source compilation and installed observation remain unverified.
+
+Worktree is MangaFlow-network, source-equivalent to published main01344575 with concurrent main2dfa9ec experience-goal/cache/scheduling changes already preserved. Earlier worktrees contain published history and must not be replayed. No tests/local builds/real network or device probes were run. Next exact action: retain any newer main, publish one complete expected-head batch and confirm normal CI activation once. Device API behavior, actual proxy/network transitions and rendered layout/motion await artifact/user feedback; metadata is not a connectivity test.
+
 ## Adaptive experience delivery · 2026-11-14
 
 Active user authorization: the supplied “MangaFlow 体验策略深度研究” followed by “交给你去落地”; exact message ID unavailable. DESIGN EXPERIENCE-166–173 records the scope, adopted UI and verification boundaries and supersedes earlier design-only/frozen-cache statements for this batch. Root is the sole writer/integrator; one independent reviewer inspected the actual source and bounded corrections. Initial publication base is main fd7b4ba3974e131f8686df30d02dfbdd1a8e310c, to be rechecked immediately before the single expected-head update.
