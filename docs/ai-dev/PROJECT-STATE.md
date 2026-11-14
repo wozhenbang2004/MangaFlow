@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Guided panel recovery continuation · 2026-11-14
+
+User continued the reader/Steam repair with “继续”. DESIGN READER-RECOVERY-05–08 closes the previously separate GuidedPanelReader loading-recovery implementation: same stage/source/page/time and actions, missing-image console taps,45second image wait, separate image retry versus re-recognition, and an independent45second UI recognition deadline that retains the image even when native cancellation finishes later. Existing last dock action can stop analysis and keep the whole page. Camera detail errors retain preview; true image errors terminate the attempt. Source, headers, cursor and prefetch ownership remain unchanged; no new dependency or optional-runtime version is needed.
+
+Previous Android0.1.242/run43587705026 for d510b5e completed success; its applications run was still in_progress when checked. These are earlier-build observations, not acceptance of this continuation. Baseline57ca7eb contains the concurrent Venera/source-host and Copy shelf motion work. Prepublication merges retain db0efef reviewed-sync/settings,84327b8 compiler fixes and5dd6029 protected script-image prefetch/foreground quotas; guided recovery adds no recognition of offscreen images. No tests, local builds, source/account/network/device probes or new gate; source review and current tree comparison only. New compilation, installed timeout/gesture/source-switch behavior and visual/motion quality remain pending normal CI and user feedback.
+
+Independent source review corrected page-index ownership and both wait-clock lifetimes, then confirmed the bounded fixes. Image clocks reset for actual foreground/unshown waits; recognition clocks are run-owned, and stop invalidates stale results synchronously.
+
+Next exact action: retain any newer main, submit one complete expected-head batch and confirm ordinary CI trigger once. If this source is already in main, do not replay it; continue from actual user feedback. Do not wait for artifacts or claim an unobserved result.
+
 ## Source continuation and compiler recovery · 2026-11-14
 
 User continued after the published57ca7eb batch. DESIGN SOURCE-HOST-174–175 records actual Android245/native83 failures and the bounded corrections; source implementation is not compilation or installed acceptance. The matching compiler fixes landed concurrently in main84327b8 and are retained unchanged: shared UI imports, QuickJS Native member calls, Native IO/Okio extensions and AI_NUMERICHOST/sockaddr validation. The first batch's source/package/native-account/image work and all concurrent main changes remain intact.

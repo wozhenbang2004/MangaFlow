@@ -77,6 +77,7 @@ internal fun PanelCamera(
     onTap: (Float) -> Unit,
     onImageReady: (Boolean) -> Unit,
     onError: (String) -> Unit,
+    onDetailError: (String?) -> Unit,
     modifier: Modifier = Modifier,
     onSwipe: (deltaX: Float) -> Unit = {},
     boxes: List<PanelBox> = emptyList(),
@@ -94,6 +95,7 @@ internal fun PanelCamera(
     val swipe by rememberUpdatedState(onSwipe)
     val ready by rememberUpdatedState(onImageReady)
     val reportError by rememberUpdatedState(onError)
+    val reportDetailError by rememberUpdatedState(onDetailError)
     val select by rememberUpdatedState(onSelectPanel)
     val displayedBoxes by rememberUpdatedState(boxes)
     // A newly selected target releases a prior manual pan/zoom, while a gesture always wins
@@ -127,7 +129,7 @@ internal fun PanelCamera(
     }
     DisposableEffect(page.url) { onDispose { ready(false) } }
     LaunchedEffect(failure) { failure?.let { reportError(it) } }
-    LaunchedEffect(image.detailError) { image.detailError?.let { reportError(it) } }
+    LaunchedEffect(image.detailError) { reportDetailError(image.detailError) }
     LaunchedEffect(page.url, box, overview, sourceBounds, viewport, geometry, active, motion, manualControl) {
         val bounds = sourceBounds ?: return@LaunchedEffect
         if (!active || manualControl || !image.isImageDisplayed) return@LaunchedEffect

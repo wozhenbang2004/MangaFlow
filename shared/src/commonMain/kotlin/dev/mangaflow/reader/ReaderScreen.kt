@@ -876,6 +876,16 @@ fun ReaderScreen(
                     if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
                         pages = pages, headers = headers, resolvePage = resolvePage, retryPage = retryPage,
                         sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
+                        sourceName = currentSourceName.orEmpty(), sourceAlternatives = alternativeSources,
+                        onShowControls = { controlsVisible = true },
+                        recoveryForeground = preferences.theme.foreground(),
+                        onQuickSwitch = { failedIndex, variant ->
+                            onQuickReadVariant(chapter, variant, failedIndex, pages.size)
+                        },
+                        onMoreSources = { anchor ->
+                            sourceTriggerAnchor = anchor
+                            sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
+                        },
                         preferences = preferences, initialPage = pageIndex, initialPanel = cursor.panelIndex,
                         targetPage = targetPage,
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },

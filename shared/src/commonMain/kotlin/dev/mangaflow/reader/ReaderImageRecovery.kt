@@ -104,6 +104,7 @@ internal fun ReaderImageRecovery(
     onMore: (Rect?) -> Unit,
     onControls: () -> Unit,
     attempt: ReaderLoadAttempt,
+    startedAt: TimeMark = attempt.startedAt,
     pending: Boolean = false,
     slow: Boolean = false,
     stage: String = "请求图片",
@@ -133,7 +134,7 @@ internal fun ReaderImageRecovery(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (sourceName.isNotBlank()) Text(sourceName, fontSize = 11.sp, color = foreground.copy(alpha = .55f),
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp))
-            ReaderWaitCaption(attempt.startedAt, pending, foreground.copy(alpha = .55f))
+            ReaderWaitCaption(startedAt, pending, foreground.copy(alpha = .55f))
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
             if (expanded) MotionTextButton(onClick = onRetry) {
