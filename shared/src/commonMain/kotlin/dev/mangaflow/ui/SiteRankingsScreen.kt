@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Info
@@ -472,15 +473,20 @@ internal fun RankedWorkDetailScreen(
                         }
                     }
                     items(rows, key = { it.manga.id }, contentType = { "reading-source" }) { candidate ->
+                        val selectedPreview = state.rankedSourcePreview?.takeIf { it.selected.id == candidate.manga.id }
                         Column {
-                            RankedSourceRow(candidate.manga, repository, matched = candidate.verified, linked = false,
-                                opening = state.rankedOpeningSourceId == candidate.manga.id, enabled = sourceReady,
+                            RankedSourceRow(selectedPreview?.canonical ?: candidate.manga, repository,
+                                matched = selectedPreview == null && candidate.verified, linked = false,
+                                opening = state.rankedOpeningSourceId == candidate.manga.id,
+                                enabled = sourceReady && selectedPreview == null,
+                                showAction = selectedPreview == null,
                                 onClick = { onUseSource(work.key, candidate.manga) })
-                            MotionTabContent(selected = state.rankedSourcePreview?.takeIf { it.selected.id == candidate.manga.id },
+                            MotionTabContent(selected = selectedPreview,
                                 contentKey = { it?.canonical?.id ?: "closed" }, order = { if (it == null) 0 else 1 },
                                 fillContent = false, modifier = Modifier.fillMaxWidth()) { preview ->
                                 if (preview == null) Spacer(Modifier.height(0.dp))
-                                else RankedSourceConfirmation(work, preview, repository, sourceReady,
+                                else RankedSourceConfirmation(work, preview, backdrop,
+                                    enabled = sourceReady && selectedPreview?.request == preview.request,
                                     onConfirm = { onConfirmSource(work.key, preview.canonical.id, preview.request) },
                                     onCancel = { onCancelPreview(work.key, preview.request) })
                             }
@@ -532,30 +538,56 @@ internal fun RankedWorkDetailScreen(
 
 @Composable
 private fun RankedSourceConfirmation(work: SiteRankedWork, preview: dev.mangaflow.RankedSourcePreview,
-    repository: MangaRepository, enabled: Boolean, onConfirm: () -> Unit, onCancel: () -> Unit) {
+    backdrop: HazeState, enabled: Boolean, onConfirm: () -> Unit, onCancel: () -> Unit) {
     val colors = MaterialTheme.colorScheme
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-        .background(colors.onSurface.copy(alpha = .035f)).padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("核对作品", style = MaterialTheme.typography.titleSmall)
-        Text("榜单 · " + work.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-        Text("名称或作者尚未匹配，请核对封面与版本。",
-            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-        RankedSourceRow(preview.canonical, repository, matched = false, linked = false,
-            opening = false, enabled = false, fullTitle = true, onClick = {})
-        FlowRow(Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-            verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            MotionTextButton(onClick = onCancel, enabled = enabled) { Text("重新选择") }
-            MotionButton(onClick = onConfirm, enabled = enabled, shape = RoundedCornerShape(12.dp)) { Text("确认并打开") }
+    var evidence by remember(work.key, preview.request) { mutableStateOf(false) }
+    LaunchedEffect(enabled) { if (!enabled) evidence = false }
+    // The candidate above already owns the cover/title/author. Only the decision is disclosed here.
+    Row(Modifier.fillMaxWidth().padding(start = 54.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Text("核对作品", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Box {
+            MotionIconButton(onClick = { evidence = !evidence }, enabled = enabled,
+                modifier = Modifier.size(44.dp), tooltip = "查看两站作品资料") {
+                Icon(Icons.Outlined.Info, "查看两站作品资料", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            }
+            CompactGlassPopover(evidence && enabled, backdrop, onDismiss = { evidence = false }, maximumWidth = 288.dp) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    RankedConfirmationEvidence(work.site.title, work.manga)
+                    RankedConfirmationEvidence(preview.canonical.sourceName.ifBlank {
+                        sourceDisplayName(preview.canonical.sourceId)
+                    }, preview.canonical)
+                }
+            }
+        }
+        MotionIconButton(onClick = onCancel, enabled = enabled, modifier = Modifier.size(44.dp),
+            tooltip = "取消本次关联") {
+            Icon(Icons.Outlined.Close, "取消本次关联", Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+        }
+        MotionTextButton(onClick = onConfirm, enabled = enabled,
+            modifier = Modifier.heightIn(min = 44.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Icon(Icons.Outlined.Check, null, Modifier.size(16.dp))
+            Text("确认打开", Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelMedium)
         }
     }
 }
 
 @Composable
+private fun RankedConfirmationEvidence(source: String, manga: Manga) {
+    val colors = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(source, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        Text((listOf(manga.title) + manga.alternativeTitles).filter(String::isNotBlank).distinct().take(6).joinToString(" / "),
+            fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.bodySmall)
+        Text(manga.authors.take(4).joinToString(" / ").ifBlank { "作者资料未提供" },
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+    }
+}
+
+@Composable
 private fun RankedSourceRow(manga: Manga, repository: MangaRepository, matched: Boolean,
-    linked: Boolean, opening: Boolean, enabled: Boolean, fullTitle: Boolean = false, onClick: () -> Unit) {
+    linked: Boolean, opening: Boolean, enabled: Boolean, showAction: Boolean = true, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
@@ -567,17 +599,16 @@ private fun RankedSourceRow(manga: Manga, repository: MangaRepository, matched: 
         Column(Modifier.weight(1f).padding(start = 12.dp, end = 6.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                 style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
-                maxLines = if (fullTitle) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
             val source = manga.sourceName.ifBlank { sourceDisplayName(manga.sourceId) }
             Text(listOf(source, manga.authors.take(2).joinToString(" / ")).filter(String::isNotBlank).joinToString(" · "),
                 style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 2,
                 overflow = TextOverflow.Ellipsis)
-            if (linked) Text("已关联", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         }
-        Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+        if (showAction) Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
             if (opening) MotionBusyIndicator(Modifier.size(17.dp), strokeWidth = 1.6.dp)
             else Icon(if (linked) Icons.Outlined.Link else if (matched) Icons.Outlined.Check else Icons.Outlined.ChevronRight,
-                if (linked) "已关联的来源" else if (matched) "书名与作者信息匹配" else null,
+                if (linked) "已关联的来源" else if (matched) "作品信息匹配" else null,
                 Modifier.size(18.dp), tint = colors.onSurfaceVariant)
         }
     }

@@ -288,9 +288,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val chapterPreparations by model.chapterPreparations.collectAsStateWithLifecycle()
     val account by model.account.collectAsStateWithLifecycle()
     val copyShelfSync by model.copyShelfSync.state.collectAsStateWithLifecycle()
+    val copyShelfRemote by model.copyShelfRemote.collectAsStateWithLifecycle()
     val copyProgress by model.copyProgress.collectAsStateWithLifecycle()
     val adoptedResumeTargets by model.library.resumeTargets.collectAsStateWithLifecycle()
-    val favoriteAddedTimes by model.library.favoriteAddedTimes.collectAsStateWithLifecycle()
     var copySyncOpen by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(account.profile?.username) { copySyncOpen = false }
     val update by model.updates.state.collectAsStateWithLifecycle()
@@ -308,6 +308,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         if (!restrictedMode && account.profile != null && !account.busy && reading == null && detail == null &&
             section in setOf(Section.ACCOUNT, Section.LIBRARY) && !copyShelfSync.checked && !copyShelfSync.busy)
             model.copyShelfSync.check()
+    }
+    LaunchedEffect(account.profile?.username, account.busy, section, reading == null, detail == null, restrictedMode) {
+        if (!restrictedMode && section == Section.ACCOUNT && reading == null && detail == null &&
+            account.profile != null && !account.busy) model.refreshCopyShelfMetadata()
+        else model.cancelCopyShelfMetadata()
     }
     LaunchedEffect(detail?.manga?.id, account.profile?.username, account.busy, reading == null, restrictedMode) {
         val work = detail?.manga
@@ -1223,8 +1228,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             }
                                         },
                                         onAddToLibrary = model::addCloudMangaToLibrary, onContinueLocal = model::continueReading,
-                                        onRefreshFavorites = model.copyShelfSync::check, onRefreshHistory = model::refreshCloudHistory,
-                                        favoriteAddedAt = { favoriteAddedTimes[it] },
+                                        onRefreshFavorites = {
+                                            model.copyShelfSync.check()
+                                            model.refreshCopyShelfMetadata()
+                                        }, onRefreshHistory = model::refreshCloudHistory,
+                                        cloudMetadata = copyShelfRemote.takeIf { it.owner == account.profile?.username }?.items.orEmpty(),
+                                        metadataLoading = copyShelfRemote.loading,
+                                        metadataError = copyShelfRemote.error,
+                                        onRetryMetadata = model::refreshCopyShelfMetadata,
                                         onOpenSync = { copySyncOpen = true },
                                         onLoginWithPassword = model::loginWithPassword,
                                         onLoginWithCookie = model::loginWithCookie,

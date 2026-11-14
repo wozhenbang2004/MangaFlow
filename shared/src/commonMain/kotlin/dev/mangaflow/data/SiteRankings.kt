@@ -10,6 +10,10 @@ import dev.mangaflow.platform.storage.*
 import dev.mangaflow.storage.readManga
 import dev.mangaflow.storage.toJson
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.IO
@@ -117,7 +121,13 @@ class SiteRankingsRepository(context: PlatformContext) {
     private val links by lazy { preferences(context, "mangaflow_site_ranking_links") }
     private val diskLock = Mutex()
     private val linkLock = Mutex()
+    private val identityLock = Mutex()
+    private val identityCache = linkedMapOf<String, RankedIdentity>()
     private var cacheEpoch = 0L
+
+    private data class RankedIdentity(
+        val titles: List<String>, val authors: List<String>, val ids: Map<String, String>, val fetchedAt: Long,
+    )
 
     suspend fun readViewState(): SiteRankingViewState? = withContext(Dispatchers.IO) {
         runCatching {
@@ -296,12 +306,88 @@ class SiteRankingsRepository(context: PlatformContext) {
     }
 
     suspend fun enrich(work: SiteRankedWork): SiteRankedWork = withContext(Dispatchers.IO) {
-        if (work.site != RankingSite.BANGUMI || work.manga.authors.isNotEmpty()) return@withContext work
-        val response = http.json("https://api.bgm.tv/v0/subjects/" + work.subjectId,
-            "Bangumi 作品资料", work.manga.sourceUrl)
-        val updated = bangumiWork(response)
-        if (updated.subjectId != work.subjectId) invalid(work.site)
-        updated
+        if (work.site == RankingSite.BANGUMI) {
+            if (work.manga.authors.isNotEmpty()) return@withContext work
+            val response = http.json("https://api.bgm.tv/v0/subjects/" + work.subjectId,
+                "Bangumi 作品资料", work.manga.sourceUrl)
+            val updated = bangumiWork(response)
+            if (updated.subjectId != work.subjectId) invalid(work.site)
+            return@withContext updated
+        }
+        val cached = identityLock.withLock {
+            identityCache[work.key]?.takeIf { wallTimeMillis() - it.fetchedAt in 0..300_000L }
+        }
+        if (cached != null) return@withContext work.withIdentity(cached)
+        // Rankings supply display names, often romanized only. Resolve the same native
+        // IDs through existing metadata providers; never use a search spelling as proof.
+        val evidence = supervisorScope {
+            listOf(
+                async { optionalIdentity { mappedIdentity(work) } },
+                async { optionalIdentity { aniListIdentity(work) } },
+            ).mapNotNull { it.await() }
+        }
+        if (evidence.isEmpty()) return@withContext work
+        val compatible = evidence.filter { item ->
+            work.manga.externalIds.none { (provider, id) -> item.ids[provider]?.let { it != id } == true }
+        }
+        val ids = work.manga.externalIds.toMutableMap()
+        for (item in compatible) {
+            if (item.ids.any { (provider, id) -> ids[provider]?.let { it != id } == true }) continue
+            ids.putAll(item.ids)
+        }
+        val accepted = compatible.filter { item -> item.ids.all { (provider, id) -> ids[provider] == id } }
+        if (accepted.isEmpty()) return@withContext work
+        val combined = RankedIdentity(accepted.flatMap { it.titles }.distinct(),
+            accepted.flatMap { it.authors }.distinct(), ids, wallTimeMillis())
+        identityLock.withLock {
+            if (identityCache.size >= 64 && work.key !in identityCache) identityCache.remove(identityCache.keys.first())
+            identityCache[work.key] = combined
+        }
+        work.withIdentity(combined)
+    }
+
+    private suspend fun optionalIdentity(load: suspend () -> RankedIdentity?): RankedIdentity? = try {
+        withTimeoutOrNull(5_000L) { load() }
+    } catch (cancel: CancellationException) { throw cancel
+    } catch (_: Exception) { null }
+
+    private suspend fun mappedIdentity(work: SiteRankedWork): RankedIdentity? {
+        val source = MangaBakaReviewProvider(http).fromKnownIds(work.manga.externalIds) ?: return null
+        if (source.status != ReviewStatus.READY || source.aliases.isEmpty() ||
+            work.manga.externalIds.none { (provider, id) -> source.externalIds[provider] == id }) return null
+        return RankedIdentity(source.aliases, emptyList(), source.externalIds, wallTimeMillis())
+    }
+
+    private suspend fun aniListIdentity(work: SiteRankedWork): RankedIdentity? {
+        if (work.site == RankingSite.ANILIST && work.manga.authors.isNotEmpty()) return null
+        val mal = work.manga.externalIds["myanimelist"]?.toIntOrNull()?.takeIf { it > 0 } ?: return null
+        val response = http.json("https://graphql.anilist.co", "漫画作品身份", "https://anilist.co",
+            body = JSONObject().put("query", ANILIST_IDENTITY_QUERY)
+                .put("variables", JSONObject().put("mal", mal)), minIntervalMillis = 2_100L)
+        if ((response.optJSONArray("errors")?.length() ?: 0) > 0) return null
+        val item = response.optJSONObject("data")?.optJSONObject("Media") ?: return null
+        val id = item.reviewId("id").takeIf { it.matches(Regex("[1-9][0-9]*")) } ?: return null
+        if (item.reviewId("idMal") != mal.toString() || item.reviewText("type") != "MANGA" ||
+            item.reviewText("format") !in setOf("MANGA", "ONE_SHOT") || item.optBoolean("isAdult", false)) return null
+        val title = item.optJSONObject("title") ?: return null
+        val titles = (listOf(title.reviewText("native"), title.reviewText("romaji"), title.reviewText("english")) +
+            strings(item.optJSONArray("synonyms"))).filter(String::isNotBlank).distinct()
+        val authors = item.optJSONObject("staff")?.optJSONArray("edges")?.reviewObjects().orEmpty()
+            .filter { edge -> edge.reviewText("role").lowercase().let { "story" in it || "art" in it || "author" in it } }
+            .flatMap { edge -> edge.optJSONObject("node")?.optJSONObject("name")?.let {
+                listOf(it.reviewText("native"), it.reviewText("full"))
+            }.orEmpty() }.filter(String::isNotBlank).distinct()
+        return RankedIdentity(titles, authors, mapOf("anilist" to id, "myanimelist" to mal.toString()), wallTimeMillis())
+    }
+
+    private fun SiteRankedWork.withIdentity(identity: RankedIdentity): SiteRankedWork {
+        // Put real Han aliases inside the bounded reading-source search window. The
+        // visible native ranking title, score and author row stay owned by that site.
+        val names = (identity.titles + manga.alternativeTitles).filter(String::isNotBlank).distinct()
+            .sortedByDescending { title -> title.any { it in '\u3400'..'\u9fff' } }
+        return copy(manga = manga.copy(alternativeTitles = names.take(48),
+            authorAliases = (manga.authorAliases + identity.authors).distinct().take(48),
+            externalIds = manga.externalIds + identity.ids))
     }
 
     private fun work(site: RankingSite, id: String, titles: List<String>, authors: List<String>,
@@ -459,6 +545,7 @@ class SiteRankingsRepository(context: PlatformContext) {
     }
     suspend fun cacheGeneration(): Long = diskLock.withLock { cacheEpoch }
     suspend fun clearCache() = withContext(Dispatchers.IO) {
+        identityLock.withLock { identityCache.clear() }
         diskLock.withLock {
             cacheEpoch++
             val failures = directory.listFiles().orEmpty().count { it.isFile && !it.delete() }
@@ -488,6 +575,14 @@ class SiteRankingsRepository(context: PlatformContext) {
 
     private companion object {
         const val MAX_CACHE_BYTES = 1024L * 1024
+        const val ANILIST_IDENTITY_QUERY = """
+            query MangaFlowRankingIdentity(${'$'}mal: Int!) {
+              Media(idMal: ${'$'}mal, type: MANGA) {
+                id idMal type format isAdult title { native romaji english } synonyms
+                staff(perPage: 12) { edges { role node { name { native full } } } }
+              }
+            }
+        """
         const val ANILIST_QUERY = """
             query MangaFlowRankings(${'$'}page: Int!, ${'$'}sort: MediaSort!, ${'$'}formats: [MediaFormat]!) {
               Page(page: ${'$'}page, perPage: 20) {

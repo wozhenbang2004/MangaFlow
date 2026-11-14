@@ -22,6 +22,10 @@ internal object SourceDiscoveryIdentity {
         if (Regex("小说|novel").containsMatchIn(value)) add("novel")
         if (Regex("公式书|公式集|公式fanbook|fanbook|officialguide").containsMatchIn(value)) add("guide")
         if (Regex("续作|续篇|续集|后传|続編|sequel").containsMatchIn(value)) add("sequel")
+        if (Regex("外传|外傳|番外|外伝|spinoff").containsMatchIn(value)) add("spinoff")
+        if (Regex("试作|試作|prototype").containsMatchIn(value)) add("prototype")
+        if (Regex("短篇|短編|oneshot").containsMatchIn(value)) add("one-shot")
+        if (Regex("选集|選集|anthology").containsMatchIn(value)) add("anthology")
         Regex("第([0-9]+)(卷|部|季)").findAll(value).forEach { add(it.value) }
     }
 
@@ -44,7 +48,16 @@ internal object SourceDiscoveryIdentity {
             // Some upstream names explicitly contain another spelling in parentheses.
             val parenthesized = Regex("[（(]([^()（）]+)[）)]").findAll(name).map { it.groupValues[1] }.toList()
             (listOf(name.replace(Regex("[（(][^()（）]+[）)]"), " ")) + parenthesized)
-                .flatMap { it.split(Regex("[/、,，;；\\n]")) }
+                .flatMap { it.split(Regex("[/、，;；\\n]")) }
+                .flatMap { value ->
+                    val parts = value.split(',').map(String::trim).filter(String::isNotBlank)
+                    // MAL writes one person as "Family, Given". Treating the comma as
+                    // an author separator made either bare surname sufficient evidence.
+                    if (parts.size == 2 && parts.all {
+                            normalizedBodySourceAuthor(it).let { full -> full.isNotEmpty() && full.all { character -> character in 'a'..'z' } } })
+                        listOf(value)
+                    else parts
+                }
         }.map(::normalizedBodySourceAuthor)
             .filter { it.isNotBlank() && it !in unknownAuthors }.toSet()
 

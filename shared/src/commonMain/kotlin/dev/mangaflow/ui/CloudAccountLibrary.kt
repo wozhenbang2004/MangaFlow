@@ -15,16 +15,19 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.BookmarkAdded
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.List
-import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Sort
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -37,16 +40,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.AccountUiState
+import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
-import dev.mangaflow.data.SourceKeys
-import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.platform.*
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.typography.MangaFontScene
@@ -131,7 +136,7 @@ internal fun CloudAccountHeader(
                 profile?.let {
                     Text(it.username, style = MaterialTheme.typography.bodyMedium)
                 }
-                Text("这里只展示拷贝收藏。收藏导入不包含阅读记录，进度差异会在漫画详情中提示。",
+                Text("此页展示拷贝收藏与拷贝阅读章节。导入只处理收藏；阅读进度在详情中单独采用。",
                     style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
                 Text("本机收藏的增删可主动同步到拷贝。退出账号会保留本机书架、下载和阅读进度。",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
@@ -171,7 +176,7 @@ internal fun CloudAccountHeader(
     )
 }
 
-/** One collection, with local reading positions as secondary metadata. */
+/** One native account collection. Local membership is an action, never cloud reading metadata. */
 @Composable
 internal fun CloudAccountLibrary(
     state: AccountUiState,
@@ -188,13 +193,20 @@ internal fun CloudAccountLibrary(
     onRefreshAccount: () -> Unit,
     favoriteAddedAt: (String) -> Long? = { null },
     onOpenSync: (() -> Unit)? = null,
+    cloudMetadata: Map<String, CopyShelfMetadata> = emptyMap(),
+    metadataLoading: Boolean = false,
+    metadataError: String? = null,
+    onRetryMetadata: (() -> Unit)? = null,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val colors = MaterialTheme.colorScheme
     val bottomInset = screenFitContentInsets().asPaddingValues().calculateBottomPadding()
     var favoriteList by rememberSaveable { mutableStateOf(false) }
     var sortName by rememberSaveable { mutableStateOf(CopyShelfSort.RECENT.name) }
-    val sort = CopyShelfSort.entries.firstOrNull { it.name == sortName } ?: CopyShelfSort.RECENT
+    var joinedAscending by rememberSaveable { mutableStateOf(false) }
+    val sort = CopyShelfSort.entries.firstOrNull { it.name == sortName }
+        ?: if (sortName in setOf("ADDED", "COPY")) CopyShelfSort.JOINED else CopyShelfSort.RECENT
     var sortMenu by remember { mutableStateOf(false) }
     val galleryPosition = rememberLazyGridState()
     val listPosition = rememberLazyGridState()
@@ -202,29 +214,24 @@ internal fun CloudAccountLibrary(
     val position = if (favoriteList) listPosition else galleryPosition
     val nativeFavorites = remember(state.favorites) { state.favorites.distinctBy(Manga::id) }
     val localIds = remember(localFavorites) { localFavorites.map { it.id }.toSet() }
-    val localProgress = remember(localHistory) { localHistory.associateBy { it.manga.id } }
-    val favorites = remember(nativeFavorites, localProgress, localFavorites, favoriteAddedAt, sort) {
+    val favorites = remember(nativeFavorites, cloudMetadata, sort, joinedAscending) {
         val nativeOrder = nativeFavorites.withIndex().associate { it.value.id to it.index }
         val stable = compareBy<Manga> { nativeOrder[it.id] ?: Int.MAX_VALUE }
         when (sort) {
-            CopyShelfSort.RECENT -> nativeFavorites.sortedWith(
-                compareByDescending<Manga> { localProgress[it.id]?.updatedAt?.takeIf { time -> time > 0 } ?: Long.MIN_VALUE }
-                    .then(stable))
+            CopyShelfSort.RECENT -> cloudChronology(nativeFavorites, cloudMetadata, recent = true, ascending = false, stable = stable)
+            CopyShelfSort.JOINED -> cloudChronology(nativeFavorites, cloudMetadata, recent = false, ascending = joinedAscending, stable = stable)
             CopyShelfSort.HEAT -> nativeFavorites.sortedWith(
                 compareByDescending<Manga> { it.popularity ?: it.totalPopularity ?: Long.MIN_VALUE }.then(stable))
-            CopyShelfSort.ADDED -> nativeFavorites.sortedWith(
-                compareByDescending<Manga> { favoriteAddedAt(it.id)?.takeIf { time -> time > 0 } ?: Long.MIN_VALUE }.then(stable))
             CopyShelfSort.TITLE -> nativeFavorites.sortedWith(compareBy<Manga> { it.title.lowercase() }.then(stable))
-            CopyShelfSort.COPY -> nativeFavorites
         }
     }
     var managedId by remember { mutableStateOf<String?>(null) }
     var ratings by remember { mutableStateOf<Manga?>(null) }
     val sourceFan = remember { MetricSourceFanState() }
-    LaunchedEffect(active, selected, sort) {
+    LaunchedEffect(active, selected, sort, joinedAscending) {
         sortMenu = false; managedId = null; ratings = null; sourceFan.clear()
     }
-    LaunchedEffect(sort) {
+    LaunchedEffect(sort, joinedAscending) {
         galleryPosition.scrollToItem(0)
         listPosition.scrollToItem(0)
     }
@@ -247,34 +254,54 @@ internal fun CloudAccountLibrary(
                 Box(Modifier.weight(1f)) {
                     MotionTextButton(onClick = { sortMenu = !sortMenu }, enabled = active,
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)) {
-                        Icon(Icons.Outlined.Sort, "排序", Modifier.size(18.dp))
-                        Text(sort.label, Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelMedium,
+                        Icon(Icons.Outlined.Sort, null, Modifier.size(16.dp))
+                        Text(sort.label, Modifier.weight(1f, fill = false).padding(start = 6.dp), style = MaterialTheme.typography.labelMedium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Icon(Icons.Outlined.KeyboardArrowDown, "选择排序", Modifier.padding(start = 3.dp).size(15.dp))
                     }
-                    CompactGlassPopover(sortMenu, backdrop, onDismiss = { sortMenu = false }, maximumWidth = 208.dp) {
+                    CompactGlassPopover(sortMenu, backdrop, onDismiss = { sortMenu = false }, maximumWidth = 184.dp) {
                         CopyShelfSort.entries.forEach { option ->
-                            CompactMenuAction(if (sort == option) Icons.Outlined.Check else Icons.Outlined.Sort,
-                                option.label, onClick = { sortName = option.name; sortMenu = false })
+                            MotionTextButton(onClick = { sortName = option.name; sortMenu = false },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).semantics { this.selected = sort == option },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)) {
+                                Text(option.label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurface, maxLines = 1)
+                                if (sort == option) Icon(Icons.Outlined.Check, "已选择", Modifier.size(16.dp))
+                                else Spacer(Modifier.size(16.dp))
+                            }
                         }
                     }
                 }
+                if (metadataLoading) Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                    MotionBusyIndicator(Modifier.size(12.dp), strokeWidth = 1.3.dp)
+                } else if (metadataError != null && onRetryMetadata != null) MotionIconButton(
+                    onClick = onRetryMetadata, enabled = active, modifier = Modifier.size(44.dp),
+                    tooltip = "拷贝记录读取失败，点击重试") {
+                    Icon(Icons.Outlined.Refresh, "拷贝记录读取失败，重试", Modifier.size(16.dp), tint = colors.error)
+                }
+                if (sort == CopyShelfSort.JOINED) MotionIconButton(onClick = { joinedAscending = !joinedAscending },
+                    enabled = active, modifier = Modifier.size(44.dp),
+                    tooltip = if (joinedAscending) "加入拷贝时间：旧到新，切换为新到旧" else "加入拷贝时间：新到旧，切换为旧到新") {
+                    Icon(if (joinedAscending) Icons.Outlined.ArrowUpward else Icons.Outlined.ArrowDownward,
+                        if (joinedAscending) "加入拷贝时间：旧到新" else "加入拷贝时间：新到旧", Modifier.size(16.dp))
+                }
                 if (onOpenSync != null) MotionIconButton(onClick = onOpenSync, enabled = active,
-                    modifier = Modifier.size(44.dp), tooltip = "拷贝收藏同步") {
-                    Icon(Icons.Outlined.Sync, "拷贝收藏同步", Modifier.size(20.dp))
+                    modifier = Modifier.size(44.dp), tooltip = "收藏导入与提交") {
+                    Icon(Icons.Outlined.SwapHoriz, "收藏导入与提交", Modifier.size(18.dp))
                 }
                 MotionIconButton(onClick = { favoriteList = !favoriteList }, enabled = active,
                     modifier = Modifier.size(44.dp), tooltip = if (favoriteList) "封面网格" else "紧凑列表") {
                     Icon(if (favoriteList) Icons.Outlined.ViewModule else Icons.Outlined.List,
-                        if (favoriteList) "切换封面网格" else "切换紧凑列表", Modifier.size(20.dp))
+                        if (favoriteList) "切换封面网格" else "切换紧凑列表", Modifier.size(18.dp))
                 }
             }
             state.error?.let {
                 Box(Modifier.fillMaxWidth().heightIn(max = 112.dp).verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp)) { AccountError(it, state.busy, onRefreshAccount) }
             }
-            if (hasMore && count > 0) Text("已载入 $count 本，当前排序覆盖已载入书目",
+            if (hasMore && count > 0) Text("已载入 $count 本",
                 Modifier.padding(horizontal = if (desktop) 20.dp else 16.dp, vertical = 2.dp),
-                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             MotionTabContent(selected, Modifier.weight(1f).fillMaxWidth()) { mode ->
                 val grid = mode == 0
                 val feedPosition = if (grid) galleryPosition else listPosition
@@ -286,18 +313,17 @@ internal fun CloudAccountLibrary(
                         contentPadding = PaddingValues(start = if (desktop) 20.dp else 16.dp,
                             end = if (desktop) 20.dp else 16.dp, top = 6.dp, bottom = 24.dp + bottomInset),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(if (grid) 14.dp else 2.dp)) {
+                        verticalArrangement = Arrangement.spacedBy(if (grid) 12.dp else 2.dp)) {
                         if (favorites.isEmpty()) item(key = "cloud-empty", span = { GridItemSpan(maxLineSpan) }) {
                             when {
                                 loading -> QuietLoading("正在读取拷贝书架…")
                                 error != null -> AccountError(error, false, onMoreFavorites)
-                                else -> EmptyMessage("拷贝书架还是空的", "收藏同步只处理书架；阅读进度在漫画详情中查看。",
-                                    "刷新", onRefreshFavorites)
+                                else -> EmptyMessage("拷贝书架还是空的", "在拷贝收藏的漫画会显示在这里。", "刷新", onRefreshFavorites)
                             }
                         } else items(favorites, key = { "cloud-favorite:" + it.id },
                             contentType = { if (grid) "cloud-cover" else "cloud-row" }) { manga ->
                             CloudAccountItem(manga, repository, backdrop, grid = grid,
-                                progress = localProgress[manga.id], local = manga.id in localIds,
+                                metadata = cloudMetadata[manga.id], local = manga.id in localIds,
                                 syncing = manga.id in state.syncingFavorites,
                                 placement = if (grid) "cloud-favorite-cover" else "cloud-favorite-row",
                                 managed = managedId == manga.id, onManage = { managedId = manga.id },
@@ -327,65 +353,73 @@ internal fun CloudAccountLibrary(
 }
 
 private enum class CopyShelfSort(val label: String) {
-    RECENT("最近阅读"), HEAT("热度"), ADDED("加入本机时间"), COPY("拷贝收藏顺序"), TITLE("名称")
+    RECENT("最近阅读"), HEAT("热度"), JOINED("加入拷贝时间"), TITLE("名称")
 }
 
-private fun localShelfPosition(progress: ReadingProgress?): String? = progress?.let { saved ->
-    val source = runCatching { SourceKeys.decodeChapter(saved.manga.id, saved.chapterId).sourceId }.getOrNull()
-    val sourceName = when (source) {
-        null -> "来源未确认"
-        "copy" -> null
-        saved.manga.sourceId -> saved.manga.sourceName.ifBlank { sourceDisplayName(source) }
-        else -> sourceDisplayName(source)
+/** Native time-ordered ranks remain ranks; no local timestamp or list index is invented as a date. */
+private fun cloudChronology(
+    mangas: List<Manga>, metadata: Map<String, CopyShelfMetadata>, recent: Boolean, ascending: Boolean,
+    stable: Comparator<Manga>,
+): List<Manga> {
+    fun record(manga: Manga): CopyShelfMetadata? = metadata[manga.id]?.takeIf {
+        !recent || it.chapterId.isNotBlank() || (it.readAt ?: 0L) > 0L
     }
-    val chapter = saved.chapterTitle.ifBlank { "阅读章节" }
-    val page = if (saved.pageCount > 0) "${saved.pageIndex + 1}/${saved.pageCount}页" else null
-    listOfNotNull("本机", sourceName, chapter, page).joinToString(" · ")
+    val order: (Manga) -> Int? = { manga -> record(manga)?.let { if (recent) it.readOrder else it.joinedOrder } }
+    val time: (Manga) -> Long? = { manga -> record(manga)?.let { if (recent) it.readAt else it.joinedAt }?.takeIf { it > 0L } }
+    return if (mangas.any { order(it) != null }) {
+        mangas.sortedWith(compareBy<Manga> { order(it) == null }
+            .then(if (ascending) compareByDescending(order) else compareBy(order)).then(stable))
+    } else mangas.sortedWith(compareBy<Manga> { time(it) == null }
+        .then(if (ascending) compareBy(time) else compareByDescending(time)).then(stable))
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CloudAccountItem(
     manga: Manga, repository: MangaRepository, backdrop: HazeState, grid: Boolean,
-    progress: ReadingProgress?, local: Boolean, syncing: Boolean, placement: String,
+    metadata: CopyShelfMetadata?, local: Boolean, syncing: Boolean, placement: String,
     managed: Boolean, onManage: () -> Unit, onDismiss: () -> Unit,
     onClick: () -> Unit, onAdd: () -> Unit, onRatings: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val canManage = !local
     val actions = if (canManage) listOf(DesktopMenuAction("加入本机书架", onClick = onAdd)) else emptyList()
-    val caption = localShelfPosition(progress)
     val itemMenu: @Composable (Boolean) -> Unit = { showTrigger ->
         Box {
             if (showTrigger && canManage) MotionIconButton(onClick = onManage,
                 modifier = Modifier.size(44.dp), tooltip = "加入本机书架") {
-                Icon(Icons.Outlined.MoreHoriz, "加入本机书架", Modifier.size(19.dp))
+                Icon(Icons.Outlined.BookmarkAdd, "加入本机书架", Modifier.size(17.dp))
             }
-            CompactGlassPopover(managed && canManage, backdrop, maximumWidth = 208.dp, onDismiss = onDismiss) {
+            CompactGlassPopover(managed && canManage, backdrop, maximumWidth = 192.dp, onDismiss = onDismiss) {
                 CompactMenuAction(Icons.Outlined.BookmarkAdd, "加入本机书架") { onDismiss(); onAdd() }
             }
         }
     }
+    val interaction = remember { MutableInteractionSource() }
+    val transition = LocalMangaCoverTransition.current
+    // Adapt CoverTile's source geometry/press/shared-cover path, with account-owned metadata.
     DesktopContextMenuArea(actions) {
-        if (grid) Column {
-            Box {
-                CoverTile(manga, repository, dense = true, narrow = true, showChapter = false, placement = placement,
-                    onLongClick = if (canManage) onManage else null, onRatings = onRatings, onClick = onClick)
-                if (local || syncing) Box(Modifier.align(Alignment.TopStart).padding(5.dp).size(22.dp)
-                    .background(colors.surface.copy(alpha = .94f), CircleShape), contentAlignment = Alignment.Center) {
-                    if (syncing) MotionBusyIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp)
-                    else Icon(Icons.Outlined.BookmarkAdded, "已在本机书架", Modifier.size(13.dp), tint = colors.onSurfaceVariant)
-                }
-                if (platformKind == PlatformKind.DESKTOP && canManage) Box(Modifier.align(Alignment.TopEnd)) {
-                    LiquidGlassSurface(backdrop, Modifier, cornerRadius = 16.dp, role = GlassSurfaceRole.NAVIGATION) { itemMenu(true) }
-                } else if (canManage) Box(Modifier.align(Alignment.TopEnd)) { itemMenu(false) }
+        if (grid) Box {
+            Column(Modifier.fillMaxWidth()
+                .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
+                    onClickLabel = "查看${manga.title}", onLongClickLabel = if (canManage) "加入本机书架" else null,
+                    onLongClick = if (canManage) onManage else null, onClick = {
+                        transition?.select?.invoke(MangaCoverKey(manga.id, placement)); onClick()
+                    }).motionPress(interaction)) {
+                MangaCover(manga, repository, Modifier.fillMaxWidth().aspectRatio(2f / 3f)
+                    .mangaSharedCover(manga.id, placement).mangaCoverCard(12.dp))
+                Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                    modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
+                    style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium,
+                    minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                MangaMetricBadges(manga, Modifier.fillMaxWidth().padding(top = 2.dp, start = 2.dp, end = 2.dp),
+                    compact = true, showMore = false, plain = true, valueSize = 12.sp, onExpand = onRatings)
+                CloudChapterCaption(metadata, Modifier.fillMaxWidth().padding(start = 2.dp, end = 2.dp, top = 1.dp))
             }
-            if (caption != null) Text(caption, Modifier.padding(start = 2.dp, end = 2.dp, top = 3.dp),
-                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (platformKind == PlatformKind.DESKTOP && canManage) Box(Modifier.align(Alignment.TopEnd)) {
+                LiquidGlassSurface(backdrop, Modifier, cornerRadius = 16.dp, role = GlassSurfaceRole.NAVIGATION) { itemMenu(true) }
+            } else if (canManage) Box(Modifier.align(Alignment.TopEnd)) { itemMenu(false) }
         } else {
-            val interaction = remember { MutableInteractionSource() }
-            val transition = LocalMangaCoverTransition.current
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                 .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
                     onClickLabel = "打开${manga.title}详情",
@@ -401,13 +435,24 @@ private fun CloudAccountItem(
                     Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                         style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    val secondary = caption ?: manga.authors.takeIf { it.isNotEmpty() }?.joinToString(" · ")
-                    if (secondary != null) Text(secondary, style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    CloudChapterCaption(metadata, Modifier.fillMaxWidth())
                 }
-                if (syncing) MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                if (syncing) MotionBusyIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp)
                 itemMenu(true)
             }
         }
+    }
+}
+
+@Composable
+private fun CloudChapterCaption(metadata: CopyShelfMetadata?, modifier: Modifier = Modifier) {
+    if (metadata?.chapterId.isNullOrBlank()) return
+    val colors = MaterialTheme.colorScheme
+    val label = metadata?.chapterTitle.orEmpty()
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        Icon(Icons.Outlined.History, if (label.isBlank()) "拷贝已保存阅读章节" else null,
+            Modifier.size(12.dp), tint = colors.onSurfaceVariant)
+        if (label.isNotBlank()) Text(label, style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }

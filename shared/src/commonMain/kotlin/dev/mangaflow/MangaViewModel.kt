@@ -7,6 +7,7 @@ import dev.mangaflow.account.AccountProfile
 import dev.mangaflow.account.CloudHistoryEntry
 import dev.mangaflow.account.CopyAccountRepository
 import dev.mangaflow.account.CopyShelfSyncController
+import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.storage.SavedResumeTarget
 import dev.mangaflow.ui.CopyProgressHintState
 import dev.mangaflow.data.Chapter
@@ -239,6 +240,15 @@ data class AccountUiState(
     val syncingFavorites: Set<String> = emptySet(),
 )
 
+/** Remote shelf presentation only; these values are never imported into local reading history. */
+data class CopyShelfRemoteState(
+    val owner: String? = null,
+    val items: Map<String, CopyShelfMetadata> = emptyMap(),
+    val loading: Boolean = false,
+    val loaded: Boolean = false,
+    val error: String? = null,
+)
+
 private class RankedSourceIdentityMismatch : IllegalArgumentException("来源资料与所选作品不一致。")
 
 class MangaViewModel(context: PlatformContext) : ViewModel() {
@@ -281,6 +291,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     val copyProgress = _copyProgress.asStateFlow()
     private var copyProgressJob: Job? = null
     private var copyProgressRequest = 0L
+    private val _copyShelfRemote = MutableStateFlow(CopyShelfRemoteState())
+    val copyShelfRemote = _copyShelfRemote.asStateFlow()
+    private var copyShelfRemoteJob: Job? = null
+    private var copyShelfRemoteRequest = 0L
     private val _browse = MutableStateFlow(BrowseState())
     val browse = _browse.asStateFlow()
     private var retainedBrowse: BrowseState? = null
@@ -1015,7 +1029,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 if (connectRankedSource(work, saved, token, confirmed = saved)) return@launch
                 if (!rankedWorkCurrent(token, work)) return@launch
             }
-            val enriched = try { withTimeout(4_000L) { siteRankingsRepository.enrich(work) } }
+            val enriched = try { withTimeout(8_000L) { siteRankingsRepository.enrich(work) } }
             catch (cancel: CancellationException) {
                 if (cancel is kotlinx.coroutines.TimeoutCancellationException) work else throw cancel
             }
@@ -2481,6 +2495,36 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     private fun restoreAccount() = authenticate(restoring = true) { accountRepository.restore() }
 
+    fun cancelCopyShelfMetadata(clear: Boolean = false) {
+        copyShelfRemoteRequest++
+        copyShelfRemoteJob?.cancel()
+        if (clear) _copyShelfRemote.value = CopyShelfRemoteState()
+        else _copyShelfRemote.update { it.copy(loading = false) }
+    }
+
+    /** Cloud-owned collection/read ordering is fetched separately from collection import/upload. */
+    fun refreshCopyShelfMetadata() {
+        val owner = _account.value.profile?.username ?: return
+        if (_account.value.busy) return
+        cancelCopyShelfMetadata()
+        val request = copyShelfRemoteRequest
+        val version = accountRepository.sessionVersion
+        val retained = _copyShelfRemote.value.takeIf { it.owner == owner } ?: CopyShelfRemoteState(owner)
+        _copyShelfRemote.value = retained.copy(loading = true, error = null)
+        copyShelfRemoteJob = viewModelScope.launch {
+            try {
+                val items = foregroundRequest("拷贝书架记录", 120_000L) { accountRepository.completeShelfMetadata() }
+                if (request == copyShelfRemoteRequest && isCurrentAccount(version) && _account.value.profile?.username == owner)
+                    _copyShelfRemote.value = CopyShelfRemoteState(owner, items, loaded = true)
+            } catch (cancel: CancellationException) { throw cancel
+            } catch (failure: Exception) {
+                if (request == copyShelfRemoteRequest && isCurrentAccount(version) && _account.value.profile?.username == owner)
+                    _copyShelfRemote.update { it.copy(loading = false,
+                        error = accountError(failure, "拷贝书架记录暂未读取，可重试")) }
+            }
+        }
+    }
+
     /** The chosen cloud chapter is a resume target, never a fabricated local reading event. */
     fun continuePreferredResume(manga: Manga): Boolean {
         val owner = _account.value.profile?.username ?: return false
@@ -2557,6 +2601,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     private fun authenticate(restoring: Boolean = false, action: suspend () -> AccountProfile?) {
         clearCopyProgress()
+        cancelCopyShelfMetadata(clear = true)
         val browserAttempt = websiteLoginAttempt
         websiteLoginAttempt = null
         browserAttempt?.let(accountRepository::cancelWebsiteLogin)
@@ -2596,6 +2641,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     fun logout() {
         val previousOwner = _account.value.profile?.username
         clearCopyProgress()
+        cancelCopyShelfMetadata(clear = true)
         websiteLoginAttempt = null
         accountRequestId++
         accountJob?.cancel()

@@ -40,6 +40,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.AccountUiState
 import dev.mangaflow.account.CloudHistoryEntry
+import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.platform.*
@@ -81,6 +82,10 @@ fun AccountScreen(
     onSearch: (() -> Unit)? = null,
     favoriteAddedAt: (String) -> Long? = { null },
     onOpenSync: (() -> Unit)? = null,
+    cloudMetadata: Map<String, CopyShelfMetadata> = emptyMap(),
+    metadataLoading: Boolean = false,
+    metadataError: String? = null,
+    onRetryMetadata: (() -> Unit)? = null,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val profile = state.profile
@@ -232,7 +237,9 @@ fun AccountScreen(
                 contentTopPadding = contentTopPadding,
                 onOpen = onOpen, onAddToLibrary = onAddToLibrary,
                 onMoreFavorites = onMoreFavorites, onRefreshFavorites = onRefreshFavorites,
-                onRefreshAccount = onRefresh, favoriteAddedAt = favoriteAddedAt, onOpenSync = onOpenSync,
+                onRefreshAccount = onRefresh, onOpenSync = onOpenSync,
+                cloudMetadata = cloudMetadata, metadataLoading = metadataLoading,
+                metadataError = metadataError, onRetryMetadata = onRetryMetadata,
             )
         }
     }

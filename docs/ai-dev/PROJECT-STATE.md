@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Current cloud-shelf and ranking-feedback repair · 2026-11-14
+
+Raw screenshot feedback and latest time-sort correction are DESIGN COPY-REMOTE-166–170. Copy shelf presentation is now account-owned chapter/recent/collection-time metadata, with real newest/oldest ordering, compact controls and no local progress/time/white membership circle. Explicit collection import/upload and local chapter cursors are preserved. Native-ID multilingual title/author enrichment and inline candidate confirmation replace the weak romanized-only comparison and duplicate large panel; the exact live Berserk result remains unverified.
+
+Source is in MangaFlow-refine, a source-equivalent snapshot of published mainfd7b4ba with concurrent mainda0523b desktop-navigation fixes retained; older worktrees contain already published history and must not be replayed. Four implementation domains and two independent source reviews completed; the metadata failure-recovery finding was fixed by separating display loading from synchronization qualification. No tests/local builds/source/account/device probes were run. Next exact action: integrate any newer main without dropping concurrent work, publish this full source batch with an expected-head lease and confirm normal CI trigger once. Installed visuals, API acceptance and actual multilingual matching remain pending artifact/user feedback.
+
 ## Desktop navigation overlap · 2026-11-14
 
 User rejected the delivered local window with “这他妈能用？？？” and screenshot codex-clipboard-5d47381f-2424-496b-bee3-30b624b7c3e2.png. Local evidence copy: D:/Kayokoi/MangaFlowWork/layout-feedback/user-nav-overlap.png. Root's earlier startup screenshot already contained the defect; build/window existence was wrongly treated as usability acceptance. Do not call the desktop layout usable until actual post-fix window inspection closes this feedback.

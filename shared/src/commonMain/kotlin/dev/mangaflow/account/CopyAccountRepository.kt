@@ -181,16 +181,25 @@ class CopyAccountRepository(context: Context) {
 
     suspend fun favorites(page: Int): CloudPage<Manga> = favoritePage(page, strict = false)
 
-    private suspend fun favoritePage(page: Int, strict: Boolean): CloudPage<Manga> {
+    private suspend fun favoritePage(page: Int, strict: Boolean): CloudPage<Manga> =
+        favoriteRows(page, strict, "-datetime_updated").let { result ->
+            CloudPage(result.items.map(FavoriteRow::manga), result.hasMore)
+        }
+
+    private suspend fun favoriteRows(page: Int, strict: Boolean, ordering: String): CloudPage<FavoriteRow> {
         val lease = requireSession()
         return withContext(Dispatchers.IO) {
             requirePage(page, 1200)
             requests.withLock {
                 val offset = page * 18
                 val data = accountObject(lease, apiUrl("member/collect/comics", "limit" to "18", "offset" to "$offset",
-                    "free_type" to "1", "ordering" to "-datetime_updated"), "个人收藏", maxChars = 1024 * 1024)
+                    "free_type" to "1", "ordering" to ordering), "个人收藏", maxChars = 1024 * 1024)
                 val rows = pageRows(data, offset, 18, "个人收藏")
-                val items = rows.items.mapNotNull { row -> row.optJSONObject("comic")?.let(::parseManga) }.distinctBy(Manga::id)
+                val items = rows.items.mapNotNull { row ->
+                    row.optJSONObject("comic")?.let(::parseManga)?.let { manga ->
+                        FavoriteRow(manga, shelfMetadata(row))
+                    }
+                }.distinctBy { it.manga.id }
                 if (rows.items.isNotEmpty() && items.isEmpty()) throw SourceException("个人收藏中没有可识别的作品资料。")
                 if (strict && (rows.items.size != data.optJSONArray("list")?.length() || items.size != rows.items.size)) {
                     throw SourceException("拷贝收藏中有无法识别或重复的作品，尚不能建立完整同步状态。")
@@ -226,6 +235,74 @@ class CopyAccountRepository(context: Context) {
         }
         ensureVersion(expected)
         return second
+    }
+
+    /**
+     * Read only the actual account collection. The API exposes collection/read ordering even
+     * when it omits raw times. Modifier is collection time; comic.datetime_updated is not.
+     * See fumiama/copymanga 0fdd3f4 ShelfFragment and niuhuan/kobi 2b5ef83 collection sorting.
+     * This is deliberately separate from full-import eligibility and never records reading.
+     */
+    suspend fun completeShelfMetadata(): Map<String, CopyShelfMetadata> {
+        val expected = sessionVersion
+        suspend fun scan(ordering: String): List<FavoriteRow> {
+            val result = mutableListOf<FavoriteRow>()
+            val seen = mutableSetOf<String>()
+            for (page in 0..1200) {
+                ensureVersion(expected)
+                val next = favoriteRows(page, strict = true, ordering = ordering)
+                ensureVersion(expected)
+                for (item in next.items) {
+                    if (!seen.add(item.manga.id)) throw SourceException("拷贝书架在读取期间发生变化，请重新检查。")
+                    result += item
+                }
+                if (!next.hasMore) return result
+            }
+            throw SourceException("拷贝书架尚未完整读取，请稍后重试。")
+        }
+        val joined = scan("-datetime_modifier")
+        val reading = scan("-datetime_browse")
+        if (joined.map { it.manga.id }.toSet() != reading.map { it.manga.id }.toSet()) {
+            throw SourceException("拷贝收藏在读取期间发生变化，请刷新后重试。")
+        }
+        val joinedById = joined.withIndex().associate { (index, row) ->
+            row.manga.id to row.metadata.copy(joinedOrder = index)
+        }
+        val result = reading.withIndex().associate { (index, row) ->
+            val prior = joinedById.getValue(row.manga.id)
+            // last_browse belongs to this account; comic.last_chapter only describes releases.
+            row.manga.id to row.metadata.copy(
+                joinedAt = prior.joinedAt, joinedOrder = prior.joinedOrder,
+                readOrder = index.takeIf { row.metadata.chapterId.isNotBlank() },
+            )
+        }
+        ensureVersion(expected)
+        return result
+    }
+
+    private fun shelfMetadata(row: JSONObject): CopyShelfMetadata {
+        val browse = row.optJSONObject("last_browse")
+        val chapterId = browse?.text("last_browse_id")
+            ?.takeIf { SEGMENT_PATTERN.matches(it) && it.any { char -> char != '0' && char != '-' } }.orEmpty()
+        return CopyShelfMetadata(
+            joinedAt = cloudTime(row, "datetime_modifier"),
+            chapterId = chapterId,
+            chapterTitle = if (chapterId.isNotBlank()) browse?.text("last_browse_name").orEmpty().take(120) else "",
+            readAt = if (chapterId.isNotBlank()) cloudTime(row, "datetime_browse") else null,
+        )
+    }
+
+    /** A time without a zone stays unknown; the native sort order remains available independently. */
+    private fun cloudTime(row: JSONObject, key: String): Long? {
+        val raw = row.opt(key)?.toString()?.trim()?.takeIf { it.isNotEmpty() && it != "null" } ?: return null
+        val numeric = raw.toLongOrNull()
+        if (numeric != null) return when (numeric) {
+            in 1_000_000_000L..99_999_999_999L -> numeric * 1000L
+            in 100_000_000_000L..253_402_300_799_999L -> numeric
+            else -> null
+        }
+        return runCatching { kotlin.time.Instant.parse(raw.replace(' ', 'T')).toEpochMilliseconds() }
+            .getOrNull()?.takeIf { it > 0 }
     }
 
     /** Query is read-only. Never open the authenticated chapter route to inspect a cursor. */
@@ -577,6 +654,7 @@ class CopyAccountRepository(context: Context) {
     }
     private class PendingLogin(val lease: SessionLease, val expiresAt: Long)
     private data class AccountRows(val items: List<JSONObject>, val hasMore: Boolean)
+    private data class FavoriteRow(val manga: Manga, val metadata: CopyShelfMetadata)
 
     private companion object {
         val SEGMENT_PATTERN = Regex("[A-Za-z0-9_-]{1,160}")
