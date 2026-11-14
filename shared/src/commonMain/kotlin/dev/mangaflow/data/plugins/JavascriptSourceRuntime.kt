@@ -198,4 +198,4 @@ internal fun javascriptUrlInfo(raw: String): String {
 
 /** Original script image bytes use the same checked public-network boundary as script HTTP. */
 internal expect suspend fun fetchScriptImageBytes(context: PlatformContext, url: String,
-    headers: Map<String, String>, route: DownloadRouteSnapshot?): ByteArray
+    headers: Map<String, String>, route: DownloadRouteSnapshot?, onBytes: ((Long) -> Unit)? = null): ByteArray

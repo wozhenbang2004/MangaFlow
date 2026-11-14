@@ -9,6 +9,7 @@ import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.data.sources.materializeJmPage
 import dev.mangaflow.data.plugins.resolveScriptPage
 import dev.mangaflow.data.plugins.materializeScriptPage
+import dev.mangaflow.data.plugins.prefetchScriptPage
 import dev.mangaflow.data.plugins.invalidateScriptImage
 import dev.mangaflow.data.plugins.discardFailedScriptImage
 
@@ -232,6 +233,8 @@ import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.IO
@@ -483,6 +486,15 @@ fun ReaderScreen(
     val prefetchPage: suspend (Page) -> Page? = remember(manga.id, chapterId, downloadStore) {
         { page -> downloadStore.resolvePrefetchPage(manga.id, readingChapterId, page) }
     }
+    val scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page? =
+        remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, downloadStore, adultImageContext) {
+            { page, budget, work ->
+                val local = downloadStore.resolvePrefetchPage(manga.id, readingChapterId, page)
+                if (local == null || local.url.startsWith("file:")) local else
+                    prefetchScriptPage(adultImageContext, chapterSourceMangaId(manga.id, chapter),
+                        readingChapterId, local, budget, work)
+            }
+        }
     val retryPage: suspend (Page) -> Page = remember(manga.id, chapterId, sourceIdentity, repository, downloadStore, adultImageContext) {
         { sourcePage ->
             val requestedIdentity = manga.id to sourceIdentity
@@ -863,7 +875,7 @@ fun ReaderScreen(
                     preferences.panelLayoutKey) {
                     if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
                         pages = pages, headers = headers, resolvePage = resolvePage, retryPage = retryPage,
-                        sourceId = chapter.sourceId, prefetchPage = prefetchPage,
+                        sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
                         preferences = preferences, initialPage = pageIndex, initialPanel = cursor.panelIndex,
                         targetPage = targetPage,
                         onTargetConsumed = { targetPage = null; targetOffset = 0 },
@@ -890,7 +902,7 @@ fun ReaderScreen(
                         backdrop = readerBackdrop,
                         bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
                     ) else ChapterPages(
-                        pages = pages, sourceId = chapter.sourceId, prefetchPage = prefetchPage,
+                        pages = pages, sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
                         headers = headers,
                         resolvePage = resolvePage,
                         retryPage = retryPage,
@@ -1415,6 +1427,7 @@ private fun ChapterPages(
     pages: List<Page>,
     sourceId: String,
     prefetchPage: suspend (Page) -> Page?,
+    scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page?,
     headers: Map<String, String>,
     resolvePage: suspend (Page) -> Page,
     retryPage: suspend (Page) -> Page,
@@ -1608,6 +1621,7 @@ private fun ChapterPages(
             }
         }
         AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, prefetchPage,
+            scriptPrefetch = scriptPrefetch,
             enabled = active, sourceId = sourceId,
             onPageDimensions = { index, size -> pageDimensions[pages[index].url] = size },
             position = {
@@ -1750,6 +1764,7 @@ private fun ChapterPages(
             }
         }
         AdjacentPagePrefetch(pages, headers, preferences.mode, composedPages, loadedPages, prefetchRequests, prefetchPage,
+            scriptPrefetch = scriptPrefetch,
             enabled = active, sourceId = sourceId, groups = groups,
             position = { pager.currentPage + pager.currentPageOffsetFraction }) {
             val shown = groups.getOrNull(pager.currentPage)
@@ -1847,6 +1862,7 @@ private fun AdjacentPagePrefetch(
     pages: List<Page>, headers: Map<String, String>, mode: ReadingMode,
     composedPages: Map<Int, Boolean>, loadedPages: Map<Int, String>,
     requests: MutableMap<Int, Disposable>, resolvePage: suspend (Page) -> Page?,
+    scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page?,
     enabled: Boolean, sourceId: String = "",
     onPageDimensions: (Int, IntSize) -> Unit = { _, _ -> },
     position: (() -> Float)? = null, groups: List<PageSpread>? = null,
@@ -1863,10 +1879,17 @@ private fun AdjacentPagePrefetch(
     val currentPosition by rememberUpdatedState(position)
     val dimensionsKnown by rememberUpdatedState(onPageDimensions)
     val prefetchEnabled by rememberUpdatedState(enabled)
-    LaunchedEffect(pages, headers, mode, imageLoader, resolvePage, sourceId, groups) {
+    LaunchedEffect(pages, headers, mode, imageLoader, resolvePage, scriptPrefetch, sourceId, groups) {
         val requestScope = this
         val finished = mutableSetOf<Int>()
         val workTokens = mutableMapOf<Int, PrefetchWork>()
+        val scriptRequests = mutableStateMapOf<Int, Job>()
+        fun pending(): Set<Int> = (requests.keys + scriptRequests.keys).toSet()
+        fun stop(index: Int) {
+            requests.remove(index)?.dispose()
+            scriptRequests.remove(index)?.cancel()
+            workTokens.remove(index)
+        }
         var previousPosition = Float.NaN
         var previousTime = monotonicTimeMillis()
         var lastMove = previousTime
@@ -1878,7 +1901,7 @@ private fun AdjacentPagePrefetch(
         try {
             snapshotFlow {
                 val (first, last) = visible()
-                PrefetchWindow(first, last, composedPages.keys.toSet(), requests.keys.toSet(), prefetchEnabled,
+                PrefetchWindow(first, last, composedPages.keys.toSet(), pending(), prefetchEnabled,
                     (first..last).all { it !in pages.indices || loadedPages[it] == pages[it].url },
                     currentBudget.prefetchAhead, currentBudget.prefetchBehind,
                     ((currentPosition?.invoke() ?: first.toFloat()) * 10f).roundToInt() / 10f,
@@ -1896,7 +1919,7 @@ private fun AdjacentPagePrefetch(
                     val delta = window.position - previousPosition
                     val nextDirection = if (delta > 0f) 1 else -1
                     if (nextDirection != direction) {
-                        requests.keys.filter { it !in active }.forEach { requests.remove(it)?.dispose() }
+                        pending().filter { it !in active }.forEach(::stop)
                         finished.clear(); speed = 0f
                     }
                     direction = nextDirection
@@ -1928,15 +1951,16 @@ private fun AdjacentPagePrefetch(
                 }
                 val desired = (candidates(ahead, true) + candidates(window.behind, false)).filter { index ->
                     window.enabled && sourceId != "jmcomic" && window.bytes > 0L && window.visibleReady && index in pages.indices &&
-                        index !in window.composed && pages[index].url.startsWith("https:")
+                        index !in window.composed && (pages[index].url.startsWith("https:") ||
+                        sourceId.startsWith("js_") && pages[index].sourceImageToken.isNotBlank())
                 }.toSet()
                 val retained = desired + active
-                requests.keys.filter { it !in retained }.forEach { index -> requests.remove(index)?.dispose() }
+                pending().filter { it !in retained }.forEach(::stop)
                 finished.retainAll(retained)
                 if (window.bytes < budgetLimit) {
-                    requests.keys.filter { it !in active }.forEach { requests.remove(it)?.dispose() }
+                    pending().filter { it !in active }.forEach(::stop)
                 }
-                if ((desired != budgetOwner || window.bytes != budgetLimit) && requests.keys.none { it !in active }) {
+                if ((desired != budgetOwner || window.bytes != budgetLimit) && pending().none { it !in active }) {
                     budgetOwner = desired; budgetLimit = window.bytes
                     byteWindow = PrefetchByteBudget(window.bytes)
                     // Already fetched pages remain part of the future-page window.
@@ -1946,8 +1970,35 @@ private fun AdjacentPagePrefetch(
                     }
                 }
                 for (index in desired) {
-                    if (index in requests || index in finished || requests.keys.count { it !in active } >= window.parallel) continue
+                    if (index in pending() || index in finished || pending().count { it !in active } >= window.parallel) continue
                     if (experience.estimatedPageBytes(pages[index].url) > byteWindow.remaining) break
+                    if (sourceId.startsWith("js_")) {
+                        val windowBytes = byteWindow
+                        val token = PrefetchWork(experience::wakeAdmissions)
+                        val job = requestScope.launch(start = CoroutineStart.LAZY) {
+                            val owned = currentCoroutineContext()[Job]
+                            try {
+                                val resource = scriptPrefetch(pages[index], windowBytes, token)
+                                currentCoroutineContext().ensureActive()
+                                if (resource != null && scriptRequests[index] === owned) {
+                                    readerImageDimensions(imageLoader, resource, originalPage = pages[index])?.let { size ->
+                                        currentCoroutineContext().ensureActive()
+                                        if (scriptRequests[index] === owned) dimensionsKnown(index, size)
+                                    }
+                                }
+                                if (scriptRequests[index] === owned) finished += index
+                            } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: PrefetchBudgetExceeded) { windowBytes.exhaust(); if (scriptRequests[index] === owned) finished += index }
+                            catch (_: Exception) { if (scriptRequests[index] === owned) finished += index }
+                            finally {
+                                if (scriptRequests[index] === owned) { scriptRequests.remove(index); workTokens.remove(index) }
+                            }
+                        }
+                        scriptRequests[index] = job
+                        workTokens[index] = token
+                        job.start()
+                        continue
+                    }
                     val resource = try { resolvePage(pages[index]) }
                     catch (cancelled: CancellationException) { throw cancelled }
                     catch (_: Exception) { finished += index; continue }
@@ -1985,6 +2036,9 @@ private fun AdjacentPagePrefetch(
                 }
             }
         } finally {
+            val scriptPending = scriptRequests.values.toList()
+            scriptRequests.clear()
+            scriptPending.forEach { it.cancel() }
             val pending = requests.values.toList()
             requests.clear()
             pending.forEach(Disposable::dispose)

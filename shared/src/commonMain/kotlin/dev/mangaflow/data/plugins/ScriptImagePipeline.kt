@@ -4,6 +4,11 @@ import dev.mangaflow.data.ChapterDownloadTransport
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.experience.PrefetchByteBudget
+import dev.mangaflow.experience.PrefetchWork
+import dev.mangaflow.experience.PrefetchPromoted
+import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRouteSnapshot
@@ -12,6 +17,7 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.hmacSha256
 import dev.mangaflow.platform.wallTimeMillis
+import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.randomUuid
 import dev.mangaflow.platform.storage.StorageAtomicFile
 import dev.mangaflow.platform.storage.StorageFile
@@ -52,6 +58,7 @@ private val resolvedImages = linkedMapOf<ImageRequestKey, ResolvedImage>()
 private val imageGates = Array(16) { Mutex() }
 private val decodeGates = Array(16) { Mutex() }
 private val decodeSlots = Semaphore(2)
+private val scriptPrefetchSlots = Semaphore(1)
 private val savedHeaderRefs = linkedSetOf<String>()
 private val headerSecrets = linkedMapOf<String, String>()
 private val sourceEpochOverrides = mutableMapOf<String, String>()
@@ -213,6 +220,7 @@ suspend fun resolveScriptPage(
 suspend fun materializeScriptPage(
     context: PlatformContext, mangaId: String, chapterId: String, page: Page,
     route: DownloadRouteSnapshot? = null,
+    onBytes: ((Long) -> Unit)? = null,
 ): Page {
     if (page.url.startsWith("file://")) return page.copy(headers = emptyMap())
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
@@ -254,7 +262,7 @@ suspend fun materializeScriptPage(
             try {
                 val bytes = withImageSession(context, ref.sourceId, epoch) {
                     fetchScriptImageBytes(context, page.url, actualHeaders,
-                        route ?: currentCoroutineContext()[ChapterDownloadTransport]?.route)
+                        route ?: currentCoroutineContext()[ChapterDownloadTransport]?.route, onBytes)
                 }
                 require(bytes.size.toLong() in 128L..MAX_IMAGE_BYTES) { "来源原图为空或超过大小限制。" }
                 currentCoroutineContext().ensureActive()
@@ -279,12 +287,55 @@ suspend fun materializeScriptPage(
                 imageEvents.tryEmit(ScriptImageEvent(ref.sourceId, stage, true, wallTimeMillis()))
                 page.copy(url = target.toURI(), headers = emptyMap(), transform = "", sourceSessionEpoch = epoch)
             } catch (failure: Exception) {
-                if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
+                if (failure is CancellationException && failure !is TimeoutCancellationException || failure is PrefetchBudgetExceeded) throw failure
                 imageEvents.tryEmit(ScriptImageEvent(ref.sourceId, stage, false, wallTimeMillis()))
                 throw failure
             }
         }
     } }
+}
+
+/** The same original-byte cache as foreground reading, admitted under its current future-page budget. */
+internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: String, chapterId: String,
+    page: Page, budget: PrefetchByteBudget, work: PrefetchWork): Page? = scriptPrefetchSlots.withPermit {
+    val source = SourceKeys.decodeChapter(mangaId, chapterId).sourceId
+    if (!source.startsWith("js_")) return@withPermit null
+    val policy = ExperiencePolicyStore.get(context)
+    val transferLock = SynchronizedObject()
+    var retained = 0L
+    var received = 0L
+    var closed = false
+    val started = monotonicTimeMillis()
+    suspend fun load(): Page {
+        currentCoroutineContext().ensureActive()
+        val resolved = resolveScriptPage(context, mangaId, chapterId, page)
+        val result = materializeScriptPage(context, mangaId, chapterId, resolved, onBytes = { count ->
+            synchronized(transferLock) {
+                if (closed) throw CancellationException("图片预取已结束。")
+                received += count
+                work.ifOptional {
+                    if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
+                    budget.accept(count)
+                    policy.acceptPrefetchChunk(count)
+                    retained += count
+                }
+            }
+        })
+        val path = dev.mangaflow.reader.readerFilePath(result.url)
+        val size = path?.let { StorageFile(it).length() }
+        val cacheHit = synchronized(transferLock) { received == 0L }
+        if (cacheHit && size != null) work.ifOptional { budget.accept(size) }
+        policy.recordImage(monotonicTimeMillis() - started, memory = false, disk = cacheHit,
+            prefetch = !work.isForeground, key = page.url, bytes = size)
+        return result
+    }
+    try {
+        try { policy.withPrefetchAdmission(source, policy.estimatedPageBytes(page.url), { work.isForeground }) { load() } }
+        catch (_: PrefetchPromoted) { policy.withImageAdmission(reader = true) { load() } }
+    } finally {
+        val released = synchronized(transferLock) { closed = true; retained.also { retained = 0L } }
+        policy.releasePrefetchBytes(released)
+    }
 }
 
 /** Shared chapter headers reuse one vault item; the manifest contains only its opaque reference. */

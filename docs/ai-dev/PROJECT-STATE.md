@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Source continuation and compiler recovery · 2026-11-14
+
+User continued after the published57ca7eb batch. DESIGN SOURCE-HOST-174–175 records actual Android245/native83 failures and the bounded corrections; source implementation is not compilation or installed acceptance. The matching compiler fixes landed concurrently in main84327b8 and are retained unchanged: shared UI imports, QuickJS Native member calls, Native IO/Okio extensions and AI_NUMERICHOST/sockaddr validation. The first batch's source/package/native-account/image work and all concurrent main changes remain intact.
+
+Adjacent JS preparation now uses controlled source HTTP and the same original-byte/JM decode cache in vertical, horizontal and guided modes. Existing window/byte/source/foreground policy and frozen download ownership are retained. Independent source review caught optional transfers occupying both materialization slots and callback accounting racing cancellation; one optional lane and a closed/retained lifecycle lock correct those paths. No synthetic service response, local build or test was used. Root publishes one complete latest-main lease and confirms ordinary CI activation; compilation, installed UX and site coverage remain pending actual artifacts/user evidence. Optional APK hosting, arbitrary image programs and next-chapter JS image warming are still open. Do not replay already published57ca7eb or call the whole roadmap complete.
+
 ## CI246 compiler correction · 2026-11-14
 
 User asked twice “ci 是不是失败了”. Actual main db0efef Android run43591800939/job132437913562, Windows run43591801012/job132437914194 and iOS job132437914354 all failed compilation. Common MangaFlowApp.kt errors identify missing dev.mangaflow.data.Manga and kotlinx.coroutines.CancellationException imports in the preserved source-hosting additions, with cascading inference/sourceId errors. iOS additionally reports JavascriptSourceRuntime.kt:4 evaluate and JavascriptHttpSession.ios.kt IO/inet_pton/use API errors. This is a concrete failed246 build, not an installation result.

@@ -106,13 +106,13 @@ internal actual class JavascriptHttpSession actual constructor(
         error("漫画源重定向次数过多。")
     }
 
-    internal suspend fun imageBytes(value: String, imageHeaders: Map<String, String>): ByteArray {
+    internal suspend fun imageBytes(value: String, imageHeaders: Map<String, String>, onBytes: ((Long) -> Unit)?): ByteArray {
         var url = publicPluginUrl(value)
         var headers = nativeScriptHeaders(JSONObject(imageHeaders))
         repeat(4) { index ->
             currentCoroutineContext().ensureActive()
             reserveNativeOrigin(url)
-            val result = withContext(Dispatchers.IO) { response(url, "GET", headers, ByteArray(0), 45_000L) }
+            val result = withContext(Dispatchers.IO) { response(url, "GET", headers, ByteArray(0), 45_000L, onBytes) }
             if (result.status in setOf(301, 302, 303, 307, 308)) {
                 require(index < 3) { "图片重定向次数过多。" }
                 val target = result.headers.entries.firstOrNull { it.key.equals("Location", true) }?.value
@@ -128,7 +128,8 @@ internal actual class JavascriptHttpSession actual constructor(
         error("图片重定向次数过多。")
     }
 
-    private suspend fun response(url: HttpUrl, method: String, headers: Map<String, String>, body: ByteArray, timeoutMillis: Long = 15_000L): NativeScriptResponse {
+    private suspend fun response(url: HttpUrl, method: String, headers: Map<String, String>, body: ByteArray,
+        timeoutMillis: Long = 15_000L, onBytes: ((Long) -> Unit)? = null): NativeScriptResponse {
         val selected = route?.checked()
         if (selected?.mode == DownloadRouteMode.PROXY && selected.proxy?.type != DownloadProxyType.SOCKS)
             throw DownloadRouteException("第三方脚本来源在 iOS 上仅支持指定 SOCKS5 代理，暂不支持 HTTP 代理。")
@@ -201,6 +202,7 @@ internal actual class JavascriptHttpSession actual constructor(
                     check(count >= 0) { "漫画源响应读取失败。" }
                     if (count == 0) break
                     require(received.size + count <= maximumBytes + 65_536L) { "漫画源响应过大。" }
+                    onBytes?.invoke(count.toLong())
                     received.write(chunk, 0, count)
                     if (frame.complete(received)) break
                 }
@@ -499,7 +501,7 @@ internal actual suspend fun fetchPluginText(context: PlatformContext, url: Strin
 }
 
 internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url: String,
-    headers: Map<String, String>, route: DownloadRouteSnapshot?): ByteArray {
+    headers: Map<String, String>, route: DownloadRouteSnapshot?, onBytes: ((Long) -> Unit)?): ByteArray {
     val session = JavascriptHttpSession(true, route, 96 * 1024 * 1024, true)
-    try { return session.imageBytes(url, headers) } finally { session.close() }
+    try { return session.imageBytes(url, headers, onBytes) } finally { session.close() }
 }

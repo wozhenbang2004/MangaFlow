@@ -32,6 +32,14 @@ User supplied the Venera/Mihon/Suwayomi research and authorized “交给你彻�
 | SOURCE-HOST-172 | Bounded three-platform QuickJS/DOM/crypto/network hosts, public HTTPS and fixed-IP/TLS checks, per-source protected sessions, cancellation and frozen routes. Source/manga/chapter/token/session identities govern lazy per-page hooks and private original-byte caching. Known JM strips are decoded on JVM/Android and iOS; arbitrary binary/image programs fail explicitly. JS downloads resume completed pages; native downloads retain existing Range behavior. |
 | SOURCE-HOST-173 | Optional Android APK hosting, interactive web verification, private-server script endpoints and arbitrary image programs remain open/unadvertised. Source implementation, compilation, installed function and visual acceptance are separate evidence; main CI builds/packages and users perform actual-use verification. No tests/local builds/probes or added CI gate. |
 
+
+Continuation after the user's “继续” (exact message ID unavailable) keeps the same source scope:
+
+| ID | Continuation and evidence |
+| --- | --- |
+| SOURCE-HOST-174 | Actual Android245/run43590951715 and native83/run43590951415 at57ca7eb failed compilation. Concurrent main84327b8 already corrects the missing Manga/CancellationException imports, QuickJS1.0.18 member evaluate import, Native Dispatchers.IO/Okio use and inet_pton binding. Adopt that correction unchanged, including AI_NUMERICHOST parsing and sockaddr byte validation. Keep the original fixed-IP/TLS/public-network boundary. These corrections are source-reviewed, not yet a successful build. |
+| SOURCE-HOST-175 | JS neighboring pages in vertical, horizontal and guided readers use the same controlled source resolver/original-byte cache as foreground reading. Existing direction/cadence/whole-spread windows, byte budgets, completed-page accounting and download ownership remain. A global one-operation optional lane leaves a materialization slot for foreground work; normal reader windows promote visible work and cancel abandoned pages, guided-page changes cancel its old preparation. Streaming callbacks enforce budget before buffering; one lifecycle lock fences late callback accounting after cancellation. Resource-budget cancellation is not a source failure. Guided recognition stays on the current page; next-chapter JS image prefetch, APK hosting and unknown image programs remain open. |
+
 Exact-version repairs retained with original code digests: NH 1.1.0 mixed-page cursor, JM 1.4.0 strip boundary/idempotent favorites/confirmed login, WNACG 1.0.6 cover URL. The bridge is independent protocol glue referencing Venera's parser/init contracts; full upstream source scripts remain user imports. Current source work has no site/account/device verification. Cross-platform compilation and installed UI/motion remain unverified until normal CI and user evidence.
 
 ## Copy shelf interruption and return · 2026-11-14 (COPY-MOTION-177–180)

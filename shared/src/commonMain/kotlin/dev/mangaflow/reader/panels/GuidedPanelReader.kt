@@ -69,6 +69,7 @@ internal fun GuidedPanelReader(
     headers: Map<String, String>,
     sourceId: String,
     prefetchPage: suspend (Page) -> Page?,
+    scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page?,
     resolvePage: suspend (Page) -> Page,
     retryPage: suspend (Page) -> Page,
     preferences: ReaderPreferences,
@@ -171,16 +172,18 @@ internal fun GuidedPanelReader(
     }
     LaunchedEffect(pageIndex, detection, active, experienceBudget.prefetchAhead, experienceBudget.adjacentPrefetchBytes) {
         if (!active || detection == null || experienceBudget.prefetchAhead == 0 || sourceId == "jmcomic") return@LaunchedEffect
-        // Prepare only original bytes. Recognition/decoding belongs to the displayed page;
-        // within that page all panels are already available for the next camera transition.
+        // Prepare readable source images only; panel recognition belongs to the displayed page.
         delay(400)
         val bytes = PrefetchByteBudget(experienceBudget.adjacentPrefetchBytes)
         for (index in pageIndex + 1..minOf(pageIndex + minOf(2, experienceBudget.prefetchAhead), pages.lastIndex)) {
             try {
                 withTimeoutOrNull(15_000) {
-                    val resource = prefetchPage(pages[index])
-                    if (resource != null && resource.url.startsWith("https:"))
-                        prefetchOriginalPage(context, resource, headers, sourceId, bytes)
+                    if (sourceId.startsWith("js_")) scriptPrefetch(pages[index], bytes, PrefetchWork(experience::wakeAdmissions))
+                    else {
+                        val resource = prefetchPage(pages[index])
+                        if (resource != null && resource.url.startsWith("https:"))
+                            prefetchOriginalPage(context, resource, headers, sourceId, bytes)
+                    }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { /* The visible page owns retry and error presentation. */ }

@@ -28,7 +28,7 @@ import kotlin.coroutines.resumeWithException
 
 /** Fetch real original bytes, retaining the source's DNS/TLS and immutable routing guarantees. */
 internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url: String,
-    headers: Map<String, String>, route: DownloadRouteSnapshot?): ByteArray {
+    headers: Map<String, String>, route: DownloadRouteSnapshot?, onBytes: ((Long) -> Unit)?): ByteArray {
     var current = publicPluginUrl(url).toString().toHttpUrlOrNull() ?: error("来源图片地址无效。")
     var actualHeaders = JvmScriptNetwork.checkedHeaders(JSONObject(headers)).filterKeys { !it.equals("Accept-Encoding", true) }
     val sockets = route?.let { publicSourceSocketFactory(it, JvmScriptNetwork::isPublic) }
@@ -69,6 +69,7 @@ internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url:
                                         val count = input.read(chunk)
                                         if (count < 0) break
                                         require(output.size().toLong() + count <= MAX_SCRIPT_IMAGE_BYTES) { "来源图片超过 96 MiB。" }
+                                        onBytes?.invoke(count.toLong())
                                         output.write(chunk, 0, count)
                                     }
                                 }
