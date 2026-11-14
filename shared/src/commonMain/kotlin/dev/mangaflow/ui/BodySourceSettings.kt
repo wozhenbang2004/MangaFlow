@@ -1,5 +1,9 @@
 package dev.mangaflow.ui
 
+import androidx.compose.material.icons.outlined.Tune
+
+import dev.mangaflow.data.UnifiedMangaRepository
+
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 
@@ -78,8 +82,9 @@ internal fun BodySourceSettingsSheet(
     plugins: SourcePluginStore? = null,
     onDismiss: () -> Unit,
     importAsAdult: Boolean = false,
+    repository: UnifiedMangaRepository? = null,
 ) {
-    val scriptImportSupported = platformKind == PlatformKind.ANDROID
+    val scriptImportSupported = true
     val entries by registry.entries.collectAsStateWithLifecycle()
     val packages = if (plugins != null) {
         val installed by plugins.installed.collectAsStateWithLifecycle()
@@ -103,6 +108,7 @@ internal fun BodySourceSettingsSheet(
     val colors = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    var inspecting by remember { mutableStateOf<String?>(null) }
     var adding by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     var movingExisting by remember { mutableStateOf(false) }
@@ -183,10 +189,11 @@ internal fun BodySourceSettingsSheet(
                 } }
                 items(added, key = { "added:${it.source.id}" }) { entry ->
                     BodySourceSettingsRow(entry, enabled = busyId == null,
+                        onDetails = if (repository != null) { { inspecting = entry.source.id } } else null,
                         modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
                             placementSpec = if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap()),
                         kind = scriptPackages[entry.source.id]?.let {
-                            "JS" + it.metadata.optString("version").takeIf(String::isNotBlank)?.let { version -> " · $version" }.orEmpty()
+                            (if (it.metadata.optString("protocol") == "venera") "Venera" else "Mangayomi") + it.metadata.optString("version").takeIf(String::isNotBlank)?.let { version -> " · $version" }.orEmpty()
                         },
                         onToggle = { value -> change(entry, "toggle") {
                             if (value && entry.removed) registry.restore(entry.source.id)
@@ -264,6 +271,9 @@ internal fun BodySourceSettingsSheet(
             }
         }
     }
+    if (repository != null) inspecting?.let { id -> entries.firstOrNull { it.source.id == id }?.let { entry ->
+        SourceCapabilityDetailsSheet(entry.source, repository, plugins, backdrop, onDismiss = { inspecting = null })
+    } }
     if (importing && plugins != null && scriptImportSupported) SourceImportSheet(plugins, registry, backdrop,
         onDismiss = { importing = false }, markAdult = importAsAdult, onImported = { name ->
             notice = "已导入并启用$name。"
@@ -278,6 +288,7 @@ private fun BodySourceSettingsRow(
     modifier: Modifier = Modifier,
     kind: String? = null,
     onToggle: (Boolean) -> Unit,
+    onDetails: (() -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember(entry.source.id) { MutableInteractionSource() }
@@ -290,6 +301,10 @@ private fun BodySourceSettingsRow(
                 .filter { it.isNotBlank() }.joinToString(" · "),
                 fontSize = 11.sp, color = colors.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (onDetails != null) MotionIconButton(onClick = onDetails, enabled = enabled,
+            modifier = Modifier.size(40.dp), tooltip = "来源状态与设置") {
+            androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Outlined.Tune, "来源状态与设置", Modifier.size(18.dp))
         }
         Box(Modifier.size(44.dp).clip(RoundedCornerShape(10.dp))
             .toggleable(entry.enabled, enabled = enabled, interactionSource = interaction, indication = null,

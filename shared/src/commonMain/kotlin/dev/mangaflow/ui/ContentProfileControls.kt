@@ -97,23 +97,26 @@ internal fun ContentProfileSourceSheet(
     onDismiss: () -> Unit,
     unavailableReasons: Map<String, String> = emptyMap(),
     onAccount: (() -> Unit)? = null,
+    onInspect: ((String) -> Unit)? = null,
 ) {
     val sources = remember(entries) { entries.distinctBy { it.source.id } }
     var pendingSource by remember { mutableStateOf<String?>(null) }
     var manageAfterDismiss by remember { mutableStateOf(false) }
     var accountAfterDismiss by remember { mutableStateOf(false) }
+    var pendingInspect by remember { mutableStateOf<String?>(null) }
     var delivered by remember { mutableStateOf(false) }
-    val choosing = pendingSource != null || manageAfterDismiss || accountAfterDismiss
+    val choosing = pendingSource != null || pendingInspect != null || manageAfterDismiss || accountAfterDismiss
     MotionBottomSheet(
         backdrop = backdrop,
         onDismissRequest = {
             if (!delivered) {
                 delivered = true
                 onDismiss()
-                if (accountAfterDismiss) onAccount?.invoke()
+                if (pendingInspect != null) onInspect?.invoke(pendingInspect!!)
+                else if (accountAfterDismiss) onAccount?.invoke()
                 else if (manageAfterDismiss) onManage()
                 else pendingSource?.let { id ->
-                    if (id !in unavailableReasons &&
+                    if (id == "*" || id !in unavailableReasons &&
                         sources.any { it.source.id == id && it.enabled && it.isInstalled && !it.removed })
                         onSelect(id)
                 }
@@ -131,6 +134,13 @@ internal fun ContentProfileSourceSheet(
                     MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
+                }
+            }
+            if (sources.any { it.enabled && it.isInstalled && !it.removed }) item(key = "all-sources") {
+                MotionTextButton(onClick = { pendingSource = "*"; dismiss() }, enabled = !choosing,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                    Text("全部来源", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                    if (selectedId == "*") Icon(Icons.Outlined.Check, null, Modifier.size(16.dp))
                 }
             }
             if (sources.isEmpty()) item(key = "profile-source-empty") {
@@ -175,6 +185,12 @@ internal fun ContentProfileSourceSheet(
                         Spacer(Modifier.width(10.dp))
                         Text(status, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (onInspect != null && entry.isInstalled && !entry.removed) {
+                        MotionIconButton(onClick = { pendingInspect = entry.source.id; dismiss() },
+                            enabled = !choosing, modifier = Modifier.size(40.dp), tooltip = "${entry.source.name}状态与设置") {
+                            Icon(Icons.Outlined.Tune, "来源状态与设置", Modifier.size(16.dp))
+                        }
                     }
                     if (selected && available) {
                         Spacer(Modifier.width(8.dp))

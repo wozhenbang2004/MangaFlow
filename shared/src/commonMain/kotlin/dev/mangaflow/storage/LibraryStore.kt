@@ -1241,6 +1241,14 @@ internal fun Page.toJson(): JSONObject = JSONObject().apply {
     put("url", url)
     put("width", width)
     put("height", height)
+    // Authorization and cookies never enter a manifest or exported reading backup.
+    put("headers", JSONObject(headers.filterKeys { it.equals("User-Agent", true) || it.equals("Accept", true) }))
+    if (headerSecretRef.isNotBlank()) put("headerSecretRef", headerSecretRef)
+    if (headerSecretBinding.isNotBlank()) put("headerSecretBinding", headerSecretBinding)
+    if (sourceImageToken.isNotEmpty()) put("sourceImageToken", sourceImageToken)
+    if (sourceRevision.isNotEmpty()) put("sourceRevision", sourceRevision)
+    if (sourceSessionEpoch.isNotEmpty()) put("sourceSessionEpoch", sourceSessionEpoch)
+    if (transform.isNotEmpty()) put("transform", transform)
 }
 
 internal fun readPage(json: JSONObject): Page = Page(
@@ -1248,6 +1256,21 @@ internal fun readPage(json: JSONObject): Page = Page(
     url = json.getString("url"),
     width = json.optInt("width"),
     height = json.optInt("height"),
+    headers = json.optJSONObject("headers")?.let { value -> value.keys().asSequence()
+        .filter { it.equals("User-Agent", true) || it.equals("Accept", true) }
+        .associateWith(value::getString) }.orEmpty(),
+    headerSecretRef = json.optString("headerSecretRef").takeIf { it.matches(Regex("[a-f0-9]{64}")) }.orEmpty(),
+    headerSecretBinding = json.optString("headerSecretBinding").takeIf { it.matches(Regex("[a-f0-9]{64}")) }.orEmpty(),
+    sourceImageToken = json.optString("sourceImageToken").also {
+        require(it.length <= 8192 && it.none(Char::isISOControl)) { "来源图片标识无效。" }
+    },
+    sourceRevision = json.optString("sourceRevision").also {
+        require(it.isEmpty() || it.matches(Regex("[a-f0-9]{64}"))) { "来源图片版本无效。" }
+    },
+    sourceSessionEpoch = json.optString("sourceSessionEpoch").also {
+        require(it.length <= 80 && it.none(Char::isISOControl)) { "来源图片会话版本无效。" }
+    },
+    transform = json.optString("transform").also { require(it in setOf("", "jm")) { "图片处理方式暂不兼容。" } },
 )
 
 private fun ReadingProgress.toJson(): JSONObject = JSONObject().apply {

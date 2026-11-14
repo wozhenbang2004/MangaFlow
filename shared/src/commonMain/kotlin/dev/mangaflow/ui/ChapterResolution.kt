@@ -20,6 +20,8 @@ import coil3.request.SuccessResult
 import dev.mangaflow.data.CHAPTER_DIMENSION_SAMPLE_LIMIT
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.Page
+import dev.mangaflow.data.plugins.resolveScriptPage
+import dev.mangaflow.data.plugins.materializeScriptPage
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.imagePlatformContext
 import dev.mangaflow.reader.ReaderDimensionCache
@@ -166,10 +168,12 @@ internal fun rememberChapterResolution(
                             size = readerImageDimensions(loader, local, originalPage = page)
                     }
                     if (size == null) {
-                        val headers = repository.imageHeaders(mangaId, chapterId)
+                        val resolved = materializeScriptPage(context, mangaId, chapterId,
+                            resolveScriptPage(context, mangaId, chapterId, page))
+                        val headers = repository.imageHeaders(mangaId, chapterId) + resolved.headers
                         val result = withContext(Dispatchers.IO) {
                             loader.execute(ImageRequest.Builder(imagePlatformContext(context))
-                                .data(page.url)
+                                .data(resolved.url)
                                 .httpHeaders(NetworkHeaders.Builder().apply {
                                     headers.forEach { (name, value) -> set(name, value) }
                                 }.build())
@@ -180,7 +184,7 @@ internal fun rememberChapterResolution(
                                 .build())
                         }
                         if (result !is SuccessResult) throw IllegalStateException()
-                        size = readerImageDimensions(loader, page, result.diskCacheKey)
+                        size = readerImageDimensions(loader, resolved, result.diskCacheKey, originalPage = page)
                     }
                     if (size == null) throw IllegalStateException()
                 }

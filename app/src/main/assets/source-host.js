@@ -150,6 +150,7 @@
   };
   globalThis.__mfInvoke = async (provider, method, args) => {
     __mfValidate(provider);
+    if (method === 'capabilities') return stringify({result:{features:[...(typeof provider.getPopular === 'function' ? ['DISCOVERY'] : []), ...(typeof provider.search === 'function' ? ['SEARCH'] : [])], loginRequired:false}, headers:{}});
     const allowed = ['search', 'getDetail', 'getPageList', 'getPopular', 'getLatestUpdates', 'getFilterList', 'getSourcePreferences', 'getHeaders'];
     if (!allowed.includes(method) || typeof provider[method] !== 'function') throw new Error(`Unsupported source operation: ${method}`);
     if (method === 'search' && (!Array.isArray(args[2]) || args[2].length === 0)) args[2] = filterDefaults(provider.getFilterList());

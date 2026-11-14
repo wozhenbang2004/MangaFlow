@@ -30,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,6 +52,13 @@ import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import dev.mangaflow.data.MangaRepository
+import dev.mangaflow.data.Page
+import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.chapterSourceMangaId
+import dev.mangaflow.data.plugins.resolveScriptPage
+import dev.mangaflow.data.plugins.materializeScriptPage
+import dev.mangaflow.storage.DownloadStore
+import kotlinx.coroutines.CancellationException
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.PageCollection
 import dev.mangaflow.storage.ReadingMode
@@ -139,6 +147,25 @@ private fun PageCollectionRow(collection: PageCollection, repository: MangaRepos
 @Composable
 private fun CollectionPreview(collection: PageCollection, repository: MangaRepository, modifier: Modifier) {
     val context = LocalContext.current
+    val owner = chapterSourceMangaId(collection.manga.id, collection.chapter)
+    val script = remember(owner, collection.chapter.id) {
+        SourceKeys.decodeChapter(owner, collection.chapter.id).sourceId.startsWith("js_")
+    }
+    var scriptPreviews by remember(repository, collection.key) { mutableStateOf<List<Page>?>(null) }
+    LaunchedEffect(repository, collection.key, script) {
+        if (!script) return@LaunchedEffect
+        try {
+            val downloaded = DownloadStore.get(context).downloadedPages(collection.manga.id, collection.chapter.id)
+            val values = downloaded ?: repository.cachedPages(owner, collection.chapter.id)
+                ?: repository.pages(owner, collection.chapter.id)
+            scriptPreviews = (collection.firstPage..collection.lastPage).map { index ->
+                val page = values.getOrNull(index) ?: error("已收藏的图片页码暂不可用。")
+                materializeScriptPage(context, owner, collection.chapter.id,
+                    resolveScriptPage(context, owner, collection.chapter.id, page))
+            }
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { scriptPreviews = emptyList() }
+    }
     val headers = remember(repository, collection.manga.id, collection.manga.sourceUrl, collection.chapter.id,
         collection.chapter.sourceId, collection.chapter.sourceMangaId) {
         if (collection.manga.sourceUrl == LOCAL_SOURCE_URL) emptyMap()
@@ -148,13 +175,15 @@ private fun CollectionPreview(collection: PageCollection, repository: MangaRepos
     val order = if (collection.spread && collection.mode == ReadingMode.RIGHT_TO_LEFT) slots.reversed() else slots
     Row(modifier, horizontalArrangement = Arrangement.Absolute.Left, verticalAlignment = Alignment.CenterVertically) {
         order.forEach { slot ->
-            val url = collection.previewUrls.getOrNull(slot)?.takeIf(String::isNotBlank)
+            val resolved = scriptPreviews?.getOrNull(slot)
+            val url = if (script) resolved?.url else collection.previewUrls.getOrNull(slot)?.takeIf(String::isNotBlank)
             val pageNumber = collection.firstPage + slot + 1
-            val request = remember(context, url, headers) {
+            val request = remember(context, url, headers, resolved?.headers) {
                 url?.let {
                     ImageRequest.Builder(imagePlatformContext(context)).data(it)
                         .httpHeaders(NetworkHeaders.Builder().apply {
                             headers.forEach { (name, value) -> set(name, value) }
+                            resolved?.headers.orEmpty().forEach { (name, value) -> set(name, value) }
                         }.build()).crossfade(0).build()
                 }
             }

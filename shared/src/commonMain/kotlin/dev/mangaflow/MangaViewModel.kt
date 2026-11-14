@@ -393,7 +393,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     try {
                         val scope = withContext(Dispatchers.Default) {
                             pluginSourceSync.withLock {
-                                repository.replaceImportedSources(packages.map { ScriptBodySource(it, sourcePlugins.runtime) })
+                                repository.replaceImportedSources(packages.map { ScriptBodySource(it, sourcePlugins.runtime, application) })
                                 bodySources.updateInstalledSources(repository.sources)
                                 repository.setEnabledSources(bodySources.enabledSourceIds)
                                 repository.sourceConfigurationKey()

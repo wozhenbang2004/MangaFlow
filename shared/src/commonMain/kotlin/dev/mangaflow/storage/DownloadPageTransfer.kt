@@ -44,6 +44,7 @@ internal suspend fun downloadPageFile(
     if (resume == null) discardDownloadPartial(partial)
     var redirects = 0
     var restarted = false
+    var requestHeaders = pageHeaders(headers)
     while (true) {
         currentCoroutineContext().ensureActive()
         val saved = resume?.takeIf { it.target == target.toString() }
@@ -54,7 +55,7 @@ internal suspend fun downloadPageFile(
         var expectedTotal: Long? = null
         var output: StorageOutput? = null
         val request = Request.Builder().url(target).apply {
-            pageHeaders(headers).forEach { (name, value) -> header(name, value) }
+            requestHeaders.forEach { (name, value) -> header(name, value) }
             header("Accept-Encoding", "identity")
             if (saved != null && offset > 0L) {
                 header("Range", "bytes=" + offset + "-")
@@ -133,6 +134,10 @@ internal suspend fun downloadPageFile(
             if (next == null || ++redirects > 4) {
                 throw PermanentDownloadException("图片地址跳转无效，请刷新并重试", true)
             }
+            if (target.scheme != next.scheme || target.host != next.host || target.port != next.port) {
+                requestHeaders = requestHeaders.filterKeys { it.lowercase() !in setOf(
+                    "authorization", "cookie", "x-api-key", "x-access-token") }
+            }
             target = next
             continue
         }
@@ -202,8 +207,17 @@ private fun saveResume(partial: StorageFile, url: String, state: ResumeState) = 
 }
 
 private fun resumeFile(partial: StorageFile) = StorageFile(partial.path + ".json")
-private fun pageHeaders(headers: Map<String, String>) = headers.filterKeys {
-    it.equals("Referer", true) || it.equals("User-Agent", true) || it.equals("Accept", true)
+private fun pageHeaders(headers: Map<String, String>): Map<String, String> {
+    val managed = setOf("host", "connection", "content-length", "transfer-encoding", "proxy-authorization",
+        "proxy-connection", "accept-encoding", "range", "if-range")
+    require(headers.size <= 64 && headers.entries.sumOf { it.key.length + it.value.length } <= 32_768) { "图片请求头超过限制。" }
+    val normalized = linkedMapOf<String, String>()
+    headers.forEach { (name, value) ->
+        require(name.isNotBlank() && name.length <= 128 && name.all { it.code in 33..126 && it != ':' } &&
+            value.length <= 8192 && value.none { it == '\r' || it == '\n' || it == '\u0000' }) { "图片请求头无效。" }
+        if (name.lowercase() !in managed) normalized[name.lowercase()] = value
+    }
+    return normalized
 }
 private fun responseFailure(code: Int): IOException = when (code) {
     401, 403, 404 -> PermanentDownloadException("图片地址已失效（" + code + "），请刷新并重试", true)

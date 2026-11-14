@@ -1,16 +1,15 @@
 package dev.mangaflow.data.plugins
 
-import org.json.JSONArray
-import org.json.JSONObject
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
-import java.util.IdentityHashMap
+import dev.mangaflow.json.JSONArray
+import dev.mangaflow.json.JSONObject
+import com.fleeksoft.ksoup.Ksoup
+import com.fleeksoft.ksoup.nodes.Document
+import com.fleeksoft.ksoup.nodes.Element
 
 /** Context-local DOM handles; no URL loading, scripting, file reads or XML entity resolution. */
 internal class JavascriptDomBridge(private val baseUrl: String) {
     private val elements = LinkedHashMap<Int, Element>()
-    private val handles = IdentityHashMap<Element, Int>()
+    private val handles = HashMap<Element, Int>()
     private var operations = 0
     private var parsedChars = 0
     private var nextId = 1
@@ -24,7 +23,7 @@ internal class JavascriptDomBridge(private val baseUrl: String) {
             require(html.length <= 2 * 1024 * 1024) { "漫画源 HTML 文档过大。" }
             parsedChars += html.length
             require(parsedChars <= 4 * 1024 * 1024 && html.count { it == '<' } <= 25_000) { "漫画源 DOM 文档超出内存限制。" }
-            return scriptJsonValue(handle(Jsoup.parse(html, baseUrl)))
+            return scriptJsonValue(handle(Ksoup.parse(html, baseUrl)))
         }
         val element = elements[request.getInt("key")] ?: throw IllegalArgumentException("漫画源 DOM 节点已失效。")
         val value: Any? = when (op) {
@@ -84,7 +83,7 @@ internal class JavascriptDomBridge(private val baseUrl: String) {
 
     private fun selector(request: JSONObject): String = request.getString("selector").also {
         require(it.length in 1..512) { "漫画源 CSS 选择器过长。" }
-        // Jsoup executes JVM regex pseudos outside QuickJS's interrupt handler.
+        // Native DOM regex pseudos execute outside QuickJS's interrupt handler.
         // Reject these explicitly instead of exposing unbounded native backtracking.
         require(!it.contains(":matches", true) && !REGEX_ATTRIBUTE_OPERATOR.containsMatchIn(it)) {
             "漫画源 DOM 正则选择器暂不支持。"
@@ -102,7 +101,7 @@ internal class JavascriptDomBridge(private val baseUrl: String) {
     }
 }
 
-/** Android org.json lacks JSON-java's valueToString helper. Serialize one safe JSON value. */
+/** Serialize a bounded host value without platform-specific JSON helpers. */
 internal fun scriptJsonValue(value: Any?): String = JSONArray().put(value ?: JSONObject.NULL).toString().let {
     it.substring(1, it.length - 1)
 }

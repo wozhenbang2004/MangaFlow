@@ -228,6 +228,7 @@ fun DetailScreen(
     pendingSourceCount: Int = 0,
     repository: MangaRepository? = null,
     commentsAvailable: Boolean = true,
+    sourceCommentsContent: (@Composable (Modifier, Dp, Int, Boolean) -> Unit)? = null,
     downloadPreparations: List<ChapterPreparationState> = emptyList(),
     cloudProgress: CopyProgressHintState? = null,
     onAdoptCloudProgress: (() -> Unit)? = null,
@@ -352,7 +353,7 @@ fun DetailScreen(
         Column(paneModifier) {
             DetailSections(
                 selected = activeSection,
-                commentsAvailable = commentsAvailable,
+                commentsAvailable = commentsAvailable, sourceComments = sourceCommentsContent != null,
                 chapterCount = chapters.size, commentCount = commentCount,
                 onSelect = { target ->
                     if (target == 0 || commentsAvailable) {
@@ -408,7 +409,9 @@ fun DetailScreen(
                             onCancelSourceSelection = onCancelSourceSelection,
                             sourceLoading = sourceLoading, sourceError = sourceError,
                         )
-                        else -> if (commentsAvailable) Box(Modifier.fillMaxSize()) {
+                        else -> if (sourceCommentsContent != null) {
+                            sourceCommentsContent(Modifier.fillMaxSize(), paneBottomPadding, commentsOpenRevision, active && targetSection == activeSection)
+                        } else if (commentsAvailable) Box(Modifier.fillMaxSize()) {
                             Box(Modifier.fillMaxSize().padding(end =
                                 if (platformKind == PlatformKind.DESKTOP) 12.dp else 0.dp)) {
                                 CommunityPanel(
@@ -1096,6 +1099,7 @@ private fun DetailSections(
     sourceLoading: Boolean, sourcesChecking: Boolean, pendingSourceCount: Int,
     onManageSources: () -> Unit,
     commentsAvailable: Boolean,
+    sourceComments: Boolean = false,
 ) {
     val labels = if (commentsAvailable) listOf("章节", "评论") else listOf("章节")
     val density = LocalDensity.current
@@ -1114,7 +1118,7 @@ private fun DetailSections(
         // Keep action width and the tab track continuous while the whole
         // section rail travels with the shrinking artwork above it.
         val actionsWidth by animateDpAsState(
-            targetValue = if (comments) 44.dp else sourceWidth + 48.dp,
+            targetValue = if (comments) { if (sourceComments) 0.dp else 44.dp } else sourceWidth + 48.dp,
             animationSpec = if (LocalMotionEnabled.current)
                 spring(dampingRatio = MangaMotion.NavigationDamping, stiffness = 430f)
                 else snap(),
@@ -1150,7 +1154,7 @@ private fun DetailSections(
                     if (!showingComments) DetailSourceAction(
                         sourceId, sourceName, sourceCount, pendingSourceCount,
                         sourceLoading, sourcesChecking, sourceWidth, onManageSources)
-                    DetailAction(
+                    if (!showingComments || !sourceComments) DetailAction(
                         icon = if (showingComments) Icons.Outlined.FilterList else if (downloadMode) Icons.Outlined.Check else Icons.Outlined.Download,
                         description = if (showingComments) {
                             if (filterOpen) "收起评论筛选" else "筛选评论"

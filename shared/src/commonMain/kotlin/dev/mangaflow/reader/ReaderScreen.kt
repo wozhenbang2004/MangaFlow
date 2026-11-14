@@ -7,6 +7,10 @@ import dev.mangaflow.ui.mangaNumberText
 
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.data.sources.materializeJmPage
+import dev.mangaflow.data.plugins.resolveScriptPage
+import dev.mangaflow.data.plugins.materializeScriptPage
+import dev.mangaflow.data.plugins.invalidateScriptImage
+import dev.mangaflow.data.plugins.discardFailedScriptImage
 
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.MangaLayout
@@ -467,9 +471,12 @@ fun ReaderScreen(
         { page ->
             experience.withImageAdmission(reader = true) {
                 val local = downloadStore.resolveReaderPage(manga.id, readingChapterId, page)
-                if (local.url.startsWith("file://")) local else
-                    materializeJmPage(adultImageContext, chapterSourceMangaId(manga.id, chapter),
-                        readingChapterId, local) ?: local
+                if (local.url.startsWith("file://")) local else {
+                    val owner = chapterSourceMangaId(manga.id, chapter)
+                    val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, local)
+                    val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved)
+                    materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
+                }
             }
         }
     }
@@ -481,7 +488,8 @@ fun ReaderScreen(
             val requestedIdentity = manga.id to sourceIdentity
             if (localImport) throw IllegalStateException("本地文件已损坏，请删除后重新导入")
             val expectedEntry = downloadStore.entryFor(manga.id, readingChapterId)
-            if (expectedEntry?.needsSourceRefresh == true) {
+            invalidateScriptImage(chapterSourceMangaId(manga.id, chapter), readingChapterId, sourcePage.sourceImageToken)
+            val retried = if (expectedEntry?.needsSourceRefresh == true) {
                 val route = downloadStore.routeForReadingDownload(manga.id, readingChapterId, expectedEntry)
                 val prepared = dev.mangaflow.data.foregroundRequest("刷新下载图片地址") {
                     repository.prepareDownload(adultImageContext, chapterSourceMangaId(manga.id, chapter),
@@ -502,6 +510,12 @@ fun ReaderScreen(
                 }
             } else experience.withImageAdmission(reader = true) {
                 downloadStore.retryReaderPage(manga.id, readingChapterId, sourcePage)
+            }
+            if (retried.url.startsWith("file://")) retried else experience.withImageAdmission(reader = true) {
+                val owner = chapterSourceMangaId(manga.id, chapter)
+                val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, retried)
+                val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved)
+                materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
             }
         }
     }
@@ -1317,6 +1331,7 @@ fun ReaderScreen(
         visible = showPageNavigator,
         pages = pages,
         headers = headers,
+        resolvePage = resolvePage,
         currentPage = pageIndex,
         collectedPages = pageCollections.filter { it.manga.id == manga.id && it.chapter.id == chapterId && !it.spread }
             .map(PageCollection::firstPage).toSet(),
@@ -1980,7 +1995,10 @@ private fun AdjacentPagePrefetch(
 private fun readerImageRequest(context: dev.mangaflow.platform.PlatformContext, page: Page, headers: Map<String, String>, sourceId: String = ""): ImageRequest.Builder =
     ImageRequest.Builder(imagePlatformContext(context))
         .data(page.url).readerPriority(sourceId.takeIf { it.isNotBlank() })
-        .httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
+        .httpHeaders(NetworkHeaders.Builder().apply {
+            headers.forEach { (name, value) -> set(name, value) }
+            page.headers.forEach { (name, value) -> set(name, value) }
+        }.build())
 
 @Composable
 private fun ReaderPage(
@@ -2035,7 +2053,9 @@ private fun ReaderPage(
     var observedDimensions by remember(page.url) { mutableStateOf<IntSize?>(null) }
     var measuredHeight by remember { mutableIntStateOf(0) }
     var reload by remember(page.url) { mutableIntStateOf(0) }
-    val attempt = remember(page.url, headers, sourceId, reload) { ReaderLoadAttempt() }
+    var fileRecoveryAttempted by remember(page.url) { mutableStateOf(false) }
+    var failedMaterializedUrl by remember(page.url) { mutableStateOf<String?>(null) }
+    val attempt = remember(page, headers, sourceId, reload) { ReaderLoadAttempt() }
     var error by remember(attempt) { mutableStateOf<String?>(null) }
     var loading by remember(attempt) { mutableStateOf(true) }
     var slowLoading by remember(attempt) { mutableStateOf(false) }
@@ -2069,6 +2089,8 @@ private fun ReaderPage(
         error = null
         resolvedPage = null
         try {
+            failedMaterializedUrl?.let { discardFailedScriptImage(context, it) }
+            failedMaterializedUrl = null
             val resource = if (reload > 0) retrySource(page) else resolve(page)
             currentCoroutineContext().ensureActive()
             if (!attempt.acceptsResult) return@LaunchedEffect
@@ -2136,7 +2158,7 @@ private fun ReaderPage(
         val previewWidth = viewportWidthPx.coerceIn(1, 1600)
         val previewHeight = with(density) { screenHeight.roundToPx() }.coerceIn(1, 4096)
         val resource = resolvedPage
-        val request = remember(resource?.url, headers, attempt, previewWidth, previewHeight) {
+        val request = remember(resource, headers, attempt, previewWidth, previewHeight) {
             resource?.let { requested -> readerImageRequest(context, requested, headers, sourceId)
                 // The preview need only fit this viewport. Telephoto keeps the original
                 // disk file for full-quality visible tiles and pinch zoom.
@@ -2158,10 +2180,14 @@ private fun ReaderPage(
                     } },
                     onError = { _, result -> if (attempt.acceptsResult) {
                         loadChanged(false)
-                        if (requested.url.startsWith("file:") && page.url.startsWith("https:")) {
+                        if (requested.url.startsWith("file:") &&
+                            (page.url.startsWith("https:") || page.sourceImageToken.isNotEmpty()) && !fileRecoveryAttempted) {
                             // Files can be removed by the download screen while this image is visible.
                             // Recover just this image from its retained source address.
-                            resolvedPage = page
+                            fileRecoveryAttempted = true
+                            failedMaterializedUrl = requested.url
+                            loadedImage = null
+                            reload++
                         } else {
                             loading = false
                             error = result.throwable.message ?: "图片暂时无法读取"
@@ -2323,6 +2349,7 @@ private fun ReaderPageNavigatorDialog(
     visible: Boolean,
     pages: List<Page>,
     headers: Map<String, String>,
+    resolvePage: suspend (Page) -> Page,
     currentPage: Int,
     collectedPages: Set<Int>,
     onToggleCollection: (Int) -> Unit,
@@ -2352,11 +2379,15 @@ private fun ReaderPageNavigatorDialog(
                 ) {
                     items(pages, key = { it.index }) { page ->
                         val selected = page.index == currentPage
-                        val request = remember(page.url, headers) {
-                            ImageRequest.Builder(imagePlatformContext(context)).data(page.url)
-                                .httpHeaders(NetworkHeaders.Builder().apply {
-                                    headers.forEach { (name, value) -> set(name, value) }
-                                }.build()).crossfade(0).build()
+                        var preview by remember(page) { mutableStateOf<Page?>(null) }
+                        LaunchedEffect(page, visible, resolvePage) {
+                            if (!visible) return@LaunchedEffect
+                            try { preview = resolvePage(page) }
+                            catch (cancel: CancellationException) { throw cancel }
+                            catch (_: Exception) { preview = null }
+                        }
+                        val request = remember(preview, headers) {
+                            preview?.let { readerImageRequest(context, it, headers).crossfade(0).build() }
                         }
                         Column(
                             Modifier.clip(RoundedCornerShape(10.dp))

@@ -1,5 +1,22 @@
 # MangaFlow detail · 2026-11-12
 
+## Unified source protocols and adult capabilities · 2026-11-14 (SOURCE-HOST-166–173)
+
+User supplied the Venera/Mihon/Suwayomi research and authorized “交给你彻底落地实现全部”. Subsequent clarification: “脚本源目前是复用别人的是吗然后我们再做我们自己的适配器实现的吗？”; additional authorization: “我提个醒脚本源有设计的不好的你也完全可以直接改”. Exact message IDs are unavailable. This expands CONTENT-MODE's previous existing-adapters-only scope; its single scope switch, shared UI, actual source identities and record separation remain binding. Source repairs retain their upstream base and cannot be silently overwritten by updates.
+
+| ID | Adopted requirement and implementation boundary |
+| --- | --- |
+| SOURCE-HOST-166 | Native Picacg/JM and imported Venera ComicSource/Mangayomi packages use one source manager and existing Manga/Chapter/Page routing. Repository indexing is inert; explicit install compiles and checks the actual source exports. Listing an upstream script does not establish site availability. |
+| SOURCE-HOST-167 | Common atomic package/repository storage and protocol/repository-qualified identities across Android/Windows/iOS. Explicit updates preserve current packages on errors and concurrent changes; local revisions retain upstream digests and require an explicit merge. |
+| SOURCE-HOST-168 | Dynamic capabilities drive the existing discovery/search, account, favorites and comment surfaces. Default all-source browsing/search keeps independent cursors, failures and retry. Source/feed/filter restoration and cancellation reject stale callbacks. Ordinary Copy data never fills an adult feed. |
+| SOURCE-HOST-169 | Native categories, ranking, filtered search, login, site favorites and comments use actual pinned upstream contracts. Site favorites remain independent from local shelf/progress; explicit mutations read actual state before toggles and verify the result. Passwords are not retained or automatically replayed. |
+| SOURCE-HOST-170 | Real operation diagnostics distinguish catalogue/search/detail/image manifest/image resolution/image transfer/image decoding/account/favorites/comments and retain last success plus sanitized failure. Detection is explicit, without a synthetic success or fallback feed. |
+| SOURCE-HOST-171 | Reuse existing Ovio/Motion controls, sheets, cover grids, quiet source rows and Haze roles. More than four feed choices use a grouped lazy sheet; filters are loaded only for the selected source/feed. Failures disclose on demand. No separate adult home/theme/reader. |
+| SOURCE-HOST-172 | Bounded three-platform QuickJS/DOM/crypto/network hosts, public HTTPS and fixed-IP/TLS checks, per-source protected sessions, cancellation and frozen routes. Source/manga/chapter/token/session identities govern lazy per-page hooks and private original-byte caching. Known JM strips are decoded on JVM/Android and iOS; arbitrary binary/image programs fail explicitly. JS downloads resume completed pages; native downloads retain existing Range behavior. |
+| SOURCE-HOST-173 | Optional Android APK hosting, interactive web verification, private-server script endpoints and arbitrary image programs remain open/unadvertised. Source implementation, compilation, installed function and visual acceptance are separate evidence; main CI builds/packages and users perform actual-use verification. No tests/local builds/probes or added CI gate. |
+
+Exact-version repairs retained with original code digests: NH 1.1.0 mixed-page cursor, JM 1.4.0 strip boundary/idempotent favorites/confirmed login, WNACG 1.0.6 cover URL. The bridge is independent protocol glue referencing Venera's parser/init contracts; full upstream source scripts remain user imports. Current source work has no site/account/device verification. Cross-platform compilation and installed UI/motion remain unverified until normal CI and user evidence.
+
 ## Copy shelf interruption and return · 2026-11-14 (COPY-MOTION-177–180)
 
 User continued the existing motion request with “继续” twice; exact message IDs unavailable. Preserve COPY-MOTION-171–176 and all cloud-owned ordering, account isolation, sync eligibility/actions and real book identities. This batch addresses source-confirmed interruption/return gaps rather than adding a new visual style.

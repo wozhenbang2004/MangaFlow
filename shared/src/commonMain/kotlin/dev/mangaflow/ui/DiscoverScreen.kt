@@ -198,6 +198,7 @@ fun DiscoverScreen(
     isFavorite: (Manga) -> Boolean,
     onToggleFavorite: (Manga) -> Unit,
     onManageSources: (() -> Unit)? = null,
+    sourceControls: (@Composable () -> Unit)? = null,
     active: Boolean = true,
 ) {
     val browse = if (!state.isSearch) state else backgroundState
@@ -212,13 +213,13 @@ fun DiscoverScreen(
     LaunchedEffect(browse.cacheKey) { sourceFan.clear() }
     val unobscured = active && !searchExpanded && actionsManga == null && ratingsManga == null && sourceFan.request == null
     val desktopActions: (Manga) -> List<DesktopMenuAction> = { manga ->
-        listOf(
+        listOfNotNull(
             DesktopMenuAction("查看详情") {
                 coverTransition?.select?.invoke(null)
                 onOpen(manga)
             },
             DesktopMenuAction(if (isFavorite(manga)) "移出书架" else "加入书架") { onToggleFavorite(manga) },
-            DesktopMenuAction("各站评分") { ratingsManga = manga },
+            if (state.sourceScope.startsWith("scoped:")) null else DesktopMenuAction("各站评分") { ratingsManga = manga },
         )
     }
     CompositionLocalProvider(LocalMetricSourceFan provides sourceFan) {
@@ -251,7 +252,7 @@ fun DiscoverScreen(
                     active = unobscured && selectedPane,
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
-                    onManageSources = onManageSources,
+                    onManageSources = onManageSources, sourceControls = sourceControls,
                     onManage = { actionsManga = it }, onRatings = { ratingsManga = it },
                     desktopActions = desktopActions,
                     topPadding = if (selectedPane) contentTopPadding else exitTopPadding)
@@ -277,7 +278,7 @@ fun DiscoverScreen(
                 MangaQuickAction(Icons.Outlined.BookmarkBorder, if (isFavorite(manga)) "移出书架" else "加入书架") {
                     onToggleFavorite(manga); dismiss()
                 }
-                MangaQuickAction(Icons.Outlined.StarOutline, "各站评分") {
+                if (!state.sourceScope.startsWith("scoped:")) MangaQuickAction(Icons.Outlined.StarOutline, "各站评分") {
                     actionsManga = null
                     ratingsManga = manga
                 }
@@ -319,6 +320,7 @@ internal fun DiscoverySearchResults(
     scopeInToolbar: Boolean = false,
     desktopMainContent: Boolean = false,
     desktopActions: ((Manga) -> List<DesktopMenuAction>)? = null,
+    sourceControls: (@Composable () -> Unit)? = null,
 ) {
     var retainedSearch by remember { mutableStateOf(state) }
     SideEffect { if (expanded) retainedSearch = state }
@@ -393,6 +395,7 @@ internal fun DiscoverySearchResults(
             // Chrome receives a finite share before the result list is measured. Even the
             // expanded tag/source directory can scroll here instead of measuring the list to zero.
             Column(Modifier.fillMaxWidth().heightIn(max = controlsRoom).verticalScroll(rememberScrollState())) {
+                sourceControls?.invoke()
                 SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
                     search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly,
                     onTagQuery = onTagQuery, maxChoicesHeight = choicesRoom, showScope = !scopeInToolbar)
@@ -624,6 +627,7 @@ private fun DiscoveryPane(
     onRetry: () -> Unit,
     onMore: () -> Unit,
     onManageSources: (() -> Unit)?,
+    sourceControls: (@Composable () -> Unit)?,
     onOpen: (Manga) -> Unit,
     onManage: (Manga) -> Unit,
     onRatings: (Manga) -> Unit,
@@ -684,7 +688,7 @@ private fun DiscoveryPane(
     if (desktop) DesktopBrowsePagination(state, enabled = active,
         nearEnd = { count ->
             val info = grid.layoutInfo
-            val chromeItems = 1 + (if (ranking) 0 else 1) +
+            val chromeItems = 1 + (if (sourceControls == null) 0 else 1) + (if (ranking) 0 else 1) +
                 (if (state.mode == DiscoveryMode.RECOMMENDED) 1 else 0)
             info.totalItemsCount == count + chromeItems &&
                 (info.visibleItemsInfo.lastOrNull()?.index ?: -1) >=
@@ -709,6 +713,7 @@ private fun DiscoveryPane(
         modifier = Modifier.fillMaxSize().then(if (desktop) Modifier else Modifier.bottomPullLoad(pull))
             .motionInputGate(active),
     ) {
+        if (sourceControls != null) item(span = { GridItemSpan(maxLineSpan) }, key = "source-controls") { sourceControls() }
         if (state.mode == DiscoveryMode.RECOMMENDED && (state.loading || state.items.isNotEmpty())) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "hero", contentType = "featured") {
                 // The gallery owns only its artwork. The following section can remain

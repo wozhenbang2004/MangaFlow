@@ -23,6 +23,7 @@ import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +49,12 @@ import coil3.request.ImageRequest
 import coil3.request.crossfade
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Page
+import dev.mangaflow.data.chapterSourceMangaId
+import dev.mangaflow.data.plugins.resolveScriptPage
+import dev.mangaflow.data.plugins.materializeScriptPage
+import dev.mangaflow.data.sources.materializeJmPage
+import dev.mangaflow.data.SourceKeys
+import kotlinx.coroutines.CancellationException
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -95,18 +102,37 @@ internal fun VolumeBookTile(
         DesktopMenuAction("章节信息", enabled = enabled, onClick = onActions),
     )
     val interaction = remember(mangaId, chapter.id) { MutableInteractionSource() }
-    val request = remember(mangaId, chapter.id, cover.page, cover.attempt, motion) {
-        cover.page?.let { page ->
+    val nativeJm = remember(mangaId, chapter.id) { SourceKeys.decodeChapter(mangaId, chapter.id).sourceId == "jmcomic" }
+    val scriptSource = remember(mangaId, chapter.id) { SourceKeys.decodeChapter(mangaId, chapter.id).sourceId.startsWith("js_") }
+    var resolvedCover by remember(mangaId, chapter.id, cover.page, cover.attempt) { mutableStateOf<Page?>(
+        cover.page?.takeIf { !nativeJm && !scriptSource && it.sourceImageToken.isEmpty() && it.transform.isEmpty() }) }
+    var resolvingCover by remember(mangaId, chapter.id, cover.page, cover.attempt) { mutableStateOf(false) }
+    LaunchedEffect(mangaId, chapter.id, cover.page, cover.attempt) {
+        val page = cover.page ?: return@LaunchedEffect
+        if (!nativeJm && !scriptSource && page.sourceImageToken.isEmpty() && page.transform.isEmpty()) { resolvedCover = page; return@LaunchedEffect }
+        resolvingCover = true
+        try {
+            val owner = chapterSourceMangaId(mangaId, chapter)
+            val resolved = materializeScriptPage(context, owner, chapter.id,
+                resolveScriptPage(context, owner, chapter.id, page))
+            resolvedCover = materializeJmPage(context, owner, chapter.id, resolved) ?: resolved
+        } catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { onCoverError() }
+        finally { resolvingCover = false }
+    }
+    val request = remember(mangaId, chapter.id, resolvedCover, cover.attempt, motion) {
+        resolvedCover?.let { page ->
             ImageRequest.Builder(imagePlatformContext(context)).data(page.url).apply {
                 if (!page.url.startsWith("file:")) httpHeaders(NetworkHeaders.Builder().apply {
                     imageHeaders().forEach { (name, value) -> set(name, value) }
+                    page.headers.forEach { (name, value) -> set(name, value) }
                 }.build())
             }.crossfade(if (motion) MangaMotion.Quick else 0).build()
         }
     }
     var imageLoading by remember(request) { mutableStateOf(request != null) }
     var imageReady by remember(request) { mutableStateOf(false) }
-    val busy = rememberDelayedBusy(cover.loading || imageLoading)
+    val busy = rememberDelayedBusy(cover.loading || resolvingCover || imageLoading)
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopStart) {
         DesktopContextMenuArea(desktopActions) {
             Column(

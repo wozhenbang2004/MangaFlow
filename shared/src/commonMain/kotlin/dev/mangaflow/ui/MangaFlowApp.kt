@@ -1,5 +1,8 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.data.sources.SourceCapabilities
+import dev.mangaflow.data.sources.SourceFeature
+
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.StateFlow
@@ -303,6 +306,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val update by model.updates.state.collectAsStateWithLifecycle()
     var restrictedMode by remember { mutableStateOf(false) }
     var profileSourcesOpen by remember { mutableStateOf(false) }
+    var sourceDetailsId by remember { mutableStateOf<String?>(null) }
+    var sourceDetailsManga by remember { mutableStateOf<Manga?>(null) }
+    var detailSourceCapabilities by remember(detail?.manga?.id) { mutableStateOf(SourceCapabilities(emptySet())) }
     var sourceSettingsOpen by remember { mutableStateOf(false) }
     val profileKey = if (restrictedMode) "restricted" else "ordinary"
     val ordinarySection = rememberSaveable { mutableStateOf(Section.DISCOVER.name) }
@@ -393,8 +399,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         sourceEntries.filter { it.adult == restrictedMode }
     }
     val usableScopedSources = remember(sourceEntries, sourceSignedIn) {
-        sourceEntries.filter { it.adult && it.enabled && it.isInstalled && !it.removed &&
-            (it.source.id != "picacg" || sourceSignedIn) }.map { it.source }
+        sourceEntries.filter { it.adult && it.enabled && it.isInstalled && !it.removed }.map { it.source }
     }
     val scopedUnavailableReason = remember(sourceEntries, sourceSignedIn, usableScopedSources) {
         val registered = sourceEntries.filter { it.adult && !it.removed }
@@ -409,6 +414,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 "当前来源需要登录，请先到账号页登录后重试。"
             else -> "此分区暂时没有已就绪的来源，请查看来源状态。"
         }
+    }
+    LaunchedEffect(detail?.manga?.id, sourceEntries) {
+        val work = detail?.manga ?: return@LaunchedEffect
+        if (sourceEntries.none { it.source.id == work.sourceId && it.adult && it.isInstalled && !it.removed }) return@LaunchedEffect
+        try { detailSourceCapabilities = model.repository.sourceCapabilities(work.sourceId) }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (_: Exception) { detailSourceCapabilities = SourceCapabilities(emptySet()) }
     }
     SideEffect {
         ordinaryBrowse.setActive(!restrictedMode)
@@ -563,16 +575,20 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         onSelect = scopedBrowse::selectSource,
         onManage = { sourceSettingsOpen = true },
         onDismiss = { profileSourcesOpen = false },
-        unavailableReasons = if (sourceSignedIn) emptyMap()
-            else mapOf("picacg" to "需要先在账号页登录"),
-        onAccount = if (!sourceSignedIn && profileEntries.any {
-            it.source.id == "picacg" && it.enabled && it.isInstalled && !it.removed
-        }) { { changeSection(Section.ACCOUNT) } } else null,
+        onInspect = { id -> sourceDetailsManga = null; sourceDetailsId = id },
+        onAccount = { changeSection(Section.ACCOUNT) },
     )
     if (sourceSettingsOpen) BodySourceSettingsSheet(
         model.bodySources, drawerBackdrop, model.sourcePlugins,
         onDismiss = { sourceSettingsOpen = false }, importAsAdult = restrictedMode,
+        repository = model.repository,
     )
+    sourceDetailsId?.let { id -> sourceEntries.firstOrNull { it.source.id == id && it.isInstalled && !it.removed }?.let { entry ->
+        SourceCapabilityDetailsSheet(entry.source, model.repository, model.sourcePlugins, drawerBackdrop,
+            manga = sourceDetailsManga?.takeIf { it.sourceId == id },
+            onDismiss = { sourceDetailsId = null; sourceDetailsManga = null },
+            onSourceChanged = { scopedBrowse.invalidateSource(id) })
+    } }
     val openDesktopSearch: () -> Unit = {
         // The regular reader/detail close paths retain their own positions and cancellation.
         model.closeReader()
@@ -612,6 +628,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     }
                 }
                 DiscoverySearchResults(browse, expanded = true, active = true,
+                    sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
+                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }) } } else null,
                     maxHeight = panelHeight, repository = model.repository,
                     onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
                     onOpen = { manga -> selectedCover = null; dismiss(); model.openManga(manga) },
@@ -943,7 +961,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 repository = model.repository,
                                 loading = current.state.loading, error = current.state.error,
                                 reviews = current.state.reviews, reviewsLoading = current.state.reviewsLoading,
-                                commentsAvailable = !restrictedMode,
+                                commentsAvailable = !restrictedMode || detailSourceCapabilities.supports(SourceFeature.COMMENTS),
+                                sourceCommentsContent = if (restrictedMode && detailSourceCapabilities.supports(SourceFeature.COMMENTS)) {
+                                    { modifier, bottom, revision, paneActive -> SourceCapabilityComments(model.repository,
+                                        current.state.manga, modifier, bottom, revision, paneActive) }
+                                } else null,
                                 isFavorite = favorites.any { it.id == current.state.manga.id },
                                 progress = history.firstOrNull { it.manga.id == current.state.manga.id },
                                 chapterPositions = chapterPositions,
@@ -967,7 +989,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 onClearChapterSource = model::clearChapterSource,
                                 onSplitVariant = model::splitChapterSource,
                                 onRelinkVariant = model::relinkChapterSource,
-                                onManageSources = model::manageSources,
+                                onManageSources = if (restrictedMode) {
+                                    { sourceDetailsManga = current.state.manga; sourceDetailsId = current.state.manga.sourceId }
+                                } else model::manageSources,
                                 onCancelSourceSelection = model::cancelSourceSelection,
                                 sourceLoading = sourceOperation.loading,
                                 pendingSourceCount = sourceDiscovery[current.state.manga.id]?.values?.count {
@@ -1146,6 +1170,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 onRefresh = browseActions::refresh,
                                                 onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
                                                 onManageSources = if (restrictedMode) manageProfileSources else null,
+                                                sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
+                                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }) } } else null,
                                                 onOpen = { model.openManga(it) },
                                                 isFavorite = { manga -> favorites.any { it.id == manga.id } },
                                                 onToggleFavorite = model::toggleFavorite,
@@ -1156,6 +1182,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 .mangaHazeSource(searchBackdrop)) {
                                                 DiscoverySearchResults(
                                                     state = browse, expanded = true, active = rootActive,
+                                                    sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
+                                                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }) } } else null,
                                                     maxHeight = maxHeight, repository = model.repository,
                                                     backdrop = searchBackdrop, scopeInToolbar = true,
                                                     desktopMainContent = true,
@@ -1224,11 +1252,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onCancelPreparation = model::cancelChapterPreparation,
                                         onRetryPreparation = model::retryChapterPreparation)
                                     Section.ACCOUNT -> if (restrictedMode) ContentProfileAccountScreen(
-                                        picacg = model.picacgSource,
-                                        hasAccountSource = profileEntries.any { it.source.id == "picacg" &&
-                                            it.enabled && it.isInstalled && !it.removed },
+                                        repository = model.repository,
+                                        sources = profileEntries.filter { it.enabled && it.isInstalled && !it.removed }.map { it.source },
                                         active = rootActive, onSources = manageProfileSources,
-                                        onSessionChange = scopedBrowse::refresh, contentTopPadding = chromePadding,
+                                        onSessionChange = { profileEntries.forEach { scopedBrowse.invalidateSource(it.source.id) } }, onOpen = { model.openManga(it) },
+                                        isLocalFavorite = { manga -> favorites.any { it.id == manga.id } },
+                                        onToggleLocalFavorite = model::toggleFavorite,
+                                        onInspect = { id -> sourceDetailsManga = null; sourceDetailsId = id },
+                                        contentTopPadding = chromePadding,
                                     ) else AccountScreen(
                                         state = displayedAccount, repository = model.repository,
                                         active = rootActive && !searchVisible,
@@ -1298,7 +1329,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     searching = desktopSearchContent, backdrop = searchBackdrop,
                                     onLeaveSearch = closeSearch, navigation = navigation,
                                     tabs = { tabModifier ->
-                                        BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryModes.map { it.label }, tabModifier) { index ->
+                                        BrowseTabs(discoveryModes.indexOf(displayedDiscovery.mode).coerceAtLeast(0), discoveryModes.map { if (restrictedMode) "发现" else it.label }, tabModifier) { index ->
                                             closeSearch()
                                             browseActions.selectDiscovery(discoveryModes[index], clearQuery = true)
                                         }
@@ -1375,7 +1406,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 onRefresh = browseActions::refresh)
                                         }
                                     }) {
-                                    BrowseTabs(discoveryModes.indexOf(browse.mode).coerceAtLeast(0), discoveryModes.map { it.label },
+                                    BrowseTabs(discoveryModes.indexOf(browse.mode).coerceAtLeast(0), discoveryModes.map { if (restrictedMode) "发现" else it.label },
                                         Modifier.fillMaxWidth().padding(horizontal = 4.dp)
                                             .graphicsLayer { alpha = 1f - .24f * (rankingEmphasis?.value ?: 0f) }
                                             .onGloballyPositioned { coordinates ->
@@ -1409,6 +1440,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 .padding(horizontal = 8.dp, vertical = 2.dp),
                         ) { maxHeight, searchActive ->
                             DiscoverySearchResults(
+                                sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
+                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }) } } else null,
                                 state = browse, expanded = searchExpanded, active = searchActive,
                                 scopeInToolbar = true,
                                 maxHeight = maxHeight, repository = model.repository,

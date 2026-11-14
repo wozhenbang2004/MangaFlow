@@ -43,7 +43,19 @@ data class Chapter(
 
 data class MangaPage(val items: List<Manga>, val hasMore: Boolean, val nextPage: Int? = null)
 data class MangaDetail(val manga: Manga, val chapters: List<Chapter>)
-data class Page(val index: Int, val url: String, val width: Int = 0, val height: Int = 0)
+data class Page(
+    val index: Int, val url: String, val width: Int = 0, val height: Int = 0,
+    /** Request-scoped image headers; durable storage uses a protected owner-bound reference. */
+    val headers: Map<String, String> = emptyMap(),
+    val headerSecretRef: String = "",
+    /** Authenticates this exact image URL without duplicating a chapter's shared vault item. */
+    val headerSecretBinding: String = "",
+    /** Opaque source image identity, resolved only when this page is actually requested. */
+    val sourceImageToken: String = "",
+    val sourceRevision: String = "",
+    val sourceSessionEpoch: String = "",
+    val transform: String = "",
+)
 
 interface MangaRepository {
     /** Zero-based pages. Source adapters own their upstream page size. */

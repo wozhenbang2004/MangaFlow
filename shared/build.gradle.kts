@@ -125,6 +125,7 @@ kotlin {
         desktopMain.dependsOn(nonAndroidMain)
         iosMain.get().dependsOn(nonAndroidMain)
         commonMain.dependencies {
+            implementation("io.github.dokar3:quickjs-kt:1.0.18")
             implementation("io.github.alexzhirkevich:qrose:1.3.1")
             api(compose.runtime)
             api(compose.ui)
@@ -182,7 +183,6 @@ kotlin {
             implementation("me.saket.telephoto:sub-sampling-image:0.16.0")
             implementation("com.google.ai.edge.litert:litert:1.4.2")
             implementation(files(optionalOnnxApi.flatMap { it.archiveFile }))
-            implementation("io.github.dokar3:quickjs-kt:1.0.18")
         }
         desktopMain.dependencies {
             implementation(project.dependencies.platform("com.squareup.okhttp3:okhttp-bom:$okHttpVersion"))

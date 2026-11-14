@@ -7,7 +7,7 @@ import kotlin.time.TimeSource
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 
-import dev.mangaflow.data.sources.BodySource
+import dev.mangaflow.data.sources.*
 import dev.mangaflow.data.sources.BodySourceInfo
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
@@ -36,6 +36,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.collect
+import dev.mangaflow.data.plugins.scriptImageEvents
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.Mutex
@@ -54,6 +56,8 @@ class UnifiedMangaRepository(
     bodySources: List<BodySource> = listOf(KomiicBodySource(), MangaDexBodySource()),
     private val catalogStore: ReaderCatalogStore? = null,
 ) : MangaRepository {
+    private val diagnostics = SourceDiagnostics()
+    val sourceHealth = diagnostics.state
     private val builtinAdapters = bodySources.associateBy { it.info.id }
     private val copyInfo = BodySourceInfo("copy", "拷贝", "简中", "https://www.copy3000.com", "")
     private data class SourceSnapshot(val adapters: Map<String, BodySource>, val infos: List<BodySourceInfo>,
@@ -103,6 +107,16 @@ class UnifiedMangaRepository(
     private var discoveryCacheEpoch = 0L
     private val pageCacheGenerations = mutableMapOf<String, Long>()
     private val searchTerms = LinkedHashMap<String, MutableMap<String, String>>()
+
+    init {
+        scope.launch {
+            scriptImageEvents.collect { event ->
+                if (sourceSnapshot.adapters.containsKey(event.sourceId)) diagnostics.imageResult(event.sourceId,
+                    when (event.stage) { "decode" -> SourceStage.IMAGE_DECODE; "image" -> SourceStage.IMAGE_READ; else -> SourceStage.IMAGE_RESOLVE },
+                    event.success, event.at)
+            }
+        }
+    }
 
     /** Installed sources remain readable; this eligibility controls search and automatic matching. */
     fun enabledSources(): Set<String> = sourceEligibility.ids.toSet()
@@ -206,7 +220,9 @@ class UnifiedMangaRepository(
                         (if (it.page.items.isEmpty()) EMPTY_SEARCH_CACHE_NANOS else DISCOVERY_TTL_NANOS) &&
                     (!forceRefresh || it.storedAt >= requestedAt) }?.page
             }?.let { return@withLock it }
-            val result = if (sourceId == "copy") copy.search(key.query, page) else adapter(sourceId).search(key.query, page)
+            val result = diagnostics.track(sourceId, SourceStage.SEARCH) {
+                if (sourceId == "copy") copy.search(key.query, page) else adapter(sourceId).search(key.query, page)
+            }
             if (sourceId.startsWith("js_") && synchronized(unifiedMangaRepositoryStateLock) { (pageCacheGenerations[sourceId] ?: 0L) != generation })
                 throw CancellationException("源包已更新或移除，请重新搜索。")
             if (synchronized(unifiedMangaRepositoryStateLock) { (pageCacheGenerations[sourceId] ?: 0L) == generation }) synchronized(unifiedMangaRepositoryStateLock) {
@@ -222,10 +238,49 @@ class UnifiedMangaRepository(
     }
 
     /** Explicit private-source browsing does not add the adapter to global search/matching. */
-    suspend fun browseSource(sourceId: String, page: Int = 0): MangaPage {
+    suspend fun browseSource(sourceId: String, page: Int = 0, request: SourceBrowseRequest? = null): MangaPage {
         require(page in 0..100_000) { "页码无效。" }
-        return if (sourceId == "copy") copy.discover(page) else adapter(sourceId).discover(page)
+        return diagnostics.track(sourceId, SourceStage.CATALOGUE) {
+            if (sourceId == "copy") copy.discover(page)
+            else if (request == null) adapter(sourceId).discover(page) else adapter(sourceId).browse(request.copy(page = page))
+        }
     }
+
+    suspend fun sourceCapabilities(id: String): SourceCapabilities = if (id == "copy") SourceCapabilities() else adapter(id).capabilities()
+    suspend fun sourceFeeds(id: String): List<SourceFeed> = if (id == "copy") emptyList() else adapter(id).feeds()
+    suspend fun sourceFeedFilters(id: String, feedId: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).feedFilters(feedId)
+    suspend fun sourceSearchFilters(id: String): List<SourceFilter> = if (id == "copy") emptyList() else adapter(id).searchFilters()
+    suspend fun sourceFilteredSearch(id: String, query: String, page: Int, options: List<String>, forceRefresh: Boolean = false): MangaPage =
+        if (options.isEmpty()) searchSource(id, query, page, forceRefresh) else diagnostics.track(id, SourceStage.SEARCH) {
+            adapter(id).searchFiltered(query, page, options)
+        }
+    suspend fun sourceSettings(id: String): List<SourceSetting> = if (id == "copy") emptyList() else adapter(id).settings()
+    suspend fun saveSourceSetting(id: String, key: String, value: String) { adapter(id).saveSetting(key, value); invalidatePageCache(id) }
+    suspend fun sourceAccountState(id: String): SourceAccountState = adapter(id).accountState()
+    suspend fun sourceLogin(id: String, user: String, password: String) = diagnostics.track(id, SourceStage.ACCOUNT) {
+        adapter(id).login(user, password); invalidatePageCache(id)
+    }
+    suspend fun sourceLogout(id: String) = diagnostics.track(id, SourceStage.ACCOUNT) {
+        adapter(id).logout(); invalidatePageCache(id)
+    }
+    suspend fun sourceFavoriteFolders(id: String): List<SourceFavoriteFolder> = diagnostics.track(id, SourceStage.FAVORITES) {
+        adapter(id).favoriteFolders()
+    }
+    suspend fun sourceFavorites(id: String, folder: String, page: Int): MangaPage = diagnostics.track(id, SourceStage.FAVORITES) {
+        adapter(id).favorites(folder, page)
+    }
+    suspend fun sourceSetFavorite(id: String, mangaId: String, folder: String, favorite: Boolean) = diagnostics.track(id, SourceStage.FAVORITES) {
+        val ref = SourceKeys.decodeManga(mangaId)
+        require(ref.sourceId == id) { "作品和站点收藏来源不一致。" }
+        adapter(id).setFavorite(ref.mangaId, folder, favorite)
+    }
+    suspend fun sourceComments(id: String, mangaId: String, page: Int): SourceCommentPage = diagnostics.track(id, SourceStage.COMMENTS) {
+        val ref = SourceKeys.decodeManga(mangaId)
+        require(ref.sourceId == id) { "作品和评论来源不一致。" }
+        adapter(id).comments(ref.mangaId, page)
+    }
+    /** Explicit user action; no scheduler, automatic availability probe or account retry. */
+    suspend fun sourceProbe(id: String) { browseSource(id, 0) }
 
     /** Each callback is an immutable cumulative snapshot of this requested batch only. */
     suspend fun searchAll(query: String, pages: Map<String, Int>? = null, forceRefresh: Boolean = false,
@@ -666,7 +721,9 @@ class UnifiedMangaRepository(
                             (!forceRefresh || stamp.at >= requestedAt)
                     } == true }
                 }?.let { return@withLock it }
-                val loaded = if (sourceId == "copy") copy.detail(id) else adapter(sourceId).detail(id)
+                val loaded = diagnostics.track(sourceId, SourceStage.DETAIL) {
+                    if (sourceId == "copy") copy.detail(id) else adapter(sourceId).detail(id)
+                }
                 synchronized(unifiedMangaRepositoryStateLock) {
                     if ((pageCacheGenerations[sourceId] ?: 0L) != generation)
                         throw CancellationException("来源已更新或移除，请重新打开作品。")
@@ -783,9 +840,9 @@ class UnifiedMangaRepository(
             // Match Copy's reader/download handoff: refresh may join a live fetch, never a completed one.
             val shared = pageRequests[key]?.takeIf { it.generation == generation && !it.result.isCompleted }
                 ?: ChapterPageRequest(generation, scope.async(start = CoroutineStart.LAZY) {
-                    val loaded = adapter(ref.sourceId).pages(
+                    val loaded = diagnostics.track(ref.sourceId, SourceStage.PAGES) { adapter(ref.sourceId).pages(
                         SourceKeys.manga(ref.sourceId, ref.mangaId), key, forceRefresh,
-                    ).toList()
+                    ).toList() }
                     if (loaded.isEmpty()) throw SourceException("这个来源没有返回本章图片，请重试或选择其他来源。")
                     val requestContext = currentCoroutineContext()
                     requestContext.ensureActive()

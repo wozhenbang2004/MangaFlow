@@ -22,6 +22,12 @@ import okio.use as useOkio
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
+import dev.mangaflow.data.plugins.resolveScriptPage
+import dev.mangaflow.data.plugins.materializeScriptPage
+import dev.mangaflow.data.plugins.protectScriptPageHeaders
+import dev.mangaflow.data.plugins.restoreScriptPageHeaders
+import dev.mangaflow.data.plugins.scriptImageOwner
+import dev.mangaflow.data.plugins.ScriptImageRefreshRequired
 import dev.mangaflow.experience.maximumBackgroundPageParallelism
 import dev.mangaflow.data.sources.JmDownloadSession
 import dev.mangaflow.data.sources.createJmDownloadSession
@@ -162,9 +168,19 @@ class DownloadStore private constructor(context: Context) {
             val folder = directory(id)
             val restored = runCatching {
                 val json = JSONObject(AtomicFile(File(folder, "manifest.json")).openRead().bufferedReader().use { it.readText() })
-                readRecord(json).takeIf { it.entry.id == id }
+                readRecord(json).takeIf { it.entry.id == id }?.let { record ->
+                    val owner = scriptImageOwner(record.entry.manga.id, record.entry.chapter.id)
+                    var needsRefresh = false
+                    val pages = record.pages.map { page ->
+                        try { restoreScriptPageHeaders(context, owner, page) }
+                        catch (_: Exception) { needsRefresh = true; page }
+                    }
+                    record.copy(pages = pages, entry = record.entry.copy(
+                        needsSourceRefresh = record.entry.needsSourceRefresh || needsRefresh))
+                }
             }.getOrNull()
-            prunePartialDownloads(id, restored?.pages.orEmpty(), restored?.headers.orEmpty())
+            if (restored?.entry?.needsSourceRefresh != true)
+                prunePartialDownloads(id, restored?.pages.orEmpty(), restored?.headers.orEmpty())
             // File metadata is enough for the initial index. Decode only a requested page now;
             // all remaining image headers are checked by background validation.
             val presentBytes = restored?.pages?.indices?.mapNotNull { index ->
@@ -411,7 +427,10 @@ class DownloadStore private constructor(context: Context) {
     ): String? = withContext(Dispatchers.IO) {
         awaitReady()
         require(pages.isNotEmpty()) { "本章没有可下载的图片" }
-        require(pages.all { it.url.startsWith("https://") }) { "仅支持安全的 HTTPS 图片地址" }
+        val imageSource = dev.mangaflow.data.SourceKeys.decodeChapter(manga.id, chapter.id).sourceId
+        require(pages.all { it.url.startsWith("https://") || imageSource.startsWith("js_") &&
+            it.url.startsWith("mangaflow-script://$imageSource/") && it.sourceImageToken.isNotEmpty() &&
+            it.sourceRevision.matches(Regex("[a-f0-9]{64}")) }) { "图片地址或脚本来源标识无效。" }
         val id = chapterKey(manga.id, chapter.id)
         changeChapter(id) {
             val (change, capturedRoute) = synchronized(lock) {
@@ -429,7 +448,7 @@ class DownloadStore private constructor(context: Context) {
                 // A later pause/retry/removal supersedes a source refresh that was waiting for I/O.
                 if (records[id] !== change?.detached) return@changeChapter null
                 val old = change?.previous
-                val sameContent = old?.pages?.map { it.url.substringBefore('?') } == pages.map { it.url.substringBefore('?') }
+                val sameContent = old?.pages?.map(::pageManifestIdentity) == pages.map(::pageManifestIdentity)
                 if (old != null && !sameContent) directory(id).listFiles()?.filter { it.name != "manifest.json" }?.forEach {
                     if (!it.delete() && it.exists()) throw IOException("无法替换本地章节图片")
                 }
@@ -595,7 +614,7 @@ class DownloadStore private constructor(context: Context) {
             synchronized(lock) { records[id] }
         } ?: return@withContext page
         val stored = snapshot.pages.getOrNull(page.index) ?: return@withContext page
-        if (stored.url.substringBefore('?') != page.url.substringBefore('?')) return@withContext page
+        if (pageManifestIdentity(stored) != pageManifestIdentity(page)) return@withContext page
         try {
             localPage(snapshot, page.index)?.let { return@withContext it }
             // A failed download policy never hides a validated local page or changes reader networking.
@@ -697,7 +716,9 @@ class DownloadStore private constructor(context: Context) {
                         synchronized(lock) {
                             val latest = records[key.id]
                             if (latest?.generation == key.generation && latest.entry.status in ACTIVE_STATUSES) {
-                                val permanent = failure as? PermanentDownloadException
+                                val permanent = failure as? PermanentDownloadException ?: (failure as? ScriptImageRefreshRequired)?.let {
+                                    PermanentDownloadException(it.message ?: "来源会话已变化，请刷新图片地址。", true)
+                                }
                                 transferFailures[key.id] = TransferFailure(key.generation, failure)
                                 val failed = latest.copy(entry = latest.entry.copy(
                                     status = if (permanent != null || failure is DownloadStorageException || failure is DownloadRouteException) DownloadStatus.FAILED else DownloadStatus.WAITING,
@@ -778,9 +799,20 @@ class DownloadStore private constructor(context: Context) {
         snapshot: DownloadRecord, key: PageTransferKey, client: NetworkClient?, jm: JmDownloadSession?,
     ): Page? {
         localPage(snapshot, key.index)?.let { return it }
-        val page = snapshot.pages[key.index]
+        val original = snapshot.pages[key.index]
+        val page = resolveScriptPage(context, snapshot.entry.manga.id, snapshot.entry.chapter.id, original, snapshot.route)
+        val imageHeaders = snapshot.headers + page.headers
+        // Keep the actual request identity for validated partials across pause/restart.
+        // The source token and revision remain attached for future explicit refreshes.
+        synchronized(lock) {
+            val current = records[key.id]
+            if (current == null || current.generation != key.generation || current.entry.status !in ACTIVE_STATUSES) return null
+            if (current.pages[key.index] != page) save(current.copy(pages = current.pages.mapIndexed { index, value ->
+                if (index == key.index) page else value
+            }))
+        }
         val destination = pageFile(key.id, key.index)
-        val partial = downloadPagePartial(destination, page.url, snapshot.headers)
+        val partial = downloadPagePartial(destination, page.url, imageHeaders)
         var materializedJm = false
         var ownedClient: NetworkClient? = null
         var ownedJm: JmDownloadSession? = null
@@ -793,7 +825,9 @@ class DownloadStore private constructor(context: Context) {
             // A reader can claim an active download before its worker starts. Such a shared
             // transfer still belongs to the download's route; ordinary online reading has no
             // download record and never enters this path.
-            if (client == null && jm == null) {
+            val scriptSource = dev.mangaflow.data.SourceKeys.decodeChapter(snapshot.entry.manga.id, snapshot.entry.chapter.id)
+                .sourceId.startsWith("js_")
+            if (!scriptSource && client == null && jm == null) {
                 val route = checkNotNull(snapshot.route) { "下载线路尚未准备，请重试。" }
                 ownedJm = createJmDownloadSession(context, snapshot.entry.manga.id, snapshot.entry.chapter.id, route)
                 if (ownedJm == null) ownedClient = NetworkClient(
@@ -803,8 +837,25 @@ class DownloadStore private constructor(context: Context) {
             }
             // The JM CDN returns scrambled JPEG bytes. Materialize the decoded page before
             // validating or publishing it; background workers use the native source bridge.
-            val decoded = (jm ?: ownedJm)?.read(page)
-            val bounds = if (decoded != null) {
+            val scriptFile = if (scriptSource) {
+                val materialized = materializeScriptPage(context, snapshot.entry.manga.id,
+                    snapshot.entry.chapter.id, page, snapshot.route)
+                val path = dev.mangaflow.reader.readerFilePath(materialized.url)
+                    ?: throw PermanentDownloadException("来源图片未完成解码。")
+                val file = File(path)
+                require(file.length() in 128L..96L * 1024 * 1024) { "来源图片解码结果无效。" }
+                file
+            } else null
+            val decoded = if (scriptSource) null else (jm ?: ownedJm)?.read(page)
+            val bounds = if (scriptFile != null) {
+                // Script transfers retain complete pages on interruption. Their HTTP/TLS
+                // transport stays in the restricted source host, including plain images.
+                materializedJm = true
+                discardDownloadPartial(partial)
+                scriptFile.copyTo(partial, overwrite = true)
+                syncStorageFile(partial)
+                storageImageBounds(partial) ?: throw PermanentDownloadException("来源图片不完整。")
+            } else if (decoded != null) {
                 materializedJm = true
                 discardDownloadPartial(partial)
                 if (decoded.size.toLong() !in 128L..(96L * 1024L * 1024L))
@@ -813,7 +864,7 @@ class DownloadStore private constructor(context: Context) {
                 syncStorageFile(partial)
                 storageImageBounds(partial)
                     ?: throw PermanentDownloadException("解码后的图片不完整")
-            } else downloadPageFile(page.url, snapshot.headers, partial, client ?: ownedClient)
+            } else downloadPageFile(page.url, imageHeaders, partial, client ?: ownedClient)
             val savedBytes = partial.length()
             currentCoroutineContext().ensureActive()
             return synchronized(lock) {
@@ -1073,7 +1124,7 @@ class DownloadStore private constructor(context: Context) {
         val files = folder.listFiles().orEmpty().filter { ".part" in it.name }
         if (files.isEmpty()) return
         val expected = pages.mapIndexed { index, page ->
-            downloadPagePartial(pageFile(id, index), page.url, headers).name
+            downloadPagePartial(pageFile(id, index), page.url, headers + page.headers).name
         }.toSet()
         for (file in files) {
             val partialName = when {
@@ -1109,7 +1160,15 @@ class DownloadStore private constructor(context: Context) {
             val atomic = AtomicFile(File(targetDirectory, "manifest.json"))
             val stream = atomic.startWrite()
             try {
-                stream.write(record.toJson().toString().encodeToByteArray())
+                val owner = scriptImageOwner(record.entry.manga.id, record.entry.chapter.id)
+                val script = dev.mangaflow.data.SourceKeys.decodeChapter(record.entry.manga.id, record.entry.chapter.id)
+                    .sourceId.startsWith("js_")
+                val protected = record.copy(pages = record.pages.map { page ->
+                    if (script || page.headers.isNotEmpty() || page.headerSecretRef.isNotEmpty())
+                        protectScriptPageHeaders(context, owner, page.copy(headers = record.headers + page.headers))
+                    else page
+                })
+                stream.write(protected.toJson().toString().encodeToByteArray())
                 atomic.finishWrite(stream)
             } catch (error: Throwable) {
                 atomic.failWrite(stream)
@@ -1198,6 +1257,9 @@ private fun naturalCompare(left: String, right: String): Int {
     }
     return (left.length - leftIndex).compareTo(right.length - rightIndex)
 }
+
+private fun pageManifestIdentity(page: Page): String = if (page.sourceImageToken.isNotEmpty())
+    page.sourceRevision + ":" + page.sourceImageToken else page.url.substringBefore('?')
 
 private fun DownloadRecord.toJson() = JSONObject().apply {
     put("schema", 1)

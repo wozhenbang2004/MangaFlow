@@ -10,7 +10,13 @@ import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.UnifiedMangaRepository
-import dev.mangaflow.data.sources.BodySourceInfo
+import dev.mangaflow.data.sources.*
+import dev.mangaflow.data.Manga
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import dev.mangaflow.platform.wallTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -74,328 +80,363 @@ internal class StandardBrowseActions(private val model: MangaViewModel) : Browse
     override fun browseBackground(selection: BrowseState): BrowseState = model.browseBackground(selection)
 }
 
-/**
- * UI-scoped state for an explicitly supplied set of installed sources.
- * Calls only the repository's existing opaque browse/title-search operations.
- */
-internal class ScopedBrowseController(
-    private val repository: UnifiedMangaRepository,
-    private val scope: CoroutineScope,
-) : BrowseUiActions {
-    private data class SelectionKey(val source: String, val revision: String, val selection: String)
+data class ScopedSourceControls(
+    val sources: List<BodySourceInfo> = emptyList(), val selectedSource: String = "*",
+    val capabilities: SourceCapabilities = SourceCapabilities(), val feeds: List<SourceFeed> = emptyList(),
+    val feedId: String = "", val options: List<String> = emptyList(), val searchFilters: List<SourceFilter> = emptyList(),
+    val loading: Boolean = false, val error: String? = null,
+)
 
+/** One shared browse journey; every source retains its own cursor and failure. */
+internal class ScopedBrowseController(private val repository: UnifiedMangaRepository, private val scope: CoroutineScope) : BrowseUiActions {
     private val mutableState = MutableStateFlow(emptyState())
     override val state: StateFlow<BrowseState> = mutableState.asStateFlow()
-    var sourceId: String = ""
+    private val mutableControls = MutableStateFlow(ScopedSourceControls())
+    val controls: StateFlow<ScopedSourceControls> = mutableControls.asStateFlow()
+    var sourceId: String = ALL
         private set
     private var sources = emptyList<BodySourceInfo>()
     private var unavailableReason: String? = null
     private var active = false
     private var disposed = false
     private var generation = 0L
+    private var controlsGeneration = 0L
     private var requestJob: Job? = null
-    private val snapshots = linkedMapOf<SelectionKey, BrowseState>()
-    private val nextPages = mutableMapOf<SelectionKey, Int>()
+    private var controlsJob: Job? = null
+    private var controlsOwner: String? = null
+    private data class PendingLoad(val force: Boolean, val debounce: Boolean)
+    private var pendingLoad: PendingLoad? = null
+    private val readyMetadata = mutableSetOf<String>()
+    private val feedFilterCache = mutableMapOf<String, List<SourceFilter>>()
+    private val snapshots = linkedMapOf<String, BrowseState>()
     private val selections = mutableMapOf<String, BrowseState>()
+    private val sourceControls = mutableMapOf<String, ScopedSourceControls>()
+    private val optionSelections = mutableMapOf<String, List<String>>()
     private val suspendedSearches = mutableMapOf<String, BrowseState>()
+    private val backgrounds = mutableMapOf<String, BrowseState>()
+    private val requestSlots = Semaphore(3)
 
-    /** Save only UI selection; original manga data remains in the source/repository stores. */
-    fun savedSelection(): List<String> = state.value.let {
-        listOf(sourceId, it.query, it.searchTarget.name, it.mode.name, it.period.name, it.audience.name)
-    }
+    fun savedSelection(): List<String> = state.value.let { listOf(sourceId, it.query,
+        it.searchTarget.name, it.mode.name, it.period.name, it.audience.name,
+        controls.value.feedId) + controls.value.options }
 
     fun restoreSelection(saved: List<String>) {
         if (disposed || active || sources.isNotEmpty()) return
-        sourceId = saved.getOrNull(0).orEmpty()
-        val restored = emptyState().copy(
-            query = saved.getOrNull(1).orEmpty(),
-            // The opaque source contract provides only catalogue browsing and title search.
-            // Older UI selections must not restore an unreachable ordinary-source operation.
-            searchTarget = SearchTarget.TITLE,
-            mode = DiscoveryMode.RECOMMENDED,
-            period = RankPeriod.entries.firstOrNull { it.name == saved.getOrNull(4) } ?: RankPeriod.WEEK,
-            audience = RankAudience.entries.firstOrNull { it.name == saved.getOrNull(5) } ?: RankAudience.MALE,
-            sourceScope = scopeKey(),
-        )
-        if (sourceId.isNotBlank()) selections[sourceId] = restored
+        sourceId = saved.getOrNull(0).orEmpty().ifBlank { ALL }
+        val restored = emptyState().copy(query = saved.getOrNull(1).orEmpty(), sourceScope = scopeKey())
+        selections[sourceId] = restored
+        mutableControls.value = ScopedSourceControls(selectedSource = sourceId,
+            feedId = saved.getOrNull(6).orEmpty(), options = saved.drop(7))
+        sourceControls[sourceId] = controls.value
         mutableState.value = restored
     }
 
     fun updateSources(available: List<BodySourceInfo>, unavailableReason: String? = null) {
         if (disposed) return
-        val next = available.filter { it.id.isNotBlank() }.distinctBy { it.id }
-        val reason = unavailableReason?.takeIf { it.isNotBlank() }
-        if (next == sources && this.unavailableReason == reason) return
-        this.unavailableReason = reason
-        retainCurrent()
-        cancelRequest()
+        val next = available.distinctBy { it.id }
+        if (next == sources && unavailableReason == this.unavailableReason) return
+        retainCurrent(); cancelRequest(); cancelControls()
+        this.unavailableReason = unavailableReason
         val old = sources.associateBy { it.id }
         sources = next
-        val current = next.associateBy { it.id }
-        val invalid = old.keys.filter { id ->
-            current[id] == null || current[id]?.revision != old[id]?.revision
-        }.toSet()
-        snapshots.keys.filter { it.source in invalid }.forEach {
-            snapshots.remove(it)
-            nextPages.remove(it)
+        val invalid = old.keys.filter { id -> next.none { it.id == id && it.revision == old[id]?.revision } }.toSet()
+        if (invalid.isNotEmpty()) {
+            snapshots.clear(); backgrounds.clear()
+            invalid.forEach { id ->
+                readyMetadata.removeAll { it.startsWith("$id:") }
+                feedFilterCache.keys.filter { it.startsWith("$id:") }.forEach(feedFilterCache::remove)
+                if (next.none { it.id == id }) { selections.remove(id); sourceControls.remove(id) }
+            }
         }
-        invalid.forEach { selections.remove(it); suspendedSearches.remove(it) }
-        val chosen = sourceId.takeIf { id -> next.any { it.id == id } } ?: next.firstOrNull()?.id.orEmpty()
-        sourceId = chosen
-        val selection = selections[chosen] ?: emptyState()
-        show(selection, retain = false)
+        if (sourceId != ALL && next.none { it.id == sourceId }) sourceId = ALL
+        mutableControls.value = (sourceControls[sourceId] ?: ScopedSourceControls(selectedSource = sourceId)).copy(sources = sources)
+        show(selections[sourceId] ?: emptyState(), retain = false)
     }
 
     fun selectSource(id: String) {
-        if (disposed || id == sourceId || sources.none { it.id == id }) return
-        retainCurrent()
-        cancelRequest()
+        if (disposed || id == sourceId || id != ALL && sources.none { it.id == id }) return
+        retainCurrent(); cancelRequest(); cancelControls()
+        sourceControls[sourceId] = controls.value
         sourceId = id
+        mutableControls.value = (sourceControls[id] ?: ScopedSourceControls(selectedSource = id)).copy(sources = sources)
         show(selections[id] ?: emptyState(), retain = false)
+    }
+
+    fun invalidateSource(id: String) {
+        snapshots.keys.filter { it.startsWith("scoped:$id:") || it.startsWith("scoped:$ALL:") }.forEach(snapshots::remove)
+        backgrounds.remove(id); backgrounds.remove(ALL)
+        readyMetadata.removeAll { it.startsWith("$id:") }
+        feedFilterCache.keys.filter { it.startsWith("$id:") }.forEach(feedFilterCache::remove)
+        if (sourceId == id || sourceId == ALL) {
+            cancelRequest(); cancelControls()
+            mutableState.value = state.value.copy(updatedAt = 0)
+            if (active) show(selection(state.value), force = true, retain = false)
+        }
+    }
+
+    fun selectFeed(id: String) {
+        val current = controls.value
+        val feed = current.feeds.firstOrNull { it.id == id } ?: return
+        if (id == current.feedId) return
+        retainCurrent(); cancelControls()
+        mutableControls.value = current.copy(feedId = id, options = optionSelections["$sourceId:$id:false"] ?: feed.filters.map { it.defaultValue.ifBlank { it.choices.firstOrNull()?.id.orEmpty() } })
+        show(homeSelection(state.value), retain = false)
+    }
+
+    fun selectOption(index: Int, id: String) {
+        val current = controls.value
+        if (current.loading) return
+        val filters = if (state.value.isSearch) current.searchFilters else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
+        if (filters.getOrNull(index)?.choices?.none { it.id == id } != false) return
+        retainCurrent()
+        val values = filters.mapIndexed { i, filter -> if (i == index) id else current.options.getOrNull(i) ?: filter.defaultValue }
+        optionSelections["$sourceId:${current.feedId}:${state.value.isSearch}"] = values
+        mutableControls.value = current.copy(options = values)
+        show(selection(state.value), retain = false)
+    }
+
+    private fun metadataKey(id: String = sourceId): String = id + ":" + sources.firstOrNull { it.id == id }?.revision.orEmpty()
+    private fun filterKey(id: String, feed: String): String = metadataKey(id) + ":" + feed
+    private fun controlsReady(searching: Boolean): Boolean = sourceId == ALL ||
+        metadataKey() in readyMetadata && (searching || controls.value.feedId.isEmpty() ||
+            filterKey(sourceId, controls.value.feedId) in feedFilterCache)
+    private fun normalizeOptions(filters: List<SourceFilter>, saved: List<String>): List<String> = filters.mapIndexed { index, filter ->
+        saved.getOrNull(index)?.takeIf { value -> filter.choices.any { it.id == value } }
+            ?: filter.defaultValue.takeIf { value -> filter.choices.any { it.id == value } }
+            ?: filter.choices.firstOrNull()?.id.orEmpty()
+    }
+    private fun cancelControls() {
+        controlsGeneration++; controlsJob?.cancel(); controlsJob = null; controlsOwner = null; pendingLoad = null
+        mutableControls.value = controls.value.copy(loading = false)
+    }
+
+    /** Resolve only the selected feed. A list request never races its unfinished optionLoader. */
+    private fun prepareControls() {
+        if (!active || disposed || sourceId == ALL || sources.none { it.id == sourceId }) return
+        val searching = state.value.isSearch
+        val requestedFeed = controls.value.feedId
+        val id = sourceId
+        val revision = metadataKey(id)
+        val owner = revision + ":" + requestedFeed + ":" + searching
+        if (controlsOwner == owner && controlsJob?.isActive == true) return
+        controlsGeneration++; controlsJob?.cancel()
+        val expected = controlsGeneration
+        controlsOwner = owner
+        mutableControls.value = controls.value.copy(loading = true, error = null)
+        fun current(): Boolean = expected == controlsGeneration && active && !disposed &&
+            sourceId == id && metadataKey(id) == revision && controls.value.feedId == requestedFeed && state.value.isSearch == searching
+        controlsJob = scope.launch {
+            try {
+                val old = controls.value
+                val metadataReady = revision in readyMetadata
+                val capabilities = if (metadataReady) old.capabilities else repository.sourceCapabilities(id)
+                val feeds = if (metadataReady) old.feeds else if (capabilities.supports(SourceFeature.DISCOVERY) ||
+                    capabilities.supports(SourceFeature.CATEGORIES) || capabilities.supports(SourceFeature.RANKING)) repository.sourceFeeds(id) else emptyList()
+                val searchFilters = if (metadataReady) old.searchFilters else if (capabilities.supports(SourceFeature.SEARCH))
+                    repository.sourceSearchFilters(id) else emptyList()
+                if (!current()) return@launch
+                val feed = feeds.firstOrNull { it.id == requestedFeed } ?: feeds.firstOrNull()
+                val feedKey = feed?.let { filterKey(id, it.id) }
+                val selectedFilters = if (searching || feed == null) emptyList() else
+                    feedFilterCache[filterKey(id, feed.id)] ?: if (feed.filters.isNotEmpty()) feed.filters else repository.sourceFeedFilters(id, feed.id)
+                if (!current()) return@launch
+                // Cache actual resolved choices only after the exact source/feed request survives cancellation.
+                if (!searching && feedKey != null) feedFilterCache[feedKey] = selectedFilters
+                val resolvedFeeds = feeds.map { item ->
+                    val known = feedFilterCache[filterKey(id, item.id)]
+                    if (known == null) item else item.copy(filters = known)
+                }
+                val filters = if (searching) searchFilters else selectedFilters
+                val saved = optionSelections["$id:${feed?.id.orEmpty()}:$searching"]
+                    ?: old.options.takeIf { old.feedId == feed?.id.orEmpty() }.orEmpty()
+                val options = normalizeOptions(filters, saved)
+                // Publish metadata and the selected feed atomically; then send its one intended list request.
+                retainCurrent()
+                mutableControls.value = old.copy(capabilities = capabilities, feeds = resolvedFeeds, searchFilters = searchFilters,
+                    feedId = feed?.id.orEmpty(), options = options, loading = false, error = null)
+                sourceControls[id] = controls.value
+                optionSelections["$id:${feed?.id.orEmpty()}:$searching"] = options
+                readyMetadata.add(revision)
+                val pending = pendingLoad ?: PendingLoad(false, false)
+                pendingLoad = null
+                show(selection(state.value), force = pending.force, debounce = pending.debounce, retain = false)
+            } catch (failure: Exception) {
+                if (failure is CancellationException) throw failure
+                if (current()) {
+                    mutableControls.value = controls.value.copy(loading = false, error = "来源筛选读取失败，可重试")
+                    mutableState.value = state.value.copy(loading = false, refreshing = false, loadingMore = false,
+                        error = if (state.value.items.isEmpty()) "来源筛选未能读取，请重试。" else state.value.error)
+                }
+            } finally { if (expected == controlsGeneration) { controlsJob = null; controlsOwner = null } }
+        }
     }
 
     override fun setActive(active: Boolean) {
         if (disposed || this.active == active) return
         this.active = active
-        if (!active) {
-            retainCurrent()
-            cancelRequest()
-        } else show(selection(state.value), retain = false)
+        if (!active) { retainCurrent(); cancelRequest(); cancelControls() }
+        else show(selection(state.value), retain = false)
     }
-
-    fun dispose() {
-        if (disposed) return
-        active = false
-        cancelRequest()
-        disposed = true
-        snapshots.clear()
-        nextPages.clear()
-        selections.clear()
-        suspendedSearches.clear()
-        mutableState.value = emptyState()
-    }
-
+    fun dispose() { if (!disposed) { setActive(false); disposed = true; snapshots.clear(); selections.clear(); sourceControls.clear() } }
     override fun setQuery(query: String) {
         if (disposed || query == state.value.query) return
-        show(selection(state.value).copy(query = query), debounce = query.isNotBlank())
+        val wasSearch = state.value.isSearch
+        val isSearch = query.isNotBlank()
+        if (wasSearch != isSearch) {
+            retainCurrent(); cancelControls()
+            val current = controls.value
+            optionSelections["$sourceId:${current.feedId}:$wasSearch"] = current.options
+            val filters = if (isSearch) current.searchFilters else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
+            mutableControls.value = current.copy(options = optionSelections["$sourceId:${current.feedId}:$isSearch"] ?: filters.map {
+                it.defaultValue.ifBlank { it.choices.firstOrNull()?.id.orEmpty() } })
+        }
+        show(selection(state.value).copy(query = query), debounce = query.isNotBlank(), retain = wasSearch == isSearch)
     }
-
     override fun submitSearch() = refresh()
-
-    override fun setSearchTarget(target: SearchTarget) {
-        if (disposed || target != SearchTarget.TITLE || target == state.value.searchTarget) return
-        show(selection(state.value).copy(searchTarget = target))
-    }
-
-    override fun toggleSearchTag(tag: MangaTag) {
-        if (disposed || tag.path.isBlank() || tag.name.isBlank()) return
-        val current = state.value
-        val tags = if (current.selectedTags.any { it.path == tag.path })
-            current.selectedTags.filterNot { it.path == tag.path } else current.selectedTags + tag
-        show(selection(current).copy(selectedTags = tags))
-    }
-
-    override fun retrySearchTags() {
-        if (disposed) return
-        mutableState.value = state.value.copy(availableTags = emptyList(), tagsLoading = false,
-            tagsError = "当前来源未提供标签检索。")
-    }
-
-    override fun clearSearch() {
-        if (disposed) return
-        suspendedSearches.remove(sourceId)
-        show(homeSelection(state.value))
-    }
-
+    override fun setSearchTarget(target: SearchTarget) { if (target == SearchTarget.TITLE && target != state.value.searchTarget) show(selection(state.value).copy(searchTarget = target)) }
+    override fun toggleSearchTag(tag: MangaTag) = Unit
+    override fun retrySearchTags() = Unit
+    override fun clearSearch() { suspendedSearches.remove(sourceId); setQuery("") }
     override fun suspendBrowseSearch() {
-        if (disposed) return
-        val current = state.value
-        if (current.isSearch) suspendedSearches[sourceId] = selection(current)
-        show(homeSelection(current))
+        if (state.value.isSearch) { suspendedSearches[sourceId] = selection(state.value); setQuery("") }
     }
-
-    override fun resumeBrowseSearch() {
-        if (disposed) return
-        suspendedSearches.remove(sourceId)?.let { show(it) }
+    override fun resumeBrowseSearch() { suspendedSearches.remove(sourceId)?.let { setQuery(it.query) } }
+    override fun selectDiscovery(mode: DiscoveryMode, period: RankPeriod?, audience: RankAudience?, clearQuery: Boolean) {
+        if (clearQuery) clearSearch()
     }
-
-    override fun selectDiscovery(
-        mode: DiscoveryMode, period: RankPeriod?, audience: RankAudience?, clearQuery: Boolean,
-    ) {
-        if (disposed) return
-        val current = state.value
-        // This source contract exposes a catalogue, not ordinary-source rankings/updates.
-        // Old or delayed navigation requests return to that real catalogue operation.
-        val next = (if (clearQuery) homeSelection(current) else selection(current)).copy(
-            mode = DiscoveryMode.RECOMMENDED, period = period ?: current.period,
-            audience = audience ?: current.audience)
-        if (selection(current) != next) show(next)
-    }
-
-    override fun refresh() {
-        if (!active || disposed || requestJob?.isActive == true) return
-        show(selection(state.value), force = true)
-    }
-
+    override fun refresh() { if (active && !disposed && requestJob?.isActive != true) show(selection(state.value), force = true) }
     override fun retryBrowse() {
-        if (!active || disposed || requestJob?.isActive == true) return
-        val current = state.value
-        val failed = current.failedPage
-        if (failed == null) show(selection(current), force = true)
-        else startLoad(current, failed, forceRefresh = true)
+        val failed = state.value.searchSources.values.filter { it.error != null }.associate { it.sourceId to (it.failedPage ?: 0) }
+        if (failed.isEmpty()) refresh() else startLoad(state.value, failed)
     }
-
+    fun retrySource(id: String) {
+        val lane = state.value.searchSources[id] ?: return
+        if (lane.error != null && !lane.loading && requestJob?.isActive != true) startLoad(state.value, mapOf(id to (lane.failedPage ?: 0)))
+    }
     override fun loadMore() {
         val current = state.value
-        if (!active || disposed || requestJob?.isActive == true || current.loading ||
-            current.refreshing || current.loadingMore || !current.hasMore || current.error != null) return
-        val page = nextPages[key(current)] ?: current.page + 1
-        if (page > current.page) startLoad(current, page)
+        if (!active || disposed || requestJob?.isActive == true || current.loading || current.refreshing || current.loadingMore) return
+        val pages = current.searchSources.values.filter { it.error == null && it.hasMore }.associate { it.sourceId to (it.nextPage ?: 0) }
+        if (pages.isNotEmpty()) startLoad(current, pages)
     }
-
-    override fun browseBackground(selection: BrowseState): BrowseState {
-        if (!selection.isSearch) return selection
-        val home = homeSelection(selection).copy(sourceScope = scopeKey())
-        return snapshots[key(home)] ?: home
-    }
-
-    private fun selection(value: BrowseState) = BrowseState(
-        query = value.query, searchTarget = value.searchTarget, selectedTags = value.selectedTags,
-        mode = DiscoveryMode.RECOMMENDED, period = value.period, audience = value.audience,
-        availableTags = emptyList(), loading = false, sourceScope = scopeKey(),
-    )
-
-    private fun homeSelection(value: BrowseState) = BrowseState(
-        mode = DiscoveryMode.RECOMMENDED, period = value.period, audience = value.audience,
-        availableTags = emptyList(), loading = false, sourceScope = scopeKey(),
-    )
-
-    private fun scopeKey() = "scoped:" + sourceId
-    private fun key(value: BrowseState) = SelectionKey(sourceId,
-        sources.firstOrNull { it.id == sourceId }?.revision.orEmpty(), value.cacheKey)
-
-    private fun unsupported(value: BrowseState): String? = when {
-        sourceId.isEmpty() || sources.none { it.id == sourceId } ->
-            unavailableReason ?: "本分区暂无已启用的来源。"
-        value.searchTarget == SearchTarget.TAG || value.selectedTags.isNotEmpty() -> "当前来源未提供标签检索。"
-        value.searchTarget == SearchTarget.AUTHOR -> "当前来源未提供作者检索。"
-        value.query.trim().length > 120 -> "请输入不超过 120 个字的标题。"
-        !value.isSearch && value.mode == DiscoveryMode.RANKING -> "当前来源未提供热榜。"
-        !value.isSearch && value.mode == DiscoveryMode.LATEST -> "当前来源未提供更新列表。"
-        else -> null
-    }
+    override fun browseBackground(selection: BrowseState): BrowseState = if (!selection.isSearch) selection else backgrounds[sourceId] ?: homeSelection(selection)
+    private fun selection(value: BrowseState) = BrowseState(query = value.query, searchTarget = SearchTarget.TITLE,
+        mode = DiscoveryMode.RECOMMENDED, availableTags = emptyList(), loading = false, sourceScope = scopeKey())
+    private fun homeSelection(value: BrowseState) = selection(value).copy(query = "")
+    private fun scopeKey() = "scoped:" + sourceId + ":" + controls.value.feedId + ":" + controls.value.options.joinToString("\u001f")
+    private fun key(value: BrowseState) = scopeKey() + ":" + sources.joinToString("|") { it.id + ":" + it.revision } + ":" + value.cacheKey
+    private fun selectedSources() = if (sourceId == ALL) sources else sources.filter { it.id == sourceId }
 
     private fun show(value: BrowseState, debounce: Boolean = false, force: Boolean = false, retain: Boolean = true) {
         if (disposed) return
         if (retain) retainCurrent()
         cancelRequest()
         val configured = selection(value)
-        val failure = unsupported(configured)
-        if (failure != null) {
-            mutableState.value = configured.copy(error = failure,
-                tagsError = failure.takeIf { configured.searchTarget == SearchTarget.TAG })
+        if (sources.isEmpty()) { mutableState.value = configured.copy(error = unavailableReason ?: "本分区暂无已启用的来源。"); return }
+        val cached = snapshots[key(configured)]
+        mutableState.value = cached?.copy(loading = false, loadingMore = false, refreshing = false, sourceScope = scopeKey()) ?: configured
+        if (!active) return
+        if (!controlsReady(configured.isSearch)) {
+            pendingLoad = PendingLoad(force, debounce)
+            mutableState.value = state.value.copy(loading = state.value.items.isEmpty(), refreshing = state.value.items.isNotEmpty())
+            prepareControls()
             return
         }
-        val selectedKey = key(configured)
-        val cached = snapshots.remove(selectedKey)?.also { snapshots[selectedKey] = it }
-        mutableState.value = cached?.copy(
-            query = configured.query, searchTarget = configured.searchTarget,
-            selectedTags = configured.selectedTags, sourceScope = scopeKey(),
-            loading = false, loadingMore = false, refreshing = false,
-        ) ?: configured
-        if (!active) return
-        val fresh = cached != null && cached.error == null && cached.updatedAt > 0 &&
-            (wallTimeMillis() - cached.updatedAt in 0L until 60_000L || cached.page > 0)
-        // A previous failure is not a fresh result. Returning from source/account settings
-        // can retry once on activation, while the repository keeps real source cooldowns.
-        if (!force && fresh) return
-        val resumePage = if (force) 0 else cached?.failedPage?.takeIf { it > 0 } ?: 0
-        startLoad(state.value, resumePage, forceRefresh = force || cached?.error != null, debounce = debounce)
+        if (!force && cached != null && cached.error == null && cached.searchSources.values.none { it.error != null } &&
+            wallTimeMillis() - cached.updatedAt in 0L until 60_000L) return
+        startLoad(state.value, selectedSources().associate { it.id to 0 }, reset = true, debounce = debounce, force = force)
     }
 
-    private fun startLoad(value: BrowseState, page: Int, forceRefresh: Boolean = false, debounce: Boolean = false) {
-        if (!active || disposed || unsupported(value) != null) return
+    private fun startLoad(value: BrowseState, pages: Map<String, Int>, reset: Boolean = false, debounce: Boolean = false, force: Boolean = false) {
+        if (!active || disposed || pages.isEmpty()) return
+        if (!controlsReady(value.isSearch)) { show(selection(value), force = force, debounce = debounce, retain = false); return }
         cancelRequest()
-        val requested = generation
-        val requestedSource = sourceId
-        val selectedKey = key(value)
-        val sourceName = sources.firstOrNull { it.id == requestedSource }?.name.orEmpty()
-        val search = value.isFederatedSearch
-        mutableState.value = value.copy(
-            loading = page == 0 && value.items.isEmpty(),
-            refreshing = page == 0 && value.items.isNotEmpty(), loadingMore = page > 0,
-            error = null, failedPage = null,
-            searchSources = if (search) mapOf(requestedSource to FederatedSearchSource(
-                requestedSource, sourceName, loading = true)) else emptyMap(),
-        )
+        val expected = generation; val owner = scopeKey(); val selectedKey = key(value)
+        val selectedSource = sourceId; val selectedControls = controls.value
+        val infos = selectedSources().associateBy { it.id }
+        val requested = pages.filterKeys { it in infos }
+        if (requested.isEmpty()) return
+        val rows = (if (reset) emptyList() else value.items).toMutableList()
+        val lanes = (if (reset) emptyMap() else value.searchSources).toMutableMap()
+        requested.forEach { (id, _) -> lanes[id] = (lanes[id] ?: FederatedSearchSource(id, infos.getValue(id).name)).copy(loading = true, error = null) }
+        fun publish() {
+            if (expected != generation || !active || owner != scopeKey()) return
+            val loading = lanes.values.any { it.loading }
+            val successes = lanes.values.any { !it.loading && it.error == null }
+            mutableState.value = selection(value).copy(items = rows.distinctBy { it.id },
+                page = if (reset) 0 else value.page + 1, loading = loading && rows.isEmpty(),
+                refreshing = loading && reset && rows.isNotEmpty(), loadingMore = loading && !reset,
+                hasMore = lanes.values.any { it.error == null && it.hasMore },
+                error = if (!loading && !successes && rows.isEmpty()) "当前来源暂时无法读取，请查看来源状态并重试。" else null,
+                failedPage = if (!loading && lanes.values.any { it.error != null }) 0 else null,
+                updatedAt = wallTimeMillis(), searchSources = lanes.toMap(),
+                sourceNextPages = lanes.mapNotNull { (id, lane) -> lane.nextPage?.let { id to it } }.toMap(),
+                sourceMatches = if (value.isSearch) rows.associate { it.id to listOf(it) } else emptyMap())
+        }
+        // Keep visible content while an explicit refresh replaces source lanes independently.
+        if (reset) rows.addAll(value.items)
+        publish()
         requestJob = scope.launch {
             try {
                 if (debounce) delay(450)
-                val result = withTimeout(20_000L) {
-                    if (value.isSearch) repository.searchSource(requestedSource, value.query.trim(), page, forceRefresh)
-                    else repository.browseSource(requestedSource, page)
+                supervisorScope {
+                    requested.map { (id, page) -> async {
+                        requestSlots.withPermit {
+                            try {
+                                val result = withTimeout(25_000L) {
+                                    if (selectedSource == ALL) {
+                                        val feature = if (value.isSearch) SourceFeature.SEARCH else SourceFeature.DISCOVERY
+                                        if (!repository.sourceCapabilities(id).supports(feature)) return@withTimeout null
+                                    }
+                                    if (value.isSearch) repository.sourceFilteredSearch(id, value.query.trim(), page,
+                                        if (selectedSource == ALL) emptyList() else selectedControls.searchFilters.mapIndexed { index, filter ->
+                                            selectedControls.options.getOrNull(index)?.takeIf { value -> filter.choices.any { it.id == value } } ?: filter.defaultValue }, forceRefresh = force)
+                                    else repository.browseSource(id, page, selectedControls.feedId.takeIf { selectedSource != ALL && it.isNotEmpty() }
+                                        ?.let { SourceBrowseRequest(it, page, selectedControls.options) })
+                                }
+                                currentCoroutineContext().ensureActive()
+                                if (expected != generation || !active || owner != scopeKey()) return@withPermit
+                                if (result == null) {
+                                    lanes.remove(id)
+                                    rows.removeAll { it.sourceId == id }
+                                    publish()
+                                    return@withPermit
+                                }
+                                val next = result.nextPage ?: page + 1
+                                require(!result.hasMore || next > page) { "来源返回的下一页无效。" }
+                                if (reset || page == 0) rows.removeAll { it.sourceId == id }
+                                rows.addAll(result.items)
+                                lanes[id] = FederatedSearchSource(id, infos.getValue(id).name, hasMore = result.hasMore, nextPage = next.takeIf { result.hasMore })
+                            } catch (failure: Exception) {
+                                if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
+                                if (expected != generation || !active || owner != scopeKey()) return@withPermit
+                                val message = repository.sourceHealth.value[id]?.message?.takeIf { it.isNotBlank() } ?: "来源读取失败，请重试"
+                                lanes[id] = FederatedSearchSource(id, infos.getValue(id).name, error = message, failedPage = page)
+                            }
+                            publish()
+                        }
+                    } }.awaitAll()
                 }
-                currentCoroutineContext().ensureActive()
-                if (requested != generation || !active || sourceId != requestedSource) return@launch
-                val providedNext = result.nextPage
-                val next = providedNext?.takeIf { it > page } ?: (page + 1)
-                if (result.hasMore && providedNext != null && providedNext <= page)
-                    throw SourceException("来源返回的下一页无效，请重试或刷新。")
-                val items = (if (page == 0) result.items else value.items + result.items).distinctBy { it.id }
-                if (result.hasMore) nextPages[selectedKey] = next else nextPages.remove(selectedKey)
-                mutableState.value = state.value.copy(
-                    items = items, page = page, hasMore = result.hasMore,
-                    loading = false, loadingMore = false, refreshing = false, error = null, failedPage = null,
-                    updatedAt = if (page == 0 || value.updatedAt <= 0) wallTimeMillis() else value.updatedAt,
-                    sourceMatches = if (search) items.associate { it.id to listOf(it) } else emptyMap(),
-                    sourceChoiceIds = emptySet(),
-                    searchSources = if (search) mapOf(requestedSource to FederatedSearchSource(
-                        requestedSource, sourceName, hasMore = result.hasMore,
-                        nextPage = next.takeIf { result.hasMore })) else emptyMap(),
-                )
-                retainCurrent()
-            } catch (failure: Exception) {
-                if (failure is CancellationException && failure !is TimeoutCancellationException) throw failure
-                if (requested != generation || !active || sourceId != requestedSource) return@launch
-                val message = if (failure is TimeoutCancellationException) "请求超时，请重试或更换来源。"
-                    else failure.message?.take(300) ?: "当前来源暂时无法读取，请重试。"
-                mutableState.value = state.value.copy(
-                    loading = false, loadingMore = false, refreshing = false, error = message, failedPage = page,
-                    searchSources = if (search) mapOf(requestedSource to FederatedSearchSource(
-                        requestedSource, sourceName, error = message, failedPage = page)) else emptyMap(),
-                )
-                retainCurrent()
-            } finally {
-                if (requested == generation) requestJob = null
-            }
+                if (expected == generation && owner == scopeKey()) { snapshots[selectedKey] = state.value; retainCurrent() }
+            } finally { if (expected == generation) requestJob = null }
         }
     }
-
     private fun retainCurrent() {
-        if (sourceId.isEmpty()) return
-        val current = state.value.copy(loading = false, refreshing = false, loadingMore = false,
-            searchSources = state.value.searchSources.mapValues { (_, source) -> source.copy(loading = false) })
-        selections[sourceId] = selection(current)
-        if (current.updatedAt <= 0 && current.items.isEmpty() && current.error == null) return
-        val selectedKey = key(current)
-        snapshots.remove(selectedKey)
-        snapshots[selectedKey] = current
-        while (snapshots.size > 12) {
-            val oldest = snapshots.keys.first()
-            snapshots.remove(oldest)
-            nextPages.remove(oldest)
-        }
+        selections[sourceId] = selection(state.value)
+        sourceControls[sourceId] = controls.value
+        val current = state.value.copy(loading = false, loadingMore = false, refreshing = false,
+            searchSources = state.value.searchSources.mapValues { (_, lane) -> lane.copy(loading = false) })
+        if (current.items.isEmpty() && current.updatedAt <= 0 && current.error == null) return
+        if (!current.isSearch) backgrounds[sourceId] = current
+        snapshots[key(current)] = current
+        while (snapshots.size > 16) snapshots.remove(snapshots.keys.first())
     }
-
     private fun cancelRequest() {
-        generation++
-        requestJob?.cancel()
-        requestJob = null
-        mutableState.value = state.value.copy(loading = false, refreshing = false, loadingMore = false,
-            searchSources = state.value.searchSources.mapValues { (_, source) -> source.copy(loading = false) })
+        generation++; requestJob?.cancel(); requestJob = null
+        mutableState.value = state.value.copy(loading = false, refreshing = false, loadingMore = false)
     }
-
     private companion object {
+        const val ALL = "*"
         fun emptyState() = BrowseState(availableTags = emptyList(), loading = false)
     }
 }

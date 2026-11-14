@@ -8,8 +8,12 @@ import dev.mangaflow.data.MangaPage
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceKeys
-import dev.mangaflow.data.sources.BodySource
-import dev.mangaflow.data.sources.BodySourceInfo
+import dev.mangaflow.data.sources.*
+import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.sha256
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.withContext
@@ -26,8 +30,9 @@ internal fun adultSourceMetadata(metadata: JSONObject): Boolean =
         metadata.optBoolean("nsfw", false) || metadata.optBoolean("adult", false) ||
         metadata.optString("contentRating").lowercase() in setOf("adult", "mature", "r18", "18+")
 
-/** Real Mangayomi calls, translated into the existing source-qualified reader contract. */
-class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: JavascriptSourceRuntime) : BodySource {
+/** Script protocols translated into the existing source-qualified reader contract. */
+class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: JavascriptSourceRuntime,
+    private val context: PlatformContext? = null) : BodySource {
     val bundle = bundle.copy(metadata = JSONObject(bundle.metadata.toString()))
     val digest: String get() = bundle.digest
     override val info = BodySourceInfo(bundle.sourceId, bundle.metadata.getString("name"),
@@ -35,9 +40,147 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
         adult = adultSourceMetadata(bundle.metadata))
     private val headerLock = SynchronizedObject()
     private val chapterHeaders = LinkedHashMap<String, Map<String, String>>()
+    private val coverHeaders = LinkedHashMap<String, Map<String, String>>()
+    private val venera: Boolean get() = bundle.metadata.optString("protocol") == "venera"
+    private val capabilityLock = Mutex()
+    @Volatile private var declaredCapabilities: SourceCapabilities? = null
     @Volatile private var publicHeaders: Map<String, String> = manifestHeaders(bundle.metadata)
 
-    internal fun forDownload(): ScriptBodySource = ScriptBodySource(bundle, runtime)
+    internal fun forDownload(): ScriptBodySource = ScriptBodySource(bundle, runtime, context)
+
+    private fun clearSessionImages() {
+        declaredCapabilities = null
+        synchronized(headerLock) {
+            chapterHeaders.clear()
+            coverHeaders.clear()
+            publicHeaders = manifestHeaders(bundle.metadata)
+        }
+        context?.let { invalidateScriptSourceImages(it, info.id) }
+    }
+
+    override suspend fun capabilities(): SourceCapabilities = capabilityLock.withLock {
+        declaredCapabilities?.let { return@withLock it }
+        val value = call("capabilities", JSONArray()).getJSONObject("result")
+        val features = value.getJSONArray("features")
+        SourceCapabilities((0 until features.length()).mapNotNull { index ->
+            SourceFeature.entries.firstOrNull { it.name == features.getString(index) }
+        }.toSet(), value.optBoolean("loginRequired", false)).also { declaredCapabilities = it }
+    }
+
+    override suspend fun feeds(): List<SourceFeed> {
+        if (!venera) return super.feeds()
+        val values = call("feeds", JSONArray()).getJSONArray("result")
+        require(values.length() <= 2_000) { "源浏览入口过多。" }
+        return (0 until values.length()).map { index ->
+            val row = values.getJSONObject(index)
+            SourceFeed(row.getString("id"), row.getString("title"),
+                SourceFeedKind.entries.firstOrNull { it.name == row.optString("kind") } ?: SourceFeedKind.EXPLORE,
+                filters(row.optJSONArray("filters")))
+        }
+    }
+
+    override suspend fun feedFilters(feedId: String): List<SourceFilter> = if (!venera) super.feedFilters(feedId)
+        else filters(call("feedFilters", JSONArray().put(feedId)).getJSONArray("result"))
+
+    override suspend fun browse(request: SourceBrowseRequest): MangaPage = if (!venera) super.browse(request)
+        else listing("browse", JSONArray().put(request.feedId).put(upstreamPage(request.page)).put(JSONArray(request.options)))
+
+    override suspend fun searchFilters(): List<SourceFilter> = if (!venera) emptyList()
+        else filters(call("searchFilters", JSONArray()).getJSONArray("result"))
+
+    override suspend fun searchFiltered(query: String, page: Int, options: List<String>): MangaPage {
+        if (!venera) return super.searchFiltered(query, page, options)
+        require(query.trim().length in 1..120) { "请输入 1–120 个字的标题。" }
+        return listing("search", JSONArray().put(query.trim()).put(upstreamPage(page)).put(JSONArray(options)))
+    }
+
+    override suspend fun accountState(): SourceAccountState {
+        if (!venera) return super.accountState()
+        val value = call("accountState", JSONArray()).getJSONObject("result")
+        return SourceAccountState(value.optBoolean("signedIn", false), value.optString("displayName"))
+    }
+
+    override suspend fun login(username: String, password: String) {
+        require(venera) { "此脚本源未提供账号能力。" }
+        require(username.trim().length in 1..160 && password.length in 1..512) { "账号或密码长度无效。" }
+        clearSessionImages()
+        try { call("login", JSONArray().put(username.trim()).put(password)) }
+        finally { clearSessionImages() }
+    }
+
+    override suspend fun logout() {
+        require(venera) { "此脚本源未提供账号能力。" }
+        clearSessionImages()
+        try { call("logout", JSONArray()) }
+        finally { clearSessionImages() }
+    }
+
+    override suspend fun favoriteFolders(): List<SourceFavoriteFolder> {
+        require(venera) { "此脚本源未提供站点收藏。" }
+        val values = call("favoriteFolders", JSONArray()).getJSONArray("result")
+        require(values.length() <= 500) { "源收藏夹过多。" }
+        return (0 until values.length()).map { index -> values.getJSONObject(index).let {
+            SourceFavoriteFolder(it.getString("id"), it.getString("title"))
+        } }
+    }
+
+    override suspend fun favorites(folderId: String, page: Int): MangaPage {
+        require(venera) { "此脚本源未提供站点收藏。" }
+        return listing("favorites", JSONArray().put(folderId).put(upstreamPage(page)))
+    }
+
+    override suspend fun setFavorite(mangaId: String, folderId: String, favorite: Boolean) {
+        require(venera) { "此脚本源未提供站点收藏。" }
+        call("setFavorite", JSONArray().put(nativeManga(mangaId)).put(folderId).put(favorite))
+    }
+
+    override suspend fun comments(mangaId: String, page: Int): SourceCommentPage {
+        require(venera) { "此脚本源未提供站点评论。" }
+        val result = call("comments", JSONArray().put(nativeManga(mangaId)).put(upstreamPage(page))).getJSONObject("result")
+        val values = result.getJSONArray("items")
+        require(values.length() <= 1_000) { "源评论条目过多。" }
+        return SourceCommentPage((0 until values.length()).map { index ->
+            val row = values.getJSONObject(index)
+            SourceComment(row.getString("id"), row.optString("author"), row.optString("content").take(40_000),
+                row.optString("avatar").takeIf(String::isNotBlank)?.let(::imageUrl).orEmpty(),
+                row.optString("time"), row.optInt("likes", 0))
+        }, result.optBoolean("hasMore", false))
+    }
+
+    override suspend fun settings(): List<SourceSetting> {
+        if (!venera) return emptyList()
+        val values = call("settings", JSONArray()).getJSONArray("result")
+        require(values.length() <= 128) { "源设置条目过多。" }
+        return (0 until values.length()).map { index ->
+            val row = values.getJSONObject(index)
+            SourceSetting(row.getString("key"), row.getString("title"), row.optString("value"),
+                row.optString("type", "input"), choices(row.optJSONArray("choices")))
+        }
+    }
+
+    override suspend fun saveSetting(key: String, value: String) {
+        require(venera) { "此脚本源未提供设置。" }
+        require(key.length in 1..160 && value.length <= 4_096) { "源设置值无效。" }
+        clearSessionImages()
+        try { call("saveSetting", JSONArray().put(key).put(value)) }
+        finally { clearSessionImages() }
+    }
+
+    private fun choices(values: JSONArray?): List<SourceChoice> {
+        if (values == null) return emptyList()
+        require(values.length() <= 2_000) { "源筛选选项过多。" }
+        return (0 until values.length()).map { index -> values.getJSONObject(index).let {
+            SourceChoice(it.getString("id"), it.getString("title"))
+        } }
+    }
+
+    private fun filters(values: JSONArray?): List<SourceFilter> {
+        if (values == null) return emptyList()
+        require(values.length() <= 64) { "源筛选组过多。" }
+        return (0 until values.length()).map { index -> values.getJSONObject(index).let {
+            SourceFilter(it.getString("id"), it.getString("title"), choices(it.optJSONArray("choices")), it.optString("defaultValue"))
+        } }
+    }
 
     override suspend fun discover(page: Int): MangaPage = listing("getPopular", JSONArray().put(upstreamPage(page)))
 
@@ -58,7 +201,7 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
         require(list.length() <= 2_000) { "源返回的单页作品过多。" }
         val rows = (0 until list.length()).map { manga(list.getJSONObject(it)) }.distinctBy(Manga::id)
         val hasMore = (result as? JSONObject)?.optBoolean("hasNextPage", false) ?: false
-        val upstream = if (method == "search") args.getInt(1) else args.getInt(0)
+        val upstream = if (method in setOf("search", "browse", "favorites")) args.getInt(1) else args.getInt(0)
         MangaPage(rows, hasMore, if (hasMore) upstream else null)
     }
 
@@ -89,25 +232,35 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
     override suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> = withContext(Dispatchers.IO) {
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         require(ref.sourceId == info.id) { "章节和脚本来源不一致。" }
-        val envelope = call("getPageList", JSONArray().put(ref.chapterId))
+        val sessionEpoch = context?.let { scriptSourceImageEpoch(it, info.id) }.orEmpty()
+        val arguments = JSONArray().put(ref.chapterId)
+        if (venera) arguments.put(ref.mangaId)
+        val envelope = call("getPageList", arguments)
+        if (context != null && scriptSourceImageEpoch(context, info.id) != sessionEpoch)
+            throw CancellationException("来源账号或设置已变化，请刷新本章。")
         val values = envelope.get("result") as? JSONArray ?: throw SourceException("源没有返回真实图片清单。")
         require(values.length() in 1..10_000) { "源图片清单为空或超过可读范围。" }
         val baseHeaders = headers(envelope.optJSONObject("headers"))
-        var common: Map<String, String>? = null
         val pages = (0 until values.length()).map { index ->
             val item = values.get(index)
-            val raw = when (item) { is String -> item; is JSONObject -> opaque(item, "url"); else -> throw SourceException("图片清单条目格式不兼容。") }
-            val perPage = if (item is JSONObject) headers(item.optJSONObject("headers")) else emptyMap()
-            val actualHeaders = baseHeaders + perPage
-            if (common == null) common = actualHeaders else require(common == actualHeaders) {
-                "此源每页使用不同请求头，当前下载与阅读链路暂不支持。"
+            if (venera && item is JSONObject && item.has("sourceImageToken")) {
+                val token = item.getString("sourceImageToken")
+                require(token.isNotBlank() && token.length <= 8_192 && token.none(Char::isISOControl)) { "源图片编号无效。" }
+                val imageIdentity = sha256((ref.mangaId + "\u0000" + ref.chapterId + "\u0000" + token + "\u0000" + sessionEpoch).encodeToByteArray())
+                    .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
+                Page(index, "mangaflow-script://${info.id}/${bundle.digest}/$imageIdentity/$index",
+                    sourceImageToken = token, sourceRevision = bundle.digest, sourceSessionEpoch = sessionEpoch)
+            } else {
+                val raw = when (item) { is String -> item; is JSONObject -> opaque(item, "url"); else -> throw SourceException("图片清单条目格式不兼容。") }
+                val perPage = if (item is JSONObject) headers(item.optJSONObject("headers")) else emptyMap()
+                Page(index, imageUrl(raw), (item as? JSONObject)?.optInt("width", 0)?.coerceAtLeast(0) ?: 0,
+                    (item as? JSONObject)?.optInt("height", 0)?.coerceAtLeast(0) ?: 0,
+                    headers = baseHeaders + perPage, sourceSessionEpoch = sessionEpoch)
             }
-            Page(index, imageUrl(raw), (item as? JSONObject)?.optInt("width", 0)?.coerceAtLeast(0) ?: 0,
-                (item as? JSONObject)?.optInt("height", 0)?.coerceAtLeast(0) ?: 0)
         }
         synchronized(headerLock) {
             chapterHeaders.remove(chapterId)
-            chapterHeaders[chapterId] = common.orEmpty()
+            chapterHeaders[chapterId] = baseHeaders
             while (chapterHeaders.size > 64) chapterHeaders.remove(chapterHeaders.keys.first())
         }
         pages
@@ -115,7 +268,9 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
 
     /** No JS runs during composition/image header lookup. */
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> =
-        synchronized(headerLock) { chapterHeaders[chapterId] } ?: publicHeaders
+        synchronized(headerLock) {
+            if (chapterId.isBlank()) coverHeaders[SourceKeys.decodeManga(mangaId).mangaId] else chapterHeaders[chapterId]
+        } ?: publicHeaders
 
     private suspend fun call(method: String, args: JSONArray): JSONObject {
         val value = JSONObject(runtime.call(bundle, method, args))
@@ -141,6 +296,11 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
             else -> emptyList()
         }
         val cover = text(row, "imageUrl", "coverUrl", "cover").takeIf(String::isNotBlank)?.let(::imageUrl).orEmpty()
+        if (row.has("headers")) synchronized(headerLock) {
+            coverHeaders.remove(native)
+            coverHeaders[native] = headers(row.optJSONObject("headers"))
+            while (coverHeaders.size > 500) coverHeaders.remove(coverHeaders.keys.first())
+        }
         return Manga(SourceKeys.manga(info.id, native), title, cover, authors,
             description = text(row, "description"), status = text(row, "status"), tags = tags,
             latestChapter = text(row, "latestChapter"), sourceUrl = native.takeIf { it.startsWith("https://") }.orEmpty(),
@@ -173,14 +333,17 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
             is String -> if (value.isBlank()) emptyMap() else headers(JSONObject(value))
             else -> throw SourceException("源公共图片请求头格式不兼容。")
         }
-        fun headers(value: JSONObject?): Map<String, String> = value?.keys()?.asSequence()?.associate { key ->
-            val name = when (key.lowercase()) {
-                "referer" -> "Referer"; "user-agent" -> "User-Agent"; "accept" -> "Accept"
-                else -> throw SourceException("此源要求 $key 图片请求头，当前仅支持 Referer、User-Agent、Accept。")
+        fun headers(value: JSONObject?): Map<String, String> {
+            if (value == null) return emptyMap()
+            val excluded = setOf("host", "connection", "content-length", "transfer-encoding", "proxy-authorization", "proxy-connection", "accept-encoding")
+            val result = value.keys().asSequence().filter { it.lowercase() !in excluded }.associate { key ->
+                require(key.matches(Regex("[!#$%&'*+.^_`|~0-9A-Za-z-]{1,80}"))) { "源图片请求头名称无效。" }
+                val content = value.getString(key)
+                require(content.length <= 8_192 && '\r' !in content && '\n' !in content) { "源图片请求头无效。" }
+                key to content
             }
-            val content = value.getString(key)
-            require(content.length <= 8192 && '\r' !in content && '\n' !in content) { "源图片请求头无效。" }
-            name to content
-        }.orEmpty()
+            require(result.size <= 64 && result.entries.sumOf { it.key.length + it.value.length } <= 32_768) { "源图片请求头过多。" }
+            return result
+        }
     }
 }

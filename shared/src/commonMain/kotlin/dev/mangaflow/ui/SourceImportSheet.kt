@@ -98,7 +98,6 @@ internal fun SourceImportSheet(
     onImported: (String) -> Unit,
     markAdult: Boolean = false,
 ) {
-    if (platformKind != PlatformKind.ANDROID) return
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
     val focus = LocalFocusManager.current
@@ -135,7 +134,7 @@ internal fun SourceImportSheet(
     var showEngineDetails by remember { mutableStateOf(false) }
     var showPackageDetails by remember(prepared?.digest) { mutableStateOf(false) }
     val motion = LocalMotionEnabled.current
-    val engineReady = engine.installed && !engine.downloading && !engine.pendingRemoval
+    val engineReady = platformKind != PlatformKind.ANDROID || engine.installed && !engine.downloading && !engine.pendingRemoval
     val engineReveal = animateFloatAsState(if (showEngineDetails) 1f else 0f,
         tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "source-engine-disclosure")
 
@@ -251,7 +250,7 @@ internal fun SourceImportSheet(
                                     expandVertically(tween(if (motion) MangaMotion.Content else 0)),
                                 exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) +
                                     shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
-                                Text("可添加公开仓库，挑选需要的漫画源；读取目录不会运行或安装脚本。目前支持 Mangayomi 格式的 JS 漫画源，APK、Dart 和阅读规则书源暂不支持。",
+                                Text("可添加公开仓库，挑选需要的漫画源；读取目录不会运行或安装脚本。支持 Venera ComicSource 和 Mangayomi JS 漫画源，APK、Dart 和阅读规则书源暂不支持。",
                                     fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant)
                             }
                         }
@@ -330,8 +329,11 @@ internal fun SourceImportSheet(
                         }
                         if (repositoryMode) {
                             MotionTextButton(enabled = busy == null, onClick = { url = PUBLIC_JS_REPOSITORY }) {
-                                Text("填入公开 JS 仓库示例", fontSize = 11.sp)
+                                Text("填入 Venera 仓库示例", fontSize = 11.sp)
                             }
+                            MotionTextButton(enabled = busy == null, onClick = {
+                                url = "https://raw.githubusercontent.com/entityJY/mangayomi-extensions-eJ/main/index.json"
+                            }) { Text("填入 Mangayomi 仓库示例", fontSize = 11.sp) }
                             Text("只保存你选择的仓库地址；移除仓库不影响已安装的源。",
                                 fontSize = 10.sp, lineHeight = 15.sp, color = colors.onSurfaceVariant)
                         }
@@ -415,13 +417,19 @@ internal fun SourceImportSheet(
                                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     ImportDetail("来源", bundle.origin)
                                     ImportDetail("指纹", bundle.digest.take(16))
+                                    bundle.metadata.optJSONArray("hostRepairs")?.length()?.takeIf { it > 0 }?.let {
+                                        ImportDetail("兼容修订", "$it 项，保留上游版本与原始摘要")
+                                    }
+                                    if (bundle.metadata.optBoolean("locallyModified", false))
+                                        Text("本机修订会保留；更新时需要先合并修改。", fontSize = 11.sp,
+                                            color = colors.onSurfaceVariant)
                                     Text("仅支持当前 JS 宿主；网页验证、APK、Dart 和阅读规则暂不兼容。目录识别不代表网站已验证可读，不支持的功能会明确报错。",
                                         color = colors.onSurfaceVariant, fontSize = 11.sp, lineHeight = 17.sp)
                                 }
                             }
                         }
                     }
-                    if (!engineReady || engine.error != null) item(key = "required-engine") {
+                    if (platformKind == PlatformKind.ANDROID && (!engineReady || engine.error != null)) item(key = "required-engine") {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("导入此源需要脚本运行组件", fontSize = 11.sp, color = colors.onSurfaceVariant)
                             ScriptEngineControl(runtimes, engine, busy == null, onFailure = { failure = it })
@@ -455,7 +463,7 @@ internal fun SourceImportSheet(
                             onClick = { prepared = null; failure = null }) { Text("重新选择", fontSize = 12.sp) }
                     }
                 }
-                if (bundle == null || engineReady && engine.error == null) item(key = "engine-maintenance") {
+                if (platformKind == PlatformKind.ANDROID && (bundle == null || engineReady && engine.error == null)) item(key = "engine-maintenance") {
                     Column {
                         MotionTextButton(onClick = { showEngineDetails = !showEngineDetails },
                             contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
@@ -557,4 +565,4 @@ private fun displayImportOrigin(value: String): String =
 
 private const val MAX_IMPORT_BYTES = 2 * 1024 * 1024
 // Public upstream metadata/script format was read; this is not an endorsed or runtime-verified catalogue.
-private const val PUBLIC_JS_REPOSITORY = "https://raw.githubusercontent.com/entityJY/mangayomi-extensions-eJ/main/index.json"
+private const val PUBLIC_JS_REPOSITORY = "https://raw.githubusercontent.com/venera-app/venera-configs/main/index.json"

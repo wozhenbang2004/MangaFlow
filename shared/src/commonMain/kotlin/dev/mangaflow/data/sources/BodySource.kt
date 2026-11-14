@@ -23,6 +23,27 @@ data class BodySourceInfo(
 
 interface BodySource : MangaRepository {
     val info: BodySourceInfo
+    suspend fun capabilities(): SourceCapabilities = SourceCapabilities()
+    suspend fun feeds(): List<SourceFeed> = listOf(SourceFeed("latest", "最近更新", SourceFeedKind.LATEST))
+    suspend fun feedFilters(feedId: String): List<SourceFilter> = feeds().firstOrNull { it.id == feedId }?.filters.orEmpty()
+    suspend fun browse(request: SourceBrowseRequest): dev.mangaflow.data.MangaPage {
+        require(request.feedId == "latest" && request.options.isEmpty()) { "来源不支持这个浏览条件。" }
+        return discover(request.page)
+    }
+    suspend fun searchFiltered(query: String, page: Int, options: List<String>): dev.mangaflow.data.MangaPage {
+        require(options.isEmpty()) { "来源不支持这个搜索条件。" }
+        return search(query, page)
+    }
+    suspend fun searchFilters(): List<SourceFilter> = emptyList()
+    suspend fun settings(): List<SourceSetting> = emptyList()
+    suspend fun saveSetting(key: String, value: String): Unit = unsupportedSourceFeature()
+    suspend fun accountState(): SourceAccountState = SourceAccountState()
+    suspend fun login(username: String, password: String): Unit = unsupportedSourceFeature()
+    suspend fun logout(): Unit = unsupportedSourceFeature()
+    suspend fun favoriteFolders(): List<SourceFavoriteFolder> = unsupportedSourceFeature()
+    suspend fun favorites(folderId: String, page: Int): dev.mangaflow.data.MangaPage = unsupportedSourceFeature()
+    suspend fun setFavorite(mangaId: String, folderId: String, favorite: Boolean): Unit = unsupportedSourceFeature()
+    suspend fun comments(mangaId: String, page: Int): SourceCommentPage = unsupportedSourceFeature()
 }
 
 internal const val BODY_USER_AGENT = "MangaFlow/1.0 (+https://github.com/wozhenbang2004/MangaFlow)"
