@@ -3,6 +3,22 @@ package dev.mangaflow.data.plugins
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 
+/** Original files read at venera-app/venera-configs a04e0559, before any host amendment. */
+internal val REVIEWED_VENERA_CODE_DIGESTS = mapOf(
+    "nhentai@1.1.0" to "0f68757f89d493926cbf4c039c256d34365d0639aaa6996acbcde7c162257982",
+    "wnacg@1.0.6" to "545a6d818d012c1e5799d6aaf7ecd09798969acb840166ee7c56de6d02201df0",
+    "ehentai@1.2.0" to "ef15f80d8090cb9ec1fcb18b502017a47694484e81d51c85e6b06ea162c58e4a",
+    "jm@1.4.0" to "a91bc8cc8b1a69eda20cdf2a04deea3fe0522baf2de84caa0c851211cb5f78ad",
+)
+
+/** Local edits and unreviewed/forked bases are never silently maintained. */
+internal fun hasReviewedVeneraBase(metadata: JSONObject): Boolean =
+    metadata.optString("protocol") == "venera" && !metadata.optBoolean("locallyModified", false) &&
+        metadata.optString("upstreamCodeDigest").isNotEmpty() &&
+        metadata.optString("upstreamCodeDigest") == REVIEWED_VENERA_CODE_DIGESTS[
+            metadata.optString("key") + "@" + metadata.optString("version")] &&
+        VeneraMetadata.namespace(metadata) == "github:venera-app/venera-configs"
+
 /** Narrow, reviewable upstream fixes; new upstream versions are never patched by a broad regex. */
 internal fun repairVeneraScript(code: String, metadata: JSONObject): Pair<String, JSONArray> {
     val repairs = JSONArray()

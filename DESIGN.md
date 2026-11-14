@@ -1,5 +1,17 @@
 # MangaFlow detail · 2026-11-12
 
+## Installed-source compatibility maintenance · 2026-11-14 (SOURCE-COMPAT-181–183)
+
+User “继续” extends the same source ecosystem implementation and the explicit permission to repair scripts/host interfaces. Exact message ID unavailable. The preceding5263d66 batch is already published; Android256/native94 were still building at this inspection, not failed or verified. A concrete source gap remains: starter history correctly avoids reinstalling existing sources, but therefore never gives those older packages newer reviewed host repairs.
+
+| ID | Current continuation and observable acceptance |
+| --- | --- |
+| SOURCE-COMPAT-181 | At existing first-adult-entry preparation, scan installed Venera packages for new exact-version repairs. Automatic maintenance requires the reviewed official repository identity and original upstream SHA256; local revisions and unknown upstream bases remain untouched. Keep source IDs, original digest/version/update URL, previous repair provenance, enable/partition choices and tombstones. Validate the actual amended script without networking, then commit only if the same installed digest still owns that source. A concurrent edit/remove/restore wins. Already repaired packages cause no write. |
+| SOURCE-COMPAT-182 | Publish a changed source package and advance its image/session fence under one existing lock boundary. Runtime operations check their installed package revision after admission and before preference writes/results; queued old scripts cannot run against a newly installed revision or restore old cookies. Validation remains inert and may inspect not-yet-installed packages. Preserve real page identities, frozen routes, completed downloads and local progress; stale pages require their existing refresh path. |
+| SOURCE-COMPAT-183 | Reuse the compact existing preparation status, progress, pause and explicit retry. An already provisioned collection does not silently redownload a removed engine solely for maintenance; a missing engine leaves packages unchanged and permits explicit preparation/retry. Normal installs retain their signed per-ABI engine path. No new settings screen, review wizard, source card or network probe. Bounded independent source review, syntax/whitespace checks and normal latest-main CI activation are evidence; actual site/device behavior remains unverified. |
+
+Scope is reviewed-source repair delivery and its necessary package/runtime consistency. The adopted references remain the actual pinned ComicSource scripts and the existing atomic store, session fence and shared Motion preparation row. Do not add more unverified default sources, rewrite custom scripts, change native account protocols or wait for artifacts before completing this batch.
+
 ## Copy comparison redesign from installed screenshots · 2026-11-14 (COPY-DIFF-182–188)
 
 User: “这部分的 uiux 和逻辑要重新设计”, with uploaded1000121726.jpg/1000121727.jpg/1000121728.jpg. Exact message ID and installed version are unavailable. The before-state shows178 fields/2 favorite differences/176 progress differences,39 unavailable progress records, a collection-read error, disabled choices, repeated local/Copy labels, a fixed tall dialog and a disabled full-width footer. Source confirms the error path could compare an empty collection snapshot as missing membership and one global error disabled all rows. This is an explicit rejection of that installed comparison, not approval of the redesign below. Original Git/IDEA-style per-field review request remains COPY-DIFF-181.

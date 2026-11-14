@@ -256,6 +256,55 @@ class SourcePluginStore constructor(context: PlatformContext, val runtime: Javas
         } }
     }
 
+    /** Pure amendments of already installed, reviewed bases; never a repository/site request. */
+    internal suspend fun pendingHostRepairs(): List<ScriptSourcePackage> = withContext(Dispatchers.IO) {
+        ready.await()
+        mutex.withLock {
+            check(mutableLoadError.value == null) { "请先恢复来源存储，再应用兼容修复。" }
+            mutableInstalled.value.filter { hostRepairedPackage(it) != null }.map(::copyPackage)
+        }
+    }
+
+    internal suspend fun applyHostRepair(sourceId: String, expectedDigest: String): Boolean = withContext(Dispatchers.IO) {
+        ready.await()
+        val prepared = mutex.withLock {
+            check(mutableLoadError.value == null) { "请先恢复来源存储，再应用兼容修复。" }
+            val current = mutableInstalled.value.firstOrNull { it.sourceId == sourceId && it.digest == expectedDigest }
+                ?: return@withContext false
+            hostRepairedPackage(copyPackage(current)) ?: return@withContext false
+        }
+        validatePackage(prepared)
+        runtime.validate(prepared)
+        mutex.withLock {
+            currentCoroutineContext().ensureActive()
+            check(mutableLoadError.value == null) { "请先恢复来源存储，再应用兼容修复。" }
+            // A manual edit, update, removal or restored package supersedes this snapshot.
+            if (mutableInstalled.value.none { it.sourceId == sourceId && it.digest == expectedDigest }) return@withLock false
+            val next = mutableInstalled.value.map { if (it.sourceId == sourceId) prepared else it }
+            validatePackages(next)
+            commit(next, JSONObject(descriptors.toString()).put(sourceId, descriptor(prepared)))
+            true
+        }
+    }
+
+    private fun hostRepairedPackage(current: ScriptSourcePackage): ScriptSourcePackage? {
+        if (!hasReviewedVeneraBase(current.metadata)) return null
+        val (code, additions) = repairVeneraScript(current.code, current.metadata)
+        if (code == current.code || additions.length() == 0) return null
+        val metadata = JSONObject(current.metadata.toString())
+        if (metadata.has("hostRepairs") && metadata.optJSONArray("hostRepairs") == null) return null
+        val repairs = metadata.optJSONArray("hostRepairs") ?: JSONArray()
+        val known = (0 until repairs.length()).map { index ->
+            repairs.optJSONObject(index)?.optString("id")?.takeIf(String::isNotBlank) ?: return null
+        }.toMutableSet()
+        for (index in 0 until additions.length()) {
+            val repair = additions.getJSONObject(index)
+            if (known.add(repair.getString("id"))) repairs.put(repair)
+        }
+        metadata.put("hostRepairs", repairs)
+        return current.copy(metadata = metadata, code = code, digest = digest(code, metadata))
+    }
+
     /** Explicit local repairs retain the upstream base and are protected from one-click updates. */
     suspend fun patch(sourceId: String, code: String) {
         ready.await()
@@ -346,20 +395,25 @@ class SourcePluginStore constructor(context: PlatformContext, val runtime: Javas
 
     private fun commit(packages: List<ScriptSourcePackage>, nextDescriptors: JSONObject,
         nextRepositories: List<SourcePluginRepository> = mutableRepositories.value) {
-        check(preserveDamagedFile()) { "原损坏源文件尚不能安全隔离，未覆盖；请检查存储空间。" }
-        val bytes = JSONObject().put("version", 1).put("packages", JSONArray(packages.map(::encodePackage)))
-            .put("descriptors", nextDescriptors)
-            .put("repositories", JSONArray(nextRepositories.map { JSONObject().put("url", it.url).put("name", it.name) }))
-            .toString().encodeToByteArray()
-        require(bytes.size <= MAX_STORE_BYTES) { "源包存储超过容量限制。" }
-        check(file.baseFile.parentFile?.let { it.isDirectory || it.mkdirs() } == true) { "无法创建源包目录。" }
-        val stream = file.startWrite()
-        try { stream.write(bytes); file.finishWrite(stream) }
-        catch (failure: Exception) { file.failWrite(stream); throw SourceException("源包未能保存，请检查存储空间。", cause = failure) }
-        descriptors = nextDescriptors
-        mutableInstalled.value = packages
-        mutableRepositories.value = nextRepositories
-        mutableLoadError.value = null
+        val previous = mutableInstalled.value.associate { it.sourceId to it.digest }
+        val incoming = packages.associate { it.sourceId to it.digest }
+        val changed = (previous.keys + incoming.keys).filter { previous[it] != incoming[it] }.toSet()
+        withScriptSourcePackageChanges(application, changed) {
+            check(preserveDamagedFile()) { "原损坏源文件尚不能安全隔离，未覆盖；请检查存储空间。" }
+            val bytes = JSONObject().put("version", 1).put("packages", JSONArray(packages.map(::encodePackage)))
+                .put("descriptors", nextDescriptors)
+                .put("repositories", JSONArray(nextRepositories.map { JSONObject().put("url", it.url).put("name", it.name) }))
+                .toString().encodeToByteArray()
+            require(bytes.size <= MAX_STORE_BYTES) { "源包存储超过容量限制。" }
+            check(file.baseFile.parentFile?.let { it.isDirectory || it.mkdirs() } == true) { "无法创建源包目录。" }
+            val stream = file.startWrite()
+            try { stream.write(bytes); file.finishWrite(stream) }
+            catch (failure: Exception) { file.failWrite(stream); throw SourceException("源包未能保存，请检查存储空间。", cause = failure) }
+            descriptors = nextDescriptors
+            mutableInstalled.value = packages
+            mutableRepositories.value = nextRepositories
+            mutableLoadError.value = null
+        }
     }
 
     private fun preserveDamagedFile(): Boolean {

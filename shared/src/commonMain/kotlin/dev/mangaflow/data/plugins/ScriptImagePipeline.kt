@@ -79,7 +79,7 @@ internal fun <T> withScriptSourceImageEpoch(context: PlatformContext, sourceId: 
         val current = sourceEpochOverrides[sourceId]
             ?: context.getSharedPreferences("mangaflow_script_image_sessions")
                 .getString("epoch_$sourceId", "initial").orEmpty()
-        if (current != expected) throw CancellationException("来源账号或设置已变化。")
+        if (current != expected) throw CancellationException("来源、账号或设置已变化。")
         operation().also { if (replaceAfter) interrupted = replaceScriptImageSessionLocked(context, sourceId) }
     }
     interrupted.forEach { it.cancel(CancellationException("来源图片会话已变化。")) }
@@ -105,13 +105,24 @@ fun invalidateScriptSourceImages(context: PlatformContext, sourceId: String) {
     interrupted.forEach { it.cancel(CancellationException("来源图片会话已变化。")) }
 }
 
+/** Package publication and its session fence must be observed as one source change. */
+internal fun <T> withScriptSourcePackageChanges(context: PlatformContext, sourceIds: Set<String>, operation: () -> T): T {
+    if (sourceIds.isEmpty()) return operation()
+    val interrupted = mutableListOf<Job>()
+    return try {
+        synchronized(imageStateLock) {
+            operation().also { sourceIds.forEach { interrupted += replaceScriptImageSessionLocked(context, it) } }
+        }
+    } finally { interrupted.forEach { it.cancel(CancellationException("来源脚本已变化。")) } }
+}
+
 private suspend fun <T> withImageSession(context: PlatformContext, sourceId: String, epoch: String,
     operation: suspend () -> T): T = try {
     coroutineScope {
         val owned = requireNotNull(currentCoroutineContext()[Job])
         synchronized(imageStateLock) { imageSessionJobs.getOrPut(sourceId) { mutableSetOf() }.add(owned) }
         try {
-            imageState(scriptSourceImageEpoch(context, sourceId) == epoch, "来源账号或设置已变化，请刷新本章。")
+            imageState(scriptSourceImageEpoch(context, sourceId) == epoch, "来源、账号或设置已变化，请刷新本章。")
             operation()
         } finally {
             synchronized(imageStateLock) {
@@ -123,7 +134,7 @@ private suspend fun <T> withImageSession(context: PlatformContext, sourceId: Str
     // A source-session change cancels only this image child, not its reader/download owner.
     currentCoroutineContext().ensureActive()
     if (scriptSourceImageEpoch(context, sourceId) != epoch)
-        throw ScriptImageRefreshRequired("来源账号或设置已变化，请刷新本章。")
+        throw ScriptImageRefreshRequired("来源、账号或设置已变化，请刷新本章。")
     throw failure
 }
 
@@ -175,7 +186,7 @@ suspend fun resolveScriptPage(
     if (page.url.startsWith("file://")) return page.copy(headers = emptyMap())
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
     val epoch = scriptSourceImageEpoch(context, ref.sourceId)
-    imageState(page.sourceSessionEpoch.isEmpty() || page.sourceSessionEpoch == epoch, "来源账号或设置已变化，请刷新本章。")
+    imageState(page.sourceSessionEpoch.isEmpty() || page.sourceSessionEpoch == epoch, "来源、账号或设置已变化，请刷新本章。")
     val owner = scriptImageOwner(mangaId, chapterId)
     val original = restoreScriptPageHeaders(context, owner, page)
     if (original.sourceImageToken.isEmpty()) {
@@ -210,7 +221,7 @@ suspend fun resolveScriptPage(
             currentCoroutineContext().ensureActive()
             if (store.installed.value.none { it.sourceId == ref.sourceId && it.digest == bundle.digest })
                 throw ScriptImageRefreshRequired("图片来源已更新或移除，请刷新本章。")
-            if (scriptSourceImageEpoch(context, ref.sourceId) != epoch) throw ScriptImageRefreshRequired("来源账号或设置已变化，请刷新本章。")
+            if (scriptSourceImageEpoch(context, ref.sourceId) != epoch) throw ScriptImageRefreshRequired("来源、账号或设置已变化，请刷新本章。")
             val result = JSONObject(response).getJSONObject("result")
             val url = publicPluginUrl(result.getString("url")).toString()
             val transform = result.optString("transform")
@@ -252,7 +263,7 @@ suspend fun materializeScriptPage(
     imageState(page.sourceRevision.isEmpty() && page.transform.isEmpty() || page.sourceRevision == bundle.digest,
         "图片来源已更新，请刷新本章后重试。")
     val epoch = scriptSourceImageEpoch(context, ref.sourceId)
-    imageState(page.sourceSessionEpoch.isEmpty() || page.sourceSessionEpoch == epoch, "来源账号或设置已变化，请刷新本章。")
+    imageState(page.sourceSessionEpoch.isEmpty() || page.sourceSessionEpoch == epoch, "来源、账号或设置已变化，请刷新本章。")
     require(page.transform in setOf("", "jm")) { "来源图片变换暂不兼容。" }
     val url = publicPluginUrl(page.url)
     val filename = url.pathSegments.lastOrNull().orEmpty()
@@ -394,7 +405,7 @@ internal fun restoreScriptPageHeaders(context: PlatformContext, owner: String, p
     val value = JSONObject(saved)
     require(value.getString("owner") == owner) { "图片会话不属于当前章节。" }
     val sourceId = SourceKeys.decodeChapter("", owner).sourceId
-    imageState(value.optString("epoch", "initial") == scriptSourceImageEpoch(context, sourceId), "来源账号或设置已变化，请刷新本章。")
+    imageState(value.optString("epoch", "initial") == scriptSourceImageEpoch(context, sourceId), "来源、账号或设置已变化，请刷新本章。")
     require(page.headerSecretBinding.isNotEmpty() && headerBinding(saved, page.url) == page.headerSecretBinding) {
         "图片地址与受保护会话不一致，请刷新本章。"
     }

@@ -42,7 +42,7 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
     fun start(retry: Boolean = false): Unit = synchronized(control) {
         if (job?.isCompleted == false || attempted && !retry) return@synchronized
         attempted = true
-        val next = scope.launch(start = CoroutineStart.LAZY) { install() }
+        val next = scope.launch(start = CoroutineStart.LAZY) { install(prepareExistingEngine = retry) }
         job = next
         next.start()
         Unit
@@ -50,18 +50,19 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
 
     fun cancel() {
         synchronized(control) { job?.cancel() }
-        if (mutableState.value.preparingEngine && platformKind == PlatformKind.ANDROID)
-            PanelRuntimeStore.get(context).cancel(PanelRuntimeId.QUICKJS)
     }
 
-    private suspend fun install() {
+    private suspend fun install(prepareExistingEngine: Boolean) {
         mutableState.value = StarterSourceState(running = true, phase = "正在准备精选来源")
         try {
             store.ready.await()
             val pending = STARTERS.filterNot { store.hasSourceHistory(it.sourceId) }
-            mutableState.value = mutableState.value.copy(completed = STARTERS.size - pending.size)
-            if (pending.isEmpty()) return
-            prepareEngine()
+            val repairs = store.pendingHostRepairs()
+            mutableState.value = mutableState.value.copy(completed = STARTERS.size - pending.size, total = STARTERS.size + repairs.size)
+            if (pending.isEmpty() && repairs.isEmpty()) return
+            // Existing-source maintenance can validate an installed engine, but never restores
+            // an explicitly removed optional component without the user's retry action.
+            if (pending.isNotEmpty() || prepareExistingEngine) prepareEngine()
             val failed = mutableListOf<String>()
             for (source in pending) {
                 currentCoroutineContext().ensureActive()
@@ -90,7 +91,22 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
                 }
                 mutableState.value = mutableState.value.copy(completed = mutableState.value.completed + 1)
             }
-            mutableState.value = mutableState.value.copy(phase = "精选来源准备完成",
+            for (source in repairs) {
+                currentCoroutineContext().ensureActive()
+                val name = source.metadata.optString("name").ifBlank { "来源" }
+                mutableState.value = mutableState.value.copy(phase = "正在修复 $name", progress = null, preparingEngine = false)
+                try {
+                    withTimeout(30_000L) { store.applyHostRepair(source.sourceId, source.digest) }
+                } catch (_: TimeoutCancellationException) { failed += name + " · 兼容修复超时" }
+                catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) {
+                    val engine = engineMaintenanceIssue()
+                    if (engine != null) { failed += engine; break }
+                    failed += name + " · 兼容修复未完成"
+                }
+                mutableState.value = mutableState.value.copy(completed = mutableState.value.completed + 1)
+            }
+            mutableState.value = mutableState.value.copy(phase = "来源准备完成",
                 error = failed.takeIf { it.isNotEmpty() }?.joinToString("；"))
         } catch (_: TimeoutCancellationException) {
             mutableState.value = mutableState.value.copy(error = "脚本组件准备超时，可重试或在来源管理中查看。")
@@ -108,7 +124,8 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
         if (platformKind != PlatformKind.ANDROID) return
         val runtimes = PanelRuntimeStore.get(context)
         val id = PanelRuntimeId.QUICKJS
-        if (runtimes.states.value[id]?.installed == true) return
+        check(runtimes.states.value[id]?.pendingRemoval != true) { "脚本组件等待移除，请重启后再准备。" }
+        if (runtimes.states.value[id]?.installed == true && runtimes.states.value[id]?.downloading != true) return
         mutableState.value = mutableState.value.copy(phase = "正在准备漫画源脚本组件", preparingEngine = true)
         runtimes.download(id)
         val ready = withTimeout(120_000L) {
@@ -122,6 +139,17 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
         mutableState.value = mutableState.value.copy(preparingEngine = false, progress = null)
     }
 
+    private fun engineMaintenanceIssue(): String? {
+        if (platformKind != PlatformKind.ANDROID) return null
+        val engine = PanelRuntimeStore.get(context).states.value[PanelRuntimeId.QUICKJS]
+        return when {
+            engine?.pendingRemoval == true -> "脚本组件等待移除，请重启后重试。"
+            engine?.downloading == true -> "脚本组件正在准备，完成后可重试兼容修复。"
+            engine?.installed != true -> "脚本组件未就绪，重试可准备并修复已有来源。"
+            else -> null
+        }
+    }
+
     private data class Starter(val key: String, val title: String, val file: String,
         val sourceId: String, val bytes: Int, val sha256: String)
 
@@ -130,11 +158,11 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
         const val UPDATE_BASE = "https://raw.githubusercontent.com/venera-app/venera-configs/main"
         val STARTERS = listOf(
             Starter("nhentai", "nhentai", "nhentai.js", "js_4121890e56c894baf221b16aaf5ec8adb85c", 58_970,
-                "0f68757f89d493926cbf4c039c256d34365d0639aaa6996acbcde7c162257982"),
+                REVIEWED_VENERA_CODE_DIGESTS.getValue("nhentai@1.1.0")),
             Starter("wnacg", "WNACG", "wnacg.js", "js_ac54e53a451f4f84f635c7c6cfac9ecd2cdb", 32_774,
-                "545a6d818d012c1e5799d6aaf7ecd09798969acb840166ee7c56de6d02201df0"),
+                REVIEWED_VENERA_CODE_DIGESTS.getValue("wnacg@1.0.6")),
             Starter("ehentai", "E-Hentai", "ehentai.js", "js_d0e1410e9d2b0f26739feea876b7b82d11e9", 61_741,
-                "ef15f80d8090cb9ec1fcb18b502017a47694484e81d51c85e6b06ea162c58e4a"),
+                REVIEWED_VENERA_CODE_DIGESTS.getValue("ehentai@1.2.0")),
         )
         fun digest(bytes: ByteArray): String = sha256(bytes).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
         fun failureReason(failure: Exception): String = when {

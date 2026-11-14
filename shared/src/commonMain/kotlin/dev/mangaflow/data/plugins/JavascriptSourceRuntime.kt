@@ -43,7 +43,7 @@ class JavascriptSourceRuntime(context: PlatformContext) {
         require(method in METHODS) { "不支持的漫画源操作。" }
         require(args.toString().length <= MAX_ARGUMENT_CHARS) { "漫画源操作参数过大。" }
         return execute(bundle, reading = method == "getPageList" || method == "resolveImage", allowNetwork = true,
-            allowRedirects = method !in setOf("login", "loginCookies")) { js ->
+            allowRedirects = method !in setOf("login", "loginCookies"), requireInstalled = true) { js ->
             val invoke = if (bundle.isVenera) "__mfVeneraInvoke" else "__mfInvoke"
             val result = js.evaluate<String>("$invoke(globalThis.__mfProvider, ${JSONObject.quote(method)}, $args)", "operation.js")
             require(result.length <= MAX_RESPONSE_BYTES) { "漫画源返回内容过大。" }
@@ -54,8 +54,10 @@ class JavascriptSourceRuntime(context: PlatformContext) {
     }
 
     private suspend fun <T> execute(bundle: ScriptSourcePackage, reading: Boolean, allowNetwork: Boolean,
-        allowRedirects: Boolean = true, block: suspend (QuickJs) -> T): T = withContext(Dispatchers.Default) {
+        allowRedirects: Boolean = true, requireInstalled: Boolean = false, block: suspend (QuickJs) -> T): T = withContext(Dispatchers.Default) {
         require(bundle.code.length in 1..MAX_SCRIPT_CHARS) { "漫画源脚本大小无效。" }
+        val store = if (requireInstalled) SourcePluginStore.get(application).also { it.ready.await() } else null
+        fun currentPackage(): Boolean = store == null || store.installed.value.any { it.sourceId == bundle.sourceId && it.digest == bundle.digest }
         withTimeout(20_000L) {
             (if (reading) readingContexts else otherContexts).withPermit {
                 prepareJavascriptEngine(application)
@@ -66,9 +68,17 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                 var hostFailure: Exception? = null
                 var responseStatus: Int? = null
                 val sourceEpoch = scriptSourceImageEpoch(application, bundle.sourceId)
+                var packageChanged = false
+                fun checkPackage() {
+                    if (!currentPackage()) {
+                        packageChanged = true
+                        throw SourceException("来源脚本已更新或移除，请刷新后重试。")
+                    }
+                }
                 val preferenceScope = sha256(bundle.sourceId.encodeToByteArray()).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
                 var preferenceCalls = 0
                 try {
+                    checkPackage()
                     val network = JavascriptHttpSession(allowNetwork,
                         currentCoroutineContext()[ChapterDownloadTransport]?.route, MAX_RESPONSE_BYTES, allowRedirects)
                     requests = network
@@ -76,19 +86,21 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                     js.maxStackSize = 256L * 1024
                     js.evaluationTimeoutMillis = 2_000L
                     js.defineBinding("__mfHttp", AsyncFunctionBinding<String> { values ->
-                        try { network.request(argument(values)).also { result ->
+                        try { checkPackage(); network.request(argument(values)).also { result ->
                             responseStatus = JSONObject(result).optInt("statusCode", 0).takeIf { it in 400..599 }
                         } }
                         catch (failure: Exception) { hostFailure = failure; throw failure }
                     })
                     js.defineBinding("__mfDom", FunctionBinding<String> { values -> dom.call(argument(values)) })
                     js.defineBinding("__mfPrefs", FunctionBinding<String> { values ->
+                        checkPackage()
                         require(++preferenceCalls <= 128) { "漫画源偏好操作过多。" }
                         val raw = argument(values)
                         if (JSONObject(raw).optString("op") == "get")
                             preference(preferenceScope, raw, allowNetwork, bundle.isVenera)
                         else withScriptSourceImageEpoch(application, bundle.sourceId, sourceEpoch,
                             replaceAfter = bundle.isVenera && JSONObject(raw).optString("op") == "batch") {
+                            checkPackage()
                             preference(preferenceScope, raw, allowNetwork, bundle.isVenera)
                         }
                     })
@@ -102,7 +114,7 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                         metadata.getString("entryClass").also { require(it.matches(Regex("[A-Za-z_$][A-Za-z0-9_$]*"))) }
                     } else "DefaultExtension"
                     js.evaluate<Unit>(js.compile(bundle.code + "\n;globalThis.__mfProvider = new $constructor(); void 0;\n", "source.js"))
-                    block(js)
+                    block(js).also { checkPackage() }
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (failure: DownloadRouteException) { throw failure }
                 catch (failure: Exception) {
@@ -114,6 +126,7 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                     val unsupported = Regex("Unsupported source capability: ([A-Za-z -]{1,100})")
                         .find(failure.message.orEmpty())?.groupValues?.get(1)
                     val message = when {
+                        packageChanged || !currentPackage() -> "来源脚本已更新或移除，请刷新后重试。"
                         failure.message.orEmpty().contains("Source cursor expired") -> "列表分页已失效，请刷新后继续。"
                         status == 401 || Regex("(?i)not[ _-]?logged|login required|login expired|session expired|需要登录|未登录")
                             .containsMatchIn(failure.message.orEmpty()) -> "此来源需要登录，请先设置来源账号。"
