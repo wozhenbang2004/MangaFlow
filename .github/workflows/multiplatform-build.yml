@@ -51,10 +51,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-          cache: gradle
-          cache-dependency-path: |
-            **/*.gradle.kts
-            gradle/wrapper/gradle-wrapper.properties
+      - name: Reuse Gradle build state
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
       - name: Install Android SDK for shared project configuration
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
@@ -81,6 +79,16 @@ jobs:
           ref: f54136611519bef50cf31336e0c28a78eb175657
           path: native/steam/tapline
           persist-credentials: false
+      - name: Reuse Steam compiler dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/steam/target
+          key: ${{ runner.os }}-${{ runner.arch }}-steam-rust188-msvc-v1-${{ hashFiles('native/steam/Cargo.toml', 'native/steam/src/**', 'native/steam/tapline-bounds.patch', 'scripts/build_steam.py', 'native/steam/tapline/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-steam-rust188-msvc-v1-
       - name: Install pinned Windows Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal --target x86_64-pc-windows-msvc
       - name: Build Windows Steam bridge resource
@@ -100,7 +108,7 @@ jobs:
           set -euo pipefail
           chmod +x gradlew
           # Windows installers do not retain an app image; incremental staging requires one.
-          ./gradlew --no-daemon --console=plain --max-workers=2 -PmangaVersionName="$MANGA_VERSION" :desktopApp:createDistributable :desktopApp:packageDistributionForCurrentOS
+          ./gradlew --no-daemon --console=plain --max-workers=2 -PmangaVersionName="$MANGA_VERSION" :desktopApp:createReleaseDistributable :desktopApp:packageReleaseDistributionForCurrentOS
       - name: Stage installers and verified incremental file assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -161,10 +169,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-          cache: gradle
-          cache-dependency-path: |
-            **/*.gradle.kts
-            gradle/wrapper/gradle-wrapper.properties
+      - name: Reuse Gradle build state
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
           packages: 'platform-tools platforms;android-37.0 build-tools;36.0.0'
@@ -173,6 +179,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/native_release.py plan
+      - name: Identify the native compiler cache
+        id: native-cache
+        run: |
+          echo "xcode=$(xcodebuild -version | shasum -a 256 | cut -c 1-16)" >> "$GITHUB_OUTPUT"
+      - name: Reuse Kotlin Native compiler dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-${{ runner.arch }}-konan-kotlin2421-${{ steps.native-cache.outputs.xcode }}-${{ hashFiles('build.gradle.kts', 'shared/build.gradle.kts', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-konan-kotlin2421-${{ steps.native-cache.outputs.xcode }}-
       - name: Generate the native Xcode application project
         run: |
           set -euo pipefail

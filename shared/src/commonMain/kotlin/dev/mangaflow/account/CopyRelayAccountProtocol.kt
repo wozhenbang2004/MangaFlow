@@ -9,9 +9,12 @@ import dev.mangaflow.net.Request
 import dev.mangaflow.platform.secureRandomBytes
 import kotlin.io.encoding.Base64
 
-/** The installed Relay 0079af7 web-login contract; no host fallback or request replay. */
+/** Relay's web-login fields on the current official site; no host fallback or request replay. */
 internal object CopyRelayAccountProtocol {
-    val loginUrl = "https://copy4000.com/api/kb/web/login".toHttpUrl()
+    // The official login bundle builds its API from document.location.host.
+    // Keep the endpoint and browser-origin headers on the same current site.
+    private const val LOGIN_ORIGIN = "https://mangacopy.com"
+    val loginUrl = "$LOGIN_ORIGIN/api/kb/web/login".toHttpUrl()
     val profileUrl = "https://api.copy202601.com/api/v3/member/info".toHttpUrl()
 
     class Submission(val request: Request, val passwordField: String)
@@ -28,8 +31,8 @@ internal object CopyRelayAccountProtocol {
             .header("Accept", "application/json, text/plain, */*")
             .header("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
             .header("platform", "2")
-            .header("Origin", "https://copy4000.com")
-            .header("Referer", "https://copy4000.com/web/login/loginByAccount?url=person%2Fhome")
+            .header("Origin", LOGIN_ORIGIN)
+            .header("Referer", "$LOGIN_ORIGIN/web/login/loginByAccount?url=person%2Fhome")
             .header("sec-ch-ua", "\"Microsoft Edge\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
             .header("sec-ch-ua-mobile", "?0").header("sec-ch-ua-platform", "\"Windows\"")
             .header("sec-fetch-site", "same-origin").header("sec-fetch-mode", "cors")

@@ -103,7 +103,7 @@ def stage_incremental(image: Path, destination: Path, version: str) -> None:
     runtime = image / "runtime"
     if not (app / "MangaFlow.cfg").is_file() or not runtime.is_dir():
         raise RuntimeError(f"The jpackage application image is missing at {image}; "
-                           "run :desktopApp:createDistributable before staging incremental files")
+                           "run :desktopApp:createReleaseDistributable before staging incremental files")
     prior = previous_file_assets()
     entries = []
     new_assets = set()
@@ -137,7 +137,7 @@ def stage_incremental(image: Path, destination: Path, version: str) -> None:
 
 def stage() -> None:
     version = os.environ["MANGA_VERSION"]
-    root = Path("desktopApp/build/compose/binaries/main")
+    root = Path("desktopApp/build/compose/binaries/main-release")
     destination = Path("dist/native")
     destination.mkdir(parents=True, exist_ok=True)
     files = sorted([*(root / "exe").glob("*.exe"), *(root / "msi").glob("*.msi")])

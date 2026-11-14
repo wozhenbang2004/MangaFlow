@@ -20,6 +20,12 @@ compose.desktop {
     application {
         mainClass = "dev.mangaflow.desktop.MainKt"
         jvmArgs += listOf("-Dmangaflow.version=${mangaVersion.get()}", "-Dcompose.interop.blending=true", "-Djava.net.useSystemProxies=true")
+        buildTypes.release.proguard {
+            optimize.set(false)
+            obfuscate.set(false)
+            joinOutputJars.set(false)
+            configurationFiles.from(project.file("compose-desktop.pro"))
+        }
         nativeDistributions {
             targetFormats(TargetFormat.Exe, TargetFormat.Msi)
             packageName = "MangaFlow"
