@@ -482,7 +482,8 @@ fun SettingsScreen(
                     SettingsSection("应用", sourceBackdrop) {
                         SettingsDisclosure("网络与下载", downloadRouteLabel(routes.defaultMode), Icons.Outlined.SwapVert,
                             expanded = expandedSetting == "network", onToggle = { toggleSetting("network") }) {
-                            NetworkDownloadSettings(sourceBackdrop)
+                            NetworkDownloadSettings(sourceBackdrop,
+                                active = expandedSetting == "network" && (!desktop || settingsCategory == 3))
                         }
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                             .animateContentSize(if (LocalMotionEnabled.current) tween(MangaMotion.Content) else snap()),

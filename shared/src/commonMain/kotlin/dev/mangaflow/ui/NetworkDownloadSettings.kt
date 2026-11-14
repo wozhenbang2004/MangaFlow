@@ -61,7 +61,7 @@ import dev.mangaflow.ui.motion.motionPress
 
 /** Existing motion controls and quiet settings rows; no request is made to configure a route. */
 @Composable
-internal fun NetworkDownloadSettings(backdrop: HazeState? = null) {
+internal fun NetworkDownloadSettings(backdrop: HazeState? = null, active: Boolean = true) {
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
@@ -83,7 +83,7 @@ internal fun NetworkDownloadSettings(backdrop: HazeState? = null) {
             }, modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
             fullWidthIndicator = true, controlHeight = 40.dp,
             track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
-        Text("直连会跳过应用和系统 HTTP 代理；外部 VPN 仍可能接管。",
+        Text("应用直连跳过 HTTP／SOCKS 代理；外部 VPN／TUN 仍可能接管。",
             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
 
         RouteDisclosure("代理地址", settings.proxy?.let(::proxyAddressLabel) ?: "未配置",
@@ -116,6 +116,7 @@ internal fun NetworkDownloadSettings(backdrop: HazeState? = null) {
             Text("填写外部代理软件提供的本地端口，当前支持无需账号密码的代理。SOCKS5 兼容更多下载类型；扩展源安装和 iOS HTTPS 下载暂不支持 HTTP 代理。",
                 style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         }
+        DownloadConnectionDiagnostics(store, active)
         RouteDisclosure("按下载类型设置", settings.categoryOverrides.size.takeIf { it > 0 }?.let {
             it.toString() + " 项独立设置"
         } ?: "全部跟随默认", categoriesExpanded, { categoriesExpanded = !categoriesExpanded })
@@ -132,7 +133,7 @@ internal fun NetworkDownloadSettings(backdrop: HazeState? = null) {
         notice?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         }
-        Text("设置用于之后开始或手动重试的下载。外部代理支持分应用排除和本地端口时，可排除 MangaFlow，再让指定下载连接此端口。",
+        Text("设置用于之后开始或手动重试的下载。外部代理支持分应用排除和本地端口时，可排除 MangaFlow，再让指定下载连接此端口；出口仍由该代理的规则决定。",
             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
     }
 }
@@ -237,7 +238,7 @@ private fun RouteChoiceRow(
 }
 
 @Composable
-private fun RouteDisclosure(label: String, detail: String, expanded: Boolean, onClick: () -> Unit) {
+internal fun RouteDisclosure(label: String, detail: String, expanded: Boolean, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     MotionTextButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Text(label, style = MaterialTheme.typography.bodyMedium)

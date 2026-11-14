@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Download connection diagnosis · 2026-11-14
+
+NETWORK-DETECT-20261114 in DESIGN owns the latest external-proxy question and repeated “继续”. Four source files add an explicitly invoked diagnostic disclosure to DOWNLOAD-ROUTING-143's actual NetworkDownloadSettings: system/direct/saved-proxy comparisons for Copy catalogue or public update metadata, bounded two-route/two-sample requests, content/error-aware results, and a separate apply-to-download-default action. Real stored-state guards and owned cancellation preserve manual/category choices and active jobs. Response time is not bandwidth, native Steam validation or proof of bypassing an external VPN/TUN.
+
+Root preserves concurrent17f14a5's full download adapters and the latest profiles/comments/rankings. No parallel settings store, ordinary reader/auth route change, new dependency, local build/test/probe or status-only push. One finished cloud source batch/expected-head update and normal CI trigger; actual build and installed connectivity remain separate evidence. Environment-adaptive performance/cache control remains design-only OPEN.
+
 ## Download routing and resolved publication report · 2026-11-14
 
 Active requirement is DESIGN.md DOWNLOAD-ROUTING-143, implementing ROUTING-DESIGN-142 after “继续”; the raw network/Steam UI/auth request remains in STEAM-UI-141. The user's “失败了” was diagnosed from actual logs:216 and217 compiled/packaged/signed but publication rejected a superseded main.218 successfully published (run43562749212, v0.1.218 at05:49:52Z), containing the account/password/Guard/stable wallpaper UI work. Keep the actual current-main publishing guard.
