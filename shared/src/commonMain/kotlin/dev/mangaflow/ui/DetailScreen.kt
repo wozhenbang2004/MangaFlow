@@ -543,9 +543,13 @@ fun DetailScreen(
                                     header.heightOffsetLimit = limit
                                     header.heightOffset = offset
                                 }
-                                val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
-                                val visibleHeight = maxOf(toolbarPixels, expanded + offset)
-                                    .coerceIn(constraints.minHeight, constraints.maxHeight)
+                                // Comments are an independent scroll viewport. The book header
+                                // must not consume their available height or move on a comment drag.
+                                val offset = if (activeSection == 1) -expanded
+                                    else header.heightOffset.roundToInt().coerceIn(-expanded, 0)
+                                val visibleHeight = if (activeSection == 1) toolbarPixels
+                                    else maxOf(toolbarPixels, expanded + offset)
+                                        .coerceIn(constraints.minHeight, constraints.maxHeight)
                                 layout(foreground.width, visibleHeight) {
                                     foreground.placeRelative(0, offset)
                                 }
