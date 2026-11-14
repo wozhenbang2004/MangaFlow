@@ -69,6 +69,7 @@ internal fun DesktopNavigationWorkspace(
     onNavigate: (Int) -> Unit,
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
+    profileControl: @Composable (compact: Boolean) -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     Box(modifier.fillMaxSize()) {
@@ -104,6 +105,7 @@ internal fun DesktopNavigationWorkspace(
                         } else MotionIconButton(onClick = onSearch, modifier = Modifier.size(40.dp), tooltip = "搜索 · Ctrl+K") {
                             Icon(Icons.Outlined.Search, "搜索", Modifier.size(19.dp))
                         }
+                        profileControl(!expanded)
                         Spacer(Modifier.height(12.dp))
                         val scroll = rememberScrollState()
                         Box(Modifier.weight(1f).fillMaxWidth()) {

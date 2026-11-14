@@ -181,7 +181,11 @@ fun DownloadsScreen(
     backgroundInParent: Boolean = false,
     excludedSourceIds: Set<String> = emptySet(),
     onDetails: ((Manga) -> Unit)? = null,
+    includedSourceIds: Set<String>? = null,
 ) {
+    fun sourceIncluded(sourceId: String): Boolean =
+        (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
+    val localImportAllowed = sourceIncluded("local")
     val desktop = platformKind == PlatformKind.DESKTOP
     val context = LocalContext.current
     val entries by store.entries.collectAsStateWithLifecycle()
@@ -216,11 +220,15 @@ fun DownloadsScreen(
     val contentTopPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
-    val visibleEntries = remember(entries, excludedSourceIds) { entries.filterNot { it.manga.sourceId in excludedSourceIds } }
+    val visibleEntries = remember(entries, includedSourceIds, excludedSourceIds) {
+        entries.filter { sourceIncluded(it.manga.sourceId) }
+    }
     val manageableEntries = remember(visibleEntries, removingIds) { visibleEntries.filterNot { it.id in removingIds } }
     val selectedEntries = remember(manageableEntries, selectedIds) { manageableEntries.filter { it.id in selectedIds } }
     val entriesById = remember(visibleEntries) { visibleEntries.associateBy(DownloadEntry::id) }
-    val historyById = remember(history) { history.associateBy { it.manga.id } }
+    val historyById = remember(history, includedSourceIds, excludedSourceIds) {
+        history.filter { sourceIncluded(it.manga.sourceId) }.associateBy { it.manga.id }
+    }
     val directory = remember(manageableEntries) {
         manageableEntries.map { DownloadDirectoryEntry(it.id, it.manga.id, it.chapter.group,
             it.chapter.index, it.status == DownloadStatus.COMPLETED) }
@@ -254,17 +262,29 @@ fun DownloadsScreen(
 
     val archivePicker = rememberOpenDocumentPicker() { uri ->
         uri?.let {
+            if (!localImportAllowed) {
+                releasePickedDocuments(listOf(it))
+                return@rememberOpenDocumentPicker
+            }
             val base = documentName(context, it).substringBeforeLast('.').ifBlank { "本地漫画" }
             pendingImport = PendingLocalImport(LocalImportSource.Archive(it), base, "第 1 话")
         }
     }
     val imagePicker = rememberMultipleDocumentPicker() { uris ->
+        if (!localImportAllowed) {
+            releasePickedDocuments(uris)
+            return@rememberMultipleDocumentPicker
+        }
         if (uris.isNotEmpty()) pendingImport = PendingLocalImport(
             LocalImportSource.Images(uris), "本地漫画", "第 1 话",
         )
     }
     val folderPicker = rememberFolderPicker() { uri ->
         uri?.let {
+            if (!localImportAllowed) {
+                releasePickedDocuments(listOf(it))
+                return@rememberFolderPicker
+            }
             pendingImport = PendingLocalImport(
                 LocalImportSource.Folder(it), documentName(context, it).ifBlank { "本地漫画" }, "第 1 话",
             )
@@ -272,6 +292,10 @@ fun DownloadsScreen(
     }
 
     fun importLocal(pending: PendingLocalImport, mangaTitle: String, chapterTitle: String) {
+        if (!localImportAllowed) {
+            importError = "本地导入保存在普通分区"
+            return
+        }
         if (importBusy) return
         importBusy = true
         importError = null
@@ -297,12 +321,13 @@ fun DownloadsScreen(
     }
 
     fun toggleSelection(targets: List<DownloadEntry>) {
-        val ids = targets.map(DownloadEntry::id).toSet()
+        val ids = targets.map(DownloadEntry::id).filter { it in entriesById }.toSet()
+        if (ids.isEmpty()) return
         selectedIds = if (ids.all { it in selectedIds }) selectedIds - ids else selectedIds + ids
     }
 
     fun removeWithUndo(targets: List<DownloadEntry>) {
-        val ids = targets.map(DownloadEntry::id).toSet() - removingIds
+        val ids = targets.map(DownloadEntry::id).filter { it in entriesById }.toSet() - removingIds
         if (ids.isEmpty()) return
         removingIds = removingIds + ids
         snackbar.currentSnackbarData?.dismiss()
@@ -345,11 +370,14 @@ fun DownloadsScreen(
                             Icon(Icons.Outlined.Close, "退出管理", Modifier.size(20.dp), tint = secondary)
                         }
                     } else {
-                        MotionIconButton(enabled = !importBusy, modifier = Modifier.size(44.dp),
-                            onClick = { showImportSources = true }) {
+                        MotionIconButton(enabled = !importBusy && localImportAllowed, modifier = Modifier.size(44.dp),
+                            tooltip = if (localImportAllowed) "导入漫画" else "本地导入保存在普通分区",
+                            onClick = { if (localImportAllowed) showImportSources = true }) {
                             if (importBusy) CircularProgressIndicator(Modifier.size(16.dp)
                                 .semantics { contentDescription = "正在导入" }, strokeWidth = 1.5.dp, color = secondary)
-                            else Icon(Icons.Outlined.Add, "导入漫画", Modifier.size(21.dp), tint = foreground)
+                            else Icon(Icons.Outlined.Add,
+                                if (localImportAllowed) "导入漫画" else "本地导入保存在普通分区",
+                                Modifier.size(21.dp), tint = foreground)
                         }
                         Box {
                             MotionIconButton(onClick = { showQueueActions = !showQueueActions }, modifier = Modifier.size(44.dp)) {
@@ -479,7 +507,10 @@ fun DownloadsScreen(
                                 } else if (pageFilter == DownloadFilter.SAVED && manageableEntries.isNotEmpty()) {
                                     TextButton(onClick = { filter = DownloadFilter.ACTIVE }) { Text("查看进行中") }
                                 } else if (pageFilter == DownloadFilter.ALL) {
-                                    TextButton(onClick = { showImportSources = true }) { Text("添加本地漫画") }
+                                    TextButton(enabled = localImportAllowed,
+                                        onClick = { if (localImportAllowed) showImportSources = true }) {
+                                        Text("添加本地漫画")
+                                    }
                                 }
                             }
                         }
@@ -606,8 +637,9 @@ fun DownloadsScreen(
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
     }
 
-    pendingDeletion?.let { targets ->
-        AlertDialog(onDismissRequest = { pendingDeletion = null }, shape = RoundedCornerShape(22.dp),
+    pendingDeletion?.let { pendingTargets ->
+        val targets = pendingTargets.mapNotNull { entriesById[it.id] }
+        if (targets.isNotEmpty()) AlertDialog(onDismissRequest = { pendingDeletion = null }, shape = RoundedCornerShape(22.dp),
             containerColor = colors.surface,
             title = { Text("删除 ${targets.size} 话下载？", style = MaterialTheme.typography.titleMedium) },
             text = {
@@ -639,18 +671,20 @@ fun DownloadsScreen(
                         Icon(Icons.Outlined.Close, "取消导入", Modifier.size(20.dp), tint = secondary)
                     }
                 }
-                LocalImportChoice(Icons.Outlined.Inventory2, "压缩包", "CBZ · ZIP") {
+                if (!localImportAllowed) Text("本地导入保存在普通分区",
+                    style = MaterialTheme.typography.bodySmall, color = secondary)
+                LocalImportChoice(Icons.Outlined.Inventory2, "压缩包", "CBZ · ZIP", enabled = localImportAllowed) {
                     showImportSources = false
                     archivePicker.launch(arrayOf(
                         "application/zip", "application/x-zip-compressed", "application/x-cbz",
                         "application/vnd.comicbook+zip", "application/octet-stream",
                     ))
                 }
-                LocalImportChoice(Icons.Outlined.Collections, "图片", "多选") {
+                LocalImportChoice(Icons.Outlined.Collections, "图片", "多选", enabled = localImportAllowed) {
                     showImportSources = false
                     imagePicker.launch(arrayOf("image/*"))
                 }
-                LocalImportChoice(Icons.Outlined.FolderOpen, "文件夹", "图片目录") {
+                LocalImportChoice(Icons.Outlined.FolderOpen, "文件夹", "图片目录", enabled = localImportAllowed) {
                     showImportSources = false
                     folderPicker.launch(null)
                 }
@@ -671,6 +705,7 @@ fun DownloadsScreen(
         busy = importBusy,
         error = importError,
         backdrop = backdrop,
+        allowed = localImportAllowed,
         onDismiss = { if (!importBusy) {
             pendingImport?.source?.documents()?.let(::releasePickedDocuments)
             pendingImport = null
@@ -686,13 +721,14 @@ private fun LocalImportChoice(
     icon: ImageVector,
     title: String,
     detail: String,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-        .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
-        .motionPress(interaction, pressedScale = .985f).heightIn(min = 52.dp).padding(horizontal = 6.dp, vertical = 8.dp),
+        .clickable(enabled = enabled, interactionSource = interaction, indication = null, role = Role.Button, onClick = onClick)
+        .motionPress(interaction, enabled = enabled, pressedScale = .985f).heightIn(min = 52.dp).padding(horizontal = 6.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Icon(icon, null, Modifier.size(22.dp), tint = colors.onSurfaceVariant)
         Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = colors.onSurface)
@@ -767,6 +803,7 @@ private fun LocalImportDetailsDialog(
     busy: Boolean,
     error: String?,
     backdrop: HazeState,
+    allowed: Boolean,
     onDismiss: () -> Unit,
     onConfirm: (PendingLocalImport, String, String) -> Unit,
 ) {
@@ -789,7 +826,7 @@ private fun LocalImportDetailsDialog(
         is LocalImportSource.Folder -> "图片文件夹"
     }
     fun submit() {
-        if (!busy && pending != null && mangaTitle.isNotBlank() && chapterTitle.isNotBlank()) {
+        if (allowed && !busy && pending != null && mangaTitle.isNotBlank() && chapterTitle.isNotBlank()) {
             focus.clearFocus(force = true)
             onConfirm(displayed, mangaTitle, chapterTitle)
         }
@@ -818,13 +855,15 @@ private fun LocalImportDetailsDialog(
                     onAction = { focus.moveFocus(FocusDirection.Next) })
                 LocalImportNameField("章节", chapterTitle, !busy, ImeAction.Done,
                     onChange = { chapterTitle = it.take(120) }, onAction = ::submit)
+                if (!allowed) Text("本地导入保存在普通分区",
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                 if (error != null) Text(error, style = MaterialTheme.typography.bodySmall, color = colors.error)
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     TextButton(enabled = !busy, onClick = { showStorageNote = !showStorageNote }) {
                         Icon(Icons.Outlined.Info, "导入说明", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                     }
                     Spacer(Modifier.weight(1f))
-                    MotionButton(enabled = !busy && mangaTitle.isNotBlank() && chapterTitle.isNotBlank(),
+                    MotionButton(enabled = allowed && !busy && mangaTitle.isNotBlank() && chapterTitle.isNotBlank(),
                         onClick = ::submit, shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = colors.onSurface,
                             contentColor = colors.surface,

@@ -77,6 +77,7 @@ internal fun BodySourceSettingsSheet(
     backdrop: HazeState?,
     plugins: SourcePluginStore? = null,
     onDismiss: () -> Unit,
+    importAsAdult: Boolean = false,
 ) {
     val scriptImportSupported = platformKind == PlatformKind.ANDROID
     val entries by registry.entries.collectAsStateWithLifecycle()
@@ -93,12 +94,18 @@ internal fun BodySourceSettingsSheet(
         .sortedBy { if (it.enabled) 0 else 1 }
     val removed = entries.filter { it.removed && it.isInstalled && !it.source.id.startsWith("js_") }
     val canImport = plugins != null && scriptImportSupported
+    val moveCandidates = if (importAsAdult) entries.filter {
+        it.isInstalled && !it.removed && !it.adult && it.source.id.startsWith("js_") &&
+            it.source.id in scriptPackages
+    } else emptyList()
+    val hasAddChoices = removed.isNotEmpty() || moveCandidates.isNotEmpty()
     val motion = LocalMotionEnabled.current
     val colors = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     var adding by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
+    var movingExisting by remember { mutableStateOf(false) }
     var showHelp by remember { mutableStateOf(false) }
     var busyId by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -117,6 +124,7 @@ internal fun BodySourceSettingsSheet(
                 if (action == "toggle") listState.scrollToItem(firstVisibleIndex, firstVisibleOffset)
                 notice = when (action) {
                     "restore" -> "已添加${entry.source.name}。"
+                    "move" -> "已将${entry.source.name}移入当前分区。"
                     else -> null
                 }
             } catch (cancel: CancellationException) {
@@ -185,30 +193,55 @@ internal fun BodySourceSettingsSheet(
                             else registry.setEnabled(entry.source.id, value)
                         } })
                 }
-                if (canImport || removed.isNotEmpty()) item(key = "add-sources") {
+                if (canImport || hasAddChoices) item(key = "add-sources") {
                     val interaction = remember { MutableInteractionSource() }
                     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp))
                         .clickable(enabled = busyId == null, interactionSource = interaction, indication = null,
                             role = Role.Button, onClickLabel = "添加漫画源",
                             onClick = {
-                                if (removed.isEmpty()) importing = true else adding = !adding
+                                if (!hasAddChoices) importing = true else adding = !adding
                             })
                         .motionPress(interaction, enabled = busyId == null, pressedScale = .99f).padding(end = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Icon(Icons.Outlined.Add, null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
                         Text("添加源", Modifier.weight(1f), fontSize = 13.sp)
-                        if (removed.isNotEmpty()) Icon(if (adding) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        if (hasAddChoices) Icon(if (adding) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
                             null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                     }
                 }
-                if (adding && removed.isNotEmpty()) {
+                if (adding && hasAddChoices) {
                     if (canImport) item(key = "import-script-source") {
                         MotionTextButton(enabled = busyId == null, onClick = {
                             adding = false
                             importing = true
                         }, modifier = Modifier.padding(start = 28.dp)) {
                             Text("导入文件或源库链接", fontSize = 12.sp)
+                        }
+                    }
+                    if (moveCandidates.isNotEmpty()) item(key = "move-existing-sources") {
+                        MotionTextButton(enabled = busyId == null, onClick = {
+                            movingExisting = !movingExisting
+                        }, modifier = Modifier.padding(start = 28.dp)) {
+                            Text("从已有来源移入", fontSize = 12.sp)
+                            Icon(if (movingExisting) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                null, Modifier.padding(start = 6.dp).size(16.dp),
+                                tint = colors.onSurfaceVariant)
+                        }
+                    }
+                    if (movingExisting) items(moveCandidates, key = { "move:${it.source.id}" }) { entry ->
+                        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            ChapterSourceLogo(entry.source.id, entry.source.name, Modifier.size(24.dp))
+                            Text(entry.source.name, Modifier.weight(1f), fontSize = 13.sp,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (busyId == entry.source.id) Box(Modifier.size(48.dp),
+                                contentAlignment = Alignment.Center) {
+                                MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                            } else MotionTextButton(enabled = busyId == null, onClick = {
+                                change(entry, "move") { registry.setAdult(entry.source.id, true) }
+                            }) { Text("移入", fontSize = 12.sp) }
                         }
                     }
                     items(removed, key = { "removed:${it.source.id}" }) { entry ->
@@ -232,7 +265,7 @@ internal fun BodySourceSettingsSheet(
         }
     }
     if (importing && plugins != null && scriptImportSupported) SourceImportSheet(plugins, registry, backdrop,
-        onDismiss = { importing = false }, onImported = { name ->
+        onDismiss = { importing = false }, markAdult = importAsAdult, onImported = { name ->
             notice = "已导入并启用$name。"
             failed = false
         })

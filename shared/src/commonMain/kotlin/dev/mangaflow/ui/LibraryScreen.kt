@@ -145,7 +145,17 @@ fun LibraryScreen(
     backdrop: HazeState, navigation: @Composable () -> Unit, toolbar: @Composable (@Composable () -> Unit) -> Unit,
     wallpaper: @Composable () -> Unit = {},
     backgroundInParent: Boolean = false,
+    includedSourceIds: Set<String>? = null,
+    excludedSourceIds: Set<String> = emptySet(),
 ) {
+    fun sourceIncluded(sourceId: String): Boolean =
+        (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
+    val scopedFavorites = remember(favorites, includedSourceIds, excludedSourceIds) {
+        favorites.filter { sourceIncluded(it.sourceId) }
+    }
+    val scopedHistory = remember(history, includedSourceIds, excludedSourceIds) {
+        history.filter { sourceIncluded(it.manga.sourceId) }
+    }
     val desktop = platformKind == PlatformKind.DESKTOP
     val density = LocalDensity.current
     val motion = LocalMotionEnabled.current
@@ -163,7 +173,10 @@ fun LibraryScreen(
     var pendingLibraryTool by remember { mutableStateOf<LibraryToolDestination?>(null) }
     val shelfTabs = remember { listOf(GlassTabChoice("收藏", Icons.Outlined.Bookmarks), GlassTabChoice("最近阅读", Icons.Outlined.History)) }
     val preferredShelfWidth = morphGlassTabWidth(shelfTabs)
-    val collections by libraryStore.pageCollections.collectAsStateWithLifecycle()
+    val storedCollections by libraryStore.pageCollections.collectAsStateWithLifecycle()
+    val collections = remember(storedCollections, includedSourceIds, excludedSourceIds) {
+        storedCollections.filter { sourceIncluded(it.manga.sourceId) }
+    }
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     var managedId by remember { mutableStateOf<String?>(null) }
     var chapterHistoryManga by remember { mutableStateOf<Manga?>(null) }
@@ -190,15 +203,15 @@ fun LibraryScreen(
         if (!active || showHistory) favoritesPosition.stopScroll()
         if (!active || !showHistory) historyPosition.stopScroll()
     }
-    val progressById = remember(history) { history.associateBy { it.manga.id } }
+    val progressById = remember(scopedHistory) { scopedHistory.associateBy { it.manga.id } }
     val snackbar = remember { SnackbarHostState() }
     val removalScope = rememberCoroutineScope()
     var pendingFavorites by remember { mutableStateOf<Set<String>>(emptySet()) }
     var pendingHistory by remember { mutableStateOf<Set<String>>(emptySet()) }
-    val visibleFavorites = remember(favorites, pendingFavorites) { favorites.filterNot { it.id in pendingFavorites } }
-    val visibleHistory = remember(history, pendingHistory) { history.filterNot { it.manga.id in pendingHistory } }
+    val visibleFavorites = remember(scopedFavorites, pendingFavorites) { scopedFavorites.filterNot { it.id in pendingFavorites } }
+    val visibleHistory = remember(scopedHistory, pendingHistory) { scopedHistory.filterNot { it.manga.id in pendingHistory } }
     fun removeFavoriteWithUndo(manga: Manga) {
-        if (manga.id in pendingFavorites) return
+        if (!sourceIncluded(manga.sourceId) || manga.id in pendingFavorites) return
         pendingFavorites = pendingFavorites + manga.id
         snackbar.currentSnackbarData?.dismiss()
         removalScope.launch {
@@ -214,7 +227,7 @@ fun LibraryScreen(
         }
     }
     fun removeHistoryWithUndo(mangaId: String) {
-        if (mangaId in pendingHistory) return
+        if (scopedHistory.none { it.manga.id == mangaId } || mangaId in pendingHistory) return
         pendingHistory = pendingHistory + mangaId
         snackbar.currentSnackbarData?.dismiss()
         removalScope.launch {
@@ -243,10 +256,13 @@ fun LibraryScreen(
         onDismiss = { showCollections = false })
     if (showStats) {
         val readingActivity by libraryStore.readingActivity.collectAsStateWithLifecycle()
-        ReadingStatsSheet(readingActivity, repository,
+        val scopedActivity = remember(readingActivity, includedSourceIds, excludedSourceIds) {
+            readingActivity.filter { sourceIncluded(it.manga.sourceId) }
+        }
+        ReadingStatsSheet(scopedActivity, repository,
             onDismiss = { showStats = false }, onOpenManga = { showStats = false; onOpen(it) })
     }
-    chapterHistoryManga?.let { manga ->
+    chapterHistoryManga?.takeIf { sourceIncluded(it.sourceId) }?.let { manga ->
         ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -421,7 +437,7 @@ fun LibraryScreen(
                 if (showHistory) DesktopVerticalScrollbar(historyPosition, track)
                 else DesktopVerticalScrollbar(favoritesPosition, track)
             }
-            if (!showHistory) LibraryOpeningNotice(opening, onRetryOpen, onCancelOpen,
+            if (!showHistory) LibraryOpeningNotice(opening?.takeIf { sourceIncluded(it.manga.sourceId) }, onRetryOpen, onCancelOpen,
                 Modifier.align(Alignment.BottomCenter).padding(16.dp))
         }
         }
