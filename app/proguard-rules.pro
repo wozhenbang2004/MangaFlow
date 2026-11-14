@@ -23,7 +23,5 @@
 # JNI exports bind to this exact class and method names after an explicit component load.
 -keep class dev.mangaflow.storage.SteamNative { *; }
 
-# JM image restoration loads the Android implementation via java.util.ServiceLoader.
-# R8 must not erase the provider just because its constructor is reached reflectively.
--keep class io.github.jukomu.jmcomic.android.support.AndroidImageProcessor { *; }
--keep class io.github.jukomu.jmcomic.core.image.spi.ImageProcessor { *; }
+# Android's adapted JmImageTool constructs AndroidImageProcessor directly.
+# Ordinary class references retain the processor; no SPI keep or AWT suppression is needed.

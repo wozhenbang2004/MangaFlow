@@ -21,6 +21,14 @@ or legally cleared merely by being an open-source API wrapper. Actual server
 access, authentication, image support and jurisdiction-specific legality
 remain subject to verification and applicable service rights.
 
+Android uses a platform adaptation of JmImageTool from v1.1.12 /
+5a7a4bb4870edb512274dc2adeb4f7c157445321 (Copyright (c) 2025 JUKOMU, MIT).
+Its public segment-count and format logic is unchanged; processor selection
+binds AndroidImageProcessor directly. The Android build excludes the original
+desktop AWT processor, reflective factory and desktop ImageIO WebP dependency.
+Windows retains the original upstream core. The adapted source includes the
+full original MIT notice.
+
 ## Optional Steam Workshop connection and QR rendering
 
 The Steam connection component adapts the MPL-2.0 tapline library at

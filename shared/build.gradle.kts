@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.util.zip.ZipFile
 
 plugins {
     id("org.jetbrains.kotlin.multiplatform")
@@ -27,6 +28,45 @@ val optionalOnnxApi = tasks.register<org.gradle.api.tasks.bundling.Jar>("prepare
     }) {
         // The compiled-in source adaptation supports verified absolute native paths on Android.
         exclude("ai/onnxruntime/OnnxRuntime.class", "ai/onnxruntime/OnnxRuntime\$*.class")
+    }
+}
+
+// Android retains the pinned JM client while binding its image tool to Bitmap/Canvas.
+// The upstream core jar also contains a desktop AWT implementation and reflective fallback.
+val androidJmCoreJar = configurations.create("androidJmCoreJar") {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+val prepareAndroidJmCore = tasks.register<org.gradle.api.tasks.bundling.Jar>("prepareAndroidJmCore") {
+    archiveFileName.set("jmcomic-core-v1.1.12-android.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("generated/jm-android-core"))
+    inputs.files(androidJmCoreJar)
+    val replacedClasses = setOf(
+        "io/github/jukomu/jmcomic/core/image/AwtImageProcessor.class",
+        "io/github/jukomu/jmcomic/core/crypto/JmImageTool.class",
+    )
+    doFirst {
+        ZipFile(androidJmCoreJar.singleFile).use { source ->
+            replacedClasses.forEach { path ->
+                check(source.getEntry(path) != null) { "Pinned JM core is missing expected class: $path" }
+            }
+        }
+    }
+    from({ zipTree(androidJmCoreJar.singleFile) }) {
+        exclude("io/github/jukomu/jmcomic/core/image/AwtImageProcessor.class")
+        exclude("io/github/jukomu/jmcomic/core/image/AwtImageProcessor\$*.class")
+        exclude("io/github/jukomu/jmcomic/core/crypto/JmImageTool.class")
+        exclude("io/github/jukomu/jmcomic/core/crypto/JmImageTool\$*.class")
+    }
+    doLast {
+        ZipFile(archiveFile.get().asFile).use { output ->
+            replacedClasses.forEach { path ->
+                check(output.getEntry(path) == null) { "Desktop JM class remained in Android core: $path" }
+            }
+            check(output.getEntry("io/github/jukomu/jmcomic/core/image/spi/ImageProcessor.class") != null)
+            check(output.getEntry("io/github/jukomu/jmcomic/core/client/impl/JmApiClient.class") != null)
+        }
     }
 }
 
@@ -123,8 +163,17 @@ kotlin {
             implementation("com.squareup.okhttp3:okhttp:4.12.0")
             implementation("org.jsoup:jsoup:1.18.3")
             // Native adult source adapters (MIT). Java API code is shared with Windows.
-            implementation("io.github.jukomu:jmcomic-core:v1.1.12")
-            implementation("io.github.jukomu:jmcomic-android-support:v1.1.12")
+            implementation(files(prepareAndroidJmCore.flatMap { it.archiveFile }))
+            implementation("io.github.jukomu:jmcomic-api:v1.1.12")
+            implementation("io.github.jukomu:jmcomic-android-support:v1.1.12") {
+                exclude(group = "io.github.jukomu", module = "jmcomic-core")
+            }
+            // Non-desktop dependencies from core v1.1.12/5a7a4bb's POM.
+            // OkHttp and Jsoup already use the app's compatible Android versions above.
+            implementation("org.apache.commons:commons-lang3:3.18.0")
+            implementation("com.squareup.okhttp3:okhttp-urlconnection:4.12.0")
+            implementation("com.google.code.gson:gson:2.13.2")
+            implementation("org.slf4j:slf4j-api:2.0.12")
             implementation("me.saket.telephoto:zoomable-image-coil3:0.16.0")
             implementation("me.saket.telephoto:sub-sampling-image:0.16.0")
             implementation("com.google.ai.edge.litert:litert:1.4.2")
@@ -154,6 +203,8 @@ kotlin {
         iosMain.dependencies { implementation("io.ktor:ktor-client-darwin:3.6.1") }
     }
 }
+
+androidJmCoreJar.dependencies.add(dependencies.create("io.github.jukomu:jmcomic-core:v1.1.12"))
 
 inferenceRuntimeAars.dependencies.add(dependencies.create("com.google.ai.edge.litert:litert:1.4.2@aar"))
 inferenceRuntimeAars.dependencies.add(dependencies.create("com.microsoft.onnxruntime:onnxruntime-android:1.31.1@aar"))
