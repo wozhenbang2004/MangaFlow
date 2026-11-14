@@ -13,6 +13,9 @@ import coil3.Image as CoilImage
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.core.snap
@@ -435,21 +438,36 @@ fun DetailScreen(
         // Foreground measurement publishes this frame's actual height. Background layers
         // measure afterwards and draw behind it, without a zero-height first-frame handoff.
         val header = key(current.id) { rememberTopAppBarState(initialHeightOffsetLimit = 0f) }
-        var chapterHeaderOffset by remember(current.id) { mutableStateOf(0f) }
+        var chapterHeaderOffset by remember(current.id) { mutableFloatStateOf(0f) }
         var commentsOwnHeader by remember(current.id) { mutableStateOf(false) }
-        LaunchedEffect(active, activeSection, header, naturalHeroHeight.intValue, desktopDetail) {
+        var contentsRequestedWhileInComments by remember(current.id) { mutableStateOf(false) }
+        // The artwork remains the same measured node throughout the handoff. Animate its
+        // existing header offset rather than switching the hero to a separate layout.
+        // A rapid reverse starts at the last drawn position, not at either endpoint.
+        LaunchedEffect(active, activeSection, header, naturalHeroHeight.intValue, desktopDetail, motion) {
             if (!active || desktopDetail || naturalHeroHeight.intValue <= 0) return@LaunchedEffect
-            if (activeSection == 1) {
-                if (!commentsOwnHeader) {
-                    chapterHeaderOffset = header.heightOffset
-                    commentsOwnHeader = true
+            if (activeSection == 1 && !commentsOwnHeader) {
+                chapterHeaderOffset = header.heightOffset
+                commentsOwnHeader = true
+            }
+            if (activeSection != 1 && !commentsOwnHeader) return@LaunchedEffect
+            val destination = (if (activeSection == 1 || contentsRequestedWhileInComments)
+                header.heightOffsetLimit else chapterHeaderOffset).coerceIn(header.heightOffsetLimit, 0f)
+            val start = header.heightOffset.coerceIn(header.heightOffsetLimit, 0f)
+            if (!motion || start == destination) {
+                header.heightOffset = destination
+            } else {
+                Animatable(start).animateTo(destination, spring(
+                    dampingRatio = MangaMotion.NavigationDamping,
+                    stiffness = 240f,
+                )) {
+                    header.heightOffset = value.coerceIn(header.heightOffsetLimit, 0f)
                 }
-                // Collapse immediately, not after the user drags through the whole poster.
-                header.heightOffset = header.heightOffsetLimit
-            } else if (commentsOwnHeader) {
-                // Going back to chapters restores the prior artwork position.
-                header.heightOffset = chapterHeaderOffset.coerceIn(header.heightOffsetLimit, 0f)
+                header.heightOffset = destination
+            }
+            if (activeSection == 0) {
                 commentsOwnHeader = false
+                contentsRequestedWhileInComments = false
             }
         }
         val dockScrollTravel = with(density) { 96.dp.toPx() }
@@ -487,11 +505,16 @@ fun DetailScreen(
         val emptyCatalogScroll = rememberScrollableState { 0f }
         val artworkScroll: ScrollableState = catalogGrid ?: emptyCatalogScroll
         val openContents: () -> Unit = {
+            val fromComments = activeSection == 1
+            // Opening the chapter catalogue from comments goes to the collapsed
+            // chapter header; tapping its ordinary tab restores the prior hero.
+            contentsRequestedWhileInComments = fromComments
             section = 0
             dockHidden = false
             contentsJump?.cancel()
-            if (!desktopDetail) contentsJump = scope.launch {
-                animate(header.heightOffset, header.heightOffsetLimit, animationSpec = tween(if (motion) 320 else 0, easing = MangaMotion.EnterEasing)) { value, _ ->
+            if (!desktopDetail && !fromComments) contentsJump = scope.launch {
+                animate(header.heightOffset, header.heightOffsetLimit,
+                    animationSpec = tween(if (motion) 320 else 0, easing = MangaMotion.EnterEasing)) { value, _ ->
                     header.heightOffset = value
                 }
             }
@@ -573,14 +596,12 @@ fun DetailScreen(
                                     header.heightOffsetLimit = limit
                                     header.heightOffset = offset
                                 }
-                                // Comments are an independent scroll viewport. The book header
-                                // must not consume their available height or move on a comment drag.
-                                val offset = if (activeSection == 1) -expanded
-                                    else header.heightOffset.roundToInt().coerceIn(-expanded, 0)
-                                val visibleHeight = if (activeSection == 1)
-                                    toolbarPixels.coerceIn(constraints.minHeight, constraints.maxHeight)
-                                    else maxOf(toolbarPixels, expanded + offset)
-                                        .coerceIn(constraints.minHeight, constraints.maxHeight)
+                                // Every frame of the section handoff shares one measured
+                                // height and offset. The comment list moves up with the
+                                // shrinking hero; it cannot pull on the hero by nested scroll.
+                                val offset = header.heightOffset.roundToInt().coerceIn(-expanded, 0)
+                                val visibleHeight = maxOf(toolbarPixels, expanded + offset)
+                                    .coerceIn(constraints.minHeight, constraints.maxHeight)
                                 layout(foreground.width, visibleHeight) {
                                     foreground.placeRelative(0, offset)
                                 }
@@ -605,7 +626,7 @@ fun DetailScreen(
                                 reverseDirection = true, enabled = active && activeSection == 0),
                     ) {
                         Spacer(Modifier.fillMaxWidth().layout { _, constraints ->
-                            val seam = (if (collapsedHero || activeSection == 1) 0f else
+                            val seam = (if (collapsedHero) 0f else
                                 seamHeight.toPx() * (1f - header.collapsedFraction)).roundToInt()
                                 .coerceIn(0, constraints.maxHeight)
                             layout(constraints.maxWidth, seam) {}
@@ -682,8 +703,8 @@ fun DetailScreen(
             }
             // The catalogue's surface rises over the stationary atmosphere, including wide-window gutters.
             if (!desktopDetail) Box(Modifier.matchParentSize().zIndex(-1f).drawBehind {
-                val chapterTop = (if (activeSection == 1) toolbarPixels.toFloat()
-                    else naturalHeroHeight.intValue + header.heightOffset).coerceIn(0f, size.height)
+                val chapterTop = maxOf(toolbarPixels.toFloat(),
+                    naturalHeroHeight.intValue + header.heightOffset).coerceIn(0f, size.height)
                 drawRect(informationTone, topLeft = Offset(0f, chapterTop),
                     size = androidx.compose.ui.geometry.Size(size.width, size.height - chapterTop))
             })
@@ -756,15 +777,25 @@ private fun ArtworkToolbar(
             .then(if (progress > .02f) Modifier else Modifier.clearAndSetSemantics { })
             .clickable(enabled = progress > .7f, role = Role.Button, onClickLabel = "查看作品信息", onClick = onIntroduction),
             verticalArrangement = Arrangement.Center) {
-            if (comments) Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("评论", color = DetailForeground, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                commentCount?.let { Text(it, color = DetailSecondary, fontSize = 11.sp) }
+            // The small toolbar title crosses into its Comments identity instead
+            // of swapping two different text baselines on the first tap frame.
+            MotionSwap(comments, Modifier.fillMaxWidth().heightIn(min = 38.dp)) { showComments ->
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
+                    if (showComments) Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text("评论", color = DetailForeground, fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold)
+                        commentCount?.let { Text(it, color = DetailSecondary, fontSize = 11.sp) }
+                    }
+                    Text(title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                        color = if (showComments) DetailSecondary else DetailForeground,
+                        fontSize = if (showComments) 11.sp else 15.sp,
+                        lineHeight = if (showComments) 15.sp else 20.sp,
+                        fontWeight = FontWeight.Medium, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
+                }
             }
-            Text(title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = if (comments) DetailSecondary else DetailForeground,
-                fontSize = if (comments) 11.sp else 15.sp, lineHeight = if (comments) 15.sp else 20.sp,
-                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth())
         }
         if (coverFailed) ArtworkAction(Icons.Outlined.Refresh, "重新加载封面", backdrop, 1f - progress, tint, glassTone, onRetryCover)
         ArtworkAction(if (favorite) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
@@ -1042,7 +1073,15 @@ private fun DetailSections(
         val comments = selected == 1
         val sourceWidth = (sourceLabelWidth + 46.dp).coerceAtLeast(48.dp)
             .coerceAtMost((availableWidth - 120.dp).coerceAtLeast(48.dp))
-        val actionsWidth = if (comments) 44.dp else sourceWidth + 48.dp
+        // Keep action width and the tab track continuous while the whole
+        // section rail travels with the shrinking artwork above it.
+        val actionsWidth by animateDpAsState(
+            targetValue = if (comments) 44.dp else sourceWidth + 48.dp,
+            animationSpec = if (LocalMotionEnabled.current)
+                spring(dampingRatio = MangaMotion.NavigationDamping, stiffness = 430f)
+                else snap(),
+            label = "detail-section-actions-width",
+        )
         val tabWidth = (164f * scale).dp
             .coerceAtMost((availableWidth - actionsWidth - 16.dp).coerceAtLeast(0.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
