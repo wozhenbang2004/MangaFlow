@@ -181,6 +181,7 @@ internal fun CommunityPanel(
     backdrop: HazeState = rememberHazeState(),
     captureBackdrop: Boolean = true,
     active: Boolean = true,
+    openRevision: Int = 0,
     bottomPadding: Dp = 12.dp,
     filterOpen: Boolean = false,
     onFilterDismiss: () -> Unit = {},
@@ -195,8 +196,10 @@ internal fun CommunityPanel(
     SideEffect { if (active) { onScrollTarget(listState); onFilterChanged(selectedSource != null || longOnly || !hidePromotions) } }
     // A fresh visit starts at the newest item, including a restored tab. Requesting
     // the next layout also prevents its old item key from restoring the prior offset.
-    LaunchedEffect(mangaId, active) {
+    LaunchedEffect(mangaId, active, openRevision) {
         if (active) {
+            // A fresh Comments tab tap always starts at the first newest entry.
+            // No animated traversal through previously viewed older comments.
             listState.requestScrollToItem(0)
         } else {
             onFilterDismiss()

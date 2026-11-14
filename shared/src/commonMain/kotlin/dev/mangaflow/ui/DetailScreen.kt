@@ -253,6 +253,7 @@ fun DetailScreen(
     var dockHidden by remember(manga.id) { mutableStateOf(false) }
     val dockTravel = remember(manga.id) { floatArrayOf(0f) }
     var commentsList by remember(manga.id) { mutableStateOf<LazyListState?>(null) }
+    var commentsOpenRevision by remember(manga.id) { mutableIntStateOf(0) }
     val commentCount = detailCommentCount(reviews)
     var coverFailed by remember(current.coverUrl) { mutableStateOf(false) }
     var coverRetry by remember(current.coverUrl) { mutableIntStateOf(0) }
@@ -327,7 +328,18 @@ fun DetailScreen(
             DetailSections(
                 selected = activeSection,
                 chapterCount = chapters.size, commentCount = commentCount,
-                onSelect = { section = it; commentFilterOpen = false; dockHidden = false; dockTravel[0] = 0f },
+                onSelect = { target ->
+                    if (target == 1) {
+                        // Do not restore a previously scrolled comment position on a new visit.
+                        // The pane may still be transitioning, so also notify its own list state.
+                        commentsOpenRevision++
+                        commentsList?.requestScrollToItem(0)
+                    }
+                    section = target
+                    commentFilterOpen = false
+                    dockHidden = false
+                    dockTravel[0] = 0f
+                },
                 filterOpen = commentFilterOpen, filterChanged = commentFilterChanged,
                 onToggleFilter = { commentFilterOpen = !commentFilterOpen },
                 downloadMode = chapterDownloadMode,
@@ -373,6 +385,7 @@ fun DetailScreen(
                                 if (platformKind == PlatformKind.DESKTOP) 12.dp else 0.dp)) {
                                 CommunityPanel(
                                     mangaId = current.id, sources = reviews, loading = reviewsLoading,
+                                    openRevision = commentsOpenRevision,
                                     onMore = onReviewMore, onRetry = onReviewRetry, onMatch = onReviewMatch,
                                     onRelink = onReviewRelink, loadReplies = loadReplies,
                                     onScrollTarget = { commentsList = it }, backdrop = readingBackdrop,
@@ -422,6 +435,23 @@ fun DetailScreen(
         // Foreground measurement publishes this frame's actual height. Background layers
         // measure afterwards and draw behind it, without a zero-height first-frame handoff.
         val header = key(current.id) { rememberTopAppBarState(initialHeightOffsetLimit = 0f) }
+        var chapterHeaderOffset by remember(current.id) { mutableStateOf(0f) }
+        var commentsOwnHeader by remember(current.id) { mutableStateOf(false) }
+        LaunchedEffect(active, activeSection, header, naturalHeroHeight.intValue, desktopDetail) {
+            if (!active || desktopDetail || naturalHeroHeight.intValue <= 0) return@LaunchedEffect
+            if (activeSection == 1) {
+                if (!commentsOwnHeader) {
+                    chapterHeaderOffset = header.heightOffset
+                    commentsOwnHeader = true
+                }
+                // Collapse immediately, not after the user drags through the whole poster.
+                header.heightOffset = header.heightOffsetLimit
+            } else if (commentsOwnHeader) {
+                // Going back to chapters restores the prior artwork position.
+                header.heightOffset = chapterHeaderOffset.coerceIn(header.heightOffsetLimit, 0f)
+                commentsOwnHeader = false
+            }
+        }
         val dockScrollTravel = with(density) { 96.dp.toPx() }
         val dockCollapse by remember(header, activeSection, catalogGrid, dockScrollTravel, naturalHeroHeight, desktopDetail) {
             derivedStateOf {
@@ -547,7 +577,8 @@ fun DetailScreen(
                                 // must not consume their available height or move on a comment drag.
                                 val offset = if (activeSection == 1) -expanded
                                     else header.heightOffset.roundToInt().coerceIn(-expanded, 0)
-                                val visibleHeight = if (activeSection == 1) toolbarPixels
+                                val visibleHeight = if (activeSection == 1)
+                                    toolbarPixels.coerceIn(constraints.minHeight, constraints.maxHeight)
                                     else maxOf(toolbarPixels, expanded + offset)
                                         .coerceIn(constraints.minHeight, constraints.maxHeight)
                                 layout(foreground.width, visibleHeight) {
@@ -574,7 +605,8 @@ fun DetailScreen(
                                 reverseDirection = true, enabled = active && activeSection == 0),
                     ) {
                         Spacer(Modifier.fillMaxWidth().layout { _, constraints ->
-                            val seam = (if (collapsedHero) 0f else seamHeight.toPx() * (1f - header.collapsedFraction)).roundToInt()
+                            val seam = (if (collapsedHero || activeSection == 1) 0f else
+                                seamHeight.toPx() * (1f - header.collapsedFraction)).roundToInt()
                                 .coerceIn(0, constraints.maxHeight)
                             layout(constraints.maxWidth, seam) {}
                         })
@@ -650,7 +682,8 @@ fun DetailScreen(
             }
             // The catalogue's surface rises over the stationary atmosphere, including wide-window gutters.
             if (!desktopDetail) Box(Modifier.matchParentSize().zIndex(-1f).drawBehind {
-                val chapterTop = (naturalHeroHeight.intValue + header.heightOffset).coerceIn(0f, size.height)
+                val chapterTop = (if (activeSection == 1) toolbarPixels.toFloat()
+                    else naturalHeroHeight.intValue + header.heightOffset).coerceIn(0f, size.height)
                 drawRect(informationTone, topLeft = Offset(0f, chapterTop),
                     size = androidx.compose.ui.geometry.Size(size.width, size.height - chapterTop))
             })
