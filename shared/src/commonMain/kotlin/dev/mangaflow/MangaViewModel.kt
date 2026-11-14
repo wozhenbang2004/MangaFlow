@@ -2059,7 +2059,14 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val detailEpoch = detailRequestId
         cancelSourceSelection()
         val request = sourceReadRequest
-        val selected = resolveChapter(chapter, variant)
+        val currentChapter = findSourceChapter(catalog, chapter.id)
+        val currentVariant = currentChapter?.variants?.firstOrNull { it.storageId == variant.storageId }
+        if (currentChapter == null || currentVariant == null) {
+            _chapterSourceOperation.value = ChapterSourceOperation(
+                error = "章节来源已更新，请重新选择。", targetSource = variant.sourceName)
+            return
+        }
+        val selected = resolveChapter(currentChapter, currentVariant)
         val sourceMangaId = chapterSourceMangaId(work.id, selected)
         _chapterSourceOperation.value = ChapterSourceOperation(loading = true, targetSource = variant.sourceName)
         // Keep the old readable page mounted until the target manifest is ready.
@@ -2085,12 +2092,31 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                             (fromPageCount - 1) * (pages.size - 1)).roundToInt().coerceIn(0, pages.lastIndex)
                     else oldIndex.coerceIn(0, pages.lastIndex)
                 }
-                val projected = withContext(Dispatchers.Default) { selectedChapters(catalog, selected) }
-                if (request != sourceReadRequest) return@launch
+                val latestCatalog = (if (session != null) _reading.value?.chapters
+                    else _detail.value?.detail?.chapters) ?: return@launch
+                val latestChapter = findSourceChapter(latestCatalog, chapter.id)
+                val latestVariant = latestChapter?.variants?.firstOrNull { it.storageId == selected.id }
+                require(latestChapter != null && latestVariant != null) { "章节来源已更新，请重新选择。" }
+                val latestSelected = resolveChapter(latestChapter, latestVariant)
+                val expectedSettings = unifiedChapters.settings(work.id)
                 withContext(Dispatchers.IO) {
-                    unifiedChapters.choose(work.id, selected.logicalId.ifBlank { selected.id }, selected.id)
+                    unifiedChapters.choose(work.id, latestSelected.logicalId.ifBlank { latestSelected.id }, latestSelected.id,
+                        expectedSettings = expectedSettings)
                 }
                 if (request != sourceReadRequest) return@launch
+                if (session != null && (readingEpoch != readingRequestId || _reading.value?.manga?.id != work.id)) return@launch
+                if (session == null && (detailEpoch != detailRequestId || _detail.value?.manga?.id != work.id)) return@launch
+                // Storage yielded to catalogue updates. Only the final selection map runs
+                // synchronously; the expensive semantic projection remains off Main.
+                val currentCatalog = (if (session != null) _reading.value?.chapters
+                    else _detail.value?.detail?.chapters) ?: return@launch
+                val current = findSourceChapter(currentCatalog, chapter.id)
+                val available = current?.variants?.firstOrNull { it.storageId == selected.id }
+                require(current != null && available != null &&
+                    current.logicalId.ifBlank { current.id } == latestSelected.logicalId.ifBlank { latestSelected.id }) {
+                    "章节来源已更新，请重新选择。"
+                }
+                val projected = selectedChapters(currentCatalog, resolveChapter(current, available))
                 _chapterSourceOperation.value = ChapterSourceOperation()
                 beginReading(ReadingSession(work, projected, selected.id, initialPageIndex = initialPage))
                 messages.send(if (initialPage != null)
@@ -2105,6 +2131,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     _chapterSourceOperation.value = ChapterSourceOperation(error = error, targetSource = variant.sourceName)
                     messages.send(error)
                 }
+            } finally {
+                if (request == sourceReadRequest && _chapterSourceOperation.value.loading)
+                    _chapterSourceOperation.value = ChapterSourceOperation()
             }
         }
     }

@@ -163,8 +163,15 @@ class UnifiedChapterStore(context: Context) {
         old.copy(preferredSources = listOf(sourceId) + old.preferredSources.filterNot { it == sourceId })
     }
 
-    fun choose(workId: String, logicalId: String, variantStorageId: String) = mutate(workId) { old ->
+    fun choose(workId: String, logicalId: String, variantStorageId: String,
+        expectedSettings: UnifiedWorkSettings? = null) = mutate(workId) { old ->
         require(logicalId.isNotBlank() && variantStorageId.isNotBlank())
+        if (expectedSettings != null) require(old.links == expectedSettings.links &&
+            old.manualLinks == expectedSettings.manualLinks && old.separated == expectedSettings.separated &&
+            old.excludedSources == expectedSettings.excludedSources &&
+            old.chapterOverrides[logicalId] == expectedSettings.chapterOverrides[logicalId]) {
+            "章节来源已更新，请重新选择。"
+        }
         old.copy(chapterOverrides = old.chapterOverrides + (logicalId to variantStorageId))
     }
 

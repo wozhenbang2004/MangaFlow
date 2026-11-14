@@ -198,15 +198,31 @@ internal fun ChapterSourcePicker(
 ) {
     if (chapter == null) return
     val key = workMangaId + ":" + chapter.logicalId.ifBlank { chapter.id }
-    val frozen = remember(key) { chapter }
+    var retained by remember(key) { mutableStateOf(chapter) }
+    var closing by remember(key) { mutableStateOf(false) }
     var requestedVariant by remember(key) { mutableStateOf<ChapterVariant?>(null) }
     var inspected by remember(key) { mutableStateOf<String?>(null) }
-    val variants = remember(key, frozen.variants) {
-        frozen.variants.sortedBy { if (it.storageId == frozen.id) 0 else 1 }.distinctBy { it.storageId }
+    val current = remember(chapters, chapter.id) {
+        chapters.firstOrNull { it.id == chapter.id || it.variants.any { variant -> variant.storageId == chapter.id } }
+    } ?: retained.takeIf { chapters.isEmpty() }
+    val invalid = current == null || current.id != chapter.id ||
+        retained.variants.any { previous -> current.variants.none { it.storageId == previous.storageId } }
+    val shown = if (!closing && !closeRequested && !loading && !invalid && current != null) {
+        val incoming = current.variants.associateBy { it.storageId }
+        val existing = retained.variants.map { it.storageId }.toSet()
+        current.copy(variants = retained.variants.mapNotNull { incoming[it.storageId] } +
+            current.variants.filterNot { it.storageId in existing })
+    } else retained
+    SideEffect { if (shown != retained) retained = shown }
+    val cancelSelection by rememberUpdatedState(onCancelSelection)
+    LaunchedEffect(key, invalid) { if (invalid) cancelSelection() }
+    LaunchedEffect(key, loading, error) { if (!loading) requestedVariant = null }
+    val variants = remember(key, shown.id, shown.variants) {
+        shown.variants.sortedBy { if (it.storageId == shown.id) 0 else 1 }.distinctBy { it.storageId }
     }
     ChapterSourceOrbit("read:$key", anchor, backdrop, variants.size, onDismiss,
-        closeRequested = closeRequested, onCancel = onCancelSelection,
-        onPresenceChange = onPresenceChange,
+        closeRequested = closeRequested || invalid, onCancel = onCancelSelection,
+        onPresenceChange = onPresenceChange, onClosingChange = { closing = it },
         hasStatus = loading && requestedVariant == null || !error.isNullOrBlank() || variants.isEmpty() || inspected != null,
         status = {
             if (variants.isEmpty()) Text("本章暂无可用来源", color = DetailSecondary, fontSize = 12.sp)
@@ -218,7 +234,7 @@ internal fun ChapterSourcePicker(
         }) { index, modifier, _, reveal, sourceActive ->
         val variant = variants[index]
         val peers = variants.filter { it.sourceId == variant.sourceId }
-        val selected = variant.storageId == frozen.id
+        val selected = variant.storageId == shown.id
         val saved = chapterPositions?.get(variant.storageId)
         val entry = downloaded[variant.storageId]
         val sourceMangaId = remember(variant.sourceId, variant.mangaId) {
@@ -228,29 +244,31 @@ internal fun ChapterSourcePicker(
             repository = repository.takeIf { sourceMangaId != null },
             mangaId = sourceMangaId.orEmpty(), chapterId = variant.storageId,
             entry = entry, declaredPages = variant.pageCount,
-            // Idle-only measurement. Cancels pending source probes as soon as a row is chosen.
-            autoMeasure = true, active = sourceActive && requestedVariant == null && !loading)
+            // Measurement follows the real preparation/exit state, not a completed click marker.
+            autoMeasure = true, active = sourceActive && !loading && !invalid && !closing)
         val details = listOfNotNull(
             variant.language.takeIf(String::isNotBlank),
             variant.edition.takeIf(String::isNotBlank),
             variant.scanlator.takeIf { peers.size > 1 && it.isNotBlank() },
-            variant.title.takeIf { peers.map { it.title }.distinct().size > 1 && it != frozen.title },
+            variant.title.takeIf { peers.map { it.title }.distinct().size > 1 && it != shown.title },
             saved?.takeIf { !selected }?.let { "续读第${it.pageIndex + 1}页" },
             resolution.detail,
         ).distinct().joinToString(" · ")
         val secondary = chapterVariantDistinction(variant, peers)
         ChapterSourceDisc(variant, backdrop, modifier, selected = selected,
             busy = loading && requestedVariant?.storageId == variant.storageId,
-            enabled = !loading, details = details, secondary = secondary,
+            enabled = !loading && !invalid && !closing && !closeRequested,
+            details = details, secondary = secondary,
             entry = entry, resolution = resolution, resolutionActionEnabled = false,
             revealProgress = reveal,
             actionLabel = if (selected) "重新加载当前来源此页" else "使用${variant.sourceName}阅读本章",
             onInspect = { inspected = listOf(variant.sourceName, secondary, details)
                 .filter(String::isNotBlank).distinct().joinToString(" · ") },
             onClick = {
-                if (requestedVariant == null && !loading) {
-                    requestedVariant = variant
-                    onReadVariant(frozen, variant)
+                val available = current?.variants?.firstOrNull { it.storageId == variant.storageId }
+                if (!loading && !invalid && !closing && !closeRequested && current != null && available != null) {
+                    requestedVariant = available
+                    onReadVariant(current, available)
                 }
             })
     }

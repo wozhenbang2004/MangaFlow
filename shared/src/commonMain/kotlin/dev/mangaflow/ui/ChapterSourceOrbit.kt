@@ -1,6 +1,8 @@
 package dev.mangaflow.ui
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
@@ -114,6 +116,7 @@ internal fun ChapterSourceOrbit(
     closeRequested: Boolean = false,
     onCancel: () -> Unit = {},
     onPresenceChange: (Boolean) -> Unit = {},
+    onClosingChange: (Boolean) -> Unit = {},
     hasStatus: Boolean = false,
     status: @Composable (active: Boolean) -> Unit = {},
     item: @Composable (index: Int, modifier: Modifier, dismiss: () -> Unit, reveal: () -> Float, active: Boolean) -> Unit,
@@ -128,10 +131,12 @@ internal fun ChapterSourceOrbit(
     val onClosed by rememberUpdatedState(onDismiss)
     val cancel by rememberUpdatedState(onCancel)
     val reportPresence by rememberUpdatedState(onPresenceChange)
-    SideEffect { reportPresence(true) }
-    DisposableEffect(identity) { onDispose { reportPresence(false) } }
-    LaunchedEffect(identity, closeRequested) { if (closeRequested) closing = true }
-    val close = { if (!closing) { cancel(); closing = true } }
+    val reportClosing by rememberUpdatedState(onClosingChange)
+    SideEffect { reportPresence(true); reportClosing(closing) }
+    DisposableEffect(identity) { onDispose { reportPresence(false); reportClosing(false) } }
+    val setClosing = { value: Boolean -> closing = value; reportClosing(value) }
+    LaunchedEffect(identity, closeRequested) { if (closeRequested) setClosing(true) }
+    val close = { if (!closing) { setClosing(true); cancel() } }
     val progress = remember(identity) { Animatable(0f) }
     val canInteract by remember(identity, closing) {
         // Rows are already separated at 0.6; delaying taps to 0.9 swallowed the first touch.
@@ -211,8 +216,11 @@ internal fun ChapterSourceOrbit(
                 // Reserve the same status room before and after asynchronous failures arrive.
                 val boundsHeight = minOf(slots * rowHeightPx + statusRoom, height - edge * 2f)
                     .coerceAtLeast(1f)
-                val top = (start.y - slots * rowHeightPx / 2f)
+                val targetTop = (start.y - slots * rowHeightPx / 2f)
                     .coerceIn(edge, (height - edge - boundsHeight).coerceAtLeast(edge))
+                val top by animateFloatAsState(targetTop,
+                    if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(),
+                    label = "source-rail-position")
                 val railScroll = rememberScrollState()
                 // Disc's 4dp inset and 36dp mark slot locate the glyph, not the text box.
                 val markInset = with(density) { 22.dp.toPx() }
@@ -221,6 +229,8 @@ internal fun ChapterSourceOrbit(
                     .coerceIn(0f, with(density) { availableHeight.toPx() })
                 Column(Modifier.absoluteOffset { IntOffset(left.roundToInt(), top.roundToInt()) }
                     .width(railWidth).heightIn(max = availableHeight)
+                    .animateContentSize(if (motion) spring(MangaMotion.NavigationDamping,
+                        MangaMotion.NavigationStiffness) else snap())
                     .graphicsLayer {
                         val p = progress.value.coerceIn(0f, 1f)
                         transformOrigin = TransformOrigin(
@@ -278,7 +288,7 @@ internal fun ChapterSourceOrbit(
                     .clickable(enabled = !closeRequested,
                         interactionSource = remember(identity) { MutableInteractionSource() }, indication = null,
                         role = Role.Button, onClickLabel = if (closing) "展开来源" else "收起来源",
-                        onClick = { if (closing) closing = false else close() })
+                        onClick = { if (closing) setClosing(false) else close() })
                     .semantics { contentDescription = if (closing) "展开来源" else "收起来源" })
             }
         }
