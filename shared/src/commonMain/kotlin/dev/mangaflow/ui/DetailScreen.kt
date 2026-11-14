@@ -434,28 +434,20 @@ fun DetailScreen(
         val behavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(
             state = header, snapAnimationSpec = null, flingAnimationSpec = rememberSplineBasedDecay(),
         )
-        val scrolling = remember(behavior, activeSection) {
+        val scrolling = remember(behavior) {
             object : NestedScrollConnection by behavior.nestedScrollConnection {
                 override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                    if (source == NestedScrollSource.UserInput && available.y != 0f) {
+                    if (source == NestedScrollSource.UserInput && available.y != 0f)
                         contentsJump?.cancel()
-                        if (available.y < 0f && activeSection == 1 && header.collapsedFraction > .8f) {
-                            dockTravel[0] += -available.y
-                            if (dockTravel[0] > with(density) { 72.dp.toPx() }) dockHidden = true
-                        } else if (available.y > 0f) {
-                            dockTravel[0] = 0f
-                            dockHidden = false
-                        }
-                    }
                     return behavior.nestedScrollConnection.onPreScroll(available, source)
                 }
             }
         }
+        // Chapter gestures are allowed to collapse the artwork. Comments are an
+        // independent reading surface: never forward their drag/fling into this header.
+        val chapterScrollConnection = if (activeSection == 0) Modifier.nestedScroll(scrolling) else Modifier
         val emptyCatalogScroll = rememberScrollableState { 0f }
-        // Artwork and chapter surfaces share one scroll mutex and nested header decay.
-        // Remaining fling velocity flows into the grid after the artwork has collapsed.
-        val artworkScroll: ScrollableState = if (activeSection == 0) catalogGrid ?: emptyCatalogScroll
-            else commentsList ?: emptyCatalogScroll
+        val artworkScroll: ScrollableState = catalogGrid ?: emptyCatalogScroll
         val openContents: () -> Unit = {
             section = 0
             dockHidden = false
@@ -511,7 +503,7 @@ fun DetailScreen(
                 }
             } else {
                 Column(Modifier.widthIn(max = MangaLayout.DetailWidth).fillMaxSize()
-                    .align(Alignment.TopCenter).nestedScroll(scrolling)) {
+                    .align(Alignment.TopCenter).then(chapterScrollConnection)) {
                     Box(
                         Modifier.fillMaxWidth()
                             .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
@@ -526,7 +518,7 @@ fun DetailScreen(
                                 }
                             }
                             .scrollable(artworkScroll, Orientation.Vertical,
-                                reverseDirection = true, enabled = active)
+                                reverseDirection = true, enabled = active && activeSection == 0)
                             .layout { measurable, constraints ->
                                 // Read the moving offset during layout, without recomposing the whole detail.
                                 // Measure the actual book content independently of the previous
@@ -567,7 +559,7 @@ fun DetailScreen(
                             // Share the grid's scroll mutex as well as its position: a new drag
                             // on the surrounding surface must cancel an existing grid fling.
                             .scrollable(artworkScroll, Orientation.Vertical,
-                                reverseDirection = true, enabled = active),
+                                reverseDirection = true, enabled = active && activeSection == 0),
                     ) {
                         Spacer(Modifier.fillMaxWidth().layout { _, constraints ->
                             val seam = (if (collapsedHero) 0f else seamHeight.toPx() * (1f - header.collapsedFraction)).roundToInt()

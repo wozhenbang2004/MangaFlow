@@ -193,8 +193,14 @@ internal fun CommunityPanel(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     SideEffect { if (active) { onScrollTarget(listState); onFilterChanged(selectedSource != null || longOnly || !hidePromotions) } }
-    LaunchedEffect(active) {
-        if (!active) {
+    // SaveableStateProvider retains the scroll position while switching tabs. A new
+    // visit to the work's comments must start at the newest item, not yesterday's
+    // last-read offset. Never reset for paging or a live provider update.
+    LaunchedEffect(mangaId, active) {
+        if (active) {
+            listState.stopScroll()
+            listState.scrollToItem(0)
+        } else {
             onFilterDismiss()
             listState.stopScroll()
         }
