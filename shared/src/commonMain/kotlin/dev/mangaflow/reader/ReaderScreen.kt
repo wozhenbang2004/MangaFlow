@@ -226,7 +226,9 @@ import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -235,6 +237,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import dev.mangaflow.reader.ReaderZoomableImage as ZoomableAsyncImage
 import dev.mangaflow.reader.rememberReaderImageState as rememberZoomableImageState
 
@@ -598,6 +601,7 @@ fun ReaderScreen(
     }
 
     LaunchedEffect(chapterId, chapter.sourceId, chapter.sourceMangaId, retry, initialCollection?.key, initialPageIndex) {
+        val requestedManga = manga
         val requestedChapterId = chapterId
         val requestedChapter = chapter
         loading = true
@@ -605,11 +609,11 @@ fun ReaderScreen(
         try {
             // A stable source manifest represents the chapter, even when only some pages are saved.
             // File selection belongs to each image request and never creates a separate offline mode.
-            val stored = downloadStore.storedPages(manga.id, requestedChapterId)
+            val stored = downloadStore.storedPages(requestedManga.id, requestedChapterId)
             val loaded = stored ?: if (localImport) {
                 throw IllegalStateException("本地章节不存在，请重新导入")
             } else dev.mangaflow.data.foregroundRequest("章节图片") {
-                repository.pages(chapterSourceMangaId(manga.id, requestedChapter), requestedChapterId, forceRefresh = retry > 0)
+                repository.pages(chapterSourceMangaId(requestedManga.id, requestedChapter), requestedChapterId, forceRefresh = retry > 0)
             }
             currentCoroutineContext().ensureActive()
             if (chapterId != requestedChapterId) return@LaunchedEffect
@@ -618,24 +622,49 @@ fun ReaderScreen(
                 sourcePagePending && requestedChapterId == initialChapterId && initialCollection == null
             }
             val restarting = restartPending && chapterId == initialChapterId && initialCollection == null && sourcePage == null
-            val saved = if (restarting || sourcePage != null) null else libraryStore.progressFor(manga.id, requestedChapterId)
+            val saved = if (restarting || sourcePage != null) null else withContext(Dispatchers.IO) {
+                libraryStore.progressFor(requestedManga.id, requestedChapterId)
+            }
             val collection = initialCollection?.takeIf { collectionPresentation && !collectionPositionApplied && it.chapter.id == chapterId }
             pageIndex = (sourcePage ?: collection?.firstPage ?: saved?.pageIndex ?: 0).coerceIn(0, loaded.lastIndex)
             cursor.scrollOffset = if (sourcePage != null || collection != null) 0 else saved?.scrollOffset ?: 0
             cursor.panelIndex = if (sourcePage == null && collection == null && saved?.panelLayout == preferences.panelLayoutKey)
                 saved.panelIndex.coerceAtLeast(0) else 0
             if (collection != null) collectionPositionApplied = true
-            libraryStore.migratePageBookmarks(manga, requestedChapter, loaded)
+            val restartSaved = !restarting || withContext(Dispatchers.IO) {
+                try {
+                    libraryStore.saveProgress(requestedManga, requestedChapter, 0, loaded.size,
+                        clearLegacyLongImagePosition = true)
+                    true
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { false }
+            }
+            currentCoroutineContext().ensureActive()
+            if (chapterId != requestedChapterId) return@LaunchedEffect
             pages = loaded
             if (sourcePage != null) sourcePagePending = false
-            if (restarting) libraryStore.saveProgress(manga, requestedChapter, 0, loaded.size,
-                clearLegacyLongImagePosition = true)
             restartPending = false
+            if (!restartSaved) downloadMessage = "阅读位置暂未保存，可继续阅读"
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
             if (chapterId == requestedChapterId) error = failure.message ?: "章节暂时无法读取"
         } finally { if (chapterId == requestedChapterId) loading = false }
+    }
+
+    // Legacy picture migration is auxiliary persistence: valid chapter images must
+    // render even if this disk write is slow or fails. Original markers are retained.
+    LaunchedEffect(manga.id, chapterId, pages, libraryStore) {
+        val migrationManga = manga
+        val migrationChapter = chapter
+        val migrationPages = pages
+        if (migrationPages.isEmpty()) return@LaunchedEffect
+        try {
+            withContext(Dispatchers.IO) {
+                libraryStore.migratePageBookmarks(migrationManga, migrationChapter, migrationPages)
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { downloadMessage = "旧画面收藏暂未迁移，原记录已保留" }
     }
 
     LaunchedEffect(chapterId, pageIndex, pages.isNotEmpty()) {

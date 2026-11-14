@@ -6,6 +6,7 @@ import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 
 import dev.mangaflow.data.Chapter
+import dev.mangaflow.data.ChapterDownloadTransport
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
@@ -91,8 +92,9 @@ class MangaBzBodySource : BodySource {
     }
 
     private suspend fun loadDetail(id: String, force: Boolean): MangaDetail {
+        val cacheKey = id + (currentCoroutineContext()[ChapterDownloadTransport]?.cacheKey?.let { "@download/$it" } ?: "")
         if (!force) synchronized(mangaBzBodySourceStateLock) {
-            catalogs[id]?.takeIf { (monotonicTimeMillis() * 1_000_000L) - it.at in 0L until CATALOG_TTL }?.detail
+            catalogs[cacheKey]?.takeIf { (monotonicTimeMillis() * 1_000_000L) - it.at in 0L until CATALOG_TTL }?.detail
         }?.let { return it }
         val document = document(mangaUrl(id))
         val title = document.selectFirst(".detail-info-title")?.ownText()?.trim().orEmpty()
@@ -131,7 +133,7 @@ class MangaBzBodySource : BodySource {
         if (chapters.isEmpty()) throw SourceException("MangaBZ 暂无公开可读目录。", mangaUrl(id))
         val result = MangaDetail(manga.copy(latestChapter = chapters.last().title), chapters)
         synchronized(mangaBzBodySourceStateLock) {
-            catalogs.remove(id); catalogs[id] = Catalog((monotonicTimeMillis() * 1_000_000L), result)
+            catalogs.remove(cacheKey); catalogs[cacheKey] = Catalog((monotonicTimeMillis() * 1_000_000L), result)
             while (catalogs.size > 24) catalogs.remove(catalogs.keys.first())
         }
         return result
@@ -141,7 +143,8 @@ class MangaBzBodySource : BodySource {
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         val manga = nativeManga(mangaId)
         require(ref.sourceId == info.id && ref.mangaId == manga && DIGITS.matches(ref.chapterId)) { "MangaBZ 章节与作品来源不一致。" }
-        val key = SourceKeys.chapter(info.id, manga, ref.chapterId)
+        val key = SourceKeys.chapter(info.id, manga, ref.chapterId) +
+            (currentCoroutineContext()[ChapterDownloadTransport]?.cacheKey?.let { "@download/$it" } ?: "")
         chapterLocks[(key.hashCode() and Int.MAX_VALUE) % chapterLocks.size].withLock {
             val catalog = loadDetail(manga, forceRefresh)
             val chapter = catalog.chapters.firstOrNull { it.sourceChapterId == ref.chapterId }

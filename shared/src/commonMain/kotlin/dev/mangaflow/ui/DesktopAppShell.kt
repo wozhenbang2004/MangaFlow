@@ -163,12 +163,14 @@ internal fun DesktopSearchField(
     onTarget: (SearchTarget) -> Unit,
     onClear: () -> Unit,
     modifier: Modifier = Modifier,
+    showScopeSelector: Boolean = true,
 ) {
     val requester = remember { FocusRequester() }
     val focus = LocalFocusManager.current
     var appliedRequest by remember { mutableIntStateOf(0) }
     var scopeOpen by remember { mutableStateOf(false) }
     val inputInteraction = remember { MutableInteractionSource() }
+    val searchLabel = if (showScopeSelector) "搜索漫画、作者或标签" else "搜索漫画标题"
     LaunchedEffect(focusRequest, active) {
         if (active && focusRequest > appliedRequest) {
             withFrameNanos { }
@@ -176,7 +178,7 @@ internal fun DesktopSearchField(
             appliedRequest = focusRequest
         }
     }
-    LaunchedEffect(active) { if (!active) scopeOpen = false }
+    LaunchedEffect(active, showScopeSelector) { if (!active || !showScopeSelector) scopeOpen = false }
     Box(modifier.height(44.dp)) {
         LiquidGlassSurface(backdrop, Modifier.fillMaxSize(), cornerRadius = 16.dp,
             role = GlassSurfaceRole.NAVIGATION, interactionSource = inputInteraction, softCard = true) {}
@@ -196,10 +198,10 @@ internal fun DesktopSearchField(
                 }),
                 modifier = Modifier.weight(1f).height(44.dp).padding(horizontal = 10.dp)
                     .focusRequester(requester).onFocusChanged { if (it.isFocused) onOpen() }
-                    .semantics { contentDescription = "搜索漫画、作者或标签" },
+                    .semantics { contentDescription = searchLabel },
                 decorationBox = { input ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
-                        if (query.isEmpty()) Text("搜索漫画、作者或标签", style = MaterialTheme.typography.bodyMedium,
+                        if (query.isEmpty()) Text(searchLabel, style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         input()
                     }
@@ -209,33 +211,35 @@ internal fun DesktopSearchField(
             }, enabled = active, modifier = Modifier.size(32.dp), tooltip = "清空搜索") {
                 Icon(Icons.Outlined.Close, "清空搜索", Modifier.size(17.dp))
             }
-            val targetIcon = when (target) {
-                SearchTarget.TITLE -> Icons.AutoMirrored.Outlined.MenuBook
-                SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
-                SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
-            }
-            val targetLabel = when (target) {
-                SearchTarget.TITLE -> "作品"
-                SearchTarget.AUTHOR -> "作者"
-                SearchTarget.TAG -> "标签"
-            }
-            Box {
-                MotionIconButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
-                    modifier = Modifier.size(36.dp), tooltip = "搜索范围：" + targetLabel) {
-                    Box(Modifier.size(22.dp)) {
-                        Icon(targetIcon, "搜索范围：" + targetLabel, Modifier.align(Alignment.Center).size(18.dp))
-                        if (copyOnly || target != SearchTarget.TITLE)
-                            BodySourceMark("copy", "拷贝", Modifier.align(Alignment.BottomEnd).size(8.dp))
-                    }
+            if (showScopeSelector) {
+                val targetIcon = when (target) {
+                    SearchTarget.TITLE -> Icons.AutoMirrored.Outlined.MenuBook
+                    SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
+                    SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
                 }
-                CompactGlassPopover(scopeOpen, backdrop, onDismiss = { scopeOpen = false }, maximumWidth = 200.dp) {
-                    listOf(SearchTarget.TITLE to "作品", SearchTarget.AUTHOR to "作者", SearchTarget.TAG to "标签").forEach { (value, label) ->
-                        CompactMenuAction(if (value == target) Icons.Outlined.Check else when (value) {
-                            SearchTarget.TITLE -> Icons.AutoMirrored.Outlined.MenuBook
-                            SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
-                            SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
-                        }, label) {
-                            scopeOpen = false; onOpen(); onTarget(value)
+                val targetLabel = when (target) {
+                    SearchTarget.TITLE -> "作品"
+                    SearchTarget.AUTHOR -> "作者"
+                    SearchTarget.TAG -> "标签"
+                }
+                Box {
+                    MotionIconButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
+                        modifier = Modifier.size(36.dp), tooltip = "搜索范围：" + targetLabel) {
+                        Box(Modifier.size(22.dp)) {
+                            Icon(targetIcon, "搜索范围：" + targetLabel, Modifier.align(Alignment.Center).size(18.dp))
+                            if (copyOnly || target != SearchTarget.TITLE)
+                                BodySourceMark("copy", "拷贝", Modifier.align(Alignment.BottomEnd).size(8.dp))
+                        }
+                    }
+                    CompactGlassPopover(scopeOpen, backdrop, onDismiss = { scopeOpen = false }, maximumWidth = 200.dp) {
+                        listOf(SearchTarget.TITLE to "作品", SearchTarget.AUTHOR to "作者", SearchTarget.TAG to "标签").forEach { (value, label) ->
+                            CompactMenuAction(if (value == target) Icons.Outlined.Check else when (value) {
+                                SearchTarget.TITLE -> Icons.AutoMirrored.Outlined.MenuBook
+                                SearchTarget.AUTHOR -> Icons.Outlined.PersonOutline
+                                SearchTarget.TAG -> Icons.AutoMirrored.Outlined.Label
+                            }, label) {
+                                scopeOpen = false; onOpen(); onTarget(value)
+                            }
                         }
                     }
                 }

@@ -12,8 +12,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
@@ -38,7 +36,6 @@ import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.storage.BodySourceRegistryEntry
 import dev.mangaflow.ui.motion.MotionBottomSheet
-import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTextButton
@@ -89,60 +86,6 @@ internal fun ContentProfileSwitch(
     }
 }
 
-/** Confirming first completes the retained sheet exit; only then may its caller switch scope. */
-@Composable
-internal fun ContentProfileConfirmation(
-    backdrop: HazeState,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var accepted by remember { mutableStateOf(false) }
-    var delivered by remember { mutableStateOf(false) }
-    MotionBottomSheet(
-        backdrop = backdrop,
-        onDismissRequest = {
-            if (!delivered) {
-                delivered = true
-                onDismiss()
-                if (accepted) onConfirm()
-            }
-        },
-    ) { dismiss ->
-        Column(
-            Modifier.fillMaxWidth()
-                .heightIn(max = (LocalMangaWindow.current.height - 96.dp).coerceAtLeast(1.dp))
-                .verticalScroll(rememberScrollState())
-                .padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.Lock, null, Modifier.size(22.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.width(10.dp))
-                Text("仅限成年人", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp), tooltip = "关闭") {
-                    Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
-                }
-            }
-            Text("确认后切换内容范围，沿用当前界面与阅读方式。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            MotionButton(
-                onClick = {
-                    if (!accepted) {
-                        accepted = true
-                        dismiss()
-                    }
-                },
-                enabled = !accepted,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("我已年满18周岁") }
-            MotionTextButton(onClick = dismiss, enabled = !accepted,
-                modifier = Modifier.fillMaxWidth()) { Text("返回") }
-        }
-    }
-}
-
 /** Source availability is supplied by the registry. This sheet never enables or contacts a source. */
 @Composable
 internal fun ContentProfileSourceSheet(
@@ -153,19 +96,22 @@ internal fun ContentProfileSourceSheet(
     onManage: () -> Unit,
     onDismiss: () -> Unit,
     unavailableReasons: Map<String, String> = emptyMap(),
+    onAccount: (() -> Unit)? = null,
 ) {
     val sources = remember(entries) { entries.distinctBy { it.source.id } }
     var pendingSource by remember { mutableStateOf<String?>(null) }
     var manageAfterDismiss by remember { mutableStateOf(false) }
+    var accountAfterDismiss by remember { mutableStateOf(false) }
     var delivered by remember { mutableStateOf(false) }
-    val choosing = pendingSource != null || manageAfterDismiss
+    val choosing = pendingSource != null || manageAfterDismiss || accountAfterDismiss
     MotionBottomSheet(
         backdrop = backdrop,
         onDismissRequest = {
             if (!delivered) {
                 delivered = true
                 onDismiss()
-                if (manageAfterDismiss) onManage()
+                if (accountAfterDismiss) onAccount?.invoke()
+                else if (manageAfterDismiss) onManage()
                 else pendingSource?.let { id ->
                     if (id !in unavailableReasons &&
                         sources.any { it.source.id == id && it.enabled && it.isInstalled && !it.removed })
@@ -207,7 +153,7 @@ internal fun ContentProfileSourceSheet(
                 }
                 MotionTextButton(
                     onClick = {
-                        if (pendingSource == null && !manageAfterDismiss && available) {
+                        if (pendingSource == null && !manageAfterDismiss && !accountAfterDismiss && available) {
                             pendingSource = entry.source.id
                             dismiss()
                         }
@@ -236,10 +182,26 @@ internal fun ContentProfileSourceSheet(
                     }
                 }
             }
+            if (onAccount != null) item(key = "profile-source-account") {
+                MotionTextButton(
+                    onClick = {
+                        if (pendingSource == null && !manageAfterDismiss && !accountAfterDismiss) {
+                            accountAfterDismiss = true
+                            dismiss()
+                        }
+                    },
+                    enabled = !choosing,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                ) {
+                    Icon(Icons.Outlined.Lock, null, Modifier.size(17.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("账号登录", style = MaterialTheme.typography.labelLarge)
+                }
+            }
             item(key = "profile-source-management") {
                 MotionTextButton(
                     onClick = {
-                        if (pendingSource == null && !manageAfterDismiss) {
+                        if (pendingSource == null && !manageAfterDismiss && !accountAfterDismiss) {
                             manageAfterDismiss = true
                             dismiss()
                         }

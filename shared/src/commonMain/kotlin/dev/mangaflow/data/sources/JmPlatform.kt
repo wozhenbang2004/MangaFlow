@@ -19,6 +19,7 @@ expect suspend fun decryptedJmPageBytes(
 
 /** A background chapter owns and closes its transport; ordinary reading keeps its own client. */
 internal interface JmDownloadSession {
+    suspend fun pages(): List<Page>
     suspend fun read(page: Page): ByteArray
     fun close()
 }

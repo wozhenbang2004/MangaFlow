@@ -145,6 +145,7 @@ import dev.chrisbanes.haze.rememberHazeState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.sourceDisplayName
 import dev.mangaflow.data.ChapterVariant
+import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.MangaDetail
@@ -201,10 +202,10 @@ fun DetailScreen(
     onToggleFavorite: () -> Unit,
     onRead: (Chapter) -> Unit,
     onContinue: (ReadingProgress) -> Unit,
-    onDownload: (Chapter) -> Unit,
-    onDownloadVariant: (Chapter, ChapterVariant) -> Unit,
-    onAuthor: (Manga, String) -> Unit = { _, _ -> },
-    onTag: (Manga, String) -> Unit = { _, _ -> },
+    onDownload: (Chapter, DownloadRouteMode?) -> Unit,
+    onDownloadVariant: (Chapter, ChapterVariant, DownloadRouteMode?) -> Unit,
+    onAuthor: ((Manga, String) -> Unit)? = { _, _ -> },
+    onTag: ((Manga, String) -> Unit)? = { _, _ -> },
     onReviewMore: (String) -> Unit = {},
     onReviewRetry: (String) -> Unit = {},
     onReviewMatch: (String, String) -> Unit = { _, _ -> },
@@ -225,6 +226,7 @@ fun DetailScreen(
     sourcesChecking: Boolean = false,
     pendingSourceCount: Int = 0,
     repository: MangaRepository? = null,
+    commentsAvailable: Boolean = true,
 ) {
     val current = detail?.manga ?: manga
     var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
@@ -247,7 +249,7 @@ fun DetailScreen(
     var section by rememberSaveable(manga.id) { mutableIntStateOf(0) }
     var chapterDownloadMode by rememberSaveable(manga.id) { mutableStateOf(false) }
     val sections = rememberSaveableStateHolder()
-    val activeSection = section.coerceIn(0, 1)
+    val activeSection = if (commentsAvailable) section.coerceIn(0, 1) else 0
 
     var fullIntroduction by rememberSaveable(manga.id) { mutableStateOf(false) }
     var fullRatings by rememberSaveable(manga.id) { mutableStateOf(false) }
@@ -258,6 +260,15 @@ fun DetailScreen(
     var commentsList by remember(manga.id) { mutableStateOf<LazyListState?>(null) }
     var commentsOpenRevision by remember(manga.id) { mutableIntStateOf(0) }
     val commentCount = detailCommentCount(reviews)
+    LaunchedEffect(commentsAvailable) {
+        if (!commentsAvailable) {
+            section = 0
+            commentFilterOpen = false
+            commentsList = null
+            dockHidden = false
+            dockTravel[0] = 0f
+        }
+    }
     var coverFailed by remember(current.coverUrl) { mutableStateOf(false) }
     var coverRetry by remember(current.coverUrl) { mutableIntStateOf(0) }
     var coverBitmap by remember(current.coverUrl) { mutableStateOf<CoilImage?>(null) }
@@ -330,21 +341,24 @@ fun DetailScreen(
         Column(paneModifier) {
             DetailSections(
                 selected = activeSection,
+                commentsAvailable = commentsAvailable,
                 chapterCount = chapters.size, commentCount = commentCount,
                 onSelect = { target ->
-                    if (target == 1) {
-                        // Do not restore a previously scrolled comment position on a new visit.
-                        // The pane may still be transitioning, so also notify its own list state.
-                        commentsOpenRevision++
-                        commentsList?.requestScrollToItem(0)
+                    if (target == 0 || commentsAvailable) {
+                        if (target == 1) {
+                            // Do not restore a previously scrolled comment position on a new visit.
+                            // The pane may still be transitioning, so also notify its own list state.
+                            commentsOpenRevision++
+                            commentsList?.requestScrollToItem(0)
+                        }
+                        section = target
+                        commentFilterOpen = false
+                        dockHidden = false
+                        dockTravel[0] = 0f
                     }
-                    section = target
-                    commentFilterOpen = false
-                    dockHidden = false
-                    dockTravel[0] = 0f
                 },
                 filterOpen = commentFilterOpen, filterChanged = commentFilterChanged,
-                onToggleFilter = { commentFilterOpen = !commentFilterOpen },
+                onToggleFilter = { if (commentsAvailable) commentFilterOpen = !commentFilterOpen },
                 downloadMode = chapterDownloadMode,
                 onToggleDownload = { chapterDownloadMode = !chapterDownloadMode },
                 sourceId = current.sourceId,
@@ -383,7 +397,7 @@ fun DetailScreen(
                             onCancelSourceSelection = onCancelSourceSelection,
                             sourceLoading = sourceLoading, sourceError = sourceError,
                         )
-                        else -> Box(Modifier.fillMaxSize()) {
+                        else -> if (commentsAvailable) Box(Modifier.fillMaxSize()) {
                             Box(Modifier.fillMaxSize().padding(end =
                                 if (platformKind == PlatformKind.DESKTOP) 12.dp else 0.dp)) {
                                 CommunityPanel(
@@ -534,8 +548,9 @@ fun DetailScreen(
                                 HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
                                     compact = true, artworkHeadroom = 0.dp,
                                     onIntroduction = { fullIntroduction = true },
-                                    onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
-                                    onTag = { onTag(current, it) }, collapse = { 0f })
+                                    onRatings = { fullRatings = true },
+                                    onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
+                                    onTag = onTag?.let { action -> { tag -> action(current, tag) } }, collapse = { 0f })
                             }
                             DesktopVerticalScrollbar(summaryScroll,
                                 Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp))
@@ -612,8 +627,9 @@ fun DetailScreen(
                                 HeroBookInformation(current, coverPainter, artworkBackdrop, informationTone,
                                     compact = compactHero, artworkHeadroom = artworkHeadroom,
                                     onIntroduction = { fullIntroduction = true },
-                                    onRatings = { fullRatings = true }, onAuthor = { onAuthor(current, it) },
-                                    onTag = { onTag(current, it) },
+                                    onRatings = { fullRatings = true },
+                                    onAuthor = onAuthor?.let { action -> { name -> action(current, name) } },
+                                    onTag = onTag?.let { action -> { tag -> action(current, tag) } },
                                     collapse = { header.collapsedFraction })
                             }
                         }
@@ -720,16 +736,17 @@ fun DetailScreen(
     }
     }
     if (fullIntroduction) DetailIntroduction(current, backdrop = readingBackdrop,
-        onAuthor = { fullIntroduction = false; onAuthor(current, it) },
-        onTag = { fullIntroduction = false; onTag(current, it) }, onDismiss = { fullIntroduction = false })
+        onAuthor = onAuthor?.let { action -> { name -> fullIntroduction = false; action(current, name) } },
+        onTag = onTag?.let { action -> { tag -> fullIntroduction = false; action(current, tag) } },
+        onDismiss = { fullIntroduction = false })
     if (fullRatings) DetailRatingSheet(current, backdrop = readingBackdrop) { fullRatings = false }
     pendingDownload?.takeIf { active }?.let { pending ->
         key(current.id, pending.logicalId, pending.id) {
             ChapterDownloadSourceSheet(current, pending, downloadSourceEntries, readingBackdrop,
-                onSelect = { variant ->
+                onSelect = { variant, route ->
                     if (active && pendingDownload == pending) {
-                        if (pending.variants.isEmpty()) onDownload(pending)
-                        else onDownloadVariant(pending, variant)
+                        if (pending.variants.isEmpty()) onDownload(pending, route)
+                        else onDownloadVariant(pending, variant, route)
                     }
                 },
                 onDismiss = { if (pendingDownload == pending) { pendingDownload = null; pendingDownloadAnchor = null } },
@@ -837,8 +854,8 @@ private fun HeroBookInformation(
     artworkHeadroom: Dp,
     onIntroduction: () -> Unit,
     onRatings: () -> Unit,
-    onAuthor: (String) -> Unit,
-    onTag: (String) -> Unit,
+    onAuthor: ((String) -> Unit)?,
+    onTag: ((String) -> Unit)?,
     collapse: () -> Float,
     modifier: Modifier = Modifier,
 ) {
@@ -942,7 +959,7 @@ private fun HeroSynopsis(manga: Manga, ink: Color, enabled: Boolean, onIntroduct
 
 @Composable
 private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: Boolean = false,
-    includeState: Boolean = true, enabled: Boolean = true, onTag: (String) -> Unit) {
+    includeState: Boolean = true, enabled: Boolean = true, onTag: ((String) -> Unit)?) {
     val tags = remember(manga.status, manga.tags, manga.latestChapter, includeState) {
         buildList<Pair<String, Boolean>> {
             val status = manga.status.trim()
@@ -958,14 +975,15 @@ private fun DetailTags(manga: Manga, modifier: Modifier = Modifier, onArtwork: B
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) { tags.forEachIndexed { index, (tag, topic) ->
-        DetailTag(tag, index, onArtwork, enabled, onClick = if (topic) ({ onTag(tag) }) else null)
+        DetailTag(tag, index, onArtwork, enabled,
+            onClick = if (topic) onTag?.let { action -> { action(tag) } } else null)
     } }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: (String) -> Unit,
-    onTag: (String) -> Unit, onDismiss: () -> Unit) {
+private fun DetailIntroduction(manga: Manga, backdrop: HazeState, onAuthor: ((String) -> Unit)?,
+    onTag: ((String) -> Unit)?, onDismiss: () -> Unit) {
     MotionBottomSheet(
         onDismissRequest = onDismiss,
         backdrop = backdrop, desktopCloseButton = true,
@@ -1034,16 +1052,18 @@ private fun DetailTag(label: String, index: Int, onArtwork: Boolean = false,
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AuthorNames(authors: List<String>, color: Color, enabled: Boolean = true, onAuthor: (String) -> Unit) {
+private fun AuthorNames(authors: List<String>, color: Color, enabled: Boolean = true,
+    onAuthor: ((String) -> Unit)?) {
     if (authors.isEmpty()) return
     FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         authors.filter(String::isNotBlank).distinct().forEach { name ->
             val interaction = remember(name) { MutableInteractionSource() }
             Text(name, color = color, fontSize = 12.sp, lineHeight = 18.sp,
                 modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                    .clickable(enabled = enabled, role = Role.Button, interactionSource = interaction,
-                        indication = null, onClickLabel = "查看${name}的漫画") { onAuthor(name) }
-                    .motionPress(interaction, enabled = enabled)
+                    .then(if (onAuthor != null) Modifier.clickable(enabled = enabled, role = Role.Button,
+                        interactionSource = interaction, indication = null,
+                        onClickLabel = "查看${name}的漫画") { onAuthor(name) }
+                        .motionPress(interaction, enabled = enabled) else Modifier)
                     .padding(vertical = 4.dp))
         }
     }
@@ -1058,8 +1078,9 @@ private fun DetailSections(
     sourceId: String, sourceName: String, sourceCount: Int,
     sourceLoading: Boolean, sourcesChecking: Boolean, pendingSourceCount: Int,
     onManageSources: () -> Unit,
+    commentsAvailable: Boolean,
 ) {
-    val labels = listOf("章节", "评论")
+    val labels = if (commentsAvailable) listOf("章节", "评论") else listOf("章节")
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
     val countStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp)
@@ -1070,7 +1091,7 @@ private fun DetailSections(
     BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 2.dp)) {
         val availableWidth = maxWidth
         val scale = density.fontScale.coerceAtLeast(1f)
-        val comments = selected == 1
+        val comments = commentsAvailable && selected == 1
         val sourceWidth = (sourceLabelWidth + 46.dp).coerceAtLeast(48.dp)
             .coerceAtMost((availableWidth - 120.dp).coerceAtLeast(48.dp))
         // Keep action width and the tab track continuous while the whole
@@ -1082,11 +1103,11 @@ private fun DetailSections(
                 else snap(),
             label = "detail-section-actions-width",
         )
-        val tabWidth = (164f * scale).dp
+        val tabWidth = ((if (commentsAvailable) 164f else 82f) * scale).dp
             .coerceAtMost((availableWidth - actionsWidth - 16.dp).coerceAtLeast(0.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            MotionTabs(selected, labels, onSelect, modifier = Modifier.width(tabWidth),
+            MotionTabs(if (comments) 1 else 0, labels, onSelect, modifier = Modifier.width(tabWidth),
                 foreground = DetailForeground, muted = DetailSecondary,
                 track = Color.Transparent, indicator = DetailForeground.copy(alpha = .85f),
                 compact = true, controlHeight = 40.dp, fontSize = 13.sp,

@@ -315,6 +315,14 @@ class CopyMangaRepository(
         }
     }
 
+    /** Download preparation inherits its owned transport and never joins reader/prefetch work. */
+    internal suspend fun downloadPages(mangaId: String, chapterId: String): List<Page> {
+        currentCoroutineContext().ensureActive()
+        check(currentCoroutineContext()[ChapterDownloadTransport] != null) { "下载准备缺少固定线路。" }
+        segment(mangaId)
+        return readPages(mangaId, uuid(chapterId, "章节"))
+    }
+
     /** A volume preview retains one original page, without retaining every volume's manifest. */
     suspend fun coverPage(mangaId: String, chapterId: String, forceRefresh: Boolean = false): Page {
         currentCoroutineContext().ensureActive()

@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -149,65 +150,117 @@ internal fun DownloadRouteControl(
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
-    val selected = settings.categoryOverrides[category]
-    val effective = selected ?: settings.defaultMode
-    var expanded by remember(category) { mutableStateOf(false) }
-    var notice by remember(category) { mutableStateOf<String?>(null) }
+    DownloadRouteSelector(
+        category = category, selected = settings.categoryOverrides[category],
+        inherited = settings.defaultMode, hasProxy = settings.proxy != null,
+        taskOnly = false, onSelect = { store.setCategory(category, it) },
+        modifier = modifier, enabled = enabled, backdrop = backdrop,
+    )
+}
+
+/** One-off selection only. The caller freezes snapshot(category, selected) before preparation. */
+@Composable
+internal fun TaskDownloadRouteControl(
+    category: DownloadCategory,
+    selected: DownloadRouteMode?,
+    onSelect: (DownloadRouteMode?) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    backdrop: HazeState? = null,
+) {
+    val context = LocalMangaContext.current
+    val store = remember(context) { DownloadRoutingStore.get(context) }
+    val settings by store.state.collectAsStateWithLifecycle()
+    DownloadRouteSelector(
+        category = category, selected = selected,
+        inherited = settings.categoryOverrides[category] ?: settings.defaultMode,
+        hasProxy = settings.proxy != null, taskOnly = true, onSelect = onSelect,
+        modifier = modifier, enabled = enabled, backdrop = backdrop,
+    )
+}
+
+@Composable
+private fun DownloadRouteSelector(
+    category: DownloadCategory,
+    selected: DownloadRouteMode?,
+    inherited: DownloadRouteMode,
+    hasProxy: Boolean,
+    taskOnly: Boolean,
+    onSelect: (DownloadRouteMode?) -> Unit,
+    modifier: Modifier,
+    enabled: Boolean,
+    backdrop: HazeState?,
+) {
+    val effective = selected ?: inherited
+    var expanded by remember(category, taskOnly) { mutableStateOf(false) }
+    var notice by remember(category, taskOnly) { mutableStateOf<String?>(null) }
     val colors = MaterialTheme.colorScheme
+    LaunchedEffect(enabled) { if (!enabled) expanded = false }
+    val heading = if (taskOnly) "本次下载线路" else "本类下载默认线路"
+    val panel: @Composable () -> Unit = {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth().padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(heading, style = MaterialTheme.typography.titleSmall)
+                    Text(downloadCategoryLabel(category), style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant)
+                }
+                MotionIconButton(onClick = { expanded = false }, modifier = Modifier.size(44.dp)) {
+                    Icon(Icons.Outlined.Close, "关闭线路选择", Modifier.size(20.dp))
+                }
+            }
+            val choices: List<DownloadRouteMode?> = listOf(null) + DownloadRouteMode.entries
+            choices.forEach { choice ->
+                val needsProxy = (choice ?: inherited) == DownloadRouteMode.PROXY
+                RouteChoiceRow(
+                    label = if (choice == null) "跟随默认 · " + downloadRouteLabel(inherited)
+                        else downloadRouteLabel(choice),
+                    selected = selected == choice, enabled = enabled && (!needsProxy || hasProxy),
+                    detail = if (needsProxy && !hasProxy) "先在设置中配置代理" else null,
+                    onClick = {
+                        notice = null
+                        try { onSelect(choice); expanded = false }
+                        catch (failure: DownloadRouteException) { notice = failure.message }
+                    },
+                )
+            }
+            Text(if (taskOnly) "只用于本次下载，不更改默认线路。"
+                else "用于之后开始或手动重试的本类下载。进行中的任务保持原线路。",
+                modifier = Modifier.padding(horizontal = 10.dp),
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            Text("直连不保证绕过外部 VPN。", modifier = Modifier.padding(horizontal = 10.dp),
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            notice?.let { Text(it, modifier = Modifier.padding(horizontal = 10.dp),
+                style = MaterialTheme.typography.bodySmall, color = colors.error) }
+        }
+    }
     Box(modifier) {
-        MotionTextButton(onClick = { notice = null; expanded = true }, enabled = enabled,
+        MotionTextButton(onClick = { notice = null; expanded = !expanded }, enabled = enabled,
             modifier = Modifier.heightIn(min = 44.dp).semantics {
-                contentDescription = downloadCategoryLabel(category) + "的后续下载默认线路，" +
+                contentDescription = downloadCategoryLabel(category) + "的" + heading + "，" +
                     downloadRouteLabel(effective) + if (selected == null) "，跟随默认" else ""
             }) {
             Icon(Icons.Outlined.SwapVert, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             Spacer(Modifier.width(5.dp))
-            Text(if (selected == null) "默认 · " + downloadRouteLabel(effective)
-                else "本类 · " + downloadRouteLabel(effective), style = MaterialTheme.typography.labelMedium,
+            Text((if (taskOnly) "本次 · " else if (selected == null) "默认 · " else "本类 · ") +
+                (if (taskOnly && selected == null) "默认（" + downloadRouteLabel(effective) + "）"
+                else downloadRouteLabel(effective)), style = MaterialTheme.typography.labelMedium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        if (backdrop != null) {
+            CompactGlassPopover(visible = expanded && enabled, backdrop = backdrop,
+                onDismiss = { expanded = false }, maximumWidth = 280.dp) { panel() }
+        }
     }
-    MotionDialog(visible = expanded, onDismissRequest = { expanded = false }, maximumWidth = 420.dp) {
-        val panel: @Composable () -> Unit = {
-            Column(Modifier.fillMaxWidth()
-                .heightIn(max = LocalMangaWindow.current.height * .86f)
-                .verticalScroll(rememberScrollState()).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text("下载线路", style = MaterialTheme.typography.titleMedium)
-                        Text(downloadCategoryLabel(category), style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant)
-                    }
-                    MotionIconButton(onClick = { expanded = false }, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Outlined.Close, "关闭线路选择", Modifier.size(20.dp))
-                    }
-                }
-                val choices: List<DownloadRouteMode?> = listOf(null) + DownloadRouteMode.entries
-                choices.forEach { choice ->
-                    val available = enabled && (choice != DownloadRouteMode.PROXY || settings.proxy != null)
-                    RouteChoiceRow(
-                        label = if (choice == null) "跟随默认 · " + downloadRouteLabel(settings.defaultMode)
-                            else downloadRouteLabel(choice),
-                        selected = selected == choice, enabled = available,
-                        detail = if (choice == DownloadRouteMode.PROXY && settings.proxy == null) "先在设置中配置代理" else null,
-                        onClick = {
-                            notice = null
-                            try { store.setCategory(category, choice); expanded = false }
-                            catch (failure: DownloadRouteException) { notice = failure.message }
-                        })
-                }
-                Text("用于之后开始或手动重试的本类下载。正在进行的任务保持原线路。",
-                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                Text("直连不保证绕过外部 VPN。", style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant)
-                notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
+    if (backdrop == null) {
+        MotionDialog(visible = expanded && enabled, onDismissRequest = { expanded = false }, maximumWidth = 360.dp) {
+            Surface(shape = RoundedCornerShape(22.dp), color = colors.surfaceContainerLow,
+                tonalElevation = 0.dp) {
+                Column(Modifier.fillMaxWidth()
+                    .heightIn(max = LocalMangaWindow.current.height * .86f)
+                    .verticalScroll(rememberScrollState()).padding(10.dp)) { panel() }
             }
         }
-        if (backdrop != null) LiquidGlassSurface(state = backdrop, modifier = Modifier.fillMaxWidth(),
-            cornerRadius = 22.dp, role = GlassSurfaceRole.PANEL, elevation = 0.dp) { panel() }
-        else Surface(shape = RoundedCornerShape(22.dp), color = colors.surfaceContainerLow,
-            tonalElevation = 0.dp) { panel() }
     }
 }
 

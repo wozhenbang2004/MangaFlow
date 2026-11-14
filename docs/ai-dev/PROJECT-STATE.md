@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Three-thread takeover · 2026-11-14
+
+Publication state: main push was blocked by automatic approval review (large untested default-branch mutation; current authorization considered insufficient). Do not bypass that rejection. Preserve the complete change in an independent review branch/draft PR; merge to main and CI activation require explicit user approval. No new build was triggered.
+
+Active outcome and raw current instruction are recorded in DESIGN.md TAKEOVER-DOWNLOAD-145–149; this resumes the screenshot's three named threads with six isolated source owners and cross-domain review. Implemented: adaptive download task rows and real progress; per-task route selection with exact routed metadata/enqueue/reader-first transfers; retained same-process Steam downloads, current-choice manual retry and a stable scrolling preview footer; direct shared-profile switching with unsupported actions/comments removed and sign-in recovery; auxiliary reader IO separated from valid body rendering. Preserve the existing exact-history and newest-comment fixes.
+
+Integration base is latest mainf40174688b77de50fa29282ea027ef6192214422, preserving the concurrent account/collection redesign with actual three-way source integration. Actual Windows229/run43568776327 failed ProGuard on mismatched OkHttp core/cookie adapter; the batch aligns official5.5.1 BOM and narrowly handles observed optional external providers. Native per-SHA non-cancellation and current-main/signing protections are retained.
+
+Final evidence: source/interface/cancellation/identity reviews plus clean diff whitespace check, no tests/local builds/service/device probes. Root submits this complete batch once and confirms ordinary Android/native CI activation; installed visual/functional acceptance is pending user feedback. Source availability is not claimed restored without runtime evidence; automatic adaptive tuning and durable process-death Steam recovery remain explicitly OPEN. Next exact action after CI-trigger handoff: inspect concrete user/artifact feedback for these IDs, without repeating completed source work or issuing a status-only push.
+
 ## Copy account UX and shared library flows · 2026-11-14
 
 ACCOUNT-UX-20261114 in DESIGN owns the working-login screenshots and account redesign request, including current continuations through 2026-11-14T07:07:01.748Z. One compact identity/refresh/More header, native cover grid/list choice and flat cloud-history rows replace the detached identity area and oversized cards. Existing Ovio tabs, glass menus, metric fan, cover detail transition and exact cloud/local reading routes are reused.

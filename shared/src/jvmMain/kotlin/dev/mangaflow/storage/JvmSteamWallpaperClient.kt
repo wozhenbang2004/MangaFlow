@@ -6,6 +6,7 @@ import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.checked
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.randomUuid
@@ -317,7 +318,7 @@ internal class JvmSteamWallpaperClient(
             }
     }
 
-    override fun download(item: SteamWallpaperItem) {
+    override fun download(item: SteamWallpaperItem, route: DownloadRouteSnapshot?) {
         if (closed || !_state.value.supported) return
         val lease = currentLease()
         if (lease == null) {
@@ -332,10 +333,16 @@ internal class JvmSteamWallpaperClient(
             _state.update { it.copy(transferError = "这份壁纸超过 512 MB，请选择较小的原始图片或视频。") }
             return
         }
+        val frozenRoute = try { route?.checked() ?: steamRoute() }
+        catch (failure: DownloadRouteException) {
+            _state.update { it.copy(transferError = failure.message ?: "壁纸下载线路暂不可用。") }
+            return
+        }
         start(transfer, { it.copy(transferId = selected.id, transferName = selected.title,
+            transferRoute = frozenRoute,
             receivedBytes = 0, totalBytes = 0, transferProgressKnown = false,
             transferPhase = SteamWallpaperTransferPhase.CONNECTING, transferError = null) },
-            15 * 60_000L, lease = lease,
+            15 * 60_000L, lease = lease, routeOverride = frozenRoute,
             makeRequest = { request("download", lease.record) {
                 put("itemId", selected.id); put("media", selected.kind.wire())
             } }, download = selected) { _, _ -> Unit }
@@ -382,6 +389,7 @@ internal class JvmSteamWallpaperClient(
     override fun cancelTransfer() {
         stop(transfer)
         if (!closed) _state.update { it.copy(transferId = null, transferName = null,
+            transferRoute = null,
             receivedBytes = 0, totalBytes = 0, transferPhase = SteamWallpaperTransferPhase.NONE,
             transferProgressKnown = false, transferError = null) }
     }
@@ -393,6 +401,7 @@ internal class JvmSteamWallpaperClient(
             componentTotalBytes = 0, authenticating = false, qrUrl = null,
             guardMethods = emptyList(), guardSubmitting = false, guardError = null,
             loading = false, transferId = null, transferName = null, receivedBytes = 0,
+            transferRoute = null,
             totalBytes = 0, transferPhase = SteamWallpaperTransferPhase.NONE,
             transferProgressKnown = false, profileLoading = false, authError = null, browseError = null,
             transferError = null, profileError = null, message = null) }
@@ -413,6 +422,7 @@ internal class JvmSteamWallpaperClient(
             componentTotalBytes = 0, authenticating = false, qrUrl = null,
             guardMethods = emptyList(), guardSubmitting = false, guardError = null,
             loading = false, account = null, canResumeSession = false, transferId = null, transferName = null,
+            transferRoute = null,
             receivedBytes = 0, totalBytes = 0, transferPhase = SteamWallpaperTransferPhase.NONE,
             transferProgressKnown = false, transferError = null, profileLoading = false,
             profileError = null, authError = null, browseError = null, message = null, error = null,
@@ -463,12 +473,13 @@ internal class JvmSteamWallpaperClient(
         makeRequest: suspend () -> JsonObject?,
         download: SteamWallpaperItem? = null,
         transientSecret: CharArray? = null,
+        routeOverride: DownloadRouteSnapshot? = null,
         onEvent: suspend (Long, JsonObject) -> Unit,
     ) {
         if (closed) { transientSecret?.fill('\u0000'); return }
         // Freeze this operation's route; a settings edit affects only later operations.
         val route = try {
-            if (restoring) null else steamRoute()
+            if (restoring) null else routeOverride?.checked() ?: steamRoute()
         } catch (failure: Exception) {
             transientSecret?.fill('\u0000')
             val message = if (failure is DownloadRouteException) failure.message else null
@@ -601,6 +612,7 @@ internal class JvmSteamWallpaperClient(
                     LaneKind.TRANSFER -> {
                         val failed = current.transferError != null
                         current.copy(transferId = null,
+                            transferRoute = if (failed) current.transferRoute else null,
                             transferName = if (failed) current.transferName else null,
                             receivedBytes = if (failed) current.receivedBytes else 0,
                             totalBytes = if (failed) current.totalBytes else 0,
@@ -783,6 +795,7 @@ internal class JvmSteamWallpaperClient(
                 loading = if (lane === browse) current.loading else false,
                 transferId = if (lane === transfer) current.transferId else null,
                 transferName = if (lane === transfer) current.transferName else null,
+                transferRoute = if (lane === transfer) current.transferRoute else null,
                 transferPhase = if (lane === transfer) current.transferPhase else SteamWallpaperTransferPhase.NONE,
                 transferProgressKnown = lane === transfer && current.transferProgressKnown,
                 profileLoading = false,

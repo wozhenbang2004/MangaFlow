@@ -1,6 +1,7 @@
 package dev.mangaflow.storage
 
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.net.DownloadRouteSnapshot
 import kotlinx.coroutines.flow.StateFlow
 
 enum class SteamWallpaperKind { IMAGE, VIDEO }
@@ -56,6 +57,8 @@ data class SteamWallpaperState(
     val transferProgressKnown: Boolean = false,
     val transferError: String? = null,
     val transferName: String? = null,
+    /** The immutable effective route of this transfer, including a retained failed attempt. */
+    val transferRoute: DownloadRouteSnapshot? = null,
     val receivedBytes: Long = 0,
     val totalBytes: Long = 0,
     val importedCount: Int = 0,
@@ -73,7 +76,7 @@ interface SteamWallpaperClient {
     fun search(query: String, kind: SteamWallpaperKind, page: Int = 1)
     fun loadLibrary(library: SteamWallpaperLibrary, kind: SteamWallpaperKind, page: Int = 1)
     fun refreshProfile()
-    fun download(item: SteamWallpaperItem)
+    fun download(item: SteamWallpaperItem, route: DownloadRouteSnapshot? = null)
     fun cancelAuthentication()
     fun cancelTransfer()
     fun cancelBrowse()

@@ -22,8 +22,8 @@ import okio.use as useOkio
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
-import dev.mangaflow.data.sources.decryptedJmPageBytes
 import dev.mangaflow.data.sources.JmDownloadSession
+import dev.mangaflow.data.sources.createJmDownloadSession
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
@@ -393,28 +393,35 @@ class DownloadStore private constructor(context: Context) {
     /** Only explicit download actions create records; opening a reader reuses existing ones. */
     suspend fun enqueue(
         manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>,
-    ): String = enqueueInternal(manga, chapter, pages, headers)
+        route: DownloadRouteSnapshot? = null,
+    ): String = enqueueInternal(manga, chapter, pages, headers, route = route)
         ?: chapterKey(manga.id, chapter.id)
 
     /** Refresh only the exact entry that requested metadata; a later pause/delete/retry wins. */
     suspend fun refreshReadingDownload(
         manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>, expectedEntry: DownloadEntry,
-    ): Boolean = enqueueInternal(manga, chapter, pages, headers, expectedEntry = expectedEntry) != null
+        route: DownloadRouteSnapshot? = null,
+    ): Boolean = enqueueInternal(manga, chapter, pages, headers, expectedEntry = expectedEntry, route = route) != null
 
     private suspend fun enqueueInternal(
         manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>,
         expectedEntry: DownloadEntry? = null,
+        route: DownloadRouteSnapshot? = null,
     ): String? = withContext(Dispatchers.IO) {
         awaitReady()
         require(pages.isNotEmpty()) { "本章没有可下载的图片" }
         require(pages.all { it.url.startsWith("https://") }) { "仅支持安全的 HTTPS 图片地址" }
         val id = chapterKey(manga.id, chapter.id)
         changeChapter(id) {
-            val change = synchronized(lock) {
+            val (change, capturedRoute) = synchronized(lock) {
                 val old = records[id]
                 if (expectedEntry != null && old?.entry !== expectedEntry) return@changeChapter null
                 if (old?.entry?.status in ACTIVE_STATUSES) return@changeChapter id
-                old?.let { detachWriter(it) }
+                // Validate before detaching an older download or replacing any local image.
+                // Callers preparing online metadata pass the same frozen route into this record.
+                val checkedRoute = route?.checked()
+                    ?: DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
+                old?.let { detachWriter(it) } to checkedRoute
             }
             if (change != null) stopWriter(change)
             synchronized(lock) {
@@ -440,7 +447,7 @@ class DownloadStore private constructor(context: Context) {
                     createdAt = old?.entry?.createdAt ?: wallTimeMillis(),
                 )
                 prunePartialDownloads(id, pages, headers)
-                save(DownloadRecord(entry, pages, headers))
+                save(DownloadRecord(entry, pages, headers, route = capturedRoute))
                 if (!complete) schedule(id)
             }
             id
@@ -639,9 +646,14 @@ class DownloadStore private constructor(context: Context) {
                     throw IOException(current.entry.error)
                 }
                 if (current.entry.status !in ACTIVE_STATUSES) return null
+                // Legacy manifests may not yet have a route. Freeze it before either a reader
+                // or worker creates the shared transfer, so the first consumer cannot bypass it.
+                val routed = if (current.route != null) current else current.copy(
+                    route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS),
+                ).also(::save)
                 val pending = pageTransfers[key] ?: scope.async(start = CoroutineStart.LAZY) {
                     try {
-                        transferSlots.withPermit { transferPage(current, key, client, jm) }
+                        transferSlots.withPermit { transferPage(routed, key, client, jm) }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failure: Exception) {
@@ -733,16 +745,28 @@ class DownloadStore private constructor(context: Context) {
         val destination = pageFile(key.id, key.index)
         val partial = downloadPagePartial(destination, page.url, snapshot.headers)
         var materializedJm = false
+        var ownedClient: NetworkClient? = null
+        var ownedJm: JmDownloadSession? = null
         try {
             val canWrite = synchronized(lock) {
                 records[key.id]?.let { it.generation == key.generation && it.entry.status in ACTIVE_STATUSES } == true
             }
             if (!canWrite) return null
             destination.parentFile?.mkdirs()
+            // A reader can claim an active download before its worker starts. Such a shared
+            // transfer still belongs to the download's route; ordinary online reading has no
+            // download record and never enters this path.
+            if (client == null && jm == null) {
+                val route = checkNotNull(snapshot.route) { "下载线路尚未准备，请重试。" }
+                ownedJm = createJmDownloadSession(context, snapshot.entry.manga.id, snapshot.entry.chapter.id, route)
+                if (ownedJm == null) ownedClient = NetworkClient(
+                    connectTimeoutMillis = 20_000, readTimeoutMillis = 45_000, callTimeoutMillis = 90_000,
+                    acceptCompression = false, route = route,
+                )
+            }
             // The JM CDN returns scrambled JPEG bytes. Materialize the decoded page before
             // validating or publishing it; background workers use the native source bridge.
-            val decoded = if (jm != null) jm.read(page) else decryptedJmPageBytes(context,
-                snapshot.entry.manga.id, snapshot.entry.chapter.id, page)
+            val decoded = (jm ?: ownedJm)?.read(page)
             val bounds = if (decoded != null) {
                 materializedJm = true
                 discardDownloadPartial(partial)
@@ -752,7 +776,7 @@ class DownloadStore private constructor(context: Context) {
                 syncStorageFile(partial)
                 storageImageBounds(partial)
                     ?: throw PermanentDownloadException("解码后的图片不完整")
-            } else downloadPageFile(page.url, snapshot.headers, partial, client)
+            } else downloadPageFile(page.url, snapshot.headers, partial, client ?: ownedClient)
             val savedBytes = partial.length()
             currentCoroutineContext().ensureActive()
             return synchronized(lock) {
@@ -783,6 +807,8 @@ class DownloadStore private constructor(context: Context) {
                 updatedPages[key.index].copy(url = destination.toURI().toString())
             }
         } finally {
+            runCatching { ownedClient?.close() }
+            runCatching { ownedJm?.close() }
             // Generic HTTP partials retain their verified resume metadata across interruptions.
             // JM is materialized as a complete decoded image and only resumes by saved page.
             if (materializedJm || !partial.exists()) discardDownloadPartial(partial)
