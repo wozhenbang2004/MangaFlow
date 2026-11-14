@@ -31,7 +31,7 @@ data class PanelModelSpec(
     internal val fileName: String,
 )
 
-enum class PanelRuntimeId { LITERT, ONNX, QUICKJS }
+enum class PanelRuntimeId { LITERT, ONNX, QUICKJS, STEAM }
 
 data class PanelRuntimeState(
     val installed: Boolean = false,

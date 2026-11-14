@@ -80,12 +80,14 @@ class KomiicBodySource(private val selectedBaseUrl: () -> String = { BASE_URLS.f
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         require(ref.sourceId == info.id)
         val data = graphQl("imagesByChapterId",
-            "query imagesByChapterId(\$chapterId: ID!) { imagesByChapterId(chapterId: \$chapterId) { kid } }",
+            "query imagesByChapterId(\$chapterId: ID!) { imagesByChapterId(chapterId: \$chapterId) { kid width height } }",
             JSONObject().put("chapterId", id(ref.chapterId)))
         data.getJSONArray("imagesByChapterId").bodyObjects().mapIndexed { index, image ->
             val key = image.bodyId("kid")
             require(key.length <= 1024) { "来源图片标识无效。" }
-            Page(index, "$home/api/image/".toHttpUrl().newBuilder().addPathSegment(key).build().toString())
+            Page(index, "$home/api/image/".toHttpUrl().newBuilder().addPathSegment(key).build().toString(),
+                width = image.optInt("width").takeIf { it > 0 } ?: 0,
+                height = image.optInt("height").takeIf { it > 0 } ?: 0)
         }.also { if (it.isEmpty()) throw SourceException("Komiic 暂未提供本章图片，可能需要登录或已达访问额度。", home) }
     }
 

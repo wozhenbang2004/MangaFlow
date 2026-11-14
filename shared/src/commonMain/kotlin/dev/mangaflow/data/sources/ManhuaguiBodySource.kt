@@ -148,7 +148,8 @@ class ManhuaguiBodySource : BodySource {
             val file = files.getString(index)
             require(file.isNotBlank() && !file.startsWith('/') && !file.contains("..") &&
                 !file.contains('?') && !file.contains('#') && !file.contains('\\')) { "漫画柜图片文件名无效。" }
-            val image = IMAGE_SERVER.toHttpUrl().resolve(path + file)
+            val originalFile = if (ORIGINAL_WEBP_SUFFIX.containsMatchIn(file)) file.dropLast(5) else file
+            val image = IMAGE_SERVER.toHttpUrl().resolve(path + originalFile)
                 ?.takeIf { it.host == "i.hamreus.com" && it.isHttps }
                 ?: throw SourceException("漫画柜图片地址无效。", url)
             Page(index, image.newBuilder().addQueryParameter("e", expires).addQueryParameter("m", token).build().toString())
@@ -158,7 +159,8 @@ class ManhuaguiBodySource : BodySource {
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> {
         val reference = SourceKeys.decodeChapter(mangaId, chapterId)
         require(reference.sourceId == info.id)
-        return mapOf("User-Agent" to USER_AGENT, "Referer" to "$HOME/comic/${numeric(reference.mangaId)}/${numeric(reference.chapterId)}.html")
+        return mapOf("User-Agent" to USER_AGENT, "Referer" to "$HOME/comic/${numeric(reference.mangaId)}/${numeric(reference.chapterId)}.html",
+            "Accept" to "image/jpeg,image/png,image/*;q=0.5,*/*;q=0.1")
     }
 
     private fun mangaFromCard(element: Element, base: String, search: Boolean): Manga {
@@ -213,6 +215,7 @@ class ManhuaguiBodySource : BodySource {
         private val CHAPTER_PATH = Regex("/comic/([0-9]{1,20})/([0-9]{1,20})\\.html")
         private val VOLUME_TITLE = Regex("^(?:第\\s*)?[0-9]+(?:\\.[0-9]+)?\\s*[卷巻册冊]")
         private val SPECIAL_TITLE = Regex("番外|附录|附錄|后记|後記|特典|短篇|公式书|公式書")
+        private val ORIGINAL_WEBP_SUFFIX = Regex("\\.(?:jpe?g|png)\\.webp$", RegexOption.IGNORE_CASE)
         private val PAGE_COUNT = Regex("[（(]\\s*([0-9]+)\\s*[pP]\\s*[）)]")
     }
 }

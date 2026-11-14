@@ -82,6 +82,7 @@ kotlin {
         desktopMain.dependsOn(nonAndroidMain)
         iosMain.get().dependsOn(nonAndroidMain)
         commonMain.dependencies {
+            implementation("io.github.alexzhirkevich:qrose:1.3.1")
             api(compose.runtime)
             api(compose.ui)
             api(compose.foundation)

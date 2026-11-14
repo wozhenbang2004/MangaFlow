@@ -13,6 +13,9 @@ on:
       - 'gradle.properties'
       - 'gradle/**'
       - 'scripts/native_release.py'
+      - 'scripts/build_steam.py'
+      - 'native/steam/**'
+      - 'third_party/tapline/**'
       - '.github/workflows/multiplatform-build.yml'
   workflow_dispatch:
 
@@ -34,7 +37,7 @@ jobs:
           - target: windows-x64
             os: windows-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -69,6 +72,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/native_release.py plan
+      - name: Check out pinned Steam protocol source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: UnhingedSoftware/tapline
+          ref: f54136611519bef50cf31336e0c28a78eb175657
+          path: native/steam/tapline
+          persist-credentials: false
+      - name: Install pinned Windows Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --target x86_64-pc-windows-msvc
+      - name: Build Windows Steam bridge resource
+        run: python scripts/build_steam.py --platform windows
+      - name: Preserve resolved Steam dependencies and licenses
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mangaflow-steam-windows-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            native/steam/build/
+            native/steam/Cargo.lock
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Compile and package the complete desktop application
         run: |
           set -euo pipefail

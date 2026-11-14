@@ -16,3 +16,12 @@ signing/
 dist/
 release-plan.json
 MANGAFLOW_SIGNING_*
+
+# Pinned Steam source is checked out by CI; binaries and resolved provenance are build outputs.
+/native/steam/tapline/
+/native/steam/target/
+/native/steam/Cargo.lock
+/shared/src/desktopMain/resources/steam/windows-x64/mangaflow_steam.dll
+/shared/src/desktopMain/resources/steam/windows-x64/Tapline-MPL-2.0.txt
+/shared/src/desktopMain/resources/steam/windows-x64/Steam-Component-ThirdPartyNotices.txt
+/app/src/main/assets/licenses/Steam-Component-ThirdPartyNotices.txt

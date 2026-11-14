@@ -126,7 +126,7 @@ class BaoziBodySource : BodySource {
                 if (it.slug != target.slug || it.key != target.key) incompatible("正文章节归属不一致", url)
             }
         }
-        val images = doc.select(".comic-contain img[data-src]")
+        val images = doc.select(".comic-contain img[data-src]:not([data-ticket-preview])")
         if (images.isEmpty()) incompatible("未取得正文原图，可能需要站点验证或当前页面只提供App下载提示", url)
         images.mapIndexed { index, image ->
             val raw = image.attr("data-src").trim().takeIf(String::isNotBlank)

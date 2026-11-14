@@ -342,7 +342,7 @@ class CopyMangaRepository(
     private suspend fun readPages(mangaId: String, id: String): List<Page> {
         val url = apiOrigin.newBuilder().addPathSegments("api/v3/comic").addPathSegment(mangaId)
             .addPathSegment("chapter2").addPathSegment(id).build()
-        val data = apiJson(url, "章节内容")
+        val data = apiJson(url, "章节内容", nativeImageFormat = true)
         demandReadingAccess(data)
         val comic = data.optJSONObject("comic") ?: throw SourceException("章节缺少漫画归属信息。", comicUrl(mangaId))
         val chapter = data.optJSONObject("chapter") ?: throw SourceException("来源未返回章节正文。", comicUrl(mangaId))
@@ -392,14 +392,18 @@ class CopyMangaRepository(
         val referer = if (chapterId.isBlank()) comicUrl(mangaId) else webOrigin.newBuilder()
             .addPathSegment("comic").addPathSegment(mangaId)
             .addPathSegment("chapter").addPathSegment(uuid(chapterId, "章节")).build().toString()
-        return mapOf("User-Agent" to "Mozilla/5.0", "Referer" to referer)
+        return mapOf("User-Agent" to "Mozilla/5.0", "Referer" to referer,
+            "Accept" to "image/jpeg,image/png,image/*;q=0.5,*/*;q=0.1")
     }
 
-    private suspend fun apiJson(url: HttpUrl, label: String): JSONObject {
+    private suspend fun apiJson(url: HttpUrl, label: String, nativeImageFormat: Boolean = false): JSONObject {
         val target = url.newBuilder().setQueryParameter("platform", "3")
             .setQueryParameter("in_mainland", "false").setQueryParameter("request_id", "").build()
         val request = Request.Builder().url(target).apply {
-            anonymousIdentity.headers().forEach { (name, value) -> header(name, value) }
+            anonymousIdentity.headers().forEach { (name, value) ->
+                // Only chapter manifests opt out of the source's forced WebP route.
+                if (!nativeImageFormat || !name.equals("webp", ignoreCase = true)) header(name, value)
+            }
         }.build()
         val result = envelope(api.request(request, label, webOrigin.toString()), target, label)
         return result as? JSONObject ?: throw SourceException("$label 返回了空数据或不完整的数据结构。", webOrigin.toString())

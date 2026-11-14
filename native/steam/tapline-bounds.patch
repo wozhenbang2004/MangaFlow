@@ -1,0 +1,121 @@
+diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
+--- a/crates/tapline/src/session.rs
++++ b/crates/tapline/src/session.rs
+@@ -1198,34 +1198,77 @@
+         options: &InstallOptions,
+         observe: &mut (dyn FnMut(Event) + Send),
+     ) -> Result<InstallReport, InstallError> {
+-        let target = crate::options_for(options, item.app, item.id);
+-        std::fs::create_dir_all(&target.install_dir)?;
+-
+-        let mut report = InstallReport {
+-            app: item.app,
+-            ..InstallReport::default()
+-        };
+-
+-        match &item.content {
+-            crate::WorkshopContent::SteamPipe { depot, manifest } => {
+-                let key = self.depot_key(item.app, *depot).await?;
+-
+-                let code = self
+-                    .cm
+-                    .call(&CContentServerDirectory_GetManifestRequestCode_Request {
+-                        app_id: Some(item.app.get()),
+-                        depot_id: Some(depot.get()),
+-                        manifest_id: Some(manifest.get()),
+-                        app_branch: Some("public".to_owned()),
+-                        branch_password_hash: None,
+-                    })
+-                    .await?
+-                    .manifest_request_code
+-                    .unwrap_or(0);
+-
+-                let content = self
+-                    .fetch_manifest_from_pool(*depot, manifest.get(), code, &key)
+-                    .await?;
++        self.download_workshop_item_bounded(item, options, u64::MAX, usize::MAX, observe)
++            .await
++    }
++
++    /// MangaFlow's media receiver checks the real manifest before creating files.
++    /// Unlimited callers retain tapline's original file/link/mode behavior.
++    pub async fn download_workshop_item_bounded(
++        &mut self,
++        item: &crate::WorkshopItem,
++        options: &InstallOptions,
++        max_bytes: u64,
++        max_entries: usize,
++        observe: &mut (dyn FnMut(Event) + Send),
++    ) -> Result<InstallReport, InstallError> {
++        if max_bytes == 0 || max_entries == 0 || item.size > max_bytes {
++            return Err(InstallError::Io("mangaflow-size-limit".to_owned()));
++        }
++        let target = crate::options_for(options, item.app, item.id);
++        std::fs::create_dir_all(&target.install_dir)?;
++
++        let mut report = InstallReport {
++            app: item.app,
++            ..InstallReport::default()
++        };
++
++        match &item.content {
++            crate::WorkshopContent::SteamPipe { depot, manifest } => {
++                let key = self.depot_key(item.app, *depot).await?;
++
++                let code = self
++                    .cm
++                    .call(&CContentServerDirectory_GetManifestRequestCode_Request {
++                        app_id: Some(item.app.get()),
++                        depot_id: Some(depot.get()),
++                        manifest_id: Some(manifest.get()),
++                        app_branch: Some("public".to_owned()),
++                        branch_password_hash: None,
++                    })
++                    .await?
++                    .manifest_request_code
++                    .unwrap_or(0);
++
++                let content = self
++                    .fetch_manifest_from_pool(*depot, manifest.get(), code, &key)
++                    .await?;
++
++                if max_entries != usize::MAX {
++                    if content.files.len() > max_entries || content.total_size > max_bytes {
++                        return Err(InstallError::Io("mangaflow-size-limit".to_owned()));
++                    }
++                    let mut total = 0_u64;
++                    for file in &content.files {
++                        if file.flags.symlink || file.link_target.is_some() || file.flags.executable {
++                            return Err(InstallError::Io("mangaflow-unsupported-entry".to_owned()));
++                        }
++                        if !file.flags.directory {
++                            total = total.checked_add(file.size).ok_or_else(|| {
++                                InstallError::Io("mangaflow-size-limit".to_owned())
++                            })?;
++                            if total > max_bytes {
++                                return Err(InstallError::Io("mangaflow-size-limit".to_owned()));
++                            }
++                            if file.chunks.iter().any(|chunk| {
++                                chunk.offset.checked_add(u64::from(chunk.uncompressed_size))
++                                    .is_none_or(|end| end > file.size)
++                            }) {
++                                return Err(InstallError::Io("mangaflow-invalid-chunk".to_owned()));
++                            }
++                        }
++                    }
++                }
+ 
+                 let entry = ResolvedDepot {
+                     depot: tapline_pics::Depot {
+diff --git a/crates/tapline-auth/src/lib.rs b/crates/tapline-auth/src/lib.rs
+--- a/crates/tapline-auth/src/lib.rs
++++ b/crates/tapline-auth/src/lib.rs
+@@ -81,7 +81,7 @@
+ 
+ pub const PLATFORM_STEAM_CLIENT: i32 = 1;
+ 
+-pub const DEVICE_NAME: &str = "tapline";
++pub const DEVICE_NAME: &str = "MangaFlow";
+ 
+ #[cfg(test)]
+ mod tests {

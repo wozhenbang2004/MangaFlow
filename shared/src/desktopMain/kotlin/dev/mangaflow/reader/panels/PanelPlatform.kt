@@ -22,10 +22,13 @@ actual class PanelRepository actual constructor(context: PlatformContext) {
 actual class PanelRuntimeStore private constructor() {
     actual val abi: String? = null
     actual val states: StateFlow<Map<PanelRuntimeId, PanelRuntimeState>> = MutableStateFlow(
-        PanelRuntimeId.entries.associateWith { id -> PanelRuntimeState(error = if (id == PanelRuntimeId.QUICKJS)
+        PanelRuntimeId.entries.associateWith { id -> PanelRuntimeState(error = if (id == PanelRuntimeId.STEAM)
+            "此组件由创意工坊壁纸入口管理" else if (id == PanelRuntimeId.QUICKJS)
             "当前平台尚未提供漫画源脚本引擎" else "当前平台尚未提供可选 AI 运行组件；传统分镜可正常使用") }
     ).asStateFlow()
     actual fun spec(id: PanelRuntimeId): PanelRuntimeSpec = when (id) {
+        PanelRuntimeId.STEAM -> PanelRuntimeSpec(id, "Steam 连接组件", "0.1.0-f541366",
+            "由创意工坊壁纸入口加载，不在此管理", "MPL-2.0")
         PanelRuntimeId.LITERT -> PanelRuntimeSpec(id, "轻量 AI 运行库", "1.4.2", "当前平台尚未提供；可使用传统分镜", "Apache-2.0")
         PanelRuntimeId.ONNX -> PanelRuntimeSpec(id, "高精度与排序运行库", "1.31.1", "当前平台尚未提供；可使用传统分镜", "MIT")
         PanelRuntimeId.QUICKJS -> PanelRuntimeSpec(id, "漫画源脚本引擎", "1.0.18", "当前平台尚未提供此脚本运行时", "Apache-2.0 / MIT")

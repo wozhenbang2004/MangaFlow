@@ -30,6 +30,11 @@ SPECS = (
         "libraries": ("libquickjs.so",),
         "licenses": ("QuickJS-kt-APACHE-2.0.txt", "QuickJS-MIT.txt", "c-vector-MIT.txt"),
     },
+    {
+        "id": "STEAM", "version": "0.1.0-f541366", "aar": "mangaflow-steam-0.1.0.aar",
+        "libraries": ("libmangaflow_steam.so",),
+        "licenses": ("Tapline-MPL-2.0.txt", "Steam-Component-ThirdPartyNotices.txt"),
+    },
 )
 LIBRARY_NAMES = {name for spec in SPECS for name in spec["libraries"]}
 MAX_LIBRARY_BYTES = 128 * 1024 * 1024

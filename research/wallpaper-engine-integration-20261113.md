@@ -1,5 +1,18 @@
 # Wallpaper Engine 与 MangaFlow 壁纸接入研究
 
+## Direct Steam implementation · 2026-11-14
+
+The user accepted the direct Steam proposal with “去做” and reiterated “你和你的代理们分工推进啊别忘了关键的 steam wallpaperengine 啊”. Current implementation/acceptance is DESIGN.md STEAM-DIRECT-126. This supersedes the earlier research-only status for source authoring, not the missing real account/device verification.
+
+Native/steam now contains the small JNI wrapper over fixed taplinef541366, the bounded-manifest and friendly-name patch, exact dependency declarations and implementation limits. The common/JVM/platform client handles QR login, encrypted saved session, genuine Workshop search/download, cancellation and original project/Legacy media validation into WallpaperStore. The existing settings origin row adds one Workshop action and a compact current MotionDialog with locally generated QRose1.3.1 QR, real state/progress/error/pagination. Source/UI/Rust/build work was divided among independent agents and integrated by root.
+
+Android's explicit first action can fetch the signed per-ABI optional connection library; ordinary reading and merely opening the panel do not download code. Existing APK signer/catalog/SHA/ELF validation is reused and existing installed legacy runtime receipts stay valid. Windows packages its own DLL resource and loads lazily; iOS reports unsupported. No .NET, SteamCMD, Metal/Scene runtime or shared WE assets are incorporated.
+
+Image results require genuine standalone primary-image metadata; most Scene entries cannot be imported as images and are reported honestly. Video uses real native Video tags, then verifies the actual project and file. A preview remains browsing content. The native bounded patch checks the manifest before media-file writes; client staging is unique and cleaned after cancellation/import. Legacy upstream downloads still buffer the HTTP body, so512MiB is a payload cap, not an observed RAM bound. Real authentication, original download, decoder behavior, cancellation completion and UI acceptance are pending the actual built artifact/user flow.
+
+Build source/provenance and full resolved dependency licenses travel with the optional component/Windows resource, with exact Cargo.lock and metadata retained in CI. Main publication uses one complete ready batch and existing signing/version/tag/main guards. No tests/local builds/account/device probes are claimed; confirm CI trigger separately from build success and actual interoperation.
+
+
 ## 当前补充：电脑发现修正与 Steam 直接下载调研
 
 用户原话：“这个也没法自动确认啊以及 wallpaperengine 那个一直搜不到电脑啊”；“以及能不能实现我们直接认证 steam 我们自己可以调 wallpaperengine 的 api 说不定已经有人做了第三方客户端”。本段补充现有PC-WALLPAPER-40，不把Steam内容下载与局域网PIN传输混成一个API。

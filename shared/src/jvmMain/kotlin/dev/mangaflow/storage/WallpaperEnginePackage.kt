@@ -73,6 +73,57 @@ internal object WallpaperEnginePackage {
         }
     }
 
+    /** Workshop downloads are directories. Only the declared main media is imported. */
+    suspend fun extractProjectMedia(
+        directory: File, title: String, expectedType: SteamWallpaperKind, primaryFile: String? = null,
+    ): File = withContext(Dispatchers.IO) {
+        currentCoroutineContext().ensureActive()
+        require(directory.isDirectory) { "下载目录不可用，请重新下载。" }
+        val root = directory.canonicalFile
+        fun ownedFile(name: String): File {
+            // Use the same path grammar as packages, then reject symlinks and aliases.
+            safeName(name)
+            val selected = File(root, name)
+            val canonical = selected.canonicalFile
+            require(canonical.toPath().startsWith(root.toPath()) && canonical != root &&
+                selected.absoluteFile == canonical && canonical.isFile) {
+                "壁纸项目包含不安全或缺失的文件路径。"
+            }
+            return canonical
+        }
+        val expected = if (expectedType == SteamWallpaperKind.VIDEO) Kind.VIDEO else Kind.IMAGE
+        val source = if (File(root, "project.json").exists()) {
+            val metadata = ownedFile("project.json")
+            require(metadata.length() in 1..MAX_METADATA.toLong()) { "壁纸项目信息无效或过大。" }
+            val project = try {
+                metadataJson.parseToJsonElement(metadata.readText(Charsets.UTF_8).removePrefix("\uFEFF")) as? JsonObject
+                    ?: error("invalid project")
+            } catch (_: Exception) {
+                error("无法读取壁纸项目信息，请选择原始图片或视频项目。")
+            }
+            val actual = when (textProperty(project, "type").lowercase(Locale.ROOT)) {
+                "image", "picture" -> Kind.IMAGE
+                "video" -> Kind.VIDEO
+                "scene", "web", "application" -> error("此项目需要场景播放器，不能作为原始图片或视频导入。")
+                else -> error("此项目未声明可直接播放的图片或视频。")
+            }
+            require(actual == expected) { "实际项目类型与所选壁纸类型不一致。" }
+            ownedFile(textProperty(project, "file"))
+        } else {
+            // Legacy Workshop metadata can explicitly name its original image/video.
+            // The native download event must supply that exact primary file; never pick a preview.
+            ownedFile(primaryFile?.takeIf(String::isNotBlank)
+                ?: error("下载内容未提供可确认的主媒体文件。"))
+        }
+        require(source.length() in 1..MAX_MEDIA) { "壁纸主媒体为空或超过 512 MB。" }
+        RandomAccessFile(source, "r").use { input ->
+            val format = sniff(readHead(input, 0, source.length()), source.length())
+                ?: error("主媒体不是可读取的原始图片或视频。")
+            require(format.kind == expected) { "主媒体文件与项目声明的类型不一致。" }
+        }
+        extractMedia(source, root, title)
+    }
+
     private suspend fun readPackage(input: RandomAccessFile, size: Long): Slice {
         input.seek(0)
         require(readWord(input, size) == 8L) { "收到的文件不是可识别的图片、视频或壁纸包。" }

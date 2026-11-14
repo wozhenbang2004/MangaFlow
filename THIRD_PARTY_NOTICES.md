@@ -1,5 +1,24 @@
 # Third-party notices
 
+## Optional Steam Workshop connection and QR rendering
+
+The Steam connection component adapts the MPL-2.0 tapline library at
+f54136611519bef50cf31336e0c28a78eb175657:
+https://github.com/UnhingedSoftware/tapline/tree/f54136611519bef50cf31336e0c28a78eb175657 .
+The component source and the bounded-download source patch are in native/steam;
+Android downloads a same-signer verified native component only after an explicit
+Steam action, while Windows includes its platform library. No SteamCMD, .NET,
+Wallpaper Engine renderer or shared engine assets are incorporated.
+Resolved Rust dependency attribution and license texts travel with the native
+component assets and are retained with its exact CI Cargo.lock. Steam content
+remains subject to the account's access and the wallpaper author's rights.
+
+The QR painter uses QRose 1.3.1 (MIT), tag source
+https://github.com/alexzhirkevich/qrose/tree/1.3.1 . It encodes the real Steam
+login URL locally; no remote QR-image service or embedded account credentials
+are used. Native library existence or build completion is not evidence of a
+successful Steam account login or Workshop download.
+
 ## Multiplatform dependencies
 
 Author-script classification retains the original per-UTF16-character contract

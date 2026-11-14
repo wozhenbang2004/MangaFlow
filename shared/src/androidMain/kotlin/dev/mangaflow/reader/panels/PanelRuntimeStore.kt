@@ -195,7 +195,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         } finally { synchronized(control) { removing.remove(id) } }
     }
 
-    /** Must finish before the caller initializes any inference or QuickJS native API. */
+    /** Must finish before the caller initializes the selected native component. */
     suspend fun ensureLoaded(id: PanelRuntimeId): Unit = withContext(Dispatchers.IO) {
         ready.await()
         loadGate.withLock {
@@ -232,6 +232,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                             System.load(File(root, "libonnxruntime.so").absolutePath)
                             System.load(File(root, "libonnxruntime4j_jni.so").absolutePath)
                         }
+                        PanelRuntimeId.STEAM -> System.load(File(root, "libmangaflow_steam.so").absolutePath)
                         PanelRuntimeId.QUICKJS -> {
                             // The upstream Android loader reads this trusted path before create().
                             System.setProperty("com.dokar.quickjs.library.path", root.absolutePath)
@@ -455,10 +456,11 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         }
         require(entries.map { it.id to it.abi }.toSet().size == entries.size) { "运行库目录包含重复架构" }
         val runtimeIds = entries.map { it.id }.toSet()
-        // Existing, same-signer LiteRT/ONNX receipts predate the optional script engine.
-        // New release catalogs must contain every engine; only local legacy receipts may omit it.
-        require(runtimeIds == PanelRuntimeId.entries.toSet() || !currentRelease &&
-            runtimeIds == setOf(PanelRuntimeId.LITERT, PanelRuntimeId.ONNX)) { "运行库目录缺少必要引擎" }
+        // Same-signer installed receipts may predate the optional script or Steam component.
+        // New release catalogs include every engine; selected installed libraries stay strict.
+        val legacyBase = setOf(PanelRuntimeId.LITERT, PanelRuntimeId.ONNX)
+        require(if (currentRelease) runtimeIds == PanelRuntimeId.entries.toSet()
+            else runtimeIds.containsAll(legacyBase)) { "运行库目录缺少必要引擎" }
         require(entries.map { it.id to it.abi }.toSet() == runtimeIds.flatMap { id -> ABIS.map { id to it } }.toSet()) {
             "运行库目录条目不完整"
         }
@@ -634,12 +636,15 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         private val HOSTS = setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com")
         private val REDIRECTS = setOf(301, 302, 303, 307, 308)
         private val SPECS = mapOf(
+            PanelRuntimeId.STEAM to PanelRuntimeSpec(PanelRuntimeId.STEAM, "Steam 连接组件", "0.1.0-f541366",
+                "登录 Steam 并下载可直接使用的创意工坊壁纸，仅在启用时下载", "MPL-2.0"),
             PanelRuntimeId.LITERT to PanelRuntimeSpec(PanelRuntimeId.LITERT, "轻量 AI 运行库", "1.4.2", "运行 YOLO26 Nano，仅下载当前应用架构所需组件", "Apache-2.0"),
             PanelRuntimeId.ONNX to PanelRuntimeSpec(PanelRuntimeId.ONNX, "高精度与排序运行库", "1.31.1", "运行 Koharu 和 Inkwell，两个模型共用此运行库", "MIT"),
             PanelRuntimeId.QUICKJS to PanelRuntimeSpec(PanelRuntimeId.QUICKJS, "漫画源脚本引擎", "1.0.18",
                 "供你导入的第三方漫画源脚本使用，仅下载当前应用架构所需组件", "Apache-2.0 / MIT"),
         )
         private fun libraryNames(id: PanelRuntimeId): Set<String> = when (id) {
+            PanelRuntimeId.STEAM -> setOf("libmangaflow_steam.so")
             PanelRuntimeId.LITERT -> setOf("libtensorflowlite_jni.so")
             PanelRuntimeId.ONNX -> setOf("libonnxruntime.so", "libonnxruntime4j_jni.so")
             PanelRuntimeId.QUICKJS -> setOf("libquickjs.so")

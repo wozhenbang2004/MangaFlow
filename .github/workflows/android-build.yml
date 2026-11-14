@@ -20,7 +20,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -38,7 +38,16 @@ jobs:
           set +o pipefail
           yes | "$SDKMANAGER" --licenses > /dev/null
           set -o pipefail
-          "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0'
+          "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+      - name: Check out pinned Steam protocol source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: UnhingedSoftware/tapline
+          ref: f54136611519bef50cf31336e0c28a78eb175657
+          path: native/steam/tapline
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --target aarch64-linux-android --target armv7-linux-androideabi --target i686-linux-android --target x86_64-linux-android
       - name: Android Lint (release)
         id: lint
         if: github.event_name == 'workflow_dispatch' && inputs.full_lint == true
@@ -68,6 +77,18 @@ jobs:
 
       - name: Compile and package
         run: ./gradlew --no-daemon --console=plain --max-workers=2 :app:assembleDebug :app:assembleRelease :app:stageInferenceAars
+      - name: Build optional Steam component
+        run: python3 scripts/build_steam.py --platform android
+      - name: Preserve resolved Steam dependencies and licenses
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mangaflow-steam-android-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            native/steam/build/
+            native/steam/Cargo.lock
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Package optional inference components (unsigned)
         run: |
           python3 scripts/package_runtimes.py \

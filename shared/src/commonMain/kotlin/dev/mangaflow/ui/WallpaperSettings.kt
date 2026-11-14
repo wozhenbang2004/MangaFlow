@@ -38,6 +38,7 @@ import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Restore
+import androidx.compose.material.icons.outlined.Storefront
 import androidx.compose.material.icons.outlined.VideoFile
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -106,6 +107,7 @@ internal fun WallpaperSettings(
     var controlsExpanded by remember { mutableStateOf(false) }
     var formatDetails by remember { mutableStateOf(false) }
     var pcVisible by remember { mutableStateOf(false) }
+    var steamVisible by remember { mutableStateOf(false) }
     var removal by remember { mutableStateOf<WallpaperItem?>(null) }
     var clearRequested by remember { mutableStateOf(false) }
     var removalVisible by remember { mutableStateOf(false) }
@@ -191,6 +193,10 @@ internal fun WallpaperSettings(
                     style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (selected.items.isNotEmpty()) Text("${selected.items.size} 张",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
+            MotionIconButton(onClick = { finishAdjustment(); steamVisible = true }, enabled = !importing,
+                modifier = Modifier.size(44.dp)) {
+                Icon(Icons.Outlined.Storefront, "Steam 创意工坊", Modifier.size(21.dp), tint = colors.onSurfaceVariant)
             }
             MotionIconButton(onClick = { finishAdjustment(); pcVisible = true }, enabled = !importing,
                 modifier = Modifier.size(44.dp)) {
@@ -355,7 +361,7 @@ internal fun WallpaperSettings(
                     }
                 }
                 if (formatDetails) Text(
-                    "支持设备可读取的图片与静音视频，单个最多 512 MB。视频切后台会暂停。\nWallpaper Engine 可通过「连接电脑」接收图片和动态视频；实时场景需先转换。本地选择仍只接收原图片或视频。",
+                    "支持设备可读取的图片与静音视频，单个最多 512 MB。视频切后台会暂停。\n创意工坊仅导入原图片或视频，实时场景暂不支持；也可通过「连接电脑」接收。本地选择仍可继续使用。",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             }
         }
@@ -366,6 +372,7 @@ internal fun WallpaperSettings(
         }
     }
     WallpaperPcSheet(onDismiss = { pcVisible = false }, visible = pcVisible, backdrop = backdrop)
+    SteamWallpaperSheet(onDismiss = { steamVisible = false }, visible = steamVisible, backdrop = backdrop)
     MotionDialog(visible = removalVisible,
         onDismissRequest = { removalVisible = false }) {
         Surface(shape = RoundedCornerShape(22.dp), color = colors.surfaceContainerLow, tonalElevation = 0.dp) {

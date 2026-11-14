@@ -19,3 +19,6 @@
 -keep,allowobfuscation class dev.mangaflow.reader.ReaderScreenKt {
     public static void ReaderScreen(...);
 }
+
+# JNI exports bind to this exact class and method names after an explicit component load.
+-keep class dev.mangaflow.storage.SteamNative { *; }
