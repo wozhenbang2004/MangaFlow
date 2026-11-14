@@ -689,9 +689,21 @@ private data class WebDavBackupDraft(
 )
 
 @Composable
+private fun ReadingBackupPanel(backdrop: HazeState?, modifier: Modifier, content: @Composable () -> Unit) {
+    if (backdrop != null) {
+        LiquidGlassSurface(backdrop, modifier, cornerRadius = 22.dp,
+            role = GlassSurfaceRole.PANEL, elevation = 0.dp) { content() }
+    } else {
+        val colors = MaterialTheme.colorScheme
+        Surface(modifier, shape = RoundedCornerShape(22.dp),
+            color = lerp(colors.background, colors.surface, .85f), tonalElevation = 0.dp) { content() }
+    }
+}
+
+@Composable
 private fun WebDavBackupDialog(
     visible: Boolean,
-    backdrop: HazeState,
+    backdrop: HazeState?,
     config: WebDavBackupConfig,
     busy: String?,
     notice: String?,
@@ -730,8 +742,7 @@ private fun WebDavBackupDialog(
     MotionDialog(visible = visible, onDismissRequest = onDismiss, onClosed = onClosed, maximumWidth = 520.dp) {
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp).imePadding()) {
             val height = minOf(maxHeight, LocalMangaWindow.current.height * .88f, 680.dp)
-            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
-                role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
+            ReadingBackupPanel(backdrop, Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth().heightIn(max = height).padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.CloudSync, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
@@ -856,7 +867,7 @@ private fun WebDavTransferAction(icon: ImageVector, title: String, detail: Strin
 @Composable
 private fun BackupRestoreDialog(
     pending: PendingLibraryRestore?,
-    backdrop: HazeState,
+    backdrop: HazeState?,
     busy: Boolean,
     error: String?,
     onDismiss: () -> Unit,
@@ -868,8 +879,7 @@ private fun BackupRestoreDialog(
         onClosed = { if (pending == null) retained = null }, maximumWidth = 520.dp) {
         (pending ?: retained)?.let { restore ->
             val colors = MaterialTheme.colorScheme
-            LiquidGlassSurface(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth(),
-                cornerRadius = 22.dp, role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
+            ReadingBackupPanel(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth()) {
                 Column(Modifier.heightIn(max = LocalMangaWindow.current.height * .84f)
                     .padding(horizontal = 18.dp, vertical = 12.dp)) {
                     Text("恢复阅读备份", Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.titleMedium)

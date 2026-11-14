@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## CI261 nullable backup backdrop repair · 2026-11-15
+
+User: “失败了”, after the approved sync publicationdf6d261. Android0.1.261/run43613025995/job132502004218 failed in :shared:compileAndroidMain at SettingsScreen.kt637:20 and662:20: the existing optional sourceBackdrop is HazeState?, while the new WebDAV/restore panels required HazeState. These are observed compiler errors introduced by this sync presentation batch, not a signing/download/service failure. Native run43613026015 was still in progress at inspection; no outcome is asserted.
+
+Both panels now retain the nullable settings contract and share ReadingBackupPanel, adapting the existing SettingsSection/ExperienceSettingsDialog material branch: a real backdrop uses the unchanged22dp PANEL; absent backdrop uses the existing theme-colored Surface. Do not invent an unconnected HazeState, assert non-null, hide backup actions or change sync/restore/route/credential behavior. Source and whitespace review only, no tests/local builds/device/service probes. Preserve latest main, publish this one bounded correction with the already authorized ordinary CI flow, confirm activation once and leave the new compiler/installed outcome pending actual evidence.
+
 ## Sync workspace and backup presentation · 2026-11-14
 
 Current user: “涉及同步的需要用审美库重新设计重做”, supplied1000121735.jpg, exact message ID/installed version unavailable. DESIGN SYNC-UI-189–194 is the active requirement/design/acceptance record; preserve COPY-DIFF-181–188 and all prior collection/progress authority boundaries. Source baseline51565058ad5e2385758897bbf02beb0c6a99c2d8 already contains the previous compatibility/comparison/settings fixes; do not replay those batches.
