@@ -122,7 +122,7 @@ data class NetworkResponse(val code: Int, val headers: Map<String, String>, val 
 }
 
 /** Engines retain system TLS validation. Each client has isolated jobs and no cookie installation. */
-internal expect fun platformHttpClient(http1Only: Boolean, configure: HttpClientConfig<*>.() -> Unit): HttpClient
+internal expect fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, configure: HttpClientConfig<*>.() -> Unit): HttpClient
 
 class NetworkClient(
     http1Only: Boolean = false,
@@ -130,9 +130,11 @@ class NetworkClient(
     readTimeoutMillis: Long = 30_000,
     callTimeoutMillis: Long = 45_000,
     acceptCompression: Boolean = true,
+    route: DownloadRouteSnapshot? = null,
 ) {
     private val timeouts = Triple(connectTimeoutMillis, readTimeoutMillis, callTimeoutMillis)
-    private val client = platformHttpClient(http1Only) {
+    private val selectedRoute = route?.checked()
+    private val client = platformHttpClient(http1Only, selectedRoute) {
         expectSuccess = false
         followRedirects = false
         if (acceptCompression) install(ContentEncoding) { gzip(); deflate() }
@@ -183,6 +185,9 @@ class NetworkClient(
                     setBody(body.bytes)
                 }
             }.execute { response ->
+                if (selectedRoute?.mode == DownloadRouteMode.PROXY && response.status.value == 407) {
+                    throw DownloadRouteException("这个代理需要身份验证；当前仅支持无需账号密码的 HTTP / SOCKS 代理。")
+                }
                 val responseHeaders = response.headers.entries().associate { it.key to it.value.joinToString(", ") }
                 if (!acceptResponse(response.status.value, responseHeaders)) return@execute response.status.value to responseHeaders
                 val announced = response.headers["Content-Length"]?.toLongOrNull()

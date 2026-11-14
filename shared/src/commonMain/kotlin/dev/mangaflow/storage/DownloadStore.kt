@@ -23,6 +23,16 @@ import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.sources.decryptedJmPageBytes
+import dev.mangaflow.data.sources.JmDownloadSession
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadProxyType
+import dev.mangaflow.net.DownloadProxyEndpoint
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.checked
+import dev.mangaflow.net.NetworkClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
@@ -64,6 +74,7 @@ data class DownloadEntry(
     val error: String = "",
     val createdAt: Long = wallTimeMillis(),
     val needsSourceRefresh: Boolean = false,
+    val routingError: Boolean = false,
 )
 
 internal data class DownloadRecord(
@@ -72,6 +83,7 @@ internal data class DownloadRecord(
     val headers: Map<String, String>,
     val workId: String = "",
     val generation: String = randomUuid(),
+    val route: DownloadRouteSnapshot? = null,
 )
 
 /** Durable chapter manifests paired with WorkManager's persistent scheduler. */
@@ -463,7 +475,7 @@ class DownloadStore private constructor(context: Context) {
                 stopWriter(change)
                 synchronized(lock) {
                     if (records[id] !== change.detached) return@changeChapter
-                    save(change.detached.copy(entry = change.detached.entry.copy(status = DownloadStatus.QUEUED, error = "")))
+                    save(change.detached.copy(route = null, entry = change.detached.entry.copy(status = DownloadStatus.QUEUED, error = "", routingError = false)))
                     schedule(id)
                 }
             } catch (cancelled: CancellationException) {
@@ -560,10 +572,15 @@ class DownloadStore private constructor(context: Context) {
         val stored = snapshot.pages.getOrNull(page.index) ?: return@withContext page
         if (stored.url.substringBefore('?') != page.url.substringBefore('?')) return@withContext page
         try {
+            localPage(snapshot, page.index)?.let { return@withContext it }
+            // A failed download policy never hides a validated local page or changes reader networking.
+            if (snapshot.entry.routingError) return@withContext page
             requestPage(snapshot, page.index) ?: page
         } catch (cancelled: CancellationException) {
             // Pausing/removing cancels the shared transfer, not the still-visible reader.
             currentCoroutineContext().ensureActive()
+            page
+        } catch (_: DownloadRouteException) {
             page
         } catch (_: DownloadStorageException) {
             // Only local persistence failure falls back to the normal image path. Source refusal,
@@ -598,12 +615,17 @@ class DownloadStore private constructor(context: Context) {
         record.pages.indices.firstOrNull { it !in visited }
     }
 
-    internal suspend fun downloadPage(id: String, workId: String, index: Int): Page? {
+    internal suspend fun downloadPage(
+        id: String, workId: String, index: Int, client: NetworkClient?, jm: JmDownloadSession?,
+    ): Page? {
         val snapshot = synchronized(lock) { records[id]?.takeIf { it.workId == workId } } ?: return null
-        return requestPage(snapshot, index, background = true)
+        return requestPage(snapshot, index, background = true, client = client, jm = jm)
     }
 
-    private suspend fun requestPage(snapshot: DownloadRecord, index: Int, background: Boolean = false): Page? {
+    private suspend fun requestPage(
+        snapshot: DownloadRecord, index: Int, background: Boolean = false,
+        client: NetworkClient? = null, jm: JmDownloadSession? = null,
+    ): Page? {
         localPage(snapshot, index)?.let { return it }
         val key = PageTransferKey(snapshot.entry.id, snapshot.generation, index)
         while (true) {
@@ -619,7 +641,7 @@ class DownloadStore private constructor(context: Context) {
                 if (current.entry.status !in ACTIVE_STATUSES) return null
                 val pending = pageTransfers[key] ?: scope.async(start = CoroutineStart.LAZY) {
                     try {
-                        transferSlots.withPermit { transferPage(current, key) }
+                        transferSlots.withPermit { transferPage(current, key, client, jm) }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failure: Exception) {
@@ -629,9 +651,10 @@ class DownloadStore private constructor(context: Context) {
                                 val permanent = failure as? PermanentDownloadException
                                 transferFailures[key.id] = TransferFailure(key.generation, failure)
                                 val failed = latest.copy(entry = latest.entry.copy(
-                                    status = if (permanent != null || failure is DownloadStorageException) DownloadStatus.FAILED else DownloadStatus.WAITING,
+                                    status = if (permanent != null || failure is DownloadStorageException || failure is DownloadRouteException) DownloadStatus.FAILED else DownloadStatus.WAITING,
                                     error = failure.message ?: "下载未完成",
                                     needsSourceRefresh = permanent?.needsSourceRefresh == true,
+                                    routingError = failure is DownloadRouteException,
                                 ))
                                 try { save(failed) }
                                 catch (_: DownloadStorageException) {
@@ -702,7 +725,9 @@ class DownloadStore private constructor(context: Context) {
         }
     }
 
-    private suspend fun transferPage(snapshot: DownloadRecord, key: PageTransferKey): Page? {
+    private suspend fun transferPage(
+        snapshot: DownloadRecord, key: PageTransferKey, client: NetworkClient?, jm: JmDownloadSession?,
+    ): Page? {
         localPage(snapshot, key.index)?.let { return it }
         val page = snapshot.pages[key.index]
         val destination = pageFile(key.id, key.index)
@@ -716,8 +741,8 @@ class DownloadStore private constructor(context: Context) {
             destination.parentFile?.mkdirs()
             // The JM CDN returns scrambled JPEG bytes. Materialize the decoded page before
             // validating or publishing it; background workers use the native source bridge.
-            val decoded = decryptedJmPageBytes(context, snapshot.entry.manga.id,
-                snapshot.entry.chapter.id, page)
+            val decoded = if (jm != null) jm.read(page) else decryptedJmPageBytes(context,
+                snapshot.entry.manga.id, snapshot.entry.chapter.id, page)
             val bounds = if (decoded != null) {
                 materializedJm = true
                 discardDownloadPartial(partial)
@@ -727,7 +752,7 @@ class DownloadStore private constructor(context: Context) {
                 syncStorageFile(partial)
                 storageImageBounds(partial)
                     ?: throw PermanentDownloadException("解码后的图片不完整")
-            } else downloadPageFile(page.url, snapshot.headers, partial)
+            } else downloadPageFile(page.url, snapshot.headers, partial, client)
             val savedBytes = partial.length()
             currentCoroutineContext().ensureActive()
             return synchronized(lock) {
@@ -753,7 +778,7 @@ class DownloadStore private constructor(context: Context) {
                     completedPages = available.size,
                     downloadedBytes = downloadedBytes,
                     status = if (complete) DownloadStatus.COMPLETED else current.entry.status,
-                    error = "",
+                    error = "", routingError = false,
                 )))
                 updatedPages[key.index].copy(url = destination.toURI().toString())
             }
@@ -778,23 +803,41 @@ class DownloadStore private constructor(context: Context) {
         val failure = transferFailures[id]?.takeIf { it.generation == record.generation }
         if (retryAttempt) transferFailures.remove(id)
         else if (failure != null) throw failure.error
+        val prepared = if (record.route != null) record else record.copy(
+            route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS),
+        ).also(::save)
         writers[id] = ChapterWriter(workId)
-        record
+        prepared
     }
 
-    internal suspend fun endTransfer(id: String, workId: String) = withContext(NonCancellable) {
+    internal suspend fun endTransfer(
+        id: String, workId: String, closeTransport: () -> Unit = {},
+    ) = withContext(NonCancellable) {
         val closing = synchronized(lock) {
             val writer = writers[id]?.takeIf { it.workId == workId } ?: return@synchronized null
             writers.remove(id)
-            // Reader-owned transfers can finish; system-stopped background work retains its bytes.
-            val transfers = pageTransfers.filter { (key, _) ->
+            val all = pageTransfers.filterKeys { it.id == id }.values.toList()
+            // Reader-owned pages finish on their original transport; only background work stops.
+            val background = pageTransfers.filter { (key, _) ->
                 key.id == id && (foregroundPageUsers[key] ?: 0) == 0
             }.values.toList()
-            transfers.forEach { it.cancel() }
-            writer to transfers
-        } ?: return@withContext
+            background.forEach { it.cancel() }
+            Triple(writer, background, all)
+        }
+        if (closing == null) {
+            closeTransport()
+            return@withContext
+        }
         try { closing.second.forEach { it.join() } }
-        finally { closing.first.finished.complete(Unit) }
+        finally {
+            closing.first.finished.complete(Unit)
+            val readers = closing.third.filterNot { it.isCompleted }
+            if (readers.isEmpty()) closeTransport()
+            else scope.launch {
+                try { readers.forEach { it.join() } }
+                finally { closeTransport() }
+            }
+        }
     }
 
     private fun detachWriter(record: DownloadRecord): FileChange {
@@ -1104,9 +1147,11 @@ private fun DownloadRecord.toJson() = JSONObject().apply {
     put("downloadedBytes", entry.downloadedBytes)
     put("error", entry.error)
     put("needsSourceRefresh", entry.needsSourceRefresh)
+    put("routingError", entry.routingError)
     put("createdAt", entry.createdAt)
     put("workId", workId)
     put("generation", generation)
+    route?.let { put("route", it.toDownloadJson()) }
     put("pages", JSONArray(pages.map { it.toJson() }))
     put("headers", JSONObject(headers.filterKeys { it.equals("Referer", true) || it.equals("User-Agent", true) || it.equals("Accept", true) }))
 }
@@ -1114,22 +1159,54 @@ private fun DownloadRecord.toJson() = JSONObject().apply {
 private fun readRecord(json: JSONObject): DownloadRecord {
     val pages = json.getJSONArray("pages").let { array -> (0 until array.length()).map { readPage(array.getJSONObject(it)) } }
     val headers = json.optJSONObject("headers") ?: JSONObject()
+    var invalidRoute = false
+    val route = try {
+        if (json.has("route") && !json.isNull("route")) readDownloadRoute(json.getJSONObject("route")) else null
+    } catch (_: Exception) {
+        // Preserve the chapter/files if only its optional route metadata is damaged.
+        invalidRoute = true
+        null
+    }
+    val savedStatus = DownloadStatus.entries.firstOrNull { it.name == json.optString("status") }
+        ?: DownloadStatus.FAILED
+    val routeProblem = invalidRoute && savedStatus != DownloadStatus.COMPLETED
     return DownloadRecord(
         entry = DownloadEntry(
             id = json.getString("id"),
             manga = readManga(json.getJSONObject("manga")),
             chapter = readChapter(json.getJSONObject("chapter")),
-            status = DownloadStatus.entries.firstOrNull { it.name == json.optString("status") } ?: DownloadStatus.FAILED,
+            status = if (routeProblem) DownloadStatus.FAILED else savedStatus,
             completedPages = json.optInt("completedPages"),
             totalPages = pages.size,
             downloadedBytes = json.optLong("downloadedBytes"),
-            error = json.optString("error"),
+            error = if (routeProblem) "已保存的下载线路无效，请重新选择线路并重试。" else json.optString("error"),
             needsSourceRefresh = json.optBoolean("needsSourceRefresh", false),
+            routingError = savedStatus != DownloadStatus.COMPLETED && (routeProblem || json.optBoolean("routingError", false)),
             createdAt = json.optLong("createdAt"),
         ),
         pages = pages,
         headers = headers.keys().asSequence().associateWith(headers::getString),
         workId = json.optString("workId"),
         generation = json.optString("generation").ifBlank { randomUuid() },
+        route = route,
     )
+}
+
+/** No secrets are stored: only this task's already resolved endpoint and mode. */
+private fun DownloadRouteSnapshot.toDownloadJson() = JSONObject().apply {
+    put("mode", mode.name)
+    proxy?.let { endpoint ->
+        put("host", endpoint.host); put("port", endpoint.port); put("type", endpoint.type.name)
+    }
+}
+
+private fun readDownloadRoute(json: JSONObject): DownloadRouteSnapshot {
+    val mode = DownloadRouteMode.entries.firstOrNull { it.name == json.optString("mode") }
+        ?: throw DownloadRouteException("已保存的下载线路无效，请重新选择线路并重试。")
+    val proxy = if (mode == DownloadRouteMode.PROXY) {
+        val type = DownloadProxyType.entries.firstOrNull { it.name == json.optString("type") }
+            ?: throw DownloadRouteException("已保存的代理类型无效，请重新选择线路并重试。")
+        DownloadProxyEndpoint(json.getString("host"), json.getInt("port"), type)
+    } else null
+    return DownloadRouteSnapshot(mode, proxy).checked()
 }

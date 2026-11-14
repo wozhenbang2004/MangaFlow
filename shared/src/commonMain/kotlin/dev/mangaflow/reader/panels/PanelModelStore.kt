@@ -1,10 +1,13 @@
 package dev.mangaflow.reader.panels
 
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.storage.StorageFile
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
 import dev.mangaflow.net.NetworkClient
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.Request
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -38,6 +41,7 @@ internal expect fun panelModelDirectory(context: PlatformContext): StorageFile
 
 /** Optional weights retain their exact bytes, source revision and digest on every platform. */
 class PanelModelStore private constructor(context: PlatformContext) {
+    private val application = context.applicationContext
     private val directory = panelModelDirectory(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val control = SynchronizedObject()
@@ -129,7 +133,8 @@ class PanelModelStore private constructor(context: PlatformContext) {
             if (modelFile(id) != null) { installed = true; return }
             check(directory.isDirectory || directory.mkdirs()) { "无法创建模型目录" }
             val client = synchronized(control) { clients.getOrPut(id) {
-                NetworkClient(connectTimeoutMillis = 20_000, readTimeoutMillis = 30_000, callTimeoutMillis = 900_000)
+                NetworkClient(connectTimeoutMillis = 20_000, readTimeoutMillis = 30_000, callTimeoutMillis = 900_000,
+                    route = DownloadRoutingStore.get(application).snapshot(DownloadCategory.AI_MODELS))
             } }
             var address = spec.downloadUrl.toHttpUrl()
             var completed = false

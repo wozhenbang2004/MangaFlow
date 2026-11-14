@@ -4,6 +4,9 @@ import android.content.Context
 import android.util.AtomicFile
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRoutingStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
@@ -41,6 +44,7 @@ import kotlin.coroutines.resumeWithException
 
 /** Code, metadata, tombstones and installed index share a single durable atomic commit. */
 actual class SourcePluginStore actual constructor(context: PlatformContext, actual val runtime: JavascriptSourceRuntime) {
+    private val application = context.applicationContext
     private val file = AtomicFile(File(context.applicationContext.filesDir, "source-plugins/packages.json"))
     private val mutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -52,13 +56,19 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
     actual val loadError: StateFlow<String?> = mutableLoadError.asStateFlow()
     private var damagedFilePending = false
     private var descriptors = JSONObject()
-    private val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).proxy(Proxy.NO_PROXY).dns { host ->
-        Dns.SYSTEM.lookup(host).also { addresses ->
-            if (addresses.isEmpty() || addresses.any { !publicAddress(it) }) throw IOException("源地址指向私有或保留网络。")
-        }
-    }.build()
+    private fun sourceClient(route: DownloadRouteSnapshot): OkHttpClient {
+        val sockets = publicSourceSocketFactory(route, ::publicAddress)
+        return OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false)
+            .proxy(Proxy.NO_PROXY).dns { host ->
+                Dns.SYSTEM.lookup(host).also { addresses ->
+                    if (addresses.isEmpty() || addresses.any { !publicAddress(it) }) {
+                        throw IOException("源地址指向私有或保留网络。")
+                    }
+                }
+            }.apply { if (sockets != null) socketFactory(sockets) }.build()
+    }
 
     actual val ready: Deferred<Unit> = scope.async {
         mutex.withLock {
@@ -267,25 +277,32 @@ actual class SourcePluginStore actual constructor(context: PlatformContext, actu
 
     private suspend fun fetchText(value: String): String {
         val url = androidPluginUrl(value)
-        return suspendCancellableCoroutine { continuation ->
-            val call = client.newCall(Request.Builder().url(url).header("Accept", "application/json,text/javascript,text/plain,*/*").build())
-            continuation.invokeOnCancellation { call.cancel() }
-            call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    if (continuation.isActive) continuation.resumeWithException(SourceException("源文件下载失败：${e.message.orEmpty().take(150)}", value, cause = e))
-                }
-                override fun onResponse(call: Call, response: Response) {
-                    try {
-                        val text = response.use { current ->
-                            require(current.isSuccessful) { "源文件下载失败（HTTP ${current.code}），未导入重定向或错误页。" }
-                            val body = current.body ?: throw IOException("源文件为空。")
-                            require(body.contentLength() <= MAX_FILE_BYTES || body.contentLength() == -1L) { "源文件超过 2 MiB。" }
-                            body.byteStream().use { boundedBytes(it, MAX_FILE_BYTES).toString(Charsets.UTF_8) }
-                        }
-                        if (continuation.isActive) continuation.resume(text)
-                    } catch (failure: Exception) { if (continuation.isActive) continuation.resumeWithException(failure) }
-                }
-            })
+        val route = DownloadRoutingStore.get(application).snapshot(DownloadCategory.SOURCE_PACKAGES)
+        val client = sourceClient(route)
+        try {
+            return suspendCancellableCoroutine { continuation ->
+                val call = client.newCall(Request.Builder().url(url).header("Accept", "application/json,text/javascript,text/plain,*/*").build())
+                continuation.invokeOnCancellation { call.cancel() }
+                call.enqueue(object : Callback {
+                    override fun onFailure(call: Call, e: IOException) {
+                        if (continuation.isActive) continuation.resumeWithException(SourceException("源文件下载失败：${e.message.orEmpty().take(150)}", value, cause = e))
+                    }
+                    override fun onResponse(call: Call, response: Response) {
+                        try {
+                            val text = response.use { current ->
+                                require(current.isSuccessful) { "源文件下载失败（HTTP ${current.code}），未导入重定向或错误页。" }
+                                val body = current.body ?: throw IOException("源文件为空。")
+                                require(body.contentLength() <= MAX_FILE_BYTES || body.contentLength() == -1L) { "源文件超过 2 MiB。" }
+                                body.byteStream().use { boundedBytes(it, MAX_FILE_BYTES).toString(Charsets.UTF_8) }
+                            }
+                            if (continuation.isActive) continuation.resume(text)
+                        } catch (failure: Exception) { if (continuation.isActive) continuation.resumeWithException(failure) }
+                    }
+                })
+            }
+        } finally {
+            client.dispatcher.executorService.shutdown()
+            client.connectionPool.evictAll()
         }
     }
 

@@ -1,13 +1,14 @@
 # Steam Workshop native component
 
-MangaFlow media adapter version 0.1.1; component identity 0.1.1-f541366.
+MangaFlow media adapter version 0.1.2; component identity 0.1.2-f541366.
 
 The module links the real tapline core pinned to
 https://github.com/UnhingedSoftware/tapline/tree/f54136611519bef50cf31336e0c28a78eb175657.
 It does not launch Steam, SteamCMD, shell commands or a scene renderer.
 The fixed-source patch changes the actual Steam friendly-device label to
 MangaFlow so the user recognizes the login approval. No OS/platform or
-authentication-protocol fields are altered.
+authentication-protocol fields are altered. The same pinned patch also threads
+immutable job network routes through the existing maintained transport.
 
 ## Build inputs
 
@@ -46,7 +47,31 @@ nativePoll is nonblocking: null means pending. A complete or error event is
 terminal. Completed queues also return complete once drained. An invalid handle
 returns error code invalid_job; nativeStart returns0 when unavailable/busy.
 
-All requests are JSON, op is login/passwordLogin/account/search/download. Credentials, where
+All requests are JSON, op is login/passwordLogin/account/search/download.
+Every operation also requires an immutable network object. kind is SYSTEM or
+DIRECT, or HTTP/SOCKS5 with an explicit host and port. PROXY mode is resolved by
+the shared Kotlin routing store before nativeStart; a missing/invalid endpoint is
+rejected. Login, guard polling, account restore, search and original-media download
+use the STEAM_WALLPAPERS category. Optional component acquisition uses its own
+STEAM_COMPONENT route outside this native bridge.
+
+The fixed-source patch passes one job route through CM directory lookup, CM
+WebSocket/TLS and all Shared HTTP/CDN calls. HTTP CONNECT uses the maintained
+async-http-proxy1.2.5 (BSD-3-Clause); SOCKS5 uses tokio-socks0.5.3 (MIT).
+Target domains are sent to the proxy, including CM-directory and CDN requests;
+only the proxy endpoint itself needs ordinary OS resolution. Direct/SYSTEM
+connections retain OS DNS/routing and cannot override another app's VPN/TUN.
+SYSTEM preserves the native client's existing default network behavior; it
+does not claim to discover Windows HTTP/PAC settings. No environment variables,
+global proxy settings or OS routes are changed. The proxy mode never falls back
+to a direct socket. Existing rustls certificate/hostname checks remain active.
+
+Each native job owns a separate immutable-route HTTP pool while its derived Shared
+retains the original application-wide four-chunk semaphore. TCP connection and proxy negotiation
+are bounded by30seconds; TLS/WS and request work retain the existing job deadline. The app's package
+identity and per-job cancel/free lifetime stay unchanged; changing a setting
+applies to subsequently started jobs. This slice supports unauthenticated local
+HTTP/SOCKS ports only, with no credential/profile/authentication extension. Credentials, where
 needed, are flat account, steamId (decimal string) and refreshToken.
 The adapter never calls TokenStore, automatic login or local Steam discovery.
 
@@ -118,5 +143,5 @@ Error codes are fixed, sanitized identifiers: invalid_request, auth_required,
 session_unavailable, login_failed, steam_unavailable, not_owned,
 unsupported_media, size_limit, unsafe_path, download_failed, cancelled, timeout,
 native_failed, invalid_job, invalid_credentials, invalid_guard_code,
-expired_guard_code, login_rate_limited, login_refused and unsupported_guard. No remote error string, URL, token or filesystem
+expired_guard_code, login_rate_limited, login_refused, unsupported_guard and network_configuration. No remote error string, URL, token or filesystem
 path is logged or propagated as an error.

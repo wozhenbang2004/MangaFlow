@@ -35,7 +35,9 @@ internal fun discardDownloadPartial(partial: StorageFile) {
 }
 
 /** Stream exact unencoded bytes; append only after a matching strong validator and range. */
-internal suspend fun downloadPageFile(url: String, headers: Map<String, String>, partial: StorageFile): Pair<Int, Int> {
+internal suspend fun downloadPageFile(
+    url: String, headers: Map<String, String>, partial: StorageFile, client: NetworkClient? = null,
+): Pair<Int, Int> {
     var target = url.toHttpUrlOrNull()?.takeIf { it.isHttps }
         ?: throw PermanentDownloadException("图片地址不是 HTTPS，已停止下载")
     var resume = readResume(partial, url)
@@ -61,7 +63,7 @@ internal suspend fun downloadPageFile(url: String, headers: Map<String, String>,
         }.build()
         val response = try {
             try {
-                pageClient.downloadWithHeaders(request, MAX_PAGE_BYTES, onResponse = { response ->
+                (client ?: pageClient).downloadWithHeaders(request, MAX_PAGE_BYTES, onResponse = { response ->
                     if (response.code != 200 && response.code != 206) false
                     else {
                         val encoding = response.header("Content-Encoding")?.trim()

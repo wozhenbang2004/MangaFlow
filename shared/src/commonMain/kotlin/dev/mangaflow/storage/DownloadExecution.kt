@@ -1,6 +1,10 @@
 package dev.mangaflow.storage
 
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.data.sources.JmDownloadSession
+import dev.mangaflow.data.sources.createJmDownloadSession
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.storage.StorageLock
@@ -28,8 +32,16 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
     try {
         DownloadStore.transferGate.withLock {
             currentCoroutineContext().ensureActive()
-            store.beginTransfer(id, workId, retryAttempt = attempt > 0) ?: return@withLock
+            val record = store.beginTransfer(id, workId, retryAttempt = attempt > 0) ?: return@withLock
+            var client: NetworkClient? = null
+            var jm: JmDownloadSession? = null
             try {
+                val route = checkNotNull(record.route) { "下载线路尚未准备，请重试。" }
+                jm = createJmDownloadSession(context, record.entry.manga.id, record.entry.chapter.id, route)
+                if (jm == null) client = NetworkClient(
+                    connectTimeoutMillis = 20_000, readTimeoutMillis = 45_000, callTimeoutMillis = 90_000,
+                    acceptCompression = false, route = route,
+                )
                 val selection = Mutex()
                 val progressUpdates = Mutex()
                 suspend fun publishProgress(): Unit = progressUpdates.withLock {
@@ -52,7 +64,7 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
                                         current.entry.status in setOf(DownloadStatus.PAUSED, DownloadStatus.COMPLETED, DownloadStatus.FAILED)) null
                                     else store.nextPageIndex(id, workId, visited)?.also { visited += it }
                                 } ?: break
-                                store.downloadPage(id, workId, index) ?: break
+                                store.downloadPage(id, workId, index, client, jm) ?: break
                                 publishProgress()
                             }
                         }
@@ -63,7 +75,12 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
                 if (finished.workId != workId || finished.entry.status == DownloadStatus.PAUSED || finished.entry.status == DownloadStatus.FAILED) return@withLock
                 if (finished.entry.completedPages != finished.pages.size) throw IOException("本地章节尚未下载完整")
                 store.update(id, workId) { it.copy(status = DownloadStatus.COMPLETED, error = "") }
-            } finally { store.endTransfer(id, workId) }
+            } finally {
+                store.endTransfer(id, workId) {
+                    runCatching { client?.close() }
+                    runCatching { jm?.close() }
+                }
+            }
         }
         DownloadOutcome.SUCCESS
     } catch (cancelled: CancellationException) {
@@ -73,7 +90,8 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
         val networkFailure = failure is IOException || failure is kotlinx.io.IOException
         val retryable = networkFailure && failure !is PermanentDownloadException && failure !is DownloadStorageException && attempt < 3
         runCatching { store.update(id, workId) { it.copy(status = if (retryable) DownloadStatus.WAITING else DownloadStatus.FAILED,
-            error = failure.message ?: "下载未完成", needsSourceRefresh = (failure as? PermanentDownloadException)?.needsSourceRefresh == true) } }
+            error = failure.message ?: "下载未完成", needsSourceRefresh = (failure as? PermanentDownloadException)?.needsSourceRefresh == true,
+            routingError = failure is DownloadRouteException) } }
         if (retryable) DownloadOutcome.RETRY else DownloadOutcome.FAILURE
     }
 }

@@ -2,6 +2,7 @@ package dev.mangaflow.data.sources
 
 import dev.mangaflow.data.Page
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.net.DownloadRouteSnapshot
 
 /** Kotlin JVM adapter available to Android and desktop. iOS does not claim compatibility. */
 expect fun createJmBodySource(context: PlatformContext): BodySource?
@@ -15,3 +16,13 @@ expect suspend fun materializeJmPage(
 expect suspend fun decryptedJmPageBytes(
     context: PlatformContext, mangaId: String, chapterId: String, page: Page,
 ): ByteArray?
+
+/** A background chapter owns and closes its transport; ordinary reading keeps its own client. */
+internal interface JmDownloadSession {
+    suspend fun read(page: Page): ByteArray
+    fun close()
+}
+
+internal expect fun createJmDownloadSession(
+    context: PlatformContext, mangaId: String, chapterId: String, route: DownloadRouteSnapshot,
+): JmDownloadSession?

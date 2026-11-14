@@ -3,6 +3,9 @@ package dev.mangaflow.storage
 import androidx.compose.ui.text.font.FontFamily
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
 import dev.mangaflow.net.NetworkClient
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.Request
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.randomUuid
@@ -234,6 +237,7 @@ internal class FontStore private constructor(context: PlatformContext) {
             try {
                 val client = NetworkClient(
                     connectTimeoutMillis = 15_000, readTimeoutMillis = 30_000, callTimeoutMillis = 600_000,
+                    route = DownloadRoutingStore.get(application).snapshot(DownloadCategory.FONTS),
                 )
                 network = client
                 check(staged.isDirectory || staged.mkdirs())
@@ -251,9 +255,11 @@ internal class FontStore private constructor(context: PlatformContext) {
                 commands.trySend(Command.Failed(id, attempt, null))
                 throw cancelled
             } catch (error: Exception) {
-                val message = if (error is FontIntegrityException)
-                    "字库校验未通过，请重试下载。"
-                else "字库下载未完成，请检查网络和存储空间后重试。"
+                val message = when (error) {
+                    is DownloadRouteException -> error.message ?: "字库下载线路不可用，请检查网络设置。"
+                    is FontIntegrityException -> "字库校验未通过，请重试下载。"
+                    else -> "字库下载未完成，请检查网络和存储空间后重试。"
+                }
                 commands.trySend(Command.Failed(id, attempt, message))
             } finally {
                 runCatching { network?.close() }
@@ -305,6 +311,7 @@ internal class FontStore private constructor(context: PlatformContext) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
+                if (failure is DownloadRouteException) throw failure
                 lastFailure = failure
             }
         }

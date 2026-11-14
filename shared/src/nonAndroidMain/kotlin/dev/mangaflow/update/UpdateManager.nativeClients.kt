@@ -2,6 +2,10 @@ package dev.mangaflow.update
 
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.NetworkClient
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.Request
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
 import dev.mangaflow.platform.*
@@ -14,7 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 /** Desktop installs verified native assets; iOS hands updates to its signed distribution channel. */
 actual class UpdateManager private constructor(private val context: PlatformContext) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val client = NetworkClient(callTimeoutMillis = 20L * 60 * 1_000)
+    private var activeClient: NetworkClient? = null
     private val prefs = preferences(context, "app_updates")
     private val root = StorageFile(cacheDirectory(context), "updates")
     private val _state = MutableStateFlow(UpdateState(lastChecked = prefs.getLong("last_check", 0),
@@ -56,7 +60,12 @@ actual class UpdateManager private constructor(private val context: PlatformCont
         val before = _state.value
         _state.value = before.copy(phase = UpdatePhase.CHECKING, message = "正在检查新版本…")
         job = scope.launch {
+            var taskClient: NetworkClient? = null
             try {
+                val route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES)
+                val client = NetworkClient(callTimeoutMillis = 20L * 60 * 1_000, route = route)
+                taskClient = client
+                activeClient = client
                 var releaseMetadata = ""
                 val release = withContext(Dispatchers.IO) {
                     val response = client.execute(Request.Builder()
@@ -92,8 +101,9 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                     UpdateState(UpdatePhase.CURRENT, message = "已是最新版本", lastChecked = now)
                 } else {
                     incrementalPlan = try {
-                        planNativeIncrementalUpdate(context, release, releaseMetadata)
+                        planNativeIncrementalUpdate(context, release, releaseMetadata, route)
                     } catch (cancelled: CancellationException) { throw cancelled
+                    } catch (failure: DownloadRouteException) { throw failure
                     } catch (_: Exception) { null }
                     val delta = incrementalPlan
                     UpdateState(UpdatePhase.AVAILABLE, release, total = delta?.bytes ?: release.bytes,
@@ -103,11 +113,21 @@ actual class UpdateManager private constructor(private val context: PlatformCont
             } catch (failure: Exception) {
                 _state.value = before.copy(phase = if (before.release != null) UpdatePhase.AVAILABLE else UpdatePhase.ERROR,
                     message = failure.message ?: "检查失败，请稍后重试")
-            } finally { onComplete?.invoke() }
+            } finally {
+                if (activeClient === taskClient) activeClient = null
+                taskClient?.close()
+                onComplete?.invoke()
+            }
         }
     }
 
     actual fun download() {
+        val route = try { DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES) }
+        catch (failure: DownloadRouteException) { fail(failure.message ?: "下载线路不可用"); return }
+        download(route)
+    }
+
+    private fun download(route: DownloadRouteSnapshot) {
         val release = _state.value.release ?: return
         if (job?.isActive == true) return
         if (platformKind == PlatformKind.IOS) { install(context); return }
@@ -117,7 +137,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                 total = delta.bytes, message = "正在下载变动文件…")
             job = scope.launch {
                 try {
-                    downloadNativeIncrementalUpdate(context, delta) { received, total ->
+                    downloadNativeIncrementalUpdate(context, delta, route) { received, total ->
                         _state.value = _state.value.copy(downloaded = received, total = total)
                     }
                     _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = delta.bytes,
@@ -125,12 +145,15 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                 } catch (cancelled: CancellationException) {
                     _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE, message = "下载已取消")
                     throw cancelled
+                } catch (failure: DownloadRouteException) {
+                    _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE,
+                        message = failure.message ?: "下载线路不可用")
                 } catch (_: Exception) {
                     incrementalPlan = null
                     _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE, total = release.bytes,
                         message = "增量更新不可用，正在改用完整安装包…")
                     job = null
-                    download()
+                    download(route)
                 }
             }
             return
@@ -138,14 +161,18 @@ actual class UpdateManager private constructor(private val context: PlatformCont
         _state.value = _state.value.copy(phase = UpdatePhase.DOWNLOADING, downloaded = 0,
             total = release.bytes, message = "正在下载安装包…")
         job = scope.launch {
+            var taskClient: NetworkClient? = null
             val suffix = releaseAssetSuffixes().firstOrNull { release.url.substringBefore('?').endsWith(it, true) }
                 ?: return@launch fail("安装包类型与当前系统不匹配")
             val target = StorageFile(root, release.sha256 + suffix)
             val incoming = StorageFile(target.path + ".part")
             try {
+                val client = NetworkClient(callTimeoutMillis = 20L * 60 * 1_000, route = route)
+                taskClient = client
+                activeClient = client
                 withContext(Dispatchers.IO) {
                     check(root.isDirectory || root.mkdirs()) { "无法创建更新目录" }
-                    val url = resolveAssetUrl(release.url)
+                    val url = resolveAssetUrl(release.url, client)
                     incoming.outputStream().use { output ->
                         val response = client.download(Request.Builder().url(url).build(), release.bytes,
                             onChunk = { bytes, size -> output.write(bytes, 0, size) },
@@ -167,12 +194,15 @@ actual class UpdateManager private constructor(private val context: PlatformCont
             } catch (failure: Exception) {
                 withContext(Dispatchers.IO) { incoming.delete() }
                 fail(failure.message ?: "下载失败，请重试")
+            } finally {
+                if (activeClient === taskClient) activeClient = null
+                taskClient?.close()
             }
         }
     }
 
     actual fun cancelDownload() {
-        if (_state.value.phase in setOf(UpdatePhase.DOWNLOADING, UpdatePhase.VERIFYING)) { job?.cancel(); client.cancelAll() }
+        if (_state.value.phase in setOf(UpdatePhase.DOWNLOADING, UpdatePhase.VERIFYING)) { job?.cancel(); activeClient?.cancelAll() }
     }
 
     actual fun install(context: PlatformContext) {
@@ -209,7 +239,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
             message = message)
     }
 
-    private suspend fun resolveAssetUrl(initial: String): String {
+    private suspend fun resolveAssetUrl(initial: String, client: NetworkClient): String {
         var url = checkedUrl(initial)
         repeat(6) {
             val response = client.execute(Request.Builder().url(url).method("HEAD", null).build(), MAX_INSTALLER_BYTES)

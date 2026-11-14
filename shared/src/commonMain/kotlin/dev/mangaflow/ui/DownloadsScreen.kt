@@ -121,6 +121,7 @@ import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
@@ -395,6 +396,8 @@ fun DownloadsScreen(
                                     }
                                     Text(availableBytes?.let { "${downloadBytes(it)} 可用" } ?: "正在读取可用空间…",
                                         fontSize = 11.sp, color = secondary)
+                                    DownloadRouteControl(DownloadCategory.CHAPTERS,
+                                        enabled = entries.none { it.status == DownloadStatus.RUNNING })
                                 }
                                 HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                                     color = foreground.copy(alpha = .07f))

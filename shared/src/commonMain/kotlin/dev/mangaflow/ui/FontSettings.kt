@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.storage.FontStore
 import dev.mangaflow.storage.FontStoreState
 import dev.mangaflow.typography.MangaFontCatalog
@@ -113,6 +114,7 @@ internal fun FontSettings(modifier: Modifier = Modifier) {
                 }
             }
         }
+        DownloadRouteControl(DownloadCategory.FONTS, enabled = state.transfers.values.none { it.active })
         if (background != null) {
             val transfer = state.transfers[background.value]
             val total = (transfer?.total ?: 0L).coerceAtLeast(1L)

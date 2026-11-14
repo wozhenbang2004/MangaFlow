@@ -114,6 +114,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.storage.BodySourceRegistry
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingMode
@@ -167,6 +169,8 @@ fun SettingsScreen(
     var automatic by remember(updateManager) { mutableStateOf(updateManager.automatic) }
     var notifications by remember { mutableStateOf(notificationsEnabled(context)) }
     var expandedNotes by remember(update.release?.versionCode) { mutableStateOf(false) }
+    val routeStore = remember(context) { DownloadRoutingStore.get(context) }
+    val routes by routeStore.state.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -476,6 +480,10 @@ fun SettingsScreen(
                 RetainedSettingsCategory(!desktop || settingsCategory == 3) {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SettingsSection("应用", sourceBackdrop) {
+                        SettingsDisclosure("网络与下载", downloadRouteLabel(routes.defaultMode), Icons.Outlined.SwapVert,
+                            expanded = expandedSetting == "network", onToggle = { toggleSetting("network") }) {
+                            NetworkDownloadSettings(sourceBackdrop)
+                        }
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                             .animateContentSize(if (LocalMotionEnabled.current) tween(MangaMotion.Content) else snap()),
                             verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -568,6 +576,9 @@ fun SettingsScreen(
                                 }
                             }
                         }
+                        DownloadRouteControl(DownloadCategory.UPDATES,
+                            modifier = Modifier.padding(start = 24.dp),
+                            enabled = update.phase !in setOf(UpdatePhase.DOWNLOADING, UpdatePhase.VERIFYING), backdrop = sourceBackdrop)
                         Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
                             SettingsToggle("自动检查更新", automatic, Icons.Outlined.Update) {
                                 automatic = it
@@ -771,6 +782,7 @@ private fun WebDavBackupDialog(
 
                     }
                 }
+                DownloadRouteControl(DownloadCategory.WEBDAV, enabled = busy == null)
                 Text(
                     "上传会覆盖这个远端文件；下载只读取并展示恢复确认。暂不后台自动同步，也不会上传漫画图片。",
                     style = MaterialTheme.typography.bodySmall,

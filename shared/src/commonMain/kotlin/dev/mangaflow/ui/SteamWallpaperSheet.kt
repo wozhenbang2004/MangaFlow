@@ -79,6 +79,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.storage.SteamGuardMethod
 import dev.mangaflow.storage.SteamWallpaperItem
@@ -295,6 +296,15 @@ internal fun SteamWallpaperSheet(
                     }
                 }
 
+                Row(Modifier.fillMaxWidth().heightIn(min = 36.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("Steam 连接线路", Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    DownloadRouteControl(DownloadCategory.STEAM_WALLPAPERS,
+                        enabled = display.supported && !display.restoring && !display.preparing &&
+                            !display.authenticating && !display.loading && display.transferId == null)
+                }
+
                 MotionTabContent(selected = pane, contentKey = { it }, order = { it.ordinal },
                     modifier = Modifier.weight(1f)) { page ->
                     when (page) {
@@ -454,9 +464,10 @@ internal fun SteamWallpaperSheet(
                                 MotionTextButton(onClick = {
                                     notice = null
                                     val failedItem = retryItem
-                                    if (failedItem != null) download(failedItem)
+                                    if (display.canResumeSession) client.login()
+                                    else if (failedItem != null) download(failedItem)
                                     else search(display.query, display.kind, retryPage)
-                                }) { Text("重试") }
+                                }) { Text(if (display.canResumeSession) "恢复登录" else "重试") }
                             }
                             pane == WorkshopPane.BROWSE && display.hasMore -> {
                                 MotionTextButton(onClick = { search(display.query, display.kind, display.page + 1) }) {

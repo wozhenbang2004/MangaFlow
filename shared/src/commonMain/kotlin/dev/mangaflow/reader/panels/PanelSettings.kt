@@ -21,6 +21,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.ui.DownloadRouteControl
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -138,8 +140,13 @@ internal fun PanelModelsDialog(visible: Boolean, backdrop: HazeState, onDismiss:
                     .padding(bottom = 18.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                     Text("传统识别无需下载。AI 需下载对应组件和模型，下载后可离线使用。",
                         color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
-                    Text("运行组件", color = colors.onSurfaceVariant, fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("运行组件", color = colors.onSurfaceVariant, fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium)
+                        DownloadRouteControl(DownloadCategory.COMPONENTS,
+                            enabled = components.entries.none { it.key != PanelRuntimeId.STEAM && it.value.downloading })
+                    }
                     listOf(PanelRuntimeId.LITERT, PanelRuntimeId.ONNX).forEach { id ->
                         val spec = runtimes.spec(id)
                         val state = components[id] ?: PanelRuntimeState()
@@ -174,8 +181,12 @@ internal fun PanelModelsDialog(visible: Boolean, backdrop: HazeState, onDismiss:
                             state.error?.let { Text(it, fontSize = 11.sp, lineHeight = 16.sp, color = colors.error) }
                         }
                     }
-                    Text("模型", color = colors.onSurfaceVariant, fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("模型", color = colors.onSurfaceVariant, fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium)
+                        DownloadRouteControl(DownloadCategory.AI_MODELS, enabled = states.values.none { it.downloading })
+                    }
                     PanelModelId.entries.forEach { id ->
                         val spec = store.spec(id)
                         val state = states[id] ?: PanelModelState()

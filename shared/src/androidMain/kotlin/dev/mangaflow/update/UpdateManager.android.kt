@@ -21,6 +21,10 @@ import android.provider.Settings
 import android.util.AtomicFile
 import android.util.Base64
 import androidx.core.content.FileProvider
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.javaProxy
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -94,7 +98,8 @@ actual class UpdateManager private constructor(private val context: Context) {
         _state.value = beforeCheck.copy(phase = UpdatePhase.CHECKING, message = "正在检查新版本…")
         scope.launch {
             try {
-                val bytes = readBytes(MANIFEST_URL, MAX_MANIFEST_BYTES)
+                val route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES)
+                val bytes = readBytes(MANIFEST_URL, MAX_MANIFEST_BYTES, route)
                 val release = verifyManifest(bytes)
                 val now = System.currentTimeMillis()
                 if (release.versionCode <= versionCode(installed())) {
@@ -147,6 +152,7 @@ actual class UpdateManager private constructor(private val context: Context) {
         scope.launch {
             var partial: File? = null
             try {
+                val route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES)
                 val release = verifyManifest(metadata.readFully())
                 require(release.versionCode > versionCode(installed())) { "此版本已安装，请重新检查更新" }
                 if (!root.isDirectory && !root.mkdirs()) throw IOException("无法创建更新目录")
@@ -170,7 +176,7 @@ actual class UpdateManager private constructor(private val context: Context) {
                 }
                 val offset = incoming.length()
                 if (root.usableSpace < release.bytes - offset + 16L * 1024 * 1024) throw IOException("存储空间不足，请清理后重试")
-                val active = open(release.url, offset)
+                val active = open(release.url, offset, route)
                 connection = active
                 val deadline = System.nanoTime() + 20L * 60 * 1_000_000_000
                 try {
@@ -371,8 +377,8 @@ actual class UpdateManager private constructor(private val context: Context) {
         return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
-    private fun readBytes(url: String, limit: Int): ByteArray {
-        val active = open(url)
+    private fun readBytes(url: String, limit: Int, route: DownloadRouteSnapshot): ByteArray {
+        val active = open(url, route = route)
         connection = active
         return try {
             active.inputStream.use { input ->
@@ -391,11 +397,12 @@ actual class UpdateManager private constructor(private val context: Context) {
         }
     }
 
-    private fun open(initial: String, offset: Long = 0): HttpURLConnection {
+    private fun open(initial: String, offset: Long = 0, route: DownloadRouteSnapshot): HttpURLConnection {
+        val proxy = route.javaProxy()
         var url = URL(initial)
         repeat(6) {
             require(url.protocol == "https" && url.userInfo == null && url.port in setOf(-1, 443) && url.host in ALLOWED_HOSTS) { "更新服务重定向地址无效" }
-            val active = (url.openConnection() as HttpURLConnection).apply {
+            val active = ((if (proxy == null) url.openConnection() else url.openConnection(proxy)) as HttpURLConnection).apply {
                 instanceFollowRedirects = false
                 connectTimeout = 15_000
                 readTimeout = 30_000

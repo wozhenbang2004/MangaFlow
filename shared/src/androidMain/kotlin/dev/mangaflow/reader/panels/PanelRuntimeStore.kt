@@ -6,6 +6,10 @@ import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import android.util.Base64
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.javaProxy
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -80,10 +84,6 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         PanelRuntimeState(error = if (abi == null) "当前应用进程的架构暂不支持可选运行库" else null)
     })
     actual val states: StateFlow<Map<PanelRuntimeId, PanelRuntimeState>> = mutableStates.asStateFlow()
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
-        .callTimeout(10, TimeUnit.MINUTES).retryOnConnectionFailure(false)
-        .followRedirects(false).followSslRedirects(false).build()
 
     init {
         scope.launch {
@@ -265,20 +265,28 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         val stage = staging(id)
         var success: Installation? = null
         var error: String? = null
+        var taskClient: OkHttpClient? = null
         try {
             ready.await()
             transferContext.ensureActive()
             if (states.value.getValue(id).pendingRemoval) throw RuntimeFailure("运行库正在等待删除，请完全退出应用后重试")
             synchronized(control) { installed[id] }?.let { success = it; return }
+            val category = if (id == PanelRuntimeId.STEAM) DownloadCategory.STEAM_COMPONENT else DownloadCategory.COMPONENTS
+            val route = DownloadRoutingStore.get(context).snapshot(category)
+            val client = OkHttpClient.Builder().proxy(route.javaProxy())
+                .connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
+                .callTimeout(10, TimeUnit.MINUTES).retryOnConnectionFailure(false)
+                .followRedirects(false).followSslRedirects(false).build()
+            taskClient = client
             if (!directory.isDirectory && !directory.mkdirs()) throw RuntimeFailure("无法创建运行库目录")
-            val envelope = readRemoteCatalog(id)
+            val envelope = readRemoteCatalog(id, client)
             val entry = verifyCatalog(envelope, currentRelease = true).single { it.id == id && it.abi == abi }
             mutableStates.update { old -> old + (id to old.getValue(id).copy(totalBytes = entry.archiveBytes)) }
             val unpacked = entry.libraries.sumOf { it.bytes }
             if (directory.usableSpace < entry.archiveBytes + unpacked + 16L * 1024 * 1024) throw RuntimeFailure("存储空间不足，无法下载并展开运行库")
             if (!deleteTree(stage) || !stage.mkdir()) throw RuntimeFailure("无法准备运行库下载目录")
             val archive = File(stage, "download.zip.part")
-            downloadArchive(id, entry, archive)
+            downloadArchive(id, entry, archive, client)
             unpack(archive, stage, entry)
             archive.delete()
             writeSynced(File(stage, RECEIPT), envelope)
@@ -297,6 +305,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             // Cancel leaves neither an installed flag nor an unsigned partial runtime.
         } catch (failure: Exception) {
             error = if (!currentCoroutineContext().isActive) null else when (failure) {
+                is DownloadRouteException -> failure.message
                 is RuntimeFailure -> failure.message
                 is SocketTimeoutException -> "运行库下载超时，可稍后重试"
                 is UnknownHostException -> "无法连接运行库下载服务，请检查网络后重试"
@@ -305,6 +314,8 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                 else -> "运行库下载或校验失败，请检查网络和存储空间后重试"
             }
         } finally {
+            taskClient?.dispatcher?.executorService?.shutdown()
+            taskClient?.connectionPool?.evictAll()
             deleteTree(stage)
             synchronized(control) {
                 if (downloads[id] === ownJob) {
@@ -322,9 +333,9 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         }
     }
 
-    private suspend fun readRemoteCatalog(id: PanelRuntimeId): ByteArray {
+    private suspend fun readRemoteCatalog(id: PanelRuntimeId, client: OkHttpClient): ByteArray {
         val url = "https://github.com/$REPOSITORY/releases/download/v${appVersionName}/runtime-catalog.json"
-        return open(id, url).use { response ->
+        return open(id, url, client).use { response ->
             val input = response.body?.byteStream() ?: throw RuntimeFailure("运行库目录为空")
             input.use { stream ->
                 val output = ByteArrayOutputStream()
@@ -341,8 +352,8 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         }
     }
 
-    private suspend fun downloadArchive(id: PanelRuntimeId, entry: Entry, destination: File) {
-        open(id, entry.archiveUrl).use { response ->
+    private suspend fun downloadArchive(id: PanelRuntimeId, entry: Entry, destination: File, client: OkHttpClient) {
+        open(id, entry.archiveUrl, client).use { response ->
             val body = response.body ?: throw RuntimeFailure("运行库下载内容为空")
             if (body.contentLength() > entry.archiveBytes) throw RuntimeFailure("运行库归档大小不符")
             val digest = MessageDigest.getInstance("SHA-256")
@@ -373,7 +384,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
     }
 
     /** Redirects retain HTTPS, a closed GitHub CDN host set and the original repository asset path. */
-    private suspend fun open(id: PanelRuntimeId, initial: String): Response {
+    private suspend fun open(id: PanelRuntimeId, initial: String, client: OkHttpClient): Response {
         val initialUrl = initial.toHttpUrl()
         var url = initialUrl
         repeat(6) {
@@ -636,7 +647,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         private val HOSTS = setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com")
         private val REDIRECTS = setOf(301, 302, 303, 307, 308)
         private val SPECS = mapOf(
-            PanelRuntimeId.STEAM to PanelRuntimeSpec(PanelRuntimeId.STEAM, "Steam 连接组件", "0.1.1-f541366",
+            PanelRuntimeId.STEAM to PanelRuntimeSpec(PanelRuntimeId.STEAM, "Steam 连接组件", "0.1.2-f541366",
                 "登录 Steam 并下载可直接使用的创意工坊壁纸，仅在启用时下载", "MPL-2.0"),
             PanelRuntimeId.LITERT to PanelRuntimeSpec(PanelRuntimeId.LITERT, "轻量 AI 运行库", "1.4.2", "运行 YOLO26 Nano，仅下载当前应用架构所需组件", "Apache-2.0"),
             PanelRuntimeId.ONNX to PanelRuntimeSpec(PanelRuntimeId.ONNX, "高精度与排序运行库", "1.31.1", "运行 Koharu 和 Inkwell，两个模型共用此运行库", "MIT"),

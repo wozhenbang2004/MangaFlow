@@ -8,6 +8,9 @@ import dev.mangaflow.data.MangaPage
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.javaProxy
+import dev.mangaflow.net.checked
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.storage.StorageFile
 import dev.mangaflow.platform.storage.cacheDirectory
@@ -19,6 +22,8 @@ import io.github.jukomu.jmcomic.api.model.SearchQuery
 import io.github.jukomu.jmcomic.core.JmComic
 import io.github.jukomu.jmcomic.core.client.impl.JmApiClient
 import io.github.jukomu.jmcomic.core.config.JmConfiguration
+import io.github.jukomu.jmcomic.core.net.OkHttpBuilder
+import kotlinx.coroutines.CancellationException
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -216,4 +221,94 @@ actual suspend fun decryptedJmPageBytes(
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
     if (ref.sourceId != "jmcomic") return null
     return JmNativeSourceProvider.get(context).decryptedPageFile(ref.chapterId, page).readBytes()
+}
+
+/** The upstream's public client/context constructors preserve its cookies, domains and decoder. */
+private class RoutedJmDownloadSession(
+    private val context: PlatformContext,
+    private val mangaId: String,
+    private val chapterId: String,
+    private val route: DownloadRouteSnapshot,
+) : JmDownloadSession {
+    private val control = Any()
+    @Volatile private var closed = false
+    private var client: JmApiClient? = null
+    private val metadata = Mutex()
+    private var images: List<JmImage>? = null
+
+    override suspend fun read(page: Page): ByteArray = withContext(Dispatchers.IO) {
+        currentCoroutineContext().ensureActive()
+        if (closed) throw CancellationException("下载已停止")
+        require(page.index in 0..9_999) { "图片序号无效。" }
+        // Reuse the exact previously materialized image before opening a routed connection.
+        val fingerprint = MessageDigest.getInstance("SHA-256")
+            .digest((chapterId + ":" + page.index + ":" + page.url).toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val cached = StorageFile(StorageFile(cacheDirectory(context), "jm-decoded"), fingerprint + ".jpg")
+        if (cached.isFile && cached.length() in 128L..MAX_IMAGE_BYTES)
+            return@withContext cached.readBytes()
+        val active = activeClient()
+        currentCoroutineContext().ensureActive()
+        val pages = metadata.withLock { images ?: active.getPhoto(chapterId).let { photo ->
+            if (!photo.albumId().isNullOrBlank() && photo.albumId() != mangaId)
+                throw SourceException("章节作品编号不一致，已停止下载。")
+            photo.images()?.takeIf { it.isNotEmpty() && it.size <= 10_000 }?.toList()
+                ?: throw SourceException("章节没有可下载图片。")
+        }.also { images = it } }
+        val image = pages.getOrNull(page.index) ?: throw SourceException("图片页码超出范围。")
+        require(image.downloadUrl.startsWith("https://") && image.downloadUrl.length <= 4096) {
+            "来源返回的图片地址无效。"
+        }
+        if (closed) throw CancellationException("下载已停止")
+        val bytes = active.fetchImageBytes(image)
+        currentCoroutineContext().ensureActive()
+        if (closed) throw CancellationException("下载已停止")
+        require(bytes.size.toLong() in 128L..MAX_IMAGE_BYTES) { "图片解码结果无效或体积过大。" }
+        bytes
+    }
+
+    private fun activeClient(): JmApiClient {
+        val active = synchronized(control) {
+            if (closed) throw CancellationException("下载已停止")
+            client ?: run {
+                val proxy = route.javaProxy()
+                val config = JmConfiguration.Builder().clientType(ClientType.API)
+                    .retryTimes(2).cacheSize(24 * 1024 * 1024).downloadThreadPoolSize(1)
+                    .closeTimeoutMs(1_000).build()
+                val bundle = OkHttpBuilder.build(config)
+                val http = bundle.client.newBuilder().proxy(proxy).build()
+                JmApiClient(config, http, bundle.cookieManager, bundle.domainManager).also { client = it }
+            }
+        }
+        try {
+            active.initializeAsync().join()
+            if (closed) throw CancellationException("下载已停止")
+            return active
+        } catch (failure: Exception) {
+            synchronized(control) { if (client === active) client = null }
+            runCatching { active.close() }
+            throw failure
+        }
+    }
+
+    override fun close() {
+        val owned = synchronized(control) {
+            closed = true
+            client.also { client = null }
+        }
+        owned?.close()
+    }
+
+    private companion object { const val MAX_IMAGE_BYTES = 96L * 1024L * 1024L }
+}
+
+internal actual fun createJmDownloadSession(
+    context: PlatformContext, mangaId: String, chapterId: String, route: DownloadRouteSnapshot,
+): JmDownloadSession? {
+    val ref = SourceKeys.decodeChapter(mangaId, chapterId)
+    if (ref.sourceId != "jmcomic") return null
+    require(ref.mangaId.matches(Regex("[0-9]{1,14}")) && ref.chapterId.matches(Regex("[0-9]{1,14}"))) {
+        "来源的作品或章节编号无效。"
+    }
+    return RoutedJmDownloadSession(context, ref.mangaId, ref.chapterId, route.checked())
 }

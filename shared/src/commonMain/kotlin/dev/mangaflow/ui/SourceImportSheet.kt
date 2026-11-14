@@ -69,6 +69,7 @@ import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeState
 import dev.mangaflow.reader.panels.PanelRuntimeStore
 import dev.mangaflow.storage.BodySourceRegistry
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
@@ -215,6 +216,7 @@ internal fun SourceImportSheet(
                 verticalAlignment = Alignment.CenterVertically) {
                 Text(if (prepared == null) "导入第三方源" else "确认来源", Modifier.weight(1f),
                     fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                if (prepared == null) DownloadRouteControl(DownloadCategory.SOURCE_PACKAGES, enabled = busy == null, backdrop = backdrop)
                 MotionIconButton(onClick = { activeJob?.cancel(); dismiss() }) {
                     Icon(Icons.Outlined.Close, "关闭来源导入", Modifier.size(20.dp))
                 }
@@ -514,6 +516,7 @@ private fun ScriptEngineControl(
         }
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        DownloadRouteControl(DownloadCategory.COMPONENTS, enabled = enabled && !busy && !state.downloading)
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("脚本引擎 ${spec.version}", fontSize = 12.sp, fontWeight = FontWeight.Medium)

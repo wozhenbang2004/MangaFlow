@@ -5,6 +5,9 @@ package dev.mangaflow.storage
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.net.NetworkClient
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.NetworkResponse
 import dev.mangaflow.net.Request
 import dev.mangaflow.net.RequestBody
@@ -33,7 +36,6 @@ data class WebDavBackupConfig(
 class WebDavBackupStore(private val context: PlatformContext) {
     private val disk = preferences(context, "mangaflow_webdav_backup")
     private val lock = StorageLock()
-    private val client = NetworkClient(connectTimeoutMillis = 20_000, readTimeoutMillis = 40_000, callTimeoutMillis = 60_000)
     private val _config = MutableStateFlow(readConfig())
     val config: StateFlow<WebDavBackupConfig> = _config.asStateFlow()
 
@@ -78,34 +80,50 @@ class WebDavBackupStore(private val context: PlatformContext) {
         val bytes = payload.encodeToByteArray()
         require(bytes.isNotEmpty() && bytes.size <= MAX_BACKUP_BYTES) { "阅读备份为空或超过 8 MiB，已停止上传。" }
         val credentials = withContext(Dispatchers.IO) { readCredentials() }
-        val base = normalizeEndpoint(credentials.first.endpoint)
-        val segments = normalizeRemotePath(credentials.first.remotePath)
-        segments.dropLast(1).indices.forEach { index ->
-            val url = buildUrl(base, segments.take(index + 1), collection = true)
-            val response = execute(requestBuilder(url, credentials).method("MKCOL", RequestBody(ByteArray(0), null)).build(), "准备 WebDAV 目录")
-            if (response.code != 405) ensureSuccessful(response, "准备 WebDAV 目录")
-        }
-        val response = execute(requestBuilder(buildUrl(base, segments), credentials)
-            .method("PUT", RequestBody(bytes, "application/json; charset=utf-8")).build(), "上传阅读备份")
-        ensureSuccessful(response, "上传阅读备份")
-        rememberTransfer(upload = true)
+        var transfer: NetworkClient? = null
+        try {
+            val client = transferClient()
+            transfer = client
+            val base = normalizeEndpoint(credentials.first.endpoint)
+            val segments = normalizeRemotePath(credentials.first.remotePath)
+            segments.dropLast(1).indices.forEach { index ->
+                val url = buildUrl(base, segments.take(index + 1), collection = true)
+                val response = execute(client, requestBuilder(url, credentials).method("MKCOL", RequestBody(ByteArray(0), null)).build(), "准备 WebDAV 目录")
+                if (response.code != 405) ensureSuccessful(response, "准备 WebDAV 目录")
+            }
+            val response = execute(client, requestBuilder(buildUrl(base, segments), credentials)
+                .method("PUT", RequestBody(bytes, "application/json; charset=utf-8")).build(), "上传阅读备份")
+            ensureSuccessful(response, "上传阅读备份")
+            rememberTransfer(upload = true)
+        } finally { transfer?.close() }
     }
 
     suspend fun download(): String {
         val credentials = withContext(Dispatchers.IO) { readCredentials() }
-        val base = normalizeEndpoint(credentials.first.endpoint)
-        val response = execute(requestBuilder(buildUrl(base, normalizeRemotePath(credentials.first.remotePath)), credentials)
-            .get().header("Accept", "application/json, text/plain;q=0.8").build(), "下载阅读备份")
-        ensureSuccessful(response, "下载阅读备份")
-        check(response.bytes.isNotEmpty()) { "远端备份为空。" }
-        val payload = response.text()
-        rememberTransfer(upload = false)
-        return payload
+        var transfer: NetworkClient? = null
+        try {
+            val client = transferClient()
+            transfer = client
+            val base = normalizeEndpoint(credentials.first.endpoint)
+            val response = execute(client, requestBuilder(buildUrl(base, normalizeRemotePath(credentials.first.remotePath)), credentials)
+                .get().header("Accept", "application/json, text/plain;q=0.8").build(), "下载阅读备份")
+            ensureSuccessful(response, "下载阅读备份")
+            check(response.bytes.isNotEmpty()) { "远端备份为空。" }
+            val payload = response.text()
+            rememberTransfer(upload = false)
+            return payload
+        } finally { transfer?.close() }
     }
 
-    private suspend fun execute(request: Request, operation: String): NetworkResponse = try {
+    private fun transferClient() = NetworkClient(
+        connectTimeoutMillis = 20_000, readTimeoutMillis = 40_000, callTimeoutMillis = 60_000,
+        route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.WEBDAV),
+    )
+
+    private suspend fun execute(client: NetworkClient, request: Request, operation: String): NetworkResponse = try {
         client.execute(request, MAX_BACKUP_BYTES.toLong())
     } catch (cancelled: CancellationException) { throw cancelled }
+    catch (failure: DownloadRouteException) { throw failure }
     catch (failure: Exception) { throw IllegalStateException("$operation 连接或读取失败，请检查网络、HTTPS 证书和地址。", failure) }
 
     private fun requestBuilder(url: HttpUrl, credentials: Pair<WebDavBackupConfig, String>): Request.Builder {

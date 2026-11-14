@@ -1,38 +1,324 @@
+diff --git a/crates/tapline-rt-tokio/src/network.rs b/crates/tapline-rt-tokio/src/network.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/tapline-rt-tokio/src/network.rs
+@@ -0,0 +1,56 @@
++//! Immutable per-owner routes. These never alter process environment or OS VPN policy.
++use std::io;
++use std::time::Duration;
++use tokio::net::TcpStream;
++use tokio::time::timeout;
++use tokio_socks::tcp::Socks5Stream;
++
++#[derive(Clone, Default)]
++pub enum NetworkRoute {
++    #[default]
++    System,
++    Direct,
++    Http { host: String, port: u16 },
++    Socks5 { host: String, port: u16 },
++}
++
++fn valid_host(host: &str, port: u16) -> bool {
++    !host.is_empty() && host.len() <= 253 && port > 0 &&
++        !host.chars().any(|c| c.is_control() || c.is_whitespace() ||
++            matches!(c, '/' | '\\' | '@' | '?' | '#' | '[' | ']'))
++}
++
++impl NetworkRoute {
++    /// A new client/pool owns this snapshot for its whole job. There is no direct fallback.
++    pub async fn connect(&self, host: &str, port: u16) -> io::Result<TcpStream> {
++        if !valid_host(host, port) {
++            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid destination"));
++        }
++        timeout(Duration::from_secs(30), async {
++            let stream = match self {
++                Self::System | Self::Direct => TcpStream::connect((host, port)).await?,
++                Self::Http { host: proxy_host, port: proxy_port } => {
++                    if !valid_host(proxy_host, *proxy_port) {
++                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid proxy"));
++                    }
++                    let mut stream = TcpStream::connect((proxy_host.as_str(), *proxy_port)).await?;
++                    // CONNECT carries the target hostname to the proxy; it is not resolved locally.
++                    async_http_proxy::http_connect_tokio(&mut stream, host, port).await
++                        .map_err(|_| io::Error::new(io::ErrorKind::ConnectionRefused, "HTTP proxy connection failed"))?;
++                    stream
++                }
++                Self::Socks5 { host: proxy_host, port: proxy_port } => {
++                    if !valid_host(proxy_host, *proxy_port) {
++                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid proxy"));
++                    }
++                    // A domain tuple becomes SOCKS ATYP=DOMAIN, preserving proxy-side DNS.
++                    Socks5Stream::connect((proxy_host.as_str(), *proxy_port), (host, port)).await
++                        .map_err(|_| io::Error::new(io::ErrorKind::ConnectionRefused, "SOCKS proxy connection failed"))?
++                        .into_inner()
++                }
++            };
++            stream.set_nodelay(true)?;
++            Ok(stream)
++        }).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))?
++    }
++}
+diff --git a/crates/tapline-rt-tokio/Cargo.toml b/crates/tapline-rt-tokio/Cargo.toml
+--- a/crates/tapline-rt-tokio/Cargo.toml
++++ b/crates/tapline-rt-tokio/Cargo.toml
+@@ -12,6 +12,8 @@
+ rust-version.workspace = true
+ 
+ [dependencies]
++async-http-proxy = { version = "=1.2.5", features = ["runtime-tokio"] }
++tokio-socks = "=0.5.3"
+ rustls = { workspace = true }
+ tapline-crypto = { workspace = true }
+ tapline-fs = { workspace = true }
+diff --git a/crates/tapline-rt-tokio/src/lib.rs b/crates/tapline-rt-tokio/src/lib.rs
+--- a/crates/tapline-rt-tokio/src/lib.rs
++++ b/crates/tapline-rt-tokio/src/lib.rs
+@@ -1,11 +1,13 @@
+ mod directory;
+ mod http;
++mod network;
+ mod sink;
+ mod tls;
+ mod ws;
+ 
+-pub use directory::{CmServer, cm_list};
++pub use directory::{CmServer, cm_list, cm_list_with_route};
+ pub use http::{HttpClient, SharedHttpClient};
++pub use network::NetworkRoute;
+ pub use sink::FileSink;
+ pub use tls::connect_tls;
+ pub use ws::MAX_MESSAGE;
+@@ -19,8 +21,12 @@
+ 
+ impl CmTransport {
+     pub async fn connect(endpoint: &str) -> io::Result<Self> {
++        Self::connect_with_route(endpoint, &NetworkRoute::System).await
++    }
++
++    pub async fn connect_with_route(endpoint: &str, route: &NetworkRoute) -> io::Result<Self> {
+         Ok(Self {
+-            socket: tls::connect_cm(endpoint).await?,
++            socket: tls::connect_cm_with_route(endpoint, route).await?,
+         })
+     }
+ }
+diff --git a/crates/tapline-rt-tokio/src/tls.rs b/crates/tapline-rt-tokio/src/tls.rs
+--- a/crates/tapline-rt-tokio/src/tls.rs
++++ b/crates/tapline-rt-tokio/src/tls.rs
+@@ -1,4 +1,5 @@
+ use crate::ws::WebSocket;
++use crate::NetworkRoute;
+ use rustls::pki_types::ServerName;
+ use std::io;
+ use std::sync::Arc;
+@@ -33,9 +34,12 @@
+ const MAX_UPGRADE_RESPONSE: u64 = 16 * 1024;
+ 
+ pub async fn connect_tls(host: &str, port: u16) -> io::Result<TlsStream> {
+-    let tcp = TcpStream::connect((host, port)).await?;
+-    tcp.set_nodelay(true)?;
++    connect_tls_with_route(host, port, &NetworkRoute::System).await
++}
+ 
++pub async fn connect_tls_with_route(host: &str, port: u16, route: &NetworkRoute) -> io::Result<TlsStream> {
++    let tcp = route.connect(host, port).await?;
++
+     let server_name = ServerName::try_from(host.to_owned())
+         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("bad host {host}")))?;
+ 
+@@ -45,8 +49,12 @@
+ }
+ 
+ pub async fn connect_cm(endpoint: &str) -> io::Result<WebSocket> {
++    connect_cm_with_route(endpoint, &NetworkRoute::System).await
++}
++
++pub async fn connect_cm_with_route(endpoint: &str, route: &NetworkRoute) -> io::Result<WebSocket> {
+     let (host, port) = split_endpoint(endpoint)?;
+-    let stream = connect_tls(host, port).await?;
++    let stream = connect_tls_with_route(host, port, route).await?;
+     upgrade(stream, host, port).await
+ }
+ 
+diff --git a/crates/tapline-rt-tokio/src/directory.rs b/crates/tapline-rt-tokio/src/directory.rs
+--- a/crates/tapline-rt-tokio/src/directory.rs
++++ b/crates/tapline-rt-tokio/src/directory.rs
+@@ -1,4 +1,5 @@
+-use crate::tls::connect_tls;
++use crate::tls::connect_tls_with_route;
++use crate::NetworkRoute;
+ use std::io;
+ use tokio::io::{AsyncReadExt, AsyncWriteExt};
+ 
+@@ -15,8 +16,12 @@
+ }
+ 
+ pub async fn cm_list(cell_id: u32) -> io::Result<Vec<CmServer>> {
++    cm_list_with_route(cell_id, &NetworkRoute::System).await
++}
++
++pub async fn cm_list_with_route(cell_id: u32, route: &NetworkRoute) -> io::Result<Vec<CmServer>> {
+     let path = format!("/ISteamDirectory/GetCMListForConnect/v1/?cellid={cell_id}&maxcount=64");
+-    let body = get(DIRECTORY_HOST, &path).await?;
++    let body = get(DIRECTORY_HOST, &path, route).await?;
+ 
+     let mut servers = parse_cm_list(&body);
+     servers.sort_by_key(|server| server.load);
+@@ -63,8 +68,8 @@
+     rest.get(..end)?.parse().ok()
+ }
+ 
+-async fn get(host: &str, path: &str) -> io::Result<String> {
+-    let mut stream = connect_tls(host, 443).await?;
++async fn get(host: &str, path: &str, route: &NetworkRoute) -> io::Result<String> {
++    let mut stream = connect_tls_with_route(host, 443, route).await?;
+ 
+     let request = format!(
+         "GET {path} HTTP/1.1\r\n\
+diff --git a/crates/tapline-rt-tokio/src/http.rs b/crates/tapline-rt-tokio/src/http.rs
+--- a/crates/tapline-rt-tokio/src/http.rs
++++ b/crates/tapline-rt-tokio/src/http.rs
+@@ -1,4 +1,5 @@
+-use crate::tls::connect_tls;
++use crate::tls::connect_tls_with_route;
++use crate::NetworkRoute;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ use std::time::{Duration, Instant};
+@@ -20,6 +21,7 @@
+ }
+ 
+ pub struct HttpClient {
++    route: NetworkRoute,
+     pools: Mutex<HashMap<String, Vec<Connection>>>,
+     idle_total: usize,
+     idle_per_host: usize,
+@@ -34,7 +36,13 @@
+ impl HttpClient {
+     #[must_use]
+     pub fn new() -> Self {
++        Self::with_route(NetworkRoute::System)
++    }
++
++    #[must_use]
++    pub fn with_route(route: NetworkRoute) -> Self {
+         Self {
++            route,
+             pools: Mutex::new(HashMap::new()),
+             idle_per_host: 8,
+             idle_total: 96,
+@@ -55,7 +63,7 @@
+             }
+         }
+ 
+-        let stream = connect_tls(host, port)
++        let stream = connect_tls_with_route(host, port, &self.route)
+             .await
+             .map_err(|e| FetchError::Transport(e.to_string()))?;
+         Ok(Connection {
+diff --git a/crates/tapline/src/shared.rs b/crates/tapline/src/shared.rs
+--- a/crates/tapline/src/shared.rs
++++ b/crates/tapline/src/shared.rs
+@@ -1,7 +1,8 @@
+ use std::sync::Arc;
+-use tapline_rt_tokio::HttpClient;
++use tapline_rt_tokio::{HttpClient, NetworkRoute};
+ 
+ pub struct Shared {
++    pub(crate) route: NetworkRoute,
+     pub(crate) http: Arc<HttpClient>,
+     pub(crate) limit: Arc<tokio::sync::Semaphore>,
+     permits: usize,
+@@ -21,13 +22,25 @@
+     pub fn new(concurrency: usize) -> Arc<Self> {
+         let permits = concurrency.max(1);
+         Arc::new(Self {
++            route: NetworkRoute::System,
+             http: Arc::new(HttpClient::new()),
+             limit: Arc::new(tokio::sync::Semaphore::new(permits)),
+             permits,
+         })
+     }
+ 
++    /// Fork transport ownership while retaining the application-wide chunk budget.
+     #[must_use]
++    pub fn with_route(self: &Arc<Self>, route: NetworkRoute) -> Arc<Self> {
++        Arc::new(Self {
++            http: Arc::new(HttpClient::with_route(route.clone())),
++            route,
++            limit: Arc::clone(&self.limit),
++            permits: self.permits,
++        })
++    }
++
++    #[must_use]
+     pub const fn concurrency(&self) -> usize {
+         self.permits
+     }
+diff --git a/crates/tapline/src/lib.rs b/crates/tapline/src/lib.rs
+--- a/crates/tapline/src/lib.rs
++++ b/crates/tapline/src/lib.rs
+@@ -22,6 +22,7 @@
+ pub use remote::RemoteFile;
+ pub use session::Session;
+ pub use shared::Shared;
++pub use tapline_rt_tokio::NetworkRoute;
+ pub use streaming::{Consumer, Reorderer, StreamReport, Window};
+ pub use tuning::retune;
+ pub use validate::{Damage, ValidationReport, validate_manifest};
 diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 --- a/crates/tapline/src/session.rs
 +++ b/crates/tapline/src/session.rs
-@@ -1198,34 +1198,77 @@
+@@ -26,7 +26,7 @@
+     CPublishedFile_GetDetails_Request, CPublishedFile_Subscribe_Request,
+     CPublishedFile_Unsubscribe_Request,
+ };
+-use tapline_rt_tokio::{CmTransport, FileSink, cm_list};
++use tapline_rt_tokio::{CmTransport, FileSink, cm_list_with_route};
+ use tapline_state::AppState;
+ use tapline_wire::Message;
+ 
+@@ -89,7 +89,7 @@
+     }
+ 
+     pub async fn anonymous_shared(shared: Arc<crate::Shared>) -> Result<Self, InstallError> {
+-        let servers = cm_list(0)
++        let servers = cm_list_with_route(0, &shared.route)
+             .await
+             .map_err(|e| InstallError::Io(format!("could not reach the CM directory: {e}")))?;
+         let endpoint = servers
+@@ -98,7 +98,7 @@
+             .endpoint
+             .clone();
+ 
+-        let transport = CmTransport::connect(&endpoint)
++        let transport = CmTransport::connect_with_route(&endpoint, &shared.route)
+             .await
+             .map_err(|e| InstallError::Io(format!("could not connect to {endpoint}: {e}")))?;
+ 
+@@ -136,7 +136,7 @@
+         token: &tapline_auth::StoredToken,
+         shared: Arc<crate::Shared>,
+     ) -> Result<Self, InstallError> {
+-        let servers = cm_list(0)
++        let servers = cm_list_with_route(0, &shared.route)
+             .await
+             .map_err(|e| InstallError::Io(format!("could not reach the CM directory: {e}")))?;
+         let endpoint = servers
+@@ -145,7 +145,7 @@
+             .endpoint
+             .clone();
+ 
+-        let transport = CmTransport::connect(&endpoint)
++        let transport = CmTransport::connect_with_route(&endpoint, &shared.route)
+             .await
+             .map_err(|e| InstallError::Io(format!("could not connect to {endpoint}: {e}")))?;
+ 
+@@ -1198,6 +1198,23 @@
          options: &InstallOptions,
          observe: &mut (dyn FnMut(Event) + Send),
      ) -> Result<InstallReport, InstallError> {
--        let target = crate::options_for(options, item.app, item.id);
--        std::fs::create_dir_all(&target.install_dir)?;
--
--        let mut report = InstallReport {
--            app: item.app,
--            ..InstallReport::default()
--        };
--
--        match &item.content {
--            crate::WorkshopContent::SteamPipe { depot, manifest } => {
--                let key = self.depot_key(item.app, *depot).await?;
--
--                let code = self
--                    .cm
--                    .call(&CContentServerDirectory_GetManifestRequestCode_Request {
--                        app_id: Some(item.app.get()),
--                        depot_id: Some(depot.get()),
--                        manifest_id: Some(manifest.get()),
--                        app_branch: Some("public".to_owned()),
--                        branch_password_hash: None,
--                    })
--                    .await?
--                    .manifest_request_code
--                    .unwrap_or(0);
--
--                let content = self
--                    .fetch_manifest_from_pool(*depot, manifest.get(), code, &key)
--                    .await?;
 +        self.download_workshop_item_bounded(item, options, u64::MAX, usize::MAX, observe)
 +            .await
 +    }
@@ -50,35 +336,13 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 +        if max_bytes == 0 || max_entries == 0 || item.size > max_bytes {
 +            return Err(InstallError::Io("mangaflow-size-limit".to_owned()));
 +        }
-+        let target = crate::options_for(options, item.app, item.id);
-+        std::fs::create_dir_all(&target.install_dir)?;
-+
-+        let mut report = InstallReport {
-+            app: item.app,
-+            ..InstallReport::default()
-+        };
-+
-+        match &item.content {
-+            crate::WorkshopContent::SteamPipe { depot, manifest } => {
-+                let key = self.depot_key(item.app, *depot).await?;
-+
-+                let code = self
-+                    .cm
-+                    .call(&CContentServerDirectory_GetManifestRequestCode_Request {
-+                        app_id: Some(item.app.get()),
-+                        depot_id: Some(depot.get()),
-+                        manifest_id: Some(manifest.get()),
-+                        app_branch: Some("public".to_owned()),
-+                        branch_password_hash: None,
-+                    })
-+                    .await?
-+                    .manifest_request_code
-+                    .unwrap_or(0);
-+
-+                let content = self
-+                    .fetch_manifest_from_pool(*depot, manifest.get(), code, &key)
-+                    .await?;
-+
+         let target = crate::options_for(options, item.app, item.id);
+         std::fs::create_dir_all(&target.install_dir)?;
+ 
+@@ -1227,6 +1244,32 @@
+                     .fetch_manifest_from_pool(*depot, manifest.get(), code, &key)
+                     .await?;
+ 
 +                if max_entries != usize::MAX {
 +                    if content.files.len() > max_entries || content.total_size > max_bytes {
 +                        return Err(InstallError::Io("mangaflow-size-limit".to_owned()));
@@ -104,9 +368,10 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 +                        }
 +                    }
 +                }
- 
++
                  let entry = ResolvedDepot {
                      depot: tapline_pics::Depot {
+                         id: *depot,
 diff --git a/crates/tapline-auth/src/lib.rs b/crates/tapline-auth/src/lib.rs
 --- a/crates/tapline-auth/src/lib.rs
 +++ b/crates/tapline-auth/src/lib.rs

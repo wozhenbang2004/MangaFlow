@@ -11,7 +11,7 @@ use std::time::Duration;
 use tapline::{
     AppId, BrowseQuery, BrowseSort, Event, FileModes, InstallError, InstallOptions,
     PublishedFileId, Session, Shared, StoredToken, WorkshopContent, WorkshopLayout,
-    GuardType, LoginError, PollOutcome,
+    GuardType, LoginError, NetworkRoute, PollOutcome,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
@@ -132,6 +132,29 @@ fn shared() -> Arc<Shared> {
     Arc::clone(SHARED.get_or_init(|| Shared::new(4)))
 }
 
+
+fn routed_shared(request: &mut Value) -> Result<Arc<Shared>, &'static str> {
+    let network = request.get_mut("network").map(Value::take).ok_or("network_configuration")?;
+    let kind = network.get("kind").and_then(Value::as_str).ok_or("network_configuration")?;
+    let route = match kind {
+        "SYSTEM" => NetworkRoute::System,
+        "DIRECT" => NetworkRoute::Direct,
+        "HTTP" | "SOCKS5" => {
+            let host = text(&network, "host").ok_or("network_configuration")?;
+            let port = network.get("port").and_then(Value::as_u64)
+                .filter(|port| (1..=65535).contains(port)).ok_or("network_configuration")? as u16;
+            if host.is_empty() || host.len() > 253 || host.chars().any(|c|
+                c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | '@' | '?' | '#' | '[' | ']')) {
+                return Err("network_configuration");
+            }
+            if kind == "HTTP" { NetworkRoute::Http { host, port } }
+            else { NetworkRoute::Socks5 { host, port } }
+        }
+        _ => return Err("network_configuration"),
+    };
+    Ok(shared().with_route(route))
+}
+
 fn jobs() -> &'static Mutex<HashMap<i64, Arc<Job>>> {
     static JOBS: OnceLock<Mutex<HashMap<i64, Arc<Job>>>> = OnceLock::new();
     JOBS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -167,9 +190,9 @@ fn credentials(request: &mut Value) -> Result<StoredToken, &'static str> {
     Ok(token)
 }
 
-async fn authenticated(request: &mut Value) -> Result<(Session, StoredToken), &'static str> {
+async fn authenticated(request: &mut Value, transport: Arc<Shared>) -> Result<(Session, StoredToken), &'static str> {
     let token = credentials(request)?;
-    let session = Session::with_token_shared(&token, shared()).await
+    let session = Session::with_token_shared(&token, transport).await
         .map_err(|_| "session_unavailable")?;
     Ok((session, token))
 }
@@ -247,14 +270,14 @@ fn login_error(error: LoginError) -> &'static str {
     }
 }
 
-async fn password_login(request: &mut Value, job: &Arc<Job>) -> Result<StoredToken, &'static str> {
+async fn password_login(request: &mut Value, job: &Arc<Job>, transport: Arc<Shared>) -> Result<StoredToken, &'static str> {
     let account = Zeroizing::new(take_text(request, "account").ok_or("invalid_request")?);
     let mut password = Zeroizing::new(take_text(request, "password").ok_or("invalid_request")?);
     if account.is_empty() || account.len() > 128 || account.chars().any(char::is_control) ||
         password.is_empty() || password.len() > 4096 {
         return Err("invalid_request");
     }
-    let mut session = Session::anonymous_shared(shared()).await.map_err(|_| "steam_unavailable")?;
+    let mut session = Session::anonymous_shared(transport).await.map_err(|_| "steam_unavailable")?;
     let key = session.password_key(&account).await.map_err(login_error)?;
     // The pinned implementation RSA-encrypts and zeroizes this transferred password.
     let mut pending = session.begin_password_login(&account, std::mem::take(&mut *password), &key)
@@ -308,12 +331,13 @@ async fn password_login(request: &mut Value, job: &Arc<Job>) -> Result<StoredTok
 
 async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
     let op = text(&request.0, "op").ok_or("invalid_request")?;
+    let transport = routed_shared(&mut request.0)?;
     match op.as_str() {
         "login" | "passwordLogin" => {
             let token = if op == "passwordLogin" {
-                password_login(&mut request.0, &job).await?
+                password_login(&mut request.0, &job, Arc::clone(&transport)).await?
             } else {
-            let mut session = Session::anonymous_shared(shared()).await
+            let mut session = Session::anonymous_shared(Arc::clone(&transport)).await
                 .map_err(|_| "steam_unavailable")?;
             let codes = Arc::clone(&job);
             let token = session.qr_login(Duration::from_secs(300), &mut |url| {
@@ -325,7 +349,7 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
             };
             let steam_id = token.steam_id().filter(|id| *id != 0).ok_or("login_failed")?;
             // Validate the content session before the caller commits a new credential.
-            let verified = Session::with_token_shared(&token, shared()).await
+            let verified = Session::with_token_shared(&token, Arc::clone(&transport)).await
                 .map_err(|_| "session_unavailable")?;
             if verified.account().is_none() { return Err("login_failed"); }
             job.emit(json!({
@@ -335,7 +359,7 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
             Ok(json!({"kind":"complete"}))
         }
         "account" => {
-            let (session, token) = authenticated(&mut request.0).await?;
+            let (session, token) = authenticated(&mut request.0, Arc::clone(&transport)).await?;
             job.emit(json!({
                 "kind":"account","account":session.account().unwrap_or(&token.account),
                 "steamId":token.steam_id().ok_or("auth_required")?.to_string()
@@ -351,9 +375,9 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
             if media != "image" && media != "video" { return Err("invalid_request"); }
             let mut session = if request.0.get("refreshToken").and_then(Value::as_str)
                 .is_some_and(|value| !value.is_empty()) {
-                authenticated(&mut request.0).await?.0
+                authenticated(&mut request.0, Arc::clone(&transport)).await?.0
             } else {
-                Session::anonymous_shared(shared()).await.map_err(|_| "steam_unavailable")?
+                Session::anonymous_shared(transport).await.map_err(|_| "steam_unavailable")?
             };
             let query = BrowseQuery {
                 app: APP,
@@ -398,7 +422,7 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
             if limit == 0 || limit > MAX_BYTES { return Err("invalid_request"); }
             let path = text(&request.0, "directory").ok_or("unsafe_path")?;
             let directory = owned_directory(&path)?;
-            let (mut session, _token) = authenticated(&mut request.0).await?;
+            let (mut session, _token) = authenticated(&mut request.0, Arc::clone(&transport)).await?;
             let item = session.workshop_details(&[PublishedFileId(item_id)]).await
                 .map_err(|_| "steam_unavailable")?.into_iter().next()
                 .ok_or("download_failed")?.map_err(|_| "download_failed")?;

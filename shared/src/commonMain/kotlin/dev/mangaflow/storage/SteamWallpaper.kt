@@ -24,6 +24,8 @@ data class SteamWallpaperState(
     val componentBytes: Long = 0,
     val componentTotalBytes: Long = 0,
     val account: SteamWallpaperAccount? = null,
+    /** A saved credential was parsed locally; successful account validation is still pending. */
+    val canResumeSession: Boolean = false,
     val authenticating: Boolean = false,
     val qrUrl: String? = null,
     val guardMethods: List<SteamGuardMethod> = emptyList(),

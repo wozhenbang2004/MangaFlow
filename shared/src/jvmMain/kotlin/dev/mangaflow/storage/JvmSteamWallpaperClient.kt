@@ -1,5 +1,11 @@
 package dev.mangaflow.storage
 
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadProxyType
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.randomUuid
@@ -78,22 +84,25 @@ internal class JvmSteamWallpaperClient(
                         ?: error("invalid session"))
                     requireCurrent(token)
                     session = saved
-                    runNative(token, request("account"), 60_000L) { event ->
+                    update(token) { it.copy(canResumeSession = true) }
+                    runNative(token, routedRequest(request("account"), steamRoute()), 60_000L) { event ->
                         if (event.text("kind") == "account") publishAccount(token, event, saved)
                     }
                 } catch (timeout: TimeoutCancellationException) {
                     update(token) { it.copy(error = "Steam 登录恢复超时，请重试。") }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
+                } catch (failure: DownloadRouteException) {
+                    update(token) { it.copy(error = failure.message ?: "Steam 连接线路暂不可用，请检查下载线路设置。") }
                 } catch (failure: SteamFailure) {
                     if (failure.code in SESSION_ERRORS) {
                         session = null
                         runCatching { deleteSecret(app, SECRET_KEY) }
-                        update(token) { it.copy(account = null, error = "Steam 登录已失效，请重新登录。") }
+                        update(token) { it.copy(account = null, canResumeSession = false, error = "Steam 登录已失效，请重新登录。") }
                     } else update(token) { it.copy(error = failure.userMessage()) }
                 } catch (_: Exception) {
                     session = null
-                    update(token) { it.copy(error = "已保存的 Steam 登录暂不可用，请重新登录。") }
+                    update(token) { it.copy(canResumeSession = false, error = "已保存的 Steam 登录暂不可用，请重新登录。") }
                 } finally {
                     update(token) { it.copy(restoring = false) }
                 }
@@ -120,7 +129,7 @@ internal class JvmSteamWallpaperClient(
         // Own a copy before returning; the UI clears its submitted array immediately.
         val ownedPassword = password.copyOf()
         password.fill('\u0000')
-        start({ it.copy(authenticating = true, error = null, message = null) }, 350_000L,
+        start({ it.copy(authenticating = true, canResumeSession = false, error = null, message = null) }, 350_000L,
             makeRequest = {
                 try {
                     buildJsonObject {
@@ -169,7 +178,7 @@ internal class JvmSteamWallpaperClient(
         when (event.text("kind")) {
             "qr" -> {
                 val url = steamQrUrl(event.text("url"))
-                update(token) { it.copy(qrUrl = url, message = "请在 Steam 手机应用中确认登录。") }
+                update(token) { it.copy(qrUrl = url, canResumeSession = false, message = "请在 Steam 手机应用中确认登录。") }
             }
             "guard" -> {
                 val values = event["methods"] as? JsonArray ?: throw SteamFailure("invalid_response")
@@ -184,7 +193,7 @@ internal class JvmSteamWallpaperClient(
                     }
                 }.distinct()
                 if (methods.isEmpty()) throw SteamFailure("unsupported_guard")
-                update(token) { it.copy(guardMethods = methods, guardSubmitting = false,
+                update(token) { it.copy(guardMethods = methods, canResumeSession = false, guardSubmitting = false,
                     guardError = null, message = null) }
             }
             "guardAccepted" -> update(token) { it.copy(guardSubmitting = false, guardError = null,
@@ -269,11 +278,12 @@ internal class JvmSteamWallpaperClient(
         val token = generation.get()
         val previous = _state.value.account
         val previousSession = session
+        val previousCanResume = _state.value.canResumeSession
         session = null
         _state.update { it.copy(restoring = true, preparing = false, componentBytes = 0,
             componentTotalBytes = 0, authenticating = false, qrUrl = null,
             guardMethods = emptyList(), guardSubmitting = false, guardError = null,
-            loading = false, account = null, transferId = null, transferName = null,
+            loading = false, account = null, canResumeSession = false, transferId = null, transferName = null,
             receivedBytes = 0, totalBytes = 0, message = null, error = null) }
         operation = scope.launch {
             operationLock.withLock {
@@ -285,7 +295,7 @@ internal class JvmSteamWallpaperClient(
                     throw cancelled
                 } catch (_: Exception) {
                     if (generation.get() == token) session = previousSession
-                    update(token) { it.copy(restoring = false, account = previous,
+                    update(token) { it.copy(restoring = false, account = previous, canResumeSession = previousCanResume,
                         error = "未能移除安全登录凭据，请重试退出。") }
                 }
             }
@@ -308,6 +318,14 @@ internal class JvmSteamWallpaperClient(
         transientSecret: CharArray? = null,
         onEvent: suspend (Long, JsonObject) -> Unit,
     ) {
+        val route = try {
+            steamRoute()
+        } catch (failure: Exception) {
+            transientSecret?.fill('\u0000')
+            val message = if (failure is DownloadRouteException) failure.message else null
+            _state.update { it.copy(error = message ?: "Steam 连接线路暂不可用，请检查下载线路设置。", message = null) }
+            return
+        }
         stop()
         val token = generation.get()
         _state.update { state(it.copy(authenticating = false, qrUrl = null,
@@ -335,7 +353,7 @@ internal class JvmSteamWallpaperClient(
                         update(token) { it.copy(preparing = false) }
                     }
                     if (!ready) throw SteamFailure("component_unavailable")
-                    var request = makeRequest()
+                    var request = routedRequest(makeRequest(), route)
                     if (download != null) {
                         val root = File(cacheDirectory(app).path, "steam-wallpapers")
                         check(root.isDirectory || root.mkdirs())
@@ -387,7 +405,7 @@ internal class JvmSteamWallpaperClient(
                     if (failure.code in SESSION_ERRORS) {
                         session = null
                         runCatching { deleteSecret(app, SECRET_KEY) }
-                        update(token) { it.copy(account = null) }
+                        update(token) { it.copy(account = null, canResumeSession = false) }
                     }
                     update(token) { it.copy(error = failure.userMessage(), message = null) }
                 } catch (_: SecurityException) {
@@ -466,7 +484,7 @@ internal class JvmSteamWallpaperClient(
         requireCurrent(token)
         session = record
         update(token) { it.copy(account = SteamWallpaperAccount(record.text("account"), record.text("steamId")),
-            authenticating = false, qrUrl = null,
+            canResumeSession = false, authenticating = false, qrUrl = null,
             guardMethods = emptyList(), guardSubmitting = false, guardError = null, message = "Steam 已登录", error = null) }
     }
 
@@ -478,6 +496,32 @@ internal class JvmSteamWallpaperClient(
         require(steamId.length in 1..20 && steamId.all(Char::isDigit))
         require(token.length in 16..16384 && token.none(Char::isISOControl))
         return buildJsonObject { put("account", account); put("steamId", steamId); put("refreshToken", token) }
+    }
+
+
+    private fun steamRoute(): DownloadRouteSnapshot {
+        val route = DownloadRoutingStore.get(app).snapshot(DownloadCategory.STEAM_WALLPAPERS)
+        if (route.mode == DownloadRouteMode.PROXY && route.proxy == null)
+            throw DownloadRouteException("尚未配置代理，请先在网络与下载中填写代理地址。")
+        return route
+    }
+
+    private fun routedRequest(request: JsonObject, route: DownloadRouteSnapshot): JsonObject = buildJsonObject {
+        request.forEach { (key, value) -> put(key, value) }
+        put("network", buildJsonObject {
+            put("kind", when (route.mode) {
+                DownloadRouteMode.SYSTEM -> "SYSTEM"
+                DownloadRouteMode.DIRECT -> "DIRECT"
+                DownloadRouteMode.PROXY -> when (checkNotNull(route.proxy).type) {
+                    DownloadProxyType.HTTP -> "HTTP"
+                    DownloadProxyType.SOCKS -> "SOCKS5"
+                }
+            })
+            if (route.mode == DownloadRouteMode.PROXY) {
+                val proxy = checkNotNull(route.proxy)
+                put("host", proxy.host); put("port", proxy.port)
+            }
+        })
     }
 
     private fun request(op: String, arguments: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit = {}): JsonObject =
@@ -556,6 +600,7 @@ internal class JvmSteamWallpaperClient(
             "timeout", "login_timeout" -> "Steam 请求超时，请重试。"
             "too_large", "size_limit" -> "这份壁纸超过 512 MB，请选择较小的项目。"
             "unsupported_media" -> "这份项目不能直接作为原始图片或视频导入。"
+            "network_configuration" -> "Steam 连接线路未配置，请先设置应用代理地址。"
             "component_unavailable" -> "Steam 组件未能准备好，请检查网络后重试。"
             "not_found" -> "这份壁纸已不可用，请刷新后重试。"
             "download_failed" -> "壁纸下载未完成，请检查网络后重试。"
@@ -589,6 +634,6 @@ internal class JvmSteamWallpaperClient(
             "invalid_request", "auth_required", "session_unavailable", "login_failed", "login_timeout",
             "steam_unavailable", "not_owned", "size_limit", "unsafe_path", "download_failed", "busy", "native_failed",
             "invalid_credentials", "invalid_guard_code", "expired_guard_code", "login_rate_limited",
-            "login_refused", "unsupported_guard")
+            "login_refused", "unsupported_guard", "network_configuration")
     }
 }
