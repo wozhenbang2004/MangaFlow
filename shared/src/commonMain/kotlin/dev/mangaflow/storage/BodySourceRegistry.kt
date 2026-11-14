@@ -21,6 +21,7 @@ data class BodySourceRegistryEntry(
     val removed: Boolean = false,
     val isProtected: Boolean = false,
     val isInstalled: Boolean = true,
+    val adult: Boolean = source.adult,
 )
 
 /** Local availability for installed adapters; removing a source never deletes its reading data. */
@@ -32,8 +33,15 @@ class BodySourceRegistry(context: Context, sources: List<BodySourceInfo>) {
     val entries: StateFlow<List<BodySourceRegistryEntry>> = mutableEntries.asStateFlow()
 
     val enabledSourceIds: Set<String>
-        get() = mutableEntries.value.asSequence().filter { !it.removed && it.enabled }
+        get() = mutableEntries.value.asSequence().filter { !it.removed && it.enabled && !it.adult }
             .map { it.source.id }.toSet()
+
+    /** Explicit source classification is persisted independently of a downloaded script revision. */
+    suspend fun setAdult(sourceId: String, adult: Boolean) = update(sourceId) { entry ->
+        require(sourceId.startsWith("js_")) { "只有导入的脚本源可以调整分区。" }
+        require(adult || !entry.source.adult) { "源已声明为成人内容，不能移出专区。" }
+        entry.copy(adult = adult)
+    }
 
     suspend fun setEnabled(sourceId: String, enabled: Boolean) = update(sourceId) { entry ->
         check(!enabled || !entry.removed) { "请先从添加来源中恢复这个来源。" }
@@ -58,12 +66,14 @@ class BodySourceRegistry(context: Context, sources: List<BodySourceInfo>) {
                 val value = saved.optJSONObject(entry.source.id) ?: JSONObject()
                     .put("enabled", entry.enabled).put("removed", entry.removed)
                 value.put("source", encodeSource(entry.source))
+                value.put("adult", entry.adult)
                 if (next.none { it.id == entry.source.id }) value.put("enabled", false).put("removed", true)
                 saved.put(entry.source.id, value)
             }
             next.forEach { source ->
                 val value = saved.optJSONObject(source.id) ?: JSONObject().put("enabled", true).put("removed", false)
                 value.put("source", encodeSource(source))
+                if (!value.has("adult")) value.put("adult", source.adult)
                 saved.put(source.id, value)
             }
             check(disk.edit().putString(KEY, saved.toString()).commit()) { "来源安装状态未能保存，请检查存储空间。" }
@@ -88,7 +98,7 @@ class BodySourceRegistry(context: Context, sources: List<BodySourceInfo>) {
             val json = JSONObject(disk.getString(KEY, "{}") ?: "{}")
             val saved = json.optJSONObject(entry.source.id) ?: JSONObject()
             json.put(entry.source.id, saved.put("enabled", entry.enabled).put("removed", entry.removed)
-                .put("source", encodeSource(entry.source)))
+                .put("source", encodeSource(entry.source)).put("adult", entry.adult))
             check(disk.edit().putString(KEY, json.toString()).commit()) {
                 "来源设置未能保存，请检查存储空间后重试。"
             }
@@ -102,7 +112,8 @@ class BodySourceRegistry(context: Context, sources: List<BodySourceInfo>) {
         val tombstones = saved.keys().asSequence().filter { id -> installedSources.none { it.id == id } }
             .mapNotNull { id -> saved.optJSONObject(id)?.optJSONObject("source")?.let { value ->
                 BodySourceInfo(id, value.optString("name", id), value.optString("language"),
-                    value.optString("homeUrl"), value.optString("iconUrl"), value.optString("revision"))
+                    value.optString("homeUrl"), value.optString("iconUrl"), value.optString("revision"),
+                    adult = value.optBoolean("adult", false))
             } }.toList()
         return (installedSources + tombstones).map { source ->
             val settings = saved.optJSONObject(source.id)
@@ -115,12 +126,13 @@ class BodySourceRegistry(context: Context, sources: List<BodySourceInfo>) {
                 removed = removed,
                 isProtected = protectedSource,
                 isInstalled = installedSources.any { it.id == source.id },
+                adult = source.adult || settings?.optBoolean("adult", false) == true,
             )
         }
     }
 
     private fun encodeSource(source: BodySourceInfo) = JSONObject().put("name", source.name)
-        .put("language", source.language).put("homeUrl", source.homeUrl).put("iconUrl", source.iconUrl).put("revision", source.revision)
+        .put("language", source.language).put("homeUrl", source.homeUrl).put("iconUrl", source.iconUrl).put("revision", source.revision).put("adult", source.adult)
 
     private companion object {
         const val KEY = "body_source_registry"

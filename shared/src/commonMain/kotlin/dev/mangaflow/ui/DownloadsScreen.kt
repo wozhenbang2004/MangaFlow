@@ -168,6 +168,7 @@ fun DownloadsScreen(
     history: List<ReadingProgress> = emptyList(),
     wallpaper: @Composable () -> Unit = {},
     backgroundInParent: Boolean = false,
+    excludedSourceIds: Set<String> = emptySet(),
 ) {
     val context = LocalContext.current
     val entries by store.entries.collectAsStateWithLifecycle()
@@ -202,9 +203,10 @@ fun DownloadsScreen(
     val contentTopPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
-    val manageableEntries = remember(entries, removingIds) { entries.filterNot { it.id in removingIds } }
+    val visibleEntries = remember(entries, excludedSourceIds) { entries.filterNot { it.manga.sourceId in excludedSourceIds } }
+    val manageableEntries = remember(visibleEntries, removingIds) { visibleEntries.filterNot { it.id in removingIds } }
     val selectedEntries = remember(manageableEntries, selectedIds) { manageableEntries.filter { it.id in selectedIds } }
-    val entriesById = remember(entries) { entries.associateBy(DownloadEntry::id) }
+    val entriesById = remember(visibleEntries) { visibleEntries.associateBy(DownloadEntry::id) }
     val historyById = remember(history) { history.associateBy { it.manga.id } }
     val directory = remember(manageableEntries) {
         manageableEntries.map { DownloadDirectoryEntry(it.id, it.manga.id, it.chapter.group,
@@ -229,7 +231,7 @@ fun DownloadsScreen(
         it.status in setOf(DownloadStatus.PAUSED, DownloadStatus.FAILED) && it.manga.sourceUrl != LOCAL_SOURCE_URL
     }
     val completedEntries = manageableEntries.filter { it.status == DownloadStatus.COMPLETED }
-    val usedBytes = entries.sumOf { it.downloadedBytes }
+    val usedBytes = visibleEntries.sumOf { it.downloadedBytes }
     var availableBytes by remember(store) { mutableStateOf<Long?>(null) }
     LaunchedEffect(showQueueActions, store) {
         if (showQueueActions) availableBytes = withContext(Dispatchers.IO) { store.availableStorageBytes() }

@@ -216,6 +216,12 @@ class UnifiedMangaRepository(
         }
     }
 
+    /** Explicit private-source browsing does not add the adapter to global search/matching. */
+    suspend fun browseSource(sourceId: String, page: Int = 0): MangaPage {
+        require(page in 0..100_000) { "页码无效。" }
+        return if (sourceId == "copy") copy.discover(page) else adapter(sourceId).discover(page)
+    }
+
     /** Each callback is an immutable cumulative snapshot of this requested batch only. */
     suspend fun searchAll(query: String, pages: Map<String, Int>? = null, forceRefresh: Boolean = false,
         onUpdate: (FederatedSearchPage) -> Unit = {}): FederatedSearchPage = withContext(Dispatchers.IO) {

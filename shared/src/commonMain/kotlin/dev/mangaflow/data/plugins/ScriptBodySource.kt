@@ -20,12 +20,19 @@ import kotlin.concurrent.Volatile
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 
+/** Upstream adult declarations are private by default, even without manual assignment. */
+internal fun adultSourceMetadata(metadata: JSONObject): Boolean =
+    metadata.optBoolean("isNsfw", false) || metadata.optBoolean("isAdult", false) ||
+        metadata.optBoolean("nsfw", false) || metadata.optBoolean("adult", false) ||
+        metadata.optString("contentRating").lowercase() in setOf("adult", "mature", "r18", "18+")
+
 /** Real Mangayomi calls, translated into the existing source-qualified reader contract. */
 class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: JavascriptSourceRuntime) : BodySource {
     val bundle = bundle.copy(metadata = JSONObject(bundle.metadata.toString()))
     val digest: String get() = bundle.digest
     override val info = BodySourceInfo(bundle.sourceId, bundle.metadata.getString("name"),
-        bundle.metadata.getString("lang"), publicPluginUrl(bundle.metadata.getString("baseUrl")).toString(), "", revision = bundle.digest)
+        bundle.metadata.getString("lang"), publicPluginUrl(bundle.metadata.getString("baseUrl")).toString(), "", revision = bundle.digest,
+        adult = adultSourceMetadata(bundle.metadata))
     private val headerLock = SynchronizedObject()
     private val chapterHeaders = LinkedHashMap<String, Map<String, String>>()
     @Volatile private var publicHeaders: Map<String, String> = manifestHeaders(bundle.metadata)

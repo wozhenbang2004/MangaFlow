@@ -858,7 +858,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private fun recordDetailMetrics(mangaId: String, detailId: Long) {
-        if (clearingMetadata) return
+        if (clearingMetadata || _detail.value?.manga?.let { isAdultSource(it.sourceId) } == true) return
         val requestId = metricsRequestId
         viewModelScope.launch {
             if (clearingMetadata || requestId != metricsRequestId) return@launch
@@ -1050,6 +1050,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private fun loadReviews(manga: Manga, requestId: Long) {
+        if (isAdultSource(manga.sourceId)) return
         reviewJob = viewModelScope.launch {
             try {
                 coroutineScope {
@@ -1321,7 +1322,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val work = _detail.value?.manga ?: _reading.value?.manga ?: return
         if (work.sourceUrl == LOCAL_SOURCE_URL) return
         closeSourceManagement()
-        val available = repository.sources.filter { it.id != work.sourceId }
+        val privateWork = isAdultSource(work.sourceId)
+        val available = repository.sources.filter { it.id != work.sourceId && isAdultSource(it.id) == privateWork }
         val first = available.firstOrNull()?.id.orEmpty()
         _sourceManagement.value = SourceManagementState(
             work = work,
@@ -1342,7 +1344,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         (work.alternativeTitles + sourceIdentityReviews(work).flatMap { it.aliases + it.matchedTitle })
             .filter(String::isNotBlank).distinct()
 
+    private fun isAdultSource(sourceId: String): Boolean =
+        bodySources.entries.value.any { it.source.id == sourceId && it.adult }
+
     private fun discoverWorkSources(work: Manga, force: Boolean = false, metadataOnly: Boolean = false) {
+        if (isAdultSource(work.sourceId)) return
         val ready = sourceIdentityReviews(work)
         val aliases = sourceAliases(work)
         val ids = (work.externalIds.toList() + ready.flatMap { source ->

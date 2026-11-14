@@ -74,6 +74,7 @@ import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Close
@@ -156,7 +157,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 private enum class Section(val title: String, val icon: ImageVector) {
-    DISCOVER("发现", Icons.Outlined.Explore), LIBRARY("书架", Icons.Outlined.Bookmarks),
+    DISCOVER("发现", Icons.Outlined.Explore), ADULT("成人专区", Icons.Outlined.Lock),
+    LIBRARY("书架", Icons.Outlined.Bookmarks),
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号与云端", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
 }
@@ -259,6 +261,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val update by model.updates.state.collectAsStateWithLifecycle()
     var sectionName by rememberSaveable { mutableStateOf(Section.DISCOVER.name) }
     val section = Section.valueOf(sectionName)
+    var adultConfirmed by remember { mutableStateOf(false) }
+    LaunchedEffect(section) { if (section != Section.ADULT) adultConfirmed = false }
     var drawerAction by remember { mutableStateOf<DrawerAction?>(null) }
     var drawerRootTransition by remember { mutableStateOf<Section?>(null) }
     val rootOpacity = remember { Animatable(1f) }
@@ -284,6 +288,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val favorites by model.library.favorites.collectVisibleAsState(reading == null)
     val history by model.library.history.collectVisibleAsState(reading == null || recentReadingOpen)
     val preferences by model.library.preferences.collectVisibleAsState(reading == null)
+    val sourceEntries by model.bodySources.entries.collectAsStateWithLifecycle()
+    val privateSourceIds = remember(sourceEntries) { sourceEntries.filter { it.adult }.map { it.source.id }.toSet() }
+    val ordinaryFavorites = remember(favorites, privateSourceIds) { favorites.filterNot { it.sourceId in privateSourceIds } }
+    val ordinaryHistory = remember(history, privateSourceIds) { history.filterNot { it.manga.sourceId in privateSourceIds } }
     var selectedCover by remember { mutableStateOf<MangaCoverKey?>(null) }
     val keyboard = LocalSoftwareKeyboardController.current
     val motion = LocalMotionEnabled.current
@@ -374,7 +382,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val focus = LocalFocusManager.current
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
     if (recentReadingOpen) {
-        RecentReadingSheet(history, model.repository, model.library,
+        RecentReadingSheet(ordinaryHistory, model.repository, model.library,
             onDismiss = { recentReadingOpen = false },
             onContinue = { model.continueReading(it) },
             onRemoveHistory = model::removeHistory, backdrop = drawerBackdrop)
@@ -746,7 +754,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             Section.SETTINGS -> MangaLayout.SettingsWidth
                             Section.ACCOUNT -> MangaLayout.AccountWidth
                             Section.DOWNLOADS -> MangaLayout.ListWidth
-                            Section.DISCOVER -> if (platformKind == PlatformKind.DESKTOP)
+                            Section.DISCOVER, Section.ADULT -> if (platformKind == PlatformKind.DESKTOP)
                                 MangaLayout.desktopBrowseWidth(windowSize.width) else MangaLayout.BrowseWidth
                             else -> MangaLayout.BrowseWidth
                         }
@@ -836,8 +844,17 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         isFavorite = { manga -> favorites.any { it.id == manga.id } },
                                         onToggleFavorite = model::toggleFavorite,
                                     )
+                                    Section.ADULT -> AdultZoneScreen(
+                                        confirmed = adultConfirmed, onConfirm = { adultConfirmed = true },
+                                        onExit = { changeSection(Section.DISCOVER) },
+                                        registry = model.bodySources, plugins = model.sourcePlugins,
+                                        repository = model.repository, downloads = model.downloads,
+                                        favorites = favorites, onOpen = model::openManga,
+                                        onToggleFavorite = model::toggleFavorite,
+                                        backdrop = searchBackdrop, contentTopPadding = chromePadding,
+                                    )
                                     Section.LIBRARY -> LibraryScreen(
-                                        favorites = favorites, history = history,
+                                        favorites = ordinaryFavorites, history = ordinaryHistory,
                                         libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
                                         repository = model.repository, opening = libraryOpening, active = rootActive,
                                         backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
@@ -852,7 +869,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, repository = model.repository, onRead = model::openDownload,
                                         onRetry = model::retryDownload, backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         backgroundInParent = true,
-                                        active = rootActive && !searchVisible, refreshingIds = refreshingDownloads, history = history)
+                                        active = rootActive && !searchVisible, refreshingIds = refreshingDownloads,
+                                        history = ordinaryHistory, excludedSourceIds = privateSourceIds)
                                     Section.ACCOUNT -> AccountScreen(
                                         state = account, repository = model.repository,
                                         active = rootActive, contentTopPadding = chromePadding,
@@ -875,8 +893,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 }
                                 }
                             }
-                            if (current.section in setOf(Section.ACCOUNT, Section.SETTINGS)) {
-                                PageTitleHeader(if (current.section == Section.ACCOUNT) "账号" else "设置",
+                            if (current.section in setOf(Section.ACCOUNT, Section.SETTINGS, Section.ADULT)) {
+                                PageTitleHeader(when (current.section) {
+                                        Section.ACCOUNT -> "账号"; Section.ADULT -> "成人专区"; else -> "设置"
+                                    },
                                     searchBackdrop, navigation,
                                     modifier = Modifier.align(Alignment.TopCenter).onSizeChanged { chromeHeightPx = it.height }
                                         .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
@@ -897,7 +917,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         Row(Modifier.padding(horizontal = 8.dp).height(44.dp)
                                             .motionInputGate(rootActive && chromeReady),
                                             verticalAlignment = Alignment.CenterVertically) {
-                                            if (history.isNotEmpty()) MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
+                                            if (ordinaryHistory.isNotEmpty()) MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
                                                 feedback.perform(FeelEvent.Selection)
                                                 closeSearch()
                                                 recentReadingOpen = true

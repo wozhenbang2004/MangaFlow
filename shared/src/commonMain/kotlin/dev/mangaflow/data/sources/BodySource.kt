@@ -17,6 +17,8 @@ data class BodySourceInfo(
     val iconUrl: String,
     /** Applied adapter revision; imported sources use the installed code/metadata digest. */
     val revision: String = "",
+    /** Adult catalogues never enter the ordinary discovery scope. */
+    val adult: Boolean = false,
 )
 
 interface BodySource : MangaRepository {

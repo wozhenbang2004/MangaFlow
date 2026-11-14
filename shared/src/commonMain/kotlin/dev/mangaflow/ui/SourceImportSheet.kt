@@ -95,6 +95,7 @@ internal fun SourceImportSheet(
     backdrop: HazeState?,
     onDismiss: () -> Unit,
     onImported: (String) -> Unit,
+    markAdult: Boolean = false,
 ) {
     if (platformKind != PlatformKind.ANDROID) return
     val context = LocalContext.current
@@ -442,6 +443,7 @@ internal fun SourceImportSheet(
                                     } catch (_: TimeoutCancellationException) {
                                         error("来源已保存，但尚未接入来源列表，请重新打开源管理重试。")
                                     }
+                                    if (markAdult) registry.setAdult(bundle.sourceId, true)
                                     registry.restore(bundle.sourceId)
                                     completedName = bundle.metadata.optString("name")
                                     dismiss()
