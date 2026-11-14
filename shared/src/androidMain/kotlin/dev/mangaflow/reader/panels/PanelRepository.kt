@@ -1,5 +1,7 @@
 package dev.mangaflow.reader.panels
 
+import dev.mangaflow.experience.readerPriority
+
 import android.content.Context
 import androidx.compose.ui.graphics.asImageBitmap
 import coil3.BitmapImage
@@ -53,7 +55,7 @@ actual class PanelRepository actual constructor(context: Context) {
         val resolved = resolvePage(page)
         val result = context.imageLoader.execute(ImageRequest.Builder(context)
             .data(if (resolved.url.startsWith("file:")) File(URI(resolved.url)) else resolved.url)
-            .httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
+            .readerPriority().httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
             .size(1536, 1536).precision(Precision.EXACT).scale(Scale.FIT)
             // This analysis bitmap is owned by this call, not by the displayed original or Coil's memory cache.
             .allowHardware(false).memoryCachePolicy(CachePolicy.DISABLED).build())

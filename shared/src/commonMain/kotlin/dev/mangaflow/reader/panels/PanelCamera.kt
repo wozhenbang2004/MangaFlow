@@ -2,6 +2,8 @@
 
 package dev.mangaflow.reader.panels
 
+import dev.mangaflow.experience.readerPriority
+
 import androidx.compose.animation.core.SnapSpec
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -139,7 +141,7 @@ internal fun PanelCamera(
 
     val request = remember(page.url, headers, viewport, context) {
         ImageRequest.Builder(imagePlatformContext(context))
-            .data(page.url)
+            .data(page.url).readerPriority()
             .httpHeaders(NetworkHeaders.Builder().apply {
                 headers.forEach { (name, value) -> set(name, value) }
             }.build())

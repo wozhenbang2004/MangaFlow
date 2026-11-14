@@ -22,6 +22,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CancellationException
+import dev.mangaflow.platform.monotonicTimeMillis
 import okio.Buffer
 
 /** Same source URL contract on every target, backed by Ktor's maintained URL parser. */
@@ -121,6 +123,10 @@ data class NetworkResponse(val code: Int, val headers: Map<String, String>, val 
     fun text(): String = bytes.decodeToString()
 }
 
+data class NetworkTransferObservation(
+    val code: Int?, val headers: Map<String, String>, val bytes: Long, val elapsedMillis: Long, val failed: Boolean,
+)
+
 /** Engines retain system TLS validation. Each client has isolated jobs and no cookie installation. */
 internal expect fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, configure: HttpClientConfig<*>.() -> Unit): HttpClient
 
@@ -131,6 +137,7 @@ class NetworkClient(
     callTimeoutMillis: Long = 45_000,
     acceptCompression: Boolean = true,
     route: DownloadRouteSnapshot? = null,
+    private val onTransfer: ((NetworkTransferObservation) -> Unit)? = null,
 ) {
     private val timeouts = Triple(connectTimeoutMillis, readTimeoutMillis, callTimeoutMillis)
     private val selectedRoute = route?.checked()
@@ -175,6 +182,12 @@ class NetworkClient(
         require(maximumBytes >= 0)
         val job = currentCoroutineContext()[Job]!!
         synchronized(activeLock) { active.add(job) }
+        val started = monotonicTimeMillis()
+        var observedCode: Int? = null
+        var observedHeaders: Map<String, String> = emptyMap()
+        var received = 0L
+        var failed = false
+        var cancelled = false
         try {
             client.prepareRequest {
                 url.takeFrom(request.url.toString())
@@ -189,12 +202,13 @@ class NetworkClient(
                     throw DownloadRouteException("这个代理需要身份验证；当前仅支持无需账号密码的 HTTP / SOCKS 代理。")
                 }
                 val responseHeaders = response.headers.entries().associate { it.key to it.value.joinToString(", ") }
+                observedCode = response.status.value
+                observedHeaders = responseHeaders
                 if (!acceptResponse(response.status.value, responseHeaders)) return@execute response.status.value to responseHeaders
                 val announced = response.headers["Content-Length"]?.toLongOrNull()
                 require(announced == null || announced <= maximumBytes) { "Response exceeds the size limit" }
                 val input = response.bodyAsChannel()
                 val buffer = ByteArray(16 * 1024)
-                var received = 0L
                 progress(0, announced ?: -1)
                 while (!input.isClosedForRead) {
                     currentCoroutineContext().ensureActive()
@@ -209,6 +223,18 @@ class NetworkClient(
                 input.closedCause?.let { throw it }
                 response.status.value to responseHeaders
             }
-        } finally { synchronized(activeLock) { active.remove(job) } }
+        } catch (cancel: CancellationException) {
+            cancelled = true
+            throw cancel
+        } catch (failure: Exception) {
+            failed = true
+            throw failure
+        } finally {
+            synchronized(activeLock) { active.remove(job) }
+            if (!cancelled) runCatching {
+                onTransfer?.invoke(NetworkTransferObservation(observedCode, observedHeaders, received,
+                    monotonicTimeMillis() - started, failed))
+            }
+        }
     }
 }

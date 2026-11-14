@@ -6,6 +6,9 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.storage.cacheDirectory
 import platform.Foundation.*
 import platform.UIKit.UIApplicationDidReceiveMemoryWarningNotification
+import coil3.network.NetworkClient
+import coil3.network.ktor3.asNetworkClient
+import dev.mangaflow.net.platformHttpClient
 
 internal actual fun readExperienceResources(context: PlatformContext): ExperienceResources {
     val process = NSProcessInfo.processInfo
@@ -24,6 +27,8 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
         }.getOrNull(),
     )
 }
+
+internal actual fun createExperienceNetworkClient(): NetworkClient = platformHttpClient(false, null) {}.asNetworkClient()
 
 internal actual fun observeExperienceResources(context: PlatformContext, changed: (Boolean) -> Unit): () -> Unit {
     val center = NSNotificationCenter.defaultCenter

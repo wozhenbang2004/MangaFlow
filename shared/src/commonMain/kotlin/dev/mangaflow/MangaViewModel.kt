@@ -1,6 +1,9 @@
 package dev.mangaflow
 
 import dev.mangaflow.data.chapterSourceMangaId
+import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.experience.PrefetchByteBudget
+import dev.mangaflow.experience.prefetchOriginalPage
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.mangaflow.account.AccountProfile
@@ -95,6 +98,8 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.async
 import kotlinx.coroutines.supervisorScope
@@ -2412,9 +2417,31 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (chapterPrefetchKey == key && chapterPrefetchJob?.isActive == true) return
         chapterPrefetchJob?.cancel()
         chapterPrefetchKey = key
+        val epoch = readingRequestId
+        val currentChapter = current.id
+        val owner = chapterSourceMangaId(manga.id, chapter)
+        val source = SourceKeys.decodeChapter(owner, chapter.id).sourceId
         chapterPrefetchJob = viewModelScope.launch {
             try {
-                repository.pages(chapterSourceMangaId(manga.id, chapter), chapter.id)
+                val policy = ExperiencePolicyStore.get(application)
+                policy.state.map { Triple(it.crossChapter, it.prefetchAhead, it.nextChapterPrefetchBytes) }
+                    .distinctUntilChanged().collectLatest { (allowed, ahead, limit) ->
+                        if (!allowed || limit <= 0L) return@collectLatest
+                        fun currentSession() = epoch == readingRequestId &&
+                            _reading.value?.manga?.id == manga.id &&
+                            visibleReading?.first?.id == manga.id && visibleReading?.second?.id == currentChapter
+                        if (!currentSession()) return@collectLatest
+                        val upcoming = repository.pages(owner, chapter.id)
+                        if (!currentSession()) return@collectLatest
+                        val headers = repository.imageHeaders(owner, chapter.id).toMap()
+                        val window = PrefetchByteBudget(limit)
+                        for (page in upcoming.take(minOf(ahead, 3))) {
+                            if (!currentSession() || !policy.state.value.crossChapter) break
+                            val available = downloads.resolvePrefetchPage(manga.id, chapter.id, page) ?: continue
+                            if (available.url.startsWith("file:")) continue
+                            if (!prefetchOriginalPage(application, available, headers, source, window)) break
+                        }
+                    }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (_: Exception) {
@@ -2844,6 +2871,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     /** Called after a visible image succeeds; public reading never awaits this side channel. */
     fun onChapterVisible(manga: Manga, chapter: Chapter) {
         if (_reading.value?.manga?.id != manga.id) return
+        if (visibleReading?.second?.id != chapter.id) {
+            chapterPrefetchJob?.cancel()
+            chapterPrefetchKey = null
+        }
         visibleReading = manga to chapter
         if (chapter.sourceId != "copy" || SourceKeys.isEncoded(chapter.id) || manga.sourceId != "copy") return
         if (manga.sourceUrl == LOCAL_SOURCE_URL) return

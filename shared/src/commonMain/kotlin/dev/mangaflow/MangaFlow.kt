@@ -12,17 +12,9 @@ import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
-import coil3.ImageLoader
-import coil3.SingletonImageLoader
-import coil3.disk.DiskCache
-import coil3.memory.MemoryCache
-import coil3.network.ktor3.KtorNetworkFetcherFactory
-import coil3.request.crossfade
-import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.experience.initializeExperienceImages
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformContext
-import dev.mangaflow.platform.storage.StorageFile
-import dev.mangaflow.platform.storage.cacheDirectory
 import dev.mangaflow.ui.AppLaunchReveal
 import dev.mangaflow.ui.MangaAdaptiveLayout
 import dev.mangaflow.ui.MangaFlowApp
@@ -36,21 +28,7 @@ import dev.mangaflow.update.UpdateManager
 /** Every native entry initializes the same actual application services, then mounts the same UI. */
 fun initializeMangaFlow(context: PlatformContext) {
     MangaHazeRuntime.initialize(context)
-    val experience = ExperiencePolicyStore.get(context)
-    SingletonImageLoader.setSafe { imageContext ->
-        ImageLoader.Builder(imageContext)
-            .components { add(KtorNetworkFetcherFactory()) }
-            .memoryCache { MemoryCache.Builder().maxSizePercent(imageContext, experience.initialMemoryCacheFraction()).build() }
-            .diskCache {
-                val bytes = experience.initialDiskCacheBytes()
-                if (bytes <= 0L) null else
-                    DiskCache.Builder().directory(StorageFile(cacheDirectory(context), "image-cache").nativePath)
-                        .maxSizeBytes(bytes).build()
-            }
-            .crossfade(160)
-            .build()
-            .also(experience::attachImageLoader)
-    }
+    initializeExperienceImages(context)
     UpdateManager.get(context).start()
 }
 

@@ -32,7 +32,7 @@ compose.desktop {
             packageVersion = mangaVersion.get().substringBefore('-')
             description = "MangaFlow manga reader"
             vendor = "MangaFlow"
-            modules("java.desktop", "java.net.http", "java.naming", "java.management", "java.scripting", "jdk.unsupported", "jdk.crypto.ec", "jdk.accessibility", "jdk.jsobject", "jdk.xml.dom", "java.xml", "java.logging", "java.datatransfer", "jdk.unsupported.desktop", "java.prefs", "java.sql", "jdk.zipfs")
+            modules("java.desktop", "java.net.http", "java.naming", "java.management", "jdk.management", "java.scripting", "jdk.unsupported", "jdk.crypto.ec", "jdk.accessibility", "jdk.jsobject", "jdk.xml.dom", "java.xml", "java.logging", "java.datatransfer", "jdk.unsupported.desktop", "java.prefs", "java.sql", "jdk.zipfs")
             windows {
                 menuGroup = "MangaFlow"
                 shortcut = true

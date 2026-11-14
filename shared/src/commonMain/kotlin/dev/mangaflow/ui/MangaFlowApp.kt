@@ -125,6 +125,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -268,6 +269,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     LaunchedEffect(experience, experienceLifecycle) {
         experienceLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             val release = experience.startObserving()
+            try { awaitCancellation() } finally { release() }
+        }
+    }
+    LaunchedEffect(experience, experienceLifecycle) {
+        experienceLifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            val release = experience.startForeground()
             try { awaitCancellation() } finally { release() }
         }
     }
@@ -677,8 +684,16 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             ContentProfileSwitch(restrictedMode, requestProfile, manageProfileSources,
                 compact = compact, enabled = !rootHandoff)
         },
-        modifier = Modifier.then(if (desktop || !experienceBudget.preferHighRefresh) Modifier else
-            Modifier.preferredFrameRate(FrameRateCategory.High)).onPreviewKeyEvent { event ->
+        modifier = Modifier.then(if (!experienceBudget.preferHighRefresh || experienceBudget.refreshHz != null) Modifier else
+            Modifier.preferredFrameRate(FrameRateCategory.High)).pointerInput(experience) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Final)
+                    if (event.type == PointerEventType.Scroll || event.changes.any { it.pressed }) experience.noteInteraction()
+                }
+            }
+        }.onPreviewKeyEvent { event ->
+            if (event.type == KeyEventType.KeyDown) experience.noteInteraction()
             if (desktop && event.isCtrlPressed && !event.isAltPressed &&
                 (event.key == Key.K || event.key == Key.F)) {
                 if (event.type == KeyEventType.KeyDown) openDesktopSearch()

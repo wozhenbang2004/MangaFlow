@@ -1,5 +1,7 @@
 package dev.mangaflow.reader.panels
 
+import dev.mangaflow.experience.readerPriority
+
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.ImageBitmap
@@ -49,7 +51,7 @@ internal class PortablePanelRepository(private val context: PlatformContext) {
         if (!force) withContext(Dispatchers.IO) { readCache(key) }?.let { return@withLock it }
         val resource = resolvePage(page)
         val imageContext = imagePlatformContext(context)
-        val result = SingletonImageLoader.get(imageContext).execute(ImageRequest.Builder(imageContext).data(resource.url)
+        val result = SingletonImageLoader.get(imageContext).execute(ImageRequest.Builder(imageContext).data(resource.url).readerPriority()
             .httpHeaders(NetworkHeaders.Builder().apply { headers.forEach { (name, value) -> set(name, value) } }.build())
             .size(1536, 1536).precision(Precision.EXACT).scale(Scale.FIT)
             .memoryCachePolicy(CachePolicy.DISABLED).build())

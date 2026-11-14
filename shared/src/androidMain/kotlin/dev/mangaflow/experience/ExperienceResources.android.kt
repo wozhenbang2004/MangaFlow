@@ -10,17 +10,29 @@ import android.content.res.Configuration
 import android.os.Build
 import android.os.PowerManager
 import android.os.StatFs
+import android.os.BatteryManager
+import android.hardware.display.DisplayManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.view.Display
+import coil3.network.NetworkClient
+import coil3.network.okhttp.asNetworkClient
+import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 import dev.mangaflow.platform.PlatformContext
 
 internal actual fun readExperienceResources(context: PlatformContext): ExperienceResources {
     val app = context.applicationContext
     val memory = runCatching { app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager }.getOrNull()
     val power = runCatching { app.getSystemService(Context.POWER_SERVICE) as? PowerManager }.getOrNull()
+    val info = runCatching { ActivityManager.MemoryInfo().also { memory?.getMemoryInfo(it) } }.getOrNull()
+    val battery = runCatching { app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) }.getOrNull()
+    val network = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+    val runtime = Runtime.getRuntime()
     return ExperienceResources(
         lowMemoryDevice = runCatching { memory?.isLowRamDevice }.getOrNull(),
-        memoryPressure = runCatching {
-            memory?.let { manager -> ActivityManager.MemoryInfo().also(manager::getMemoryInfo).lowMemory }
-        }.getOrNull(),
+        memoryPressure = info?.takeIf { memory != null }?.lowMemory,
         lowPower = runCatching { power?.isPowerSaveMode }.getOrNull(),
         thermalPressure = if (Build.VERSION.SDK_INT >= 29) runCatching {
             power?.currentThermalStatus?.let { status ->
@@ -33,6 +45,25 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
             }
         }.getOrNull() else null,
         freeDiskBytes = runCatching { StatFs(app.cacheDir.absolutePath).availableBytes }.getOrNull(),
+        processHeapBytes = runtime.totalMemory() - runtime.freeMemory(),
+        processHeapLimitBytes = runtime.maxMemory(),
+        availableMemoryBytes = info?.takeIf { memory != null }?.availMem,
+        batteryPercent = battery?.let {
+            val level = it.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = it.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            if (level >= 0 && scale > 0) level * 100 / scale else null
+        },
+        charging = battery?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)?.let {
+            it == BatteryManager.BATTERY_STATUS_CHARGING || it == BatteryManager.BATTERY_STATUS_FULL
+        },
+        metered = runCatching { network?.isActiveNetworkMetered }.getOrNull(),
+        networkAvailable = runCatching { network?.let { it.activeNetwork != null } }.getOrNull(),
+        supportedRefreshRates = runCatching {
+            val display = (app.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)?.getDisplay(Display.DEFAULT_DISPLAY)
+            val current = display?.mode
+            display?.supportedModes?.filter { current != null && it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
+                ?.map { it.refreshRate.toInt() }?.filter { it > 0 }?.distinct()?.sorted().orEmpty()
+        }.getOrDefault(emptyList()),
     )
 }
 
@@ -46,8 +77,7 @@ internal actual fun observeExperienceResources(context: PlatformContext, changed
         override fun onLowMemory() { if (!released) changed(true) }
         override fun onTrimMemory(level: Int) {
             // UI_HIDDEN is a lifecycle signal, not proof of memory pressure.
-            if (!released && (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ||
-                level in ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW until ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN)) {
+            if (!released && level in ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW..ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
                 changed(true)
             }
         }
@@ -58,6 +88,7 @@ internal actual fun observeExperienceResources(context: PlatformContext, changed
     val filter = IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED).apply {
         addAction(Intent.ACTION_DEVICE_STORAGE_LOW)
         addAction(Intent.ACTION_DEVICE_STORAGE_OK)
+        addAction(Intent.ACTION_BATTERY_CHANGED)
     }
     val componentRegistered = runCatching { app.registerComponentCallbacks(callbacks); true }.getOrDefault(false)
     val receiverRegistered = runCatching {
@@ -65,6 +96,13 @@ internal actual fun observeExperienceResources(context: PlatformContext, changed
         else app.registerReceiver(receiver, filter)
         true
     }.getOrDefault(false)
+    val connectivity = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+    val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) { if (!released) changed(false) }
+        override fun onLost(network: Network) { if (!released) changed(false) }
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) { if (!released) changed(false) }
+    }
+    val networkRegistered = runCatching { connectivity?.registerDefaultNetworkCallback(networkCallback); connectivity != null }.getOrDefault(false)
     val releaseThermal: (() -> Unit)? = if (Build.VERSION.SDK_INT >= 29) {
         val power = runCatching { app.getSystemService(Context.POWER_SERVICE) as? PowerManager }.getOrNull()
         val listener = PowerManager.OnThermalStatusChangedListener { if (!released) changed(false) }
@@ -77,7 +115,11 @@ internal actual fun observeExperienceResources(context: PlatformContext, changed
             released = true
             if (componentRegistered) runCatching { app.unregisterComponentCallbacks(callbacks) }
             if (receiverRegistered) runCatching { app.unregisterReceiver(receiver) }
+            if (networkRegistered) runCatching { connectivity?.unregisterNetworkCallback(networkCallback) }
             releaseThermal?.invoke()
         }
     }
 }
+
+internal actual fun createExperienceNetworkClient(): NetworkClient = OkHttpClient.Builder()
+    .connectTimeout(20, TimeUnit.SECONDS).readTimeout(40, TimeUnit.SECONDS).build().asNetworkClient()

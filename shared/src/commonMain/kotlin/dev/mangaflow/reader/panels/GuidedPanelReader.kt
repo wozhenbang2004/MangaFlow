@@ -23,6 +23,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import dev.mangaflow.ui.motion.MotionTextButton as TextButton
+import dev.mangaflow.experience.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -66,6 +67,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 internal fun GuidedPanelReader(
     pages: List<Page>,
     headers: Map<String, String>,
+    sourceId: String,
+    prefetchPage: suspend (Page) -> Page?,
     resolvePage: suspend (Page) -> Page,
     retryPage: suspend (Page) -> Page,
     preferences: ReaderPreferences,
@@ -87,6 +90,8 @@ internal fun GuidedPanelReader(
     bottomClearancePx: Int,
 ) {
     val context = LocalContext.current
+    val experience = remember(context) { ExperiencePolicyStore.get(context) }
+    val experienceBudget by experience.state.collectAsStateWithLifecycle()
     val repository = remember(context) { PanelRepository(context) }
     val models = remember(context) { PanelModelStore.get(context) }
     val runtimes = remember(context) { PanelRuntimeStore.get(context) }
@@ -164,18 +169,21 @@ internal fun GuidedPanelReader(
             forceDetection = false
         } finally { loading = false }
     }
-    LaunchedEffect(pageIndex, detection, active) {
-        if (!active || detection == null) return@LaunchedEffect
-        // The visible page always wins. A page change cancels this bounded pre-read window.
+    LaunchedEffect(pageIndex, detection, active, experienceBudget.prefetchAhead, experienceBudget.adjacentPrefetchBytes) {
+        if (!active || detection == null || experienceBudget.prefetchAhead == 0 || sourceId == "jmcomic") return@LaunchedEffect
+        // Prepare only original bytes. Recognition/decoding belongs to the displayed page;
+        // within that page all panels are already available for the next camera transition.
         delay(400)
-        for (index in pageIndex + 1..minOf(pageIndex + 2, pages.lastIndex)) {
+        val bytes = PrefetchByteBudget(experienceBudget.adjacentPrefetchBytes)
+        for (index in pageIndex + 1..minOf(pageIndex + minOf(2, experienceBudget.prefetchAhead), pages.lastIndex)) {
             try {
                 withTimeoutOrNull(15_000) {
-                    repository.detect(pages[index], headers, resolve, preferences.panelEngine,
-                        preferences.panelDirection, preferences.panelLearnedOrder)
+                    val resource = prefetchPage(pages[index])
+                    if (resource != null && resource.url.startsWith("https:"))
+                        prefetchOriginalPage(context, resource, headers, sourceId, bytes)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
-            catch (_: Exception) { /* The visible page owns its eventual retry and error. */ }
+            catch (_: Exception) { /* The visible page owns retry and error presentation. */ }
         }
     }
     LaunchedEffect(pageIndex, selected, detection, imageReady, active) {

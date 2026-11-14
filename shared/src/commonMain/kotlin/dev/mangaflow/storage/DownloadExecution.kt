@@ -2,6 +2,7 @@ package dev.mangaflow.storage
 
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.data.sources.JmDownloadSession
+import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.sources.createJmDownloadSession
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.NetworkClient
@@ -30,17 +31,21 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
     val experience = ExperiencePolicyStore.get(context)
     val releaseExperience = experience.startObserving()
     try {
-        DownloadStore.transferGate.withLock {
+        experience.withChapterAdmission(id) {
             currentCoroutineContext().ensureActive()
-            val record = store.beginTransfer(id, workId, retryAttempt = attempt > 0) ?: return@withLock
+            val record = store.beginTransfer(id, workId, retryAttempt = attempt > 0) ?: return@withChapterAdmission
             var client: NetworkClient? = null
             var jm: JmDownloadSession? = null
             try {
+                val source = SourceKeys.decodeChapter(record.entry.manga.id, record.entry.chapter.id).sourceId
                 val route = checkNotNull(record.route) { "下载线路尚未准备，请重试。" }
                 jm = createJmDownloadSession(context, record.entry.manga.id, record.entry.chapter.id, route)
                 if (jm == null) client = NetworkClient(
                     connectTimeoutMillis = 20_000, readTimeoutMillis = 45_000, callTimeoutMillis = 90_000,
                     acceptCompression = false, route = route,
+                    onTransfer = { observed -> experience.recordTransfer(source, observed.code, observed.bytes,
+                        observed.elapsedMillis, observed.headers.entries.firstOrNull { it.key.equals("Retry-After", true) }?.value,
+                        observed.failed) },
                 )
                 val selection = Mutex()
                 val progressUpdates = Mutex()
@@ -60,7 +65,7 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
                                 currentCoroutineContext().ensureActive()
                                 // Only optional worker work takes this budget. A visible reader
                                 // can start or join its actual transfer without waiting for it.
-                                val downloaded = experience.withBackgroundPageAdmission {
+                                val downloaded = experience.withBackgroundPageAdmission(source) {
                                     val index = selection.withLock {
                                         val current = store.record(id)
                                         if (current == null || current.workId != workId ||
@@ -78,8 +83,8 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
                     }
                 }
                 currentCoroutineContext().ensureActive()
-                val finished = store.record(id) ?: return@withLock
-                if (finished.workId != workId || finished.entry.status == DownloadStatus.PAUSED || finished.entry.status == DownloadStatus.FAILED) return@withLock
+                val finished = store.record(id) ?: return@withChapterAdmission
+                if (finished.workId != workId || finished.entry.status == DownloadStatus.PAUSED || finished.entry.status == DownloadStatus.FAILED) return@withChapterAdmission
                 if (finished.entry.completedPages != finished.pages.size) throw IOException("本地章节尚未下载完整")
                 store.update(id, workId) { it.copy(status = DownloadStatus.COMPLETED, error = "") }
             } finally {
@@ -122,8 +127,14 @@ internal class SessionDownloadScheduler(private val context: PlatformContext) {
                 }
             } finally { release() }
         }
-        synchronized(lock) { jobs[workId] = job; states[workId] = DownloadTaskState.ENQUEUED }
-        job.invokeOnCompletion { synchronized(lock) { jobs.remove(workId); states.remove(workId) } }
+        val accepted = synchronized(lock) {
+            if (jobs[workId]?.isCompleted == false) false
+            else { jobs[workId] = job; states[workId] = DownloadTaskState.ENQUEUED; true }
+        }
+        if (!accepted) { job.cancel(); return }
+        job.invokeOnCompletion { synchronized(lock) {
+            if (jobs[workId] === job) { jobs.remove(workId); states.remove(workId) }
+        } }
         job.start()
     }
     suspend fun cancel(workId: String) { synchronized(lock) { jobs[workId] }?.cancelAndJoin() }

@@ -576,6 +576,17 @@ class DownloadStore private constructor(context: Context) {
         if (preferLocal && file.isFile && file.length() > 0L) page.copy(url = file.toURI().toString()) else page
     }
 
+    /** Speculation may reuse a validated local file, but cannot claim a foreground transfer/route. */
+    internal suspend fun resolvePrefetchPage(mangaId: String, chapterId: String, page: Page): Page? = withContext(Dispatchers.IO) {
+        val id = chapterKey(mangaId, chapterId)
+        restoreChapter(id)
+        val snapshot = synchronized(lock) { records[id] } ?: return@withContext page
+        val stored = snapshot.pages.getOrNull(page.index) ?: return@withContext null
+        if (stored.url.substringBefore('?') != page.url.substringBefore('?')) return@withContext null
+        // An existing download alone owns missing pages, including its frozen route.
+        localPage(snapshot, page.index)
+    }
+
     /** Called for an image when it is needed, never on every download-progress publication. */
     suspend fun resolveReaderPage(mangaId: String, chapterId: String, page: Page): Page = withContext(Dispatchers.IO) {
         val id = chapterKey(mangaId, chapterId)
@@ -852,6 +863,7 @@ class DownloadStore private constructor(context: Context) {
         val record = records[id] ?: return@synchronized null
         if (record.workId != workId || record.entry.needsSourceRefresh ||
             record.entry.status !in listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)) return@synchronized null
+        if (writers[id] != null) return@synchronized null
         val failure = transferFailures[id]?.takeIf { it.generation == record.generation }
         if (retryAttempt) transferFailures.remove(id)
         else if (failure != null) throw failure.error
@@ -1134,7 +1146,6 @@ class DownloadStore private constructor(context: Context) {
         private const val MAX_IMPORT_PAGE_BYTES = 128L * 1024L * 1024L
         private const val MAX_IMPORT_BYTES = 1_500L * 1024L * 1024L
         private val ACTIVE_STATUSES = setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
-        internal val transferGate = Mutex()
         private val instanceLock = StorageLock()
         @Volatile private var instance: DownloadStore? = null
         fun get(context: Context): DownloadStore = instance ?: synchronized(instanceLock) {

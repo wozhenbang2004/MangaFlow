@@ -175,6 +175,7 @@ fun SettingsScreen(
     val routes by routeStore.state.collectAsStateWithLifecycle()
     val experienceStore = remember(context) { ExperiencePolicyStore.get(context) }
     val experienceBudget by experienceStore.state.collectAsStateWithLifecycle()
+    val experienceUsage by experienceStore.usage.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -472,7 +473,9 @@ fun SettingsScreen(
                                 }
                             }
                         }
-                        Text("图片缓存目标预算 ${experienceCacheSize(experienceBudget.diskCacheBytes)}，容量在启动时应用。书架、阅读记录与下载章节独立保存。",
+                        Text("图片缓存实际容量 " + (experienceUsage.diskLimit?.let(::experienceCacheSize) ?: "读取中") +
+                            "，目标 " + experienceCacheSize(experienceBudget.diskCacheBytes) +
+                            if (experienceUsage.diskResizePending) "。等待正在使用的原图释放后调整。" else "。离线章节独立保存。",
                             style = MaterialTheme.typography.bodySmall, color = secondary)
                         cacheNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
                     }
@@ -957,7 +960,7 @@ private fun SettingsSection(title: String, backdrop: HazeState?, content: @Compo
 
 /** Retain the actual controls while collapsed, including an in-progress wallpaper import. */
 @Composable
-private fun SettingsDisclosure(
+internal fun SettingsDisclosure(
     title: String,
     value: String,
     icon: ImageVector,
@@ -1015,7 +1018,7 @@ private fun SettingsRowIcon(icon: ImageVector) {
 
 
 @Composable
-private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onSelected: (T) -> Unit) {
+internal fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onSelected: (T) -> Unit) {
     val colors = MaterialTheme.colorScheme
     MotionTabs(
         selected = choices.indexOfFirst { it.first == selected }, labels = choices.map { it.second },
@@ -1028,7 +1031,7 @@ private fun <T> SettingsChoices(choices: List<Pair<T, String>>, selected: T, onS
 }
 
 @Composable
-private fun SettingsToggle(title: String, checked: Boolean, icon: ImageVector, onCheckedChange: (Boolean) -> Unit) {
+internal fun SettingsToggle(title: String, checked: Boolean, icon: ImageVector, onCheckedChange: (Boolean) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
     Row(
