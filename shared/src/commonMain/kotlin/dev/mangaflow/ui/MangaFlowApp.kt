@@ -1269,6 +1269,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     )
                                     Section.DOWNLOADS -> DownloadsScreen(store = model.downloads, repository = model.repository, onRead = model::openDownload,
                                         onRetry = model::retryDownload, onDetails = model::openManga,
+                                        onRetryUsingLatestRoute = model::retryDownloadUsingLatestRoute,
                                         backdrop = searchBackdrop, navigation = navigation, toolbar = toolbar,
                                         backgroundInParent = true,
                                         active = rootActive && !searchVisible, refreshingIds = refreshingDownloads,
@@ -1276,7 +1277,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         includedSourceIds = profileIncludes,
                                         preparations = chapterPreparations,
                                         onCancelPreparation = model::cancelChapterPreparation,
-                                        onRetryPreparation = model::retryChapterPreparation)
+                                        onRetryPreparation = model::retryChapterPreparation,
+                                        onRetryPreparationUsingLatestRoute = model::retryChapterPreparationUsingLatestRoute)
                                     Section.ACCOUNT -> if (restrictedMode) ContentProfileAccountScreen(
                                         repository = model.repository,
                                         sources = profileEntries.filter { it.enabled && it.isInstalled && !it.removed }.map { it.source },

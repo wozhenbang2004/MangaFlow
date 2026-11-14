@@ -3,6 +3,8 @@
 package dev.mangaflow.reader.panels
 
 import dev.mangaflow.experience.readerPriority
+import dev.mangaflow.experience.ReaderTransferObserver
+import dev.mangaflow.experience.readerTransferProgress
 
 import androidx.compose.animation.core.SnapSpec
 import androidx.compose.foundation.Canvas
@@ -79,6 +81,7 @@ internal fun PanelCamera(
     onError: (String) -> Unit,
     onDetailError: (String?) -> Unit,
     modifier: Modifier = Modifier,
+    transferObserver: ReaderTransferObserver? = null,
     onSwipe: (deltaX: Float) -> Unit = {},
     boxes: List<PanelBox> = emptyList(),
     selectedIndex: Int = 0,
@@ -141,9 +144,10 @@ internal fun PanelCamera(
         }
     }
 
-    val request = remember(page.url, headers, viewport, context) {
+    val request = remember(page.url, headers, viewport, context, transferObserver) {
         ImageRequest.Builder(imagePlatformContext(context))
             .data(page.url).readerPriority()
+            .apply { transferObserver?.let { readerTransferProgress(it) } }
             .httpHeaders(NetworkHeaders.Builder().apply {
                 headers.forEach { (name, value) -> set(name, value) }
             }.build())

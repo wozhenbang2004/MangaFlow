@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
@@ -32,6 +33,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -60,6 +63,7 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: Boolean) {
     val context = LocalMangaContext.current
+    val clipboard = LocalClipboardManager.current
     val settings by store.state.collectAsStateWithLifecycle()
     val latestSettings by rememberUpdatedState(settings)
     val scope = rememberCoroutineScope()
@@ -91,6 +95,16 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("服务响应", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
                 color = colors.onSurfaceVariant)
+            diagnosis?.let { result ->
+                MotionIconButton(onClick = {
+                    if (latestActive && diagnosedSettings == store.state.value) {
+                        clipboard.setText(AnnotatedString(result.safeReport()))
+                        notice = "已复制检查结果"
+                    }
+                }, enabled = active && job == null, modifier = Modifier.size(44.dp), tooltip = "复制脱敏检查结果") {
+                    Icon(Icons.Outlined.ContentCopy, "复制脱敏检查结果", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                }
+            }
             MotionIconButton(onClick = { showScope = !showScope }, enabled = active,
                 modifier = Modifier.size(44.dp), tooltip = if (showScope) "收起检查范围" else "检查范围") {
                 Icon(Icons.Outlined.Info, if (showScope) "收起检查范围" else "检查范围",
@@ -182,6 +196,10 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
                     if (details == row.route.mode) Column(Modifier.padding(start = 24.dp, end = 8.dp, bottom = 6.dp),
                             verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Text(row.message, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            val facts = listOfNotNull(row.httpStatus?.let { "HTTP $it" },
+                                row.responseMillis?.let { "本次总耗时 $it ms" })
+                            if (facts.isNotEmpty()) Text(facts.joinToString(" · "),
+                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                             row.route.proxy?.let { endpoint ->
                                 val host = if (':' in endpoint.host) "[" + endpoint.host + "]" else endpoint.host
                                 Text(host + ":" + endpoint.port, style = MaterialTheme.typography.labelSmall,
@@ -239,6 +257,7 @@ private fun diagnosticRouteLabel(route: DownloadRouteSnapshot): String = when (r
 private fun diagnosticResultLabel(result: NetworkProbeResult): String = when {
     result.usable && result.millis != null -> result.millis.toString() + " ms"
     result.usable -> "接口可用"
+    result.failureKind != null -> result.failureKind!!.label
     "超时" in result.message -> "连接超时"
     "拒绝访问" in result.message -> "已响应 · 拒绝访问"
     "限流" in result.message -> "已响应 · 限流"

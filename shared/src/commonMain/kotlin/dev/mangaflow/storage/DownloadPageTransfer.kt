@@ -5,6 +5,7 @@ import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.NetworkResponse
 import dev.mangaflow.net.Request
+import dev.mangaflow.net.retryAfterMillis
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.storage.StorageAtomicFile
 import dev.mangaflow.platform.storage.StorageFile
@@ -37,6 +38,7 @@ internal fun discardDownloadPartial(partial: StorageFile) {
 /** Stream exact unencoded bytes; append only after a matching strong validator and range. */
 internal suspend fun downloadPageFile(
     url: String, headers: Map<String, String>, partial: StorageFile, client: NetworkClient? = null,
+    onProgress: (DownloadPageProgress) -> Unit = {},
 ): Pair<Int, Int> {
     var target = url.toHttpUrlOrNull()?.takeIf { it.isHttps }
         ?: throw PermanentDownloadException("图片地址不是 HTTPS，已停止下载")
@@ -54,6 +56,8 @@ internal suspend fun downloadPageFile(
         var expectedBytes: Long? = null
         var expectedTotal: Long? = null
         var output: StorageOutput? = null
+        onProgress(DownloadPageProgress(DownloadPhase.CONNECTING,
+            retainedBytes = offset, expectedBytes = saved?.total))
         val request = Request.Builder().url(target).apply {
             requestHeaders.forEach { (name, value) -> header(name, value) }
             header("Accept-Encoding", "identity")
@@ -69,7 +73,7 @@ internal suspend fun downloadPageFile(
                     else {
                         val encoding = response.header("Content-Encoding")?.trim()
                         if (!encoding.isNullOrEmpty() && !encoding.equals("identity", true)) {
-                            throw IOException("来源未提供可安全保存的原图编码")
+                            throw DownloadValidationException("来源未提供可安全保存的原图编码")
                         }
                         val lengthHeader = response.header("Content-Length")
                         val length = lengthHeader?.toLongOrNull()
@@ -108,6 +112,8 @@ internal suspend fun downloadPageFile(
                             }
                             resume?.let { saveResume(partial, url, it) }
                         }
+                        onProgress(DownloadPageProgress(DownloadPhase.FIRST_BYTE_WAIT,
+                            retainedBytes = writeOffset, expectedBytes = expectedTotal))
                         true
                     }
                 }, onChunk = { bytes, count ->
@@ -117,6 +123,8 @@ internal suspend fun downloadPageFile(
                     }
                     writeToDisk { requireNotNull(output).write(bytes, 0, count) }
                     received += count
+                    onProgress(DownloadPageProgress(DownloadPhase.TRANSFERRING,
+                        receivedBytes = received, retainedBytes = writeOffset, expectedBytes = expectedTotal))
                 })
             } finally {
                 output?.let { stream -> writeToDisk { stream.close(); syncStorageFile(partial) } }
@@ -124,7 +132,7 @@ internal suspend fun downloadPageFile(
         } catch (invalid: InvalidRangeResponse) {
             discardDownloadPartial(partial)
             resume = null
-            if (restarted) throw IOException(invalid.message ?: "图片续传失败，请重试", invalid)
+            if (restarted) throw DownloadValidationException(invalid.message ?: "图片续传失败，请重试", invalid)
             restarted = true
             continue
         }
@@ -147,15 +155,17 @@ internal suspend fun downloadPageFile(
             restarted = true
             continue
         }
-        if (response.code != 200 && response.code != 206) throw responseFailure(response.code)
+        if (response.code != 200 && response.code != 206) throw responseFailure(response)
         if (expectedBytes?.let { received != it } == true ||
             expectedTotal?.let { partial.length() != it } == true) {
-            throw IOException("图片尚未传输完整，稍后继续下载")
+            throw DownloadValidationException("图片尚未传输完整，稍后继续下载")
         }
+        onProgress(DownloadPageProgress(DownloadPhase.VERIFYING,
+            receivedBytes = received, retainedBytes = writeOffset, expectedBytes = expectedTotal))
         val bounds = storageImageBounds(partial)
         if (bounds == null) {
             discardDownloadPartial(partial)
-            throw IOException("来源返回的内容不是可读取的图片")
+            throw DownloadValidationException("来源返回的内容不是可读取的图片")
         }
         return bounds
     }
@@ -219,11 +229,25 @@ private fun pageHeaders(headers: Map<String, String>): Map<String, String> {
     }
     return normalized
 }
-private fun responseFailure(code: Int): IOException = when (code) {
-    401, 403, 404 -> PermanentDownloadException("图片地址已失效（" + code + "），请刷新并重试", true)
-    429 -> IOException("来源暂时限流，请稍后重试")
-    else -> IOException("图片下载失败（" + code + "）")
+private fun responseFailure(response: NetworkResponse): IOException = DownloadHttpException(
+    response.code, retryAfterMillis(response.header("Retry-After")),
+)
+
+internal class DownloadHttpException(
+    val code: Int, val retryAfterMillis: Long? = null,
+) : IOException(when (code) {
+    401 -> "来源登录已失效（401），请检查登录状态"
+    403 -> "来源拒绝访问（403），请检查来源授权或访问提示"
+    404, 410 -> "图片地址已失效（$code），请刷新并重试"
+    429 -> "来源暂时限流，请稍后重试"
+    503 -> "来源暂时不可用，请在冷却后重试"
+    else -> "图片下载失败（$code）"
+}) {
+    val retryable: Boolean get() = code == 408 || code == 429 || code in 500..599
+    val needsSourceRefresh: Boolean get() = code == 404 || code == 410
 }
+
+internal class DownloadValidationException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
 internal class PermanentDownloadException(message: String, val needsSourceRefresh: Boolean = false) : IOException(message)
 internal class DownloadStorageException(message: String, cause: Throwable? = null) : IOException(message, cause)
@@ -233,4 +257,4 @@ private const val MAX_PAGE_BYTES = 96L * 1024L * 1024L
 private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
 private val RANGE = Regex("^bytes ([0-9]+)-([0-9]+)/([0-9]+)$", RegexOption.IGNORE_CASE)
 private val pageClient = NetworkClient(connectTimeoutMillis = 20_000, readTimeoutMillis = 45_000,
-    callTimeoutMillis = 90_000, acceptCompression = false)
+    callTimeoutMillis = 30L * 60L * 1000L, acceptCompression = false)

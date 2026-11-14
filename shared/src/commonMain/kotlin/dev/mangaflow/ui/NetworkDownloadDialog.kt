@@ -140,7 +140,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                             if (showInfo) NetworkConnectionHelp()
                         }
                     }
-                    Text("设置用于新建与手动重试的下载", Modifier.padding(top = 3.dp, bottom = 4.dp),
+                    Text("新任务使用此设置 · 已有任务保留原线路", Modifier.padding(top = 3.dp, bottom = 4.dp),
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 }
             }

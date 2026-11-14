@@ -102,7 +102,7 @@ internal actual suspend fun createWallpaperVideoPoster(media: StorageFile, poste
 
 internal actual class DownloadScheduler actual constructor(context: PlatformContext) {
     private val session = SessionDownloadScheduler(context)
-    actual fun schedule(chapterId: String, workId: String) = session.schedule(chapterId, workId)
+    actual fun schedule(chapterId: String, workId: String, userInitiated: Boolean) = session.schedule(chapterId, workId)
     actual suspend fun cancel(workId: String) = session.cancel(workId)
     actual suspend fun state(workId: String): DownloadTaskState? = session.state(workId)
 }

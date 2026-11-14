@@ -6,6 +6,7 @@ import dev.mangaflow.platform.storage.StorageFile as File
 import dev.mangaflow.platform.storage.StorageAtomicFile as AtomicFile
 import dev.mangaflow.platform.ConcurrentMap
 import dev.mangaflow.platform.wallTimeMillis
+import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.randomUuid
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.json.JSONArray
@@ -82,6 +83,7 @@ data class DownloadEntry(
     val createdAt: Long = wallTimeMillis(),
     val needsSourceRefresh: Boolean = false,
     val routingError: Boolean = false,
+    val progress: DownloadProgress = DownloadProgress(),
 )
 
 internal data class DownloadRecord(
@@ -91,6 +93,7 @@ internal data class DownloadRecord(
     val workId: String = "",
     val generation: String = randomUuid(),
     val route: DownloadRouteSnapshot? = null,
+    val networkAttempts: Int = 0,
 )
 
 /** Durable chapter manifests paired with WorkManager's persistent scheduler. */
@@ -105,6 +108,10 @@ class DownloadStore private constructor(context: Context) {
     private val pageTransfers = mutableMapOf<PageTransferKey, Deferred<Page?>>()
     private val foregroundPageUsers = mutableMapOf<PageTransferKey, Int>()
     private val transferFailures = mutableMapOf<String, TransferFailure>()
+    private val pageProgress = mutableMapOf<PageTransferKey, DownloadPageProgress>()
+    private val pageTransferRates = mutableMapOf<PageTransferKey, TransferRate>()
+    private val admissionWaits = mutableMapOf<String, MutableMap<String, Pair<DownloadWaitReason, Long?>>>()
+    private val transferRates = mutableMapOf<String, TransferRate>()
     private val chapterChanges = ConcurrentMap<String, Mutex>()
     private val availablePages = mutableMapOf<String, MutableSet<Int>>()
     private val readerPositions = mutableMapOf<String, Int>()
@@ -160,6 +167,30 @@ class DownloadStore private constructor(context: Context) {
     fun observeChapter(mangaId: String, chapterId: String): Flow<DownloadEntry?> = entries
         .map { all -> all.firstOrNull { it.manga.id == mangaId && it.chapter.id == chapterId } }
         .distinctUntilChanged()
+
+    /** Only this exact page can advance a reader's no-progress deadline; siblings cannot lend bytes. */
+    fun observePageTransfer(mangaId: String, chapterId: String, index: Int,
+        expectedPage: Page? = null): Flow<DownloadProgress?> {
+        val id = chapterKey(mangaId, chapterId)
+        return entries.map { published -> synchronized(lock) {
+            val visible = published.firstOrNull { it.id == id } ?: return@synchronized null
+            val record = records[id]?.takeIf { it.entry.status in ACTIVE_STATUSES &&
+                it.generation == visible.progress.generation && it.workId == visible.progress.workId }
+                ?: return@synchronized null
+            val page = record.pages.getOrNull(index) ?: return@synchronized null
+            if (expectedPage != null && pageManifestIdentity(page) != pageManifestIdentity(expectedPage))
+                return@synchronized null
+            val key = PageTransferKey(id, record.generation, index)
+            val sample = pageProgress[key] ?: return@synchronized null
+            val clock = pageTransferRates[key] ?: return@synchronized null
+            DownloadProgress(phase = sample.phase, pageIndex = index, activePages = 1,
+                receivedBytes = sample.receivedBytes + sample.retainedBytes,
+                transferredBytes = clock.transferred, expectedBytes = sample.expectedBytes,
+                updatedAt = clock.updatedAt, phaseStartedAt = clock.phaseStartedAt,
+                lastProgressAt = clock.lastProgressAt, routeLabel = record.entry.progress.routeLabel,
+                workId = record.workId, generation = record.generation, transferId = clock.identity)
+        } }.distinctUntilChanged()
+    }
 
     private suspend fun restoreChapter(id: String, publishRestored: Boolean = true) = withContext(Dispatchers.IO) {
         if (!id.matches(Regex("[a-f0-9]{64}"))) return@withContext
@@ -468,22 +499,27 @@ class DownloadStore private constructor(context: Context) {
                 )
                 prunePartialDownloads(id, pages, headers)
                 save(DownloadRecord(entry, pages, headers, route = capturedRoute))
-                if (!complete) schedule(id)
+                if (!complete) schedule(id, userInitiated = true)
             }
             id
         }
     }
 
-    fun retry(id: String) {
+    fun retry(id: String) = retryDownload(id, useLatestRoute = false)
+
+    /** A separate explicit action adopts the latest defaults; ordinary retry keeps the task route. */
+    fun retryUsingLatestRoute(id: String) = retryDownload(id, useLatestRoute = true)
+
+    private fun retryDownload(id: String, useLatestRoute: Boolean) {
         scope.launch {
-            try { resumeDownload(id, includePaused = true) }
+            try { resumeDownload(id, includePaused = true, useLatestRoute = useLatestRoute) }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { /* resumeDownload has already published its failure. */ }
         }
     }
 
     private suspend fun resumeDownload(
-        id: String, includePaused: Boolean, useLatestRoute: Boolean = true,
+        id: String, includePaused: Boolean, useLatestRoute: Boolean = false,
     ) = withContext(Dispatchers.IO) {
         awaitReady()
         changeChapter(id) {
@@ -498,8 +534,8 @@ class DownloadStore private constructor(context: Context) {
                     if (record.entry.needsSourceRefresh || record.entry.status in setOf(DownloadStatus.COMPLETED, DownloadStatus.RUNNING, DownloadStatus.QUEUED) ||
                         (!includePaused && record.entry.status == DownloadStatus.PAUSED)) return@changeChapter
                     generation = record.generation
-                    // A reader image retry continues its task. Explicit download retry adopts
-                    // the latest defaults, frozen before the old writer is detached.
+                    // Ordinary retry and reader recovery keep the frozen route. Only the
+                    // separately labelled explicit action adopts the latest defaults.
                     val route = if (useLatestRoute) DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
                         else record.route?.checked() ?: DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
                     detachWriter(record) to route
@@ -508,8 +544,10 @@ class DownloadStore private constructor(context: Context) {
                 stopWriter(change)
                 synchronized(lock) {
                     if (records[id] !== change.detached) return@changeChapter
-                    save(change.detached.copy(route = capturedRoute, entry = change.detached.entry.copy(status = DownloadStatus.QUEUED, error = "", routingError = false)))
-                    schedule(id)
+                    save(change.detached.copy(route = capturedRoute, networkAttempts = 0,
+                        entry = change.detached.entry.copy(status = DownloadStatus.QUEUED, error = "", routingError = false,
+                            progress = DownloadProgress(routeLabel = capturedRoute.progressLabel()))))
+                    schedule(id, userInitiated = true)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -520,7 +558,7 @@ class DownloadStore private constructor(context: Context) {
         }
     }
 
-    fun pause(id: String) {
+    fun pause(id: String, expectedWorkId: String? = null) {
         scope.launch {
             awaitReady()
             changeChapter(id) {
@@ -528,6 +566,7 @@ class DownloadStore private constructor(context: Context) {
                 try {
                     val change = synchronized(lock) {
                         val record = records[id] ?: return@changeChapter
+                        if (expectedWorkId != null && record.workId != expectedWorkId) return@changeChapter
                         if (record.entry.status == DownloadStatus.COMPLETED) return@changeChapter
                         generation = record.generation
                         detachWriter(record)
@@ -721,10 +760,11 @@ class DownloadStore private constructor(context: Context) {
                                 }
                                 transferFailures[key.id] = TransferFailure(key.generation, failure)
                                 val failed = latest.copy(entry = latest.entry.copy(
-                                    status = if (permanent != null || failure is DownloadStorageException || failure is DownloadRouteException) DownloadStatus.FAILED else DownloadStatus.WAITING,
+                                    status = if (permanent != null || !failure.canRetryDownload()) DownloadStatus.FAILED else DownloadStatus.WAITING,
                                     error = failure.message ?: "下载未完成",
-                                    needsSourceRefresh = permanent?.needsSourceRefresh == true,
+                                    needsSourceRefresh = permanent?.needsSourceRefresh == true || failure.downloadNeedsSourceRefresh(),
                                     routingError = failure is DownloadRouteException,
+                                    progress = latest.entry.progress.copy(failureReason = failure.downloadFailureReason(), httpStatus = failure.downloadHttpStatus()),
                                 ))
                                 try { save(failed) }
                                 catch (_: DownloadStorageException) {
@@ -738,7 +778,16 @@ class DownloadStore private constructor(context: Context) {
                 }.also { deferred ->
                     pageTransfers[key] = deferred
                     deferred.invokeOnCompletion {
-                        synchronized(lock) { if (pageTransfers[key] === deferred) pageTransfers.remove(key) }
+                        synchronized(lock) {
+                            if (pageTransfers[key] === deferred) {
+                                pageTransfers.remove(key)
+                                pageTransferRates.remove(key)
+                                if (pageProgress.remove(key) != null) records[key.id]?.takeIf { it.generation == key.generation }?.let { latest ->
+                                    records[key.id] = latest.copy(entry = latest.entry.copy(progress = aggregateProgress(latest)))
+                                    publish(reorder = false)
+                                }
+                            }
+                        }
                     }
                     deferred.start()
                 }
@@ -799,6 +848,7 @@ class DownloadStore private constructor(context: Context) {
         snapshot: DownloadRecord, key: PageTransferKey, client: NetworkClient?, jm: JmDownloadSession?,
     ): Page? {
         localPage(snapshot, key.index)?.let { return it }
+        recordPageProgress(key, DownloadPageProgress(DownloadPhase.PREPARING))
         val original = snapshot.pages[key.index]
         val page = resolveScriptPage(context, snapshot.entry.manga.id, snapshot.entry.chapter.id, original, snapshot.route)
         val imageHeaders = snapshot.headers + page.headers
@@ -838,8 +888,15 @@ class DownloadStore private constructor(context: Context) {
             // The JM CDN returns scrambled JPEG bytes. Materialize the decoded page before
             // validating or publishing it; background workers use the native source bridge.
             val scriptFile = if (scriptSource) {
+                var scriptReceived = 0L
                 val materialized = materializeScriptPage(context, snapshot.entry.manga.id,
-                    snapshot.entry.chapter.id, page, snapshot.route)
+                    snapshot.entry.chapter.id, page, snapshot.route, onBytes = { count ->
+                        if (count > 0L) {
+                            scriptReceived += count
+                            recordPageProgress(key, DownloadPageProgress(DownloadPhase.TRANSFERRING,
+                                receivedBytes = scriptReceived))
+                        }
+                    })
                 val path = dev.mangaflow.reader.readerFilePath(materialized.url)
                     ?: throw PermanentDownloadException("来源图片未完成解码。")
                 val file = File(path)
@@ -852,6 +909,7 @@ class DownloadStore private constructor(context: Context) {
                 // transport stays in the restricted source host, including plain images.
                 materializedJm = true
                 discardDownloadPartial(partial)
+                recordPageProgress(key, DownloadPageProgress(DownloadPhase.VERIFYING, retainedBytes = scriptFile.length(), expectedBytes = scriptFile.length()))
                 scriptFile.copyTo(partial, overwrite = true)
                 syncStorageFile(partial)
                 storageImageBounds(partial) ?: throw PermanentDownloadException("来源图片不完整。")
@@ -860,12 +918,16 @@ class DownloadStore private constructor(context: Context) {
                 discardDownloadPartial(partial)
                 if (decoded.size.toLong() !in 128L..(96L * 1024L * 1024L))
                     throw PermanentDownloadException("图片解码后大小无效")
+                recordPageProgress(key, DownloadPageProgress(DownloadPhase.VERIFYING, retainedBytes = decoded.size.toLong(), expectedBytes = decoded.size.toLong()))
                 partial.writeBytes(decoded)
                 syncStorageFile(partial)
                 storageImageBounds(partial)
                     ?: throw PermanentDownloadException("解码后的图片不完整")
-            } else downloadPageFile(page.url, imageHeaders, partial, client ?: ownedClient)
+            } else downloadPageFile(page.url, imageHeaders, partial, client ?: ownedClient) { observed ->
+                recordPageProgress(key, observed)
+            }
             val savedBytes = partial.length()
+            recordPageProgress(key, DownloadPageProgress(DownloadPhase.COMMITTING, expectedBytes = savedBytes, retainedBytes = savedBytes))
             currentCoroutineContext().ensureActive()
             return synchronized(lock) {
                 val current = records[key.id] ?: return@synchronized null
@@ -886,15 +948,25 @@ class DownloadStore private constructor(context: Context) {
                     if (position == key.index) value.copy(width = bounds.first, height = bounds.second) else value
                 }
                 val complete = available.size == current.pages.size && validatedGenerations[key.id] == current.generation
+                pageProgress.remove(key)
+                pageTransferRates.remove(key)
                 save(current.copy(pages = updatedPages, entry = current.entry.copy(
                     completedPages = available.size,
                     downloadedBytes = downloadedBytes,
                     status = if (complete) DownloadStatus.COMPLETED else current.entry.status,
                     error = "", routingError = false,
+                    progress = aggregateProgress(current, if (complete) DownloadPhase.COMPLETED else null),
                 )))
                 updatedPages[key.index].copy(url = destination.toURI().toString())
             }
         } finally {
+            synchronized(lock) {
+                pageTransferRates.remove(key)
+                if (pageProgress.remove(key) != null) records[key.id]?.takeIf { it.generation == key.generation }?.let { latest ->
+                    records[key.id] = latest.copy(entry = latest.entry.copy(progress = aggregateProgress(latest)))
+                    publish(reorder = false)
+                }
+            }
             runCatching { ownedClient?.close() }
             runCatching { ownedJm?.close() }
             // Generic HTTP partials retain their verified resume metadata across interruptions.
@@ -957,7 +1029,11 @@ class DownloadStore private constructor(context: Context) {
 
     private fun detachWriter(record: DownloadRecord): FileChange {
         val writer = writers[record.entry.id]
-        val detached = record.copy(workId = "", generation = randomUuid(), entry = record.entry.copy(status = DownloadStatus.PAUSED, error = ""))
+        clearProgress(record.entry.id)
+        val now = wallTimeMillis()
+        val detached = record.copy(workId = "", generation = randomUuid(), entry = record.entry.copy(status = DownloadStatus.PAUSED, error = "",
+            progress = DownloadProgress(phase = DownloadPhase.PAUSED, updatedAt = now, phaseStartedAt = now,
+                routeLabel = record.entry.progress.routeLabel))).withProgressState()
         save(detached)
         transferFailures.remove(record.entry.id)
         verifiedPageFiles.keys.removeAll { it.id == record.entry.id }
@@ -991,17 +1067,159 @@ class DownloadStore private constructor(context: Context) {
         val writer: ChapterWriter?, val transfers: List<Deferred<Page?>>,
     )
 
-    internal fun update(id: String, workId: String, transform: (DownloadEntry) -> DownloadEntry) = synchronized(lock) {
+    internal fun update(id: String, workId: String, networkFailure: Boolean = false,
+        transform: (DownloadEntry) -> DownloadEntry) = synchronized(lock) {
         val record = records[id] ?: return@synchronized
         if (record.workId != workId || record.entry.status == DownloadStatus.PAUSED) return@synchronized
         val next = transform(record.entry)
-        if (next == record.entry) return@synchronized
+        if (next == record.entry && !networkFailure) return@synchronized
         // A page requested by the reader can finish the chapter while the worker is updating its
         // notification. Late cancellation/bookkeeping must not turn those saved images into failure.
         if (record.entry.status == DownloadStatus.COMPLETED && next.status != DownloadStatus.COMPLETED) return@synchronized
         if (record.entry.status == DownloadStatus.FAILED && record.entry.needsSourceRefresh && !next.needsSourceRefresh) return@synchronized
-        try { save(record.copy(entry = next)) }
+        try { save(record.copy(entry = next, networkAttempts = record.networkAttempts + if (networkFailure) 1 else 0)) }
         catch (error: Exception) { memoryFailure(id, error); throw error }
+    }
+
+    /** Admission is observable while waiting, without claiming that any image has been downloaded. */
+    internal fun admissionWait(id: String, workId: String, token: String,
+        reason: DownloadWaitReason?, retryAt: Long? = null) = synchronized(lock) {
+        val record = records[id]?.takeIf { it.workId == workId && it.entry.status in ACTIVE_STATUSES }
+            ?: return@synchronized
+        val waits = admissionWaits.getOrPut(id) { mutableMapOf() }
+        if (reason == null) waits.remove(token) else waits[token] = reason to retryAt
+        if (waits.isEmpty()) admissionWaits.remove(id)
+        val next = aggregateProgress(record)
+        // The policy's countdown may change every wake; persist only real state changes.
+        val previous = record.entry.progress
+        val changed = next.phase != previous.phase || next.waitingReason != previous.waitingReason ||
+            (next.retryAt == null) != (previous.retryAt == null) ||
+            next.retryAt != null && previous.retryAt != null && kotlin.math.abs(next.retryAt - previous.retryAt) >= 1_000L
+        if (changed) {
+            val status = if (token == "chapter" && reason != null) DownloadStatus.WAITING else record.entry.status
+            save(record.copy(entry = record.entry.copy(status = status, progress = next)))
+        }
+    }
+
+    internal fun prepareExecution(id: String, workId: String) = synchronized(lock) {
+        val record = records[id]?.takeIf { it.workId == workId && it.entry.status in ACTIVE_STATUSES }
+            ?: return@synchronized
+        admissionWaits.remove(id)
+        val now = wallTimeMillis()
+        save(record.copy(entry = record.entry.copy(status = DownloadStatus.RUNNING, error = "", routingError = false,
+            progress = DownloadProgress(phase = DownloadPhase.PREPARING, updatedAt = now, phaseStartedAt = now,
+                routeLabel = record.route?.progressLabel().orEmpty()))))
+    }
+
+    private fun recordPageProgress(key: PageTransferKey, progress: DownloadPageProgress) = synchronized(lock) {
+        val record = records[key.id]?.takeIf { it.generation == key.generation && it.entry.status in ACTIVE_STATUSES }
+            ?: return@synchronized
+        val previous = pageProgress[key]
+        val safe = progress.copy(receivedBytes = progress.receivedBytes.coerceAtLeast(0),
+            retainedBytes = progress.retainedBytes.coerceAtLeast(0), expectedBytes = progress.expectedBytes?.takeIf { it > 0L })
+        pageProgress[key] = safe
+        val rate = transferRates.getOrPut(key.id) { TransferRate(key.generation) }
+        if (rate.generation != key.generation) return@synchronized
+        // Restarts begin a new attempt; a server ignoring Range must not produce a negative sample.
+        val newBytes = if (safe.receivedBytes >= (previous?.receivedBytes ?: 0L))
+            safe.receivedBytes - (previous?.receivedBytes ?: 0L) else safe.receivedBytes
+        val now = wallTimeMillis()
+        val monotonic = monotonicTimeMillis()
+        val pageClock = pageTransferRates.getOrPut(key) { TransferRate(key.generation) }
+        pageClock.transferred += newBytes
+        if (newBytes > 0L) pageClock.lastProgressAt = now
+        pageClock.updatedAt = now
+        if (previous?.phase != safe.phase) pageClock.phaseStartedAt = now
+        rate.transferred += newBytes
+        if (newBytes > 0L) rate.lastProgressAt = now
+        if (rate.samples.isEmpty() || monotonic - rate.samples.last().first >= 250L) {
+            rate.samples.addLast(monotonic to rate.transferred)
+            while (rate.samples.size > 2 && monotonic - rate.samples.first().first > 3_000L) rate.samples.removeFirst()
+        }
+        val phaseChanged = previous?.phase != safe.phase
+        if (phaseChanged || now < record.entry.progress.updatedAt || now - record.entry.progress.updatedAt >= 250L) {
+            records[key.id] = record.copy(entry = record.entry.copy(progress = aggregateProgress(record)))
+            publish(reorder = false)
+        }
+    }
+
+    private fun aggregateProgress(record: DownloadRecord, explicitPhase: DownloadPhase? = null): DownloadProgress {
+        val current = record.entry.progress
+        val samples = pageProgress.filterKeys { it.id == record.entry.id && it.generation == record.generation }
+        val chosen = samples.entries.minWithOrNull(compareBy<Map.Entry<PageTransferKey, DownloadPageProgress>> {
+            when (it.value.phase) { DownloadPhase.TRANSFERRING -> 0; DownloadPhase.VERIFYING -> 1
+                DownloadPhase.COMMITTING -> 2; DownloadPhase.FIRST_BYTE_WAIT -> 3; DownloadPhase.CONNECTING -> 4; else -> 5 }
+        }.thenBy { it.key.index })
+        val wait = admissionWaits[record.entry.id]?.values?.minByOrNull { (reason, _) -> reason.ordinal }
+        val phase = explicitPhase ?: when (record.entry.status) {
+            DownloadStatus.COMPLETED -> DownloadPhase.COMPLETED
+            DownloadStatus.PAUSED -> DownloadPhase.PAUSED
+            DownloadStatus.FAILED -> DownloadPhase.FAILED
+            else -> chosen?.value?.phase ?: if (wait != null) DownloadPhase.WAITING else when (current.phase) {
+                DownloadPhase.PREPARING -> DownloadPhase.PREPARING
+                else -> DownloadPhase.QUEUED
+            }
+        }
+        val page = chosen?.key?.index
+        val now = wallTimeMillis()
+        val rate = transferRates[record.entry.id]?.takeIf { it.generation == record.generation }
+        val elapsed = rate?.samples?.let { if (it.size >= 2) it.last().first - it.first().first else 0L } ?: 0L
+        val speed = if (phase == DownloadPhase.TRANSFERRING && elapsed >= 500L && rate != null &&
+            rate.lastProgressAt?.let { now - it <= 4_000L } == true)
+            ((rate.samples.last().second - rate.samples.first().second) * 1_000L / elapsed).takeIf { it > 0L } else null
+        val onePage = samples.values.singleOrNull()
+        return DownloadProgress(phase = phase, pageIndex = page, activePages = samples.size,
+            receivedBytes = samples.values.sumOf { it.receivedBytes + it.retainedBytes },
+            transferredBytes = rate?.transferred ?: current.transferredBytes,
+            expectedBytes = onePage?.expectedBytes, bytesPerSecond = speed, updatedAt = now,
+            phaseStartedAt = if (current.phase == phase && current.pageIndex == page && current.phaseStartedAt > 0L) current.phaseStartedAt else now,
+            lastProgressAt = rate?.lastProgressAt ?: current.lastProgressAt,
+            waitingReason = if (chosen == null) wait?.first else null,
+            retryAt = if (chosen == null) wait?.second else null,
+            routeLabel = record.route?.progressLabel() ?: current.routeLabel,
+            failureReason = current.failureReason, httpStatus = current.httpStatus,
+            workId = record.workId, generation = record.generation)
+    }
+
+    private fun clearProgress(id: String) {
+        pageProgress.keys.removeAll { it.id == id }
+        pageTransferRates.keys.removeAll { it.id == id }
+        admissionWaits.remove(id)
+        transferRates.remove(id)
+    }
+
+    private fun DownloadRecord.withProgressState(): DownloadRecord {
+        val old = entry.progress
+        val phase = when (entry.status) {
+            DownloadStatus.COMPLETED -> DownloadPhase.COMPLETED
+            DownloadStatus.PAUSED -> DownloadPhase.PAUSED
+            DownloadStatus.FAILED -> DownloadPhase.FAILED
+            DownloadStatus.QUEUED -> if (old.activePages > 0) old.phase else DownloadPhase.QUEUED
+            else -> old.phase
+        }
+        val now = wallTimeMillis()
+        val terminal = entry.status in setOf(DownloadStatus.COMPLETED, DownloadStatus.PAUSED, DownloadStatus.FAILED)
+        val next = old.copy(phase = phase,
+            phaseStartedAt = if (old.phase == phase && old.phaseStartedAt > 0L) old.phaseStartedAt else now,
+            routeLabel = route?.progressLabel() ?: old.routeLabel,
+            workId = workId, generation = generation,
+            activePages = if (terminal) 0 else old.activePages,
+            pageIndex = if (terminal) null else old.pageIndex,
+            receivedBytes = if (terminal) 0 else old.receivedBytes,
+            expectedBytes = if (terminal) null else old.expectedBytes,
+            bytesPerSecond = if (terminal || phase == DownloadPhase.WAITING) null else old.bytesPerSecond,
+            waitingReason = if (terminal) null else old.waitingReason,
+            retryAt = if (terminal) null else old.retryAt)
+        return if (next == old) this else copy(entry = entry.copy(progress = next))
+    }
+
+    private class TransferRate(val generation: String) {
+        val identity = randomUuid()
+        var transferred = 0L
+        var lastProgressAt: Long? = null
+        var updatedAt = 0L
+        var phaseStartedAt = 0L
+        val samples = ArrayDeque<Pair<Long, Long>>()
     }
 
     internal fun pageFile(id: String, index: Int): File = File(directory(id), "${index.toString().padStart(5, '0')}.img")
@@ -1139,18 +1357,21 @@ class DownloadStore private constructor(context: Context) {
 
     private fun isReadableImage(file: File): Boolean = file.isFile && file.length() > 0 && storageImageBounds(file) != null
 
-    private fun schedule(id: String) {
+    private fun schedule(id: String, userInitiated: Boolean = false) {
         val record = records[id] ?: return
         val workId = randomUuid()
         save(record.copy(workId = workId))
-        try { scheduler.schedule(id, workId) }
+        try { scheduler.schedule(id, workId, userInitiated = userInitiated) }
         catch (error: Exception) { memoryFailure(id, error); throw error }
     }
 
     private fun save(record: DownloadRecord) {
-        writeManifest(directory(record.entry.id), record)
-        val previous = records[record.entry.id]
-        records[record.entry.id] = record
+        val normalized = record.withProgressState()
+        writeManifest(directory(normalized.entry.id), normalized)
+        val previous = records[normalized.entry.id]
+        records[normalized.entry.id] = normalized
+        if (normalized.entry.status in setOf(DownloadStatus.PAUSED, DownloadStatus.COMPLETED, DownloadStatus.FAILED))
+            clearProgress(normalized.entry.id)
         publish(reorder = previous == null || previous.entry.createdAt != record.entry.createdAt)
     }
 
@@ -1189,7 +1410,7 @@ class DownloadStore private constructor(context: Context) {
     private fun memoryFailure(id: String, error: Exception, generation: String? = null) = synchronized(lock) {
         val record = records[id] ?: return@synchronized
         if (generation != null && record.generation != generation) return@synchronized
-        records[id] = record.copy(entry = record.entry.copy(status = DownloadStatus.FAILED, error = error.message ?: "无法保存下载状态"))
+        records[id] = record.copy(entry = record.entry.copy(status = DownloadStatus.FAILED, error = error.message ?: "无法保存下载状态")).withProgressState()
         publish()
     }
 
@@ -1276,6 +1497,15 @@ private fun DownloadRecord.toJson() = JSONObject().apply {
     put("createdAt", entry.createdAt)
     put("workId", workId)
     put("generation", generation)
+    put("networkAttempts", networkAttempts)
+    put("progress", JSONObject().apply {
+        put("phase", entry.progress.phase.name)
+        put("phaseStartedAt", entry.progress.phaseStartedAt)
+        entry.progress.waitingReason?.let { put("waitingReason", it.name) }
+        entry.progress.retryAt?.let { put("retryAt", it) }
+        entry.progress.failureReason?.let { put("failureReason", it.name) }
+        entry.progress.httpStatus?.let { put("httpStatus", it) }
+    })
     route?.let { put("route", it.toDownloadJson()) }
     put("pages", JSONArray(pages.map { it.toJson() }))
     put("headers", JSONObject(headers.filterKeys { it.equals("Referer", true) || it.equals("User-Agent", true) || it.equals("Accept", true) }))
@@ -1295,6 +1525,16 @@ private fun readRecord(json: JSONObject): DownloadRecord {
     val savedStatus = DownloadStatus.entries.firstOrNull { it.name == json.optString("status") }
         ?: DownloadStatus.FAILED
     val routeProblem = invalidRoute && savedStatus != DownloadStatus.COMPLETED
+    val savedProgress = json.optJSONObject("progress")
+    // A dead process cannot still be receiving. Retain only its durable wait/failure facts.
+    val restoredPhase = when (savedStatus) {
+        DownloadStatus.COMPLETED -> DownloadPhase.COMPLETED
+        DownloadStatus.PAUSED -> DownloadPhase.PAUSED
+        DownloadStatus.FAILED -> DownloadPhase.FAILED
+        DownloadStatus.QUEUED -> DownloadPhase.QUEUED
+        else -> DownloadPhase.WAITING
+    }
+    val restoredWait = DownloadWaitReason.entries.firstOrNull { it.name == savedProgress?.optString("waitingReason") }
     return DownloadRecord(
         entry = DownloadEntry(
             id = json.getString("id"),
@@ -1308,13 +1548,28 @@ private fun readRecord(json: JSONObject): DownloadRecord {
             needsSourceRefresh = json.optBoolean("needsSourceRefresh", false),
             routingError = savedStatus != DownloadStatus.COMPLETED && (routeProblem || json.optBoolean("routingError", false)),
             createdAt = json.optLong("createdAt"),
+            progress = DownloadProgress(phase = if (routeProblem) DownloadPhase.FAILED else restoredPhase,
+                phaseStartedAt = savedProgress?.optLong("phaseStartedAt") ?: 0L,
+                routeLabel = route?.progressLabel().orEmpty(),
+                waitingReason = if (restoredPhase == DownloadPhase.WAITING) restoredWait ?: DownloadWaitReason.SYSTEM_SUSPENDED else null,
+                retryAt = savedProgress?.takeIf { it.has("retryAt") }?.optLong("retryAt")?.takeIf { it > 0L },
+                failureReason = if (routeProblem) DownloadFailureReason.ROUTE else DownloadFailureReason.entries.firstOrNull {
+                    it.name == savedProgress?.optString("failureReason") },
+                httpStatus = savedProgress?.takeIf { it.has("httpStatus") }?.optInt("httpStatus")),
         ),
         pages = pages,
         headers = headers.keys().asSequence().associateWith(headers::getString),
         workId = json.optString("workId"),
         generation = json.optString("generation").ifBlank { randomUuid() },
         route = route,
+        networkAttempts = json.optInt("networkAttempts").coerceIn(0, 4),
     )
+}
+
+private fun DownloadRouteSnapshot.progressLabel(): String = when (mode) {
+    DownloadRouteMode.SYSTEM -> "跟随系统"
+    DownloadRouteMode.DIRECT -> "直连"
+    DownloadRouteMode.PROXY -> "指定代理"
 }
 
 /** No secrets are stored: only this task's already resolved endpoint and mode. */

@@ -3,6 +3,7 @@ package dev.mangaflow.net
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.timeout
 import io.ktor.client.plugins.compression.ContentEncoding
 import io.ktor.client.request.prepareRequest
 import io.ktor.client.request.setBody
@@ -23,6 +24,10 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import dev.mangaflow.platform.monotonicTimeMillis
 import okio.Buffer
 
@@ -170,14 +175,15 @@ class NetworkClient(
         request: Request, maximumBytes: Long, onResponse: (NetworkResponse) -> Boolean,
         onChunk: (ByteArray, Int) -> Unit,
     ): NetworkResponse {
-        val response = transfer(request, maximumBytes, { _, _ -> }, onChunk) { code, headers ->
+        val response = transfer(request, maximumBytes, { _, _ -> }, onChunk, streaming = true) { code, headers ->
             onResponse(NetworkResponse(code, headers, ByteArray(0)))
         }
         return NetworkResponse(response.first, response.second, ByteArray(0))
     }
     private suspend fun transfer(
         request: Request, maximumBytes: Long, progress: (Long, Long) -> Unit,
-        write: (ByteArray, Int) -> Unit, acceptResponse: (Int, Map<String, String>) -> Boolean = { _, _ -> true },
+        write: (ByteArray, Int) -> Unit, streaming: Boolean = false,
+        acceptResponse: (Int, Map<String, String>) -> Boolean = { _, _ -> true },
     ): Pair<Int, Map<String, String>> = coroutineScope {
         require(maximumBytes >= 0)
         val job = currentCoroutineContext()[Job]!!
@@ -188,8 +194,23 @@ class NetworkClient(
         var received = 0L
         var failed = false
         var cancelled = false
+        val responseTimedOut = CompletableDeferred<Unit>()
+        // Darwin does not support Ktor's connect timeout. This deadline also bounds
+        // DNS/TLS/response-header waiting on every engine, then retires on headers.
+        val responseDeadline = if (streaming) launch {
+            delay(STREAM_RESPONSE_TIMEOUT_MILLIS)
+            responseTimedOut.complete(Unit)
+            throw NetworkTransferException(NetworkFailureKind.RESPONSE_TIMEOUT,
+                "等待来源响应超时，请稍后重试")
+        } else null
         try {
             client.prepareRequest {
+                // A progressing large image may take longer than the ordinary API
+                // call budget. Inactivity remains independently bounded below.
+                if (streaming) timeout {
+                    requestTimeoutMillis = STREAM_TOTAL_TIMEOUT_MILLIS
+                    socketTimeoutMillis = STREAM_IDLE_TIMEOUT_MILLIS
+                }
                 url.takeFrom(request.url.toString())
                 method = HttpMethod.parse(request.method)
                 request.headers.forEach { (name, value) -> headers.append(name, value) }
@@ -198,6 +219,7 @@ class NetworkClient(
                     setBody(body.bytes)
                 }
             }.execute { response ->
+                responseDeadline?.cancel()
                 if (selectedRoute?.mode == DownloadRouteMode.PROXY && response.status.value == 407) {
                     throw DownloadRouteException("这个代理需要身份验证；当前仅支持无需账号密码的 HTTP / SOCKS 代理。")
                 }
@@ -209,27 +231,43 @@ class NetworkClient(
                 require(announced == null || announced <= maximumBytes) { "Response exceeds the size limit" }
                 val input = response.bodyAsChannel()
                 val buffer = ByteArray(16 * 1024)
+                var lastByteAt = monotonicTimeMillis()
                 progress(0, announced ?: -1)
                 while (!input.isClosedForRead) {
                     currentCoroutineContext().ensureActive()
-                    val count = input.readAvailable(buffer)
+                    val count = if (streaming) {
+                        val remaining = STREAM_IDLE_TIMEOUT_MILLIS - (monotonicTimeMillis() - lastByteAt)
+                        if (remaining <= 0L) throw streamIdleTimeout(received)
+                        withTimeoutOrNull(remaining) { input.readAvailable(buffer) }
+                            ?: throw streamIdleTimeout(received)
+                    } else input.readAvailable(buffer)
                     if (count < 0) break
                     if (count == 0) continue
                     received += count
                     require(received <= maximumBytes) { "Response exceeds the size limit" }
                     write(buffer, count)
+                    lastByteAt = monotonicTimeMillis()
                     progress(received, announced ?: -1)
                 }
                 input.closedCause?.let { throw it }
                 response.status.value to responseHeaders
             }
         } catch (cancel: CancellationException) {
-            cancelled = true
+            cancelled = !responseTimedOut.isCompleted
+            failed = responseTimedOut.isCompleted
             throw cancel
         } catch (failure: Exception) {
             failed = true
+            if (streaming && failure !is NetworkTransferException) {
+                networkFailureKind(failure)?.let { identified ->
+                    val kind = if (identified == NetworkFailureKind.TRANSFER_TIMEOUT && received == 0L)
+                        NetworkFailureKind.RESPONSE_TIMEOUT else identified
+                    throw NetworkTransferException(kind, kind.message, failure)
+                }
+            }
             throw failure
         } finally {
+            responseDeadline?.cancel()
             synchronized(activeLock) { active.remove(job) }
             if (!cancelled) runCatching {
                 onTransfer?.invoke(NetworkTransferObservation(observedCode, observedHeaders, received,
@@ -238,3 +276,12 @@ class NetworkClient(
         }
     }
 }
+
+private const val STREAM_RESPONSE_TIMEOUT_MILLIS = 45_000L
+private const val STREAM_IDLE_TIMEOUT_MILLIS = 45_000L
+private const val STREAM_TOTAL_TIMEOUT_MILLIS = 30L * 60L * 1000L
+
+private fun streamIdleTimeout(received: Long) = NetworkTransferException(
+    if (received == 0L) NetworkFailureKind.RESPONSE_TIMEOUT else NetworkFailureKind.TRANSFER_TIMEOUT,
+    if (received == 0L) "来源尚未返回图片数据，请稍后重试" else "图片传输已停止响应，稍后从有效断点继续",
+)

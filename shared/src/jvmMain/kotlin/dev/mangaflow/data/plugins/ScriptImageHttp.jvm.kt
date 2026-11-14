@@ -5,9 +5,15 @@ import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.NetworkFailureKind
+import dev.mangaflow.net.NetworkTransferException
+import dev.mangaflow.net.retryAfterMillis
 import dev.mangaflow.platform.PlatformContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -23,17 +29,21 @@ import java.net.Proxy
 import java.net.ProxySelector
 import java.net.URI
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.ceil
 
 /** Fetch real original bytes, retaining the source's DNS/TLS and immutable routing guarantees. */
 internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url: String,
-    headers: Map<String, String>, route: DownloadRouteSnapshot?, onBytes: ((Long) -> Unit)?): ByteArray {
+    headers: Map<String, String>, route: DownloadRouteSnapshot?, onBytes: ((Long) -> Unit)?,
+    onResponse: ((Int, Map<String, String>) -> Unit)?): ByteArray {
     var current = publicPluginUrl(url).toString().toHttpUrlOrNull() ?: error("来源图片地址无效。")
+    val responseObserver = onResponse
     var actualHeaders = JvmScriptNetwork.checkedHeaders(JSONObject(headers)).filterKeys { !it.equals("Accept-Encoding", true) }
     val sockets = route?.let { publicSourceSocketFactory(it, JvmScriptNetwork::isPublic) }
     val client = JvmScriptNetwork.defaultClient.newBuilder().connectionPool(ConnectionPool()).dispatcher(Dispatcher())
-        .readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS).callTimeout(30, TimeUnit.MINUTES)
         .apply { if (sockets != null) socketFactory(sockets) }.build()
     try {
         repeat(4) { redirects ->
@@ -46,20 +56,51 @@ internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url:
             JvmScriptNetwork.reserveOrigin(current)
             val request = Request.Builder().url(current)
                 .apply { actualHeaders.forEach { (name, value) -> header(name, value) } }.build()
+            val requestContext = currentCoroutineContext()
             val result = suspendCancellableCoroutine<ScriptImageHttpResult> { continuation ->
                 val call = client.newCall(request)
-                continuation.invokeOnCancellation { call.cancel() }
+                // One winner between response headers and their deadline: waiting/received/expired.
+                val headerState = AtomicInteger(0)
+                val responseDeadline = CoroutineScope(requestContext).launch {
+                    delay(45_000L)
+                    if (headerState.compareAndSet(0, 2)) call.cancel()
+                }
+                continuation.invokeOnCancellation { responseDeadline.cancel(); call.cancel() }
                 call.enqueue(object : Callback {
                     override fun onFailure(call: Call, failure: IOException) {
-                        if (continuation.isActive) continuation.resumeWithException(SourceException("来源图片连接失败。", cause = failure))
+                        headerState.compareAndSet(0, 1)
+                        responseDeadline.cancel()
+                        if (continuation.isActive) continuation.resumeWithException(
+                            if (headerState.get() == 2) NetworkTransferException(NetworkFailureKind.RESPONSE_TIMEOUT,
+                                "等待来源图片响应超时，请稍后重试。", failure)
+                            else SourceException("来源图片连接失败。", cause = failure))
                     }
                     override fun onResponse(call: Call, response: Response) {
+                        headerState.compareAndSet(0, 1)
+                        responseDeadline.cancel()
                         try {
                             val value = response.use { currentResponse ->
+                                if (headerState.get() == 2) throw NetworkTransferException(NetworkFailureKind.RESPONSE_TIMEOUT,
+                                    "等待来源图片响应超时，请稍后重试。")
+                                val responseHeaders = currentResponse.headers.toMultimap().mapValues { it.value.joinToString(", ") }
+                                responseObserver?.invoke(currentResponse.code, responseHeaders)
                                 val location = currentResponse.header("Location")
                                 if (currentResponse.code in setOf(301, 302, 303, 307, 308))
                                     return@use ScriptImageHttpResult(currentResponse.code, location, ByteArray(0))
-                                if (!currentResponse.isSuccessful) throw SourceException("来源图片暂时无法读取。", httpStatus = currentResponse.code)
+                                if (!currentResponse.isSuccessful) {
+                                    val limited = currentResponse.code in setOf(429, 503)
+                                    val retry = retryAfterMillis(currentResponse.header("Retry-After")) ?: if (limited) 30_000L else 0L
+                                    val seconds = ceil(retry / 1000.0).toLong()
+                                    if (limited) JvmScriptNetwork.rememberPause(current, seconds.coerceAtLeast(1L))
+                                    throw SourceException(when (currentResponse.code) {
+                                        401 -> "来源登录已失效，请检查登录状态。"
+                                        403 -> "来源拒绝图片访问，请检查来源授权。"
+                                        404, 410 -> "来源图片地址已失效，请刷新本章。"
+                                        429 -> "来源限制图片请求，请稍后重试。"
+                                        503 -> "来源图片服务暂时不可用，请稍后重试。"
+                                        else -> "来源图片暂时无法读取。"
+                                    }, retryAfterSeconds = seconds, httpStatus = currentResponse.code)
+                                }
                                 val body = currentResponse.body ?: error("来源图片为空。")
                                 require(body.contentLength() <= MAX_SCRIPT_IMAGE_BYTES) { "来源图片超过 96 MiB。" }
                                 val output = ByteArrayOutputStream()
@@ -68,6 +109,7 @@ internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url:
                                     while (continuation.isActive) {
                                         val count = input.read(chunk)
                                         if (count < 0) break
+                                        if (count == 0) continue
                                         require(output.size().toLong() + count <= MAX_SCRIPT_IMAGE_BYTES) { "来源图片超过 96 MiB。" }
                                         onBytes?.invoke(count.toLong())
                                         output.write(chunk, 0, count)

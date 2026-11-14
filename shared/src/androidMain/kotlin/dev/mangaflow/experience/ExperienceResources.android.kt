@@ -122,4 +122,5 @@ internal actual fun observeExperienceResources(context: PlatformContext, changed
 }
 
 internal actual fun createExperienceNetworkClient(): NetworkClient = OkHttpClient.Builder()
-    .connectTimeout(20, TimeUnit.SECONDS).readTimeout(40, TimeUnit.SECONDS).build().asNetworkClient()
+    .connectTimeout(20, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS)
+    .callTimeout(30, TimeUnit.MINUTES).build().asNetworkClient()

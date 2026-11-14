@@ -176,6 +176,7 @@ fun DownloadsScreen(
     repository: MangaRepository,
     onRead: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
+    onRetryUsingLatestRoute: (DownloadEntry) -> Unit,
     backdrop: HazeState,
     navigation: @Composable () -> Unit,
     toolbar: @Composable (@Composable () -> Unit) -> Unit,
@@ -190,6 +191,7 @@ fun DownloadsScreen(
     preparations: List<ChapterPreparationState> = emptyList(),
     onCancelPreparation: (String, Long) -> Unit = { _, _ -> },
     onRetryPreparation: (String, Long) -> Unit = { _, _ -> },
+    onRetryPreparationUsingLatestRoute: (String, Long) -> Unit,
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -202,6 +204,7 @@ fun DownloadsScreen(
     val haptics = dev.mangaflow.ui.motion.rememberFeelFeedback()
     val snackbar = remember { SnackbarHostState() }
     var filter by rememberSaveable { mutableStateOf(DownloadFilter.ALL) }
+    var inspectedTaskId by remember { mutableStateOf<String?>(null) }
     var removingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var pendingDeletion by remember { mutableStateOf<List<DownloadEntry>?>(null) }
     var managing by rememberSaveable { mutableStateOf(false) }
@@ -487,9 +490,12 @@ fun DownloadsScreen(
                 ) {
                     if (pageFilter != DownloadFilter.SAVED) items(visiblePreparations,
                         key = { "preparation:" + it.id }, contentType = { "chapter-preparation" }) { preparation ->
-                        ChapterPreparationRow(preparation,
+                        ChapterPreparationRow(preparation, backdrop = backdrop, active = active && pageFilter == filter,
                             onCancel = { onCancelPreparation(preparation.id, preparation.generation) },
-                            onRetry = { onRetryPreparation(preparation.id, preparation.generation) })
+                            onRetry = { onRetryPreparation(preparation.id, preparation.generation) },
+                            onRetryUsingLatestRoute = {
+                                onRetryPreparationUsingLatestRoute(preparation.id, preparation.generation)
+                            })
                     }
                     if (loading) {
                         item {
@@ -573,7 +579,9 @@ fun DownloadsScreen(
                                                 else if (expanded) expandedBooks - mangaId else expandedBooks + mangaId },
                                             onPause = { store.pause(it.id) }, onRetry = onRetry,
                                             onDetails = onDetails?.let { open -> { open(chapters.first().manga) } },
-                                            onRemove = { pendingDeletion = chapters }, inspectMode = desktopSplit)
+                                            onRemove = { pendingDeletion = chapters }, inspectMode = desktopSplit,
+                                            active = active && pageFilter == filter,
+                                            onInspect = { inspectedTaskId = it.id })
                                     }
                                 }
                             }
@@ -590,7 +598,9 @@ fun DownloadsScreen(
                                                     onManage = { if (managing) toggleSelection(listOf(entry)) else {
                                                         managing = true; selectedIds = setOf(entry.id) } },
                                                     onPause = { store.pause(it.id) }, onRetry = onRetry,
-                                                    onRemove = { pendingDeletion = listOf(entry) })
+                                                    onRemove = { pendingDeletion = listOf(entry) },
+                                                    active = active && pageFilter == filter,
+                                                    onInspect = { inspectedTaskId = it.id })
                                             }
                                         }
                                     }
@@ -622,6 +632,7 @@ fun DownloadsScreen(
                     onManage = { managing = true; selectedIds = setOf(it.id) },
                     onRemove = { pendingDeletion = listOf(it) },
                     onPause = { store.pause(it.id) }, onRetry = onRetry,
+                    active = active, onInspect = { inspectedTaskId = it.id },
                 )
             }
             }
@@ -731,6 +742,21 @@ fun DownloadsScreen(
         }
     }
 
+    val inspectedTask = manageableEntries.firstOrNull { it.id == inspectedTaskId }
+    LaunchedEffect(active, inspectedTaskId, inspectedTask != null) {
+        if (!active || inspectedTask == null) inspectedTaskId = null
+    }
+    DownloadTaskDetailsDialog(
+        entry = if (active) inspectedTask else null,
+        active = active,
+        refreshing = inspectedTaskId?.let { it in refreshingIds } == true,
+        backdrop = backdrop,
+        onDismiss = { inspectedTaskId = null },
+        onPause = { store.pause(it.id) },
+        onRetry = onRetry,
+        onRetryUsingLatestRoute = onRetryUsingLatestRoute,
+    )
+
     LocalImportDetailsDialog(
         pending = pendingImport,
         busy = importBusy,
@@ -750,12 +776,18 @@ fun DownloadsScreen(
 @Composable
 private fun ChapterPreparationRow(
     state: ChapterPreparationState,
+    backdrop: HazeState,
+    active: Boolean,
     onCancel: () -> Unit,
     onRetry: () -> Unit,
+    onRetryUsingLatestRoute: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val failed = state.phase == ChapterPreparationPhase.FAILED
     val committing = state.phase == ChapterPreparationPhase.COMMITTING
+    var retryMenu by remember(state.id, state.generation) { mutableStateOf(false) }
+    var retryPresent by remember(state.id, state.generation) { mutableStateOf(false) }
+    LaunchedEffect(active, failed) { if (!active || !failed) retryMenu = false }
     val sourceId = remember(state.manga.id, state.chapter) {
         runCatching { dev.mangaflow.data.SourceKeys.decodeChapter(
             dev.mangaflow.data.chapterSourceMangaId(state.manga.id, state.chapter), state.chapter.id).sourceId
@@ -792,10 +824,24 @@ private fun ChapterPreparationRow(
             if (failed && state.error.isNotBlank()) Text(state.error, style = MaterialTheme.typography.bodySmall,
                 color = colors.error)
         }
-        if (failed) MotionIconButton(onClick = onRetry, modifier = Modifier.size(44.dp), tooltip = "重试准备") {
-            Icon(Icons.Outlined.Refresh, "重试准备 ${state.chapter.title}", Modifier.size(20.dp), tint = colors.error)
+        Box(Modifier.width(if (failed || retryPresent) 44.dp else 0.dp).height(44.dp)) {
+            if (failed) MotionIconButton(onClick = { retryMenu = !retryMenu }, enabled = active,
+                modifier = Modifier.size(44.dp), tooltip = "选择重试线路") {
+                Icon(Icons.Outlined.Refresh, "选择 ${state.chapter.title} 的重试线路", Modifier.size(20.dp), tint = colors.error)
+            }
+            CompactGlassPopover(visible = retryMenu && failed && active, backdrop = backdrop,
+                onDismiss = { retryMenu = false }, onPresenceChange = { retryPresent = it }, maximumWidth = 240.dp) {
+                CompactMenuAction(Icons.Outlined.Refresh, "原线路重试", enabled = failed && active && state.route != null) {
+                    retryMenu = false
+                    onRetry()
+                }
+                CompactMenuAction(Icons.Outlined.Refresh, "使用当前设置重试", enabled = failed && active) {
+                    retryMenu = false
+                    onRetryUsingLatestRoute()
+                }
+            }
         }
-        MotionIconButton(onClick = onCancel, enabled = !committing, modifier = Modifier.size(44.dp),
+        MotionIconButton(onClick = onCancel, enabled = active && !committing, modifier = Modifier.size(44.dp),
             tooltip = if (committing) "加入下载后可暂停" else if (failed) "移除准备记录" else "取消准备") {
             Icon(Icons.Outlined.Close,
                 if (committing) "正在加入下载" else if (failed) "移除准备记录" else "取消准备 ${state.chapter.title}",
@@ -875,6 +921,8 @@ private fun DesktopDownloadChapterPane(
     onRemove: (DownloadEntry) -> Unit,
     onPause: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
+    active: Boolean,
+    onInspect: (DownloadEntry) -> Unit,
 ) {
     val scroll = rememberLazyListState()
     val workId = entries.firstOrNull()?.manga?.id
@@ -907,7 +955,7 @@ private fun DesktopDownloadChapterPane(
                 DownloadChapterRow(entry, managing, entry.id in selectedIds, refreshingIds,
                     onRead = { onRead(entry) }, onSelect = { onSelect(entry) },
                     onManage = { onManage(entry) }, onPause = onPause, onRetry = onRetry,
-                    onRemove = { onRemove(entry) })
+                    onRemove = { onRemove(entry) }, active = active, onInspect = onInspect)
             }
         }
         DesktopVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd))

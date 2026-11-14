@@ -60,6 +60,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import dev.mangaflow.data.MangaRepository
@@ -91,22 +95,23 @@ internal fun DownloadBookRow(
     onDetails: (() -> Unit)? = null,
     onRemove: (() -> Unit)? = null,
     inspectMode: Boolean = false,
+    active: Boolean = true,
+    onInspect: ((DownloadEntry) -> Unit)? = null,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val actions = buildList {
         add(DesktopMenuAction("继续阅读", onClick = onRead))
         onDetails?.let { add(DesktopMenuAction("详情与目录", onClick = it)) }
         add(DesktopMenuAction("查看章节", onClick = onExpand))
+        if (onInspect != null) downloadObservedEntry(entries)?.let { task ->
+            add(DesktopMenuAction("下载状态与线路", onClick = { onInspect(task) }))
+        }
         add(DesktopMenuAction("选择下载", onClick = onManage))
         onRemove?.let { add(DesktopMenuAction("删除下载", onClick = it)) }
     }
     val manga = entries.first().manga
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
-    val allSaved = entries.all { it.status == DownloadStatus.COMPLETED }
-    val failed = entries.count { it.status == DownloadStatus.FAILED }
-    val saved = entries.count { it.status == DownloadStatus.COMPLETED }
-    val progress = downloadPageProgress(entries)
     val rotation by animateFloatAsState(if (expanded) 180f else 0f,
         tween(if (LocalMotionEnabled.current) MangaMotion.Content else 0), label = "download-book-disclosure")
     DesktopContextMenuArea(actions) {
@@ -132,27 +137,7 @@ internal fun DownloadBookRow(
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium,
                     color = colors.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                val bytes = downloadBytes(entries.sumOf { it.downloadedBytes })
-                Text(mangaNumberText(when {
-                    entries.size == 1 -> "${entries.first().chapter.title} · $progress" + if (allSaved) " · $bytes" else ""
-                    allSaved -> "${entries.size} 话 · $progress · $bytes"
-                    else -> "$saved/${entries.size} 话已保存 · $progress"
-                }), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                val status = when {
-                    failed > 0 -> "$failed 话未完成"
-                    entries.any { it.status == DownloadStatus.RUNNING && it.totalPages <= 0 } -> "准备章节"
-                    entries.any { it.status == DownloadStatus.RUNNING && it.completedPages == 0 } -> "正在接收首张"
-                    entries.any { it.status == DownloadStatus.RUNNING } -> "下载中"
-                    entries.any { it.status == DownloadStatus.QUEUED } -> "排队中"
-                    entries.any { it.status == DownloadStatus.WAITING } -> "等待恢复"
-                    entries.any { it.status == DownloadStatus.PAUSED } -> "已暂停"
-                    else -> null
-                }
-                if (status != null) Text(mangaNumberText("$status · $bytes"),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (failed > 0) colors.error else colors.onSurfaceVariant.copy(alpha = .8f),
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                DownloadInlineTransferSummary(entries, active, if (managing) null else onInspect)
                 DownloadProgressLine(entries)
             }
             if (managing) DownloadSelection(selected, onSelect)
@@ -172,7 +157,7 @@ internal fun DownloadBookRow(
         }
         // Multi-chapter failures belong to their disclosed chapter rows; do not copy every
         // complete error into the collapsed book or grow one failure row per work.
-        if (entries.size == 1 && entries.first().error.isNotBlank())
+        if (!managing && onInspect == null && entries.size == 1 && entries.first().error.isNotBlank())
             DownloadFailureDetails(entries.first().error, Modifier.padding(start = 60.dp))
 
     }
@@ -192,10 +177,13 @@ internal fun DownloadChapterRow(
     onPause: (DownloadEntry) -> Unit,
     onRetry: (DownloadEntry) -> Unit,
     onRemove: (() -> Unit)? = null,
+    active: Boolean = true,
+    onInspect: ((DownloadEntry) -> Unit)? = null,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val actions = buildList {
         add(DesktopMenuAction("阅读这一话", onClick = onRead))
+        if (onInspect != null) add(DesktopMenuAction("下载状态与线路", onClick = { onInspect(entry) }))
         add(DesktopMenuAction("选择这一话", onClick = onManage))
         onRemove?.let { add(DesktopMenuAction("删除这一话", onClick = it)) }
     }
@@ -216,19 +204,57 @@ internal fun DownloadChapterRow(
                     color = colors.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val source = dev.mangaflow.data.sourceDisplayName(
                     dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id).sourceId)
-                Text(mangaNumberText(source + " · " + if (entry.status == DownloadStatus.COMPLETED) "${entry.totalPages} 页 · ${downloadBytes(entry.downloadedBytes)}"
-                    else "${downloadStateLabel(entry)} · ${downloadPageProgress(listOf(entry))}"),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                DownloadInlineTransferSummary(listOf(entry), active, if (managing) null else onInspect, source)
                 DownloadProgressLine(listOf(entry))
             }
             if (managing) DownloadSelection(selected, onSelect)
             else DownloadTransferAction(listOf(entry), refreshingIds, onPause, onRetry)
             if (desktop) DesktopMoreButton(actions, "章节下载操作")
         }
-        if (entry.error.isNotBlank()) DownloadFailureDetails(entry.error)
+        if (!managing && onInspect == null && entry.error.isNotBlank()) DownloadFailureDetails(entry.error)
     }
+    }
+}
+
+/** The existing metadata area is the details target, so no extra permanent action column is added. */
+@Composable
+private fun DownloadInlineTransferSummary(
+    entries: List<DownloadEntry>,
+    active: Boolean,
+    onInspect: ((DownloadEntry) -> Unit)?,
+    source: String? = null,
+) {
+    val entry = downloadObservedEntry(entries) ?: return
+    val now = downloadObservationTime(entries, active)
+    val colors = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
+    val saved = entries.count { it.status == DownloadStatus.COMPLETED }
+    val allSaved = saved == entries.size
+    val title = when {
+        source != null -> source + " · " + downloadPageProgress(entries)
+        entries.size == 1 -> entry.chapter.title + " · " + downloadPageProgress(entries)
+        else -> "$saved/${entries.size} 话已保存 · " + downloadPageProgress(entries)
+    }
+    val detail = if (allSaved) downloadBytes(entries.sumOf { it.downloadedBytes })
+        else listOfNotNull(
+            downloadTransferByteLabel(entry, now).takeIf(String::isNotBlank),
+            (if (entries.size > 1) entry.chapter.title + " · " else "") + downloadTransferPhaseLabel(entry, now),
+        ).joinToString(" · ")
+    Column(Modifier.fillMaxWidth().heightIn(min = if (allSaved) 44.dp else 52.dp).then(if (onInspect != null)
+        Modifier.clickable(interactionSource = interaction, indication = null, role = Role.Button,
+            onClickLabel = "查看 ${entry.chapter.title} 下载状态与线路", onClick = { onInspect(entry) })
+            .motionPress(interaction, pressedScale = .99f) else Modifier),
+        verticalArrangement = Arrangement.Center) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(mangaNumberText(title), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (onInspect != null) Icon(Icons.Outlined.Info, null, Modifier.size(12.dp),
+                tint = colors.onSurfaceVariant.copy(alpha = .7f))
+        }
+        Text(mangaNumberText(detail), style = MaterialTheme.typography.labelSmall,
+            color = if (entry.status == DownloadStatus.FAILED) colors.error else colors.onSurfaceVariant,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -332,12 +358,17 @@ private fun DownloadTransferAction(entries: List<DownloadEntry>, refreshingIds: 
 
 @Composable
 private fun DownloadProgressLine(entries: List<DownloadEntry>) {
-    val knownProgress = downloadKnownProgress(entries)
+    val knownProgress = downloadCurrentPageFraction(entries)
     val target = knownProgress ?: 0f
     val progress by animateFloatAsState(target, tween(if (LocalMotionEnabled.current) MangaMotion.Quick else 0), label = "download-real-progress")
     val color = MaterialTheme.colorScheme.primary
     val visible = knownProgress != null && entries.any { it.status != DownloadStatus.COMPLETED }
-    Box(Modifier.fillMaxWidth().height(6.dp).drawBehind {
+    Box(Modifier.fillMaxWidth().height(6.dp).semantics {
+        if (visible) {
+            contentDescription = "当前图片接收进度"
+            progressBarRangeInfo = ProgressBarRangeInfo(knownProgress!!, 0f..1f)
+        }
+    }.drawBehind {
         if (visible) {
             val y = size.height / 2f
             drawLine(color.copy(alpha = .12f), Offset(0f, y), Offset(size.width, y), 2.dp.toPx(), StrokeCap.Round)
@@ -350,17 +381,4 @@ private fun downloadKnownProgress(entries: List<DownloadEntry>): Float? {
     if (entries.isEmpty() || entries.any { it.totalPages <= 0 }) return null
     val total = entries.sumOf { it.totalPages }
     return (entries.sumOf { it.completedPages }.toFloat() / total).coerceIn(0f, 1f)
-}
-
-private fun downloadStateLabel(entry: DownloadEntry): String = when (entry.status) {
-    DownloadStatus.QUEUED -> "排队中"
-    DownloadStatus.RUNNING -> when {
-        entry.totalPages <= 0 -> "准备章节"
-        entry.completedPages <= 0 -> "接收首张"
-        else -> "下载中"
-    }
-    DownloadStatus.WAITING -> "等待恢复"
-    DownloadStatus.PAUSED -> "已暂停"
-    DownloadStatus.FAILED -> "未完成"
-    DownloadStatus.COMPLETED -> "已保存"
 }

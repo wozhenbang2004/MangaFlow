@@ -65,23 +65,41 @@ internal actual suspend fun createWallpaperVideoPoster(media: StorageFile, poste
 
 internal actual class DownloadScheduler actual constructor(context: PlatformContext) {
     private val session = SessionDownloadScheduler(context)
-    actual fun schedule(chapterId: String, workId: String) = session.schedule(chapterId, workId)
+    actual fun schedule(chapterId: String, workId: String, userInitiated: Boolean) = session.schedule(chapterId, workId)
     actual suspend fun cancel(workId: String) = session.cancel(workId)
     actual suspend fun state(workId: String): DownloadTaskState? = session.state(workId)
 }
 
 internal actual fun beginDownloadExecution(onExpiration: () -> Unit): () -> Unit {
     var identifier = UIBackgroundTaskInvalid
+    var ended = false
+    // UIKit owns this lease on the main queue. End it inside the expiration
+    // handler before asking the shared runner to checkpoint and cancel.
+    val end = {
+        ended = true
+        val active = identifier
+        identifier = UIBackgroundTaskInvalid
+        if (active != UIBackgroundTaskInvalid) UIApplication.sharedApplication.endBackgroundTask(active)
+    }
     val start = {
-        identifier = UIApplication.sharedApplication.beginBackgroundTaskWithName("MangaFlow下载", onExpiration)
+        val acquired = UIApplication.sharedApplication.beginBackgroundTaskWithName("MangaFlow下载") {
+            end()
+            onExpiration()
+        }
+        if (ended) {
+            if (acquired != UIBackgroundTaskInvalid) UIApplication.sharedApplication.endBackgroundTask(acquired)
+        } else {
+            identifier = acquired
+            if (acquired == UIBackgroundTaskInvalid) {
+                end()
+                onExpiration()
+            }
+        }
     }
     if (NSThread.isMainThread) start() else dispatch_sync(dispatch_get_main_queue(), start)
     return {
         dispatch_async(dispatch_get_main_queue()) {
-            if (identifier != UIBackgroundTaskInvalid) {
-                UIApplication.sharedApplication.endBackgroundTask(identifier)
-                identifier = UIBackgroundTaskInvalid
-            }
+            end()
         }
     }
 }

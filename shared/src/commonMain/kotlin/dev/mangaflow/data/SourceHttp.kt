@@ -5,9 +5,9 @@ import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.Request
+import dev.mangaflow.net.retryAfterMillis
 import dev.mangaflow.platform.ConcurrentMap
 import dev.mangaflow.platform.wallTimeMillis
-import io.ktor.http.fromHttpToGmtDate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlin.math.ceil
@@ -43,8 +43,13 @@ internal class SourceHttp(
         catch (cancel: CancellationException) { throw cancel }
         catch (failure: DownloadRouteException) { throw failure }
         catch (failure: Exception) { throw SourceException("$operation 连接或数据读取失败，请检查网络后重试。", publicUrl, cause = failure) }
-        val retry = retryAfter(response.header("Retry-After")).let { if (response.code == 429 && it == 0L) 60L else it }
+        val retry = retryAfterMillis(response.header("Retry-After"))?.let { ceil(it / 1000.0).toLong() }
+            ?: when (response.code) { 429 -> 60L; 503 -> 30L; else -> 0L }
         when (response.code) {
+            503 -> {
+                rememberPause(request.url, retry)
+                throw SourceException("$operation 来源暂时繁忙，请稍后重试。", publicUrl, retry, httpStatus = 503)
+            }
             209, 210, 429 -> {
                 rememberPause(request.url, retry)
                 if (!readAccountErrors) {
@@ -64,12 +69,6 @@ internal class SourceHttp(
         }
         if (response.bytes.isEmpty()) throw SourceException("$operation 返回了空响应。", publicUrl)
         return SourceResponse(response.text(), retry, response.code)
-    }
-    private fun retryAfter(value: String?): Long {
-        if (value == null) return 0
-        value.toLongOrNull()?.let { return it.coerceIn(0, 86_400) }
-        return try { ceil((value.fromHttpToGmtDate().timestamp - wallTimeMillis()) / 1000.0).toLong().coerceIn(0, 86_400) }
-            catch (_: Exception) { 0 }
     }
     private fun HttpUrl.origin() = "$scheme://$host:$port"
 }

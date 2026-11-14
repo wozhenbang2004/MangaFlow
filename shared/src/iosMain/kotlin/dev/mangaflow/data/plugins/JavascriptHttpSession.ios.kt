@@ -13,6 +13,9 @@ import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.net.checked
+import dev.mangaflow.net.NetworkFailureKind
+import dev.mangaflow.net.NetworkTransferException
+import dev.mangaflow.net.retryAfterMillis
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.wallTimeMillis
@@ -106,13 +109,18 @@ internal actual class JavascriptHttpSession actual constructor(
         error("漫画源重定向次数过多。")
     }
 
-    internal suspend fun imageBytes(value: String, imageHeaders: Map<String, String>, onBytes: ((Long) -> Unit)?): ByteArray {
+    internal suspend fun imageBytes(value: String, imageHeaders: Map<String, String>, onBytes: ((Long) -> Unit)?,
+        onResponse: ((Int, Map<String, String>) -> Unit)?): ByteArray {
         var url = publicPluginUrl(value)
         var headers = nativeScriptHeaders(JSONObject(imageHeaders))
         repeat(4) { index ->
             currentCoroutineContext().ensureActive()
+            val pause = synchronized(nativePauseLock) { (nativePauses[url.origin()] ?: 0L) - wallTimeMillis() }
+            if (pause > 0L) throw SourceException("来源图片请求暂时受限，请稍后重试。", retryAfterSeconds = ceil(pause / 1000.0).toLong())
             reserveNativeOrigin(url)
-            val result = withContext(Dispatchers.IO) { response(url, "GET", headers, ByteArray(0), 45_000L, onBytes) }
+            val result = withContext(Dispatchers.IO) {
+                response(url, "GET", headers, ByteArray(0), SCRIPT_IMAGE_TOTAL_MILLIS, onBytes, onResponse, imageTransfer = true)
+            }
             if (result.status in setOf(301, 302, 303, 307, 308)) {
                 require(index < 3) { "图片重定向次数过多。" }
                 val target = result.headers.entries.firstOrNull { it.key.equals("Location", true) }?.value
@@ -120,7 +128,25 @@ internal actual class JavascriptHttpSession actual constructor(
                 if (url.origin() != target.origin()) headers = headers.filterKeys { !it.equals("Authorization", true) && !it.equals("Cookie", true) }
                 url = target
             } else {
-                if (result.status !in 200..299) throw SourceException("来源图片暂时无法读取。", httpStatus = result.status)
+                if (result.status !in 200..299) {
+                    val limited = result.status in setOf(429, 503)
+                    val retry = retryAfterMillis(result.headers.entries.firstOrNull { it.key.equals("Retry-After", true) }?.value)
+                        ?: if (limited) 30_000L else 0L
+                    val seconds = ceil(retry / 1000.0).toLong()
+                    if (limited) synchronized(nativePauseLock) {
+                        val origin = url.origin()
+                        nativePauses[origin] = maxOf(nativePauses[origin] ?: 0L, wallTimeMillis() + seconds.coerceAtLeast(1L) * 1000L)
+                        while (nativePauses.size > 128) nativePauses.remove(nativePauses.keys.first())
+                    }
+                    throw SourceException(when (result.status) {
+                        401 -> "来源登录已失效，请检查登录状态。"
+                        403 -> "来源拒绝图片访问，请检查来源授权。"
+                        404, 410 -> "来源图片地址已失效，请刷新本章。"
+                        429 -> "来源限制图片请求，请稍后重试。"
+                        503 -> "来源图片服务暂时不可用，请稍后重试。"
+                        else -> "来源图片暂时无法读取。"
+                    }, retryAfterSeconds = seconds, httpStatus = result.status)
+                }
                 require(result.body.isNotEmpty()) { "来源图片为空。" }
                 return result.body
             }
@@ -129,7 +155,8 @@ internal actual class JavascriptHttpSession actual constructor(
     }
 
     private suspend fun response(url: HttpUrl, method: String, headers: Map<String, String>, body: ByteArray,
-        timeoutMillis: Long = 15_000L, onBytes: ((Long) -> Unit)? = null): NativeScriptResponse {
+        timeoutMillis: Long = 15_000L, onBytes: ((Long) -> Unit)? = null,
+        onResponse: ((Int, Map<String, String>) -> Unit)? = null, imageTransfer: Boolean = false): NativeScriptResponse {
         val selected = route?.checked()
         if (selected?.mode == DownloadRouteMode.PROXY && selected.proxy?.type != DownloadProxyType.SOCKS)
             throw DownloadRouteException("第三方脚本来源在 iOS 上仅支持指定 SOCKS5 代理，暂不支持 HTTP 代理。")
@@ -171,11 +198,14 @@ internal actual class JavascriptHttpSession actual constructor(
                 val queue = dispatch_get_global_queue(0, 0uL)
                 CFReadStreamSetDispatchQueue(read, queue); CFWriteStreamSetDispatchQueue(write, queue)
                 check(CFReadStreamOpen(read) && CFWriteStreamOpen(write)) { "漫画源 TLS 连接失败。" }
-                val deadline = monotonicTimeMillis() + timeoutMillis
+                val started = monotonicTimeMillis()
+                val deadline = started + timeoutMillis
+                val responseDeadline = started + if (imageTransfer) SCRIPT_IMAGE_IDLE_MILLIS else timeoutMillis
                 val authority = url.host + if (url.port == 443) "" else ":${url.port}"
                 val requestHead = buildString {
                     append(method).append(' ').append(url.encodedPath).append(url.query?.let { "?$it" }.orEmpty()).append(" HTTP/1.1\r\n")
-                    append("Host: ").append(authority).append("\r\nConnection: close\r\nAccept-Encoding: gzip\r\n")
+                    append("Host: ").append(authority).append("\r\nConnection: close\r\nAccept-Encoding: ")
+                        .append(if (imageTransfer) "identity" else "gzip").append("\r\n")
                     headers.filterKeys { !it.equals("Accept-Encoding", true) }.forEach { (key, value) -> append(key).append(": ").append(value).append("\r\n") }
                     if (method !in setOf("GET", "HEAD")) append("Content-Length: ").append(body.size).append("\r\n")
                     append("\r\n")
@@ -183,16 +213,30 @@ internal actual class JavascriptHttpSession actual constructor(
                 val output = requestHead + body
                 var sent = 0
                 while (sent < output.size) {
-                    currentCoroutineContext().ensureActive(); check(monotonicTimeMillis() < deadline) { "漫画源连接或写入超时。" }
+                    currentCoroutineContext().ensureActive()
+                    if (imageTransfer && monotonicTimeMillis() >= responseDeadline)
+                        throw NetworkTransferException(NetworkFailureKind.CONNECT_TIMEOUT, "连接图片来源超时，请检查所选线路。")
+                    check(monotonicTimeMillis() < deadline) { "漫画源连接或写入超时。" }
                     if (!CFWriteStreamCanAcceptBytes(write)) { checkStreamErrors(read, write); delay(10); continue }
                     val count = output.usePinned { CFWriteStreamWrite(write, it.addressOf(sent).reinterpret(), (output.size - sent).toLong()) }.toInt()
                     check(count > 0) { "漫画源请求写入失败。" }; sent += count
                 }
                 val received = Buffer()
-                val frame = NativeResponseFrame(method == "HEAD", maximumBytes)
+                val frame = NativeResponseFrame(method == "HEAD", maximumBytes, imageTransfer)
                 val chunk = ByteArray(16_384)
+                var lastPayloadAt = started
+                var reportedBytes = 0L
+                var headersObserved = false
                 while (true) {
-                    currentCoroutineContext().ensureActive(); check(monotonicTimeMillis() < deadline) { "漫画源响应读取超时。" }
+                    currentCoroutineContext().ensureActive()
+                    val now = monotonicTimeMillis()
+                    if (imageTransfer) {
+                        if (now >= deadline) throw NetworkTransferException(NetworkFailureKind.REQUEST_TIMEOUT, "图片传输超过本次安全时限，请重试。")
+                        if (now - lastPayloadAt >= SCRIPT_IMAGE_IDLE_MILLIS) throw NetworkTransferException(
+                            if (reportedBytes == 0L) NetworkFailureKind.RESPONSE_TIMEOUT else NetworkFailureKind.TRANSFER_TIMEOUT,
+                            if (reportedBytes == 0L) "等待来源图片响应超时，请稍后重试。" else "来源图片传输已停止响应，请稍后重试。",
+                        )
+                    } else check(now < deadline) { "漫画源响应读取超时。" }
                     if (!CFReadStreamHasBytesAvailable(read)) {
                         checkStreamErrors(read, write)
                         if (CFReadStreamGetStatus(read) == kCFStreamStatusAtEnd || CFReadStreamGetStatus(read) == kCFStreamStatusClosed) break
@@ -202,9 +246,23 @@ internal actual class JavascriptHttpSession actual constructor(
                     check(count >= 0) { "漫画源响应读取失败。" }
                     if (count == 0) break
                     require(received.size + count <= maximumBytes + 65_536L) { "漫画源响应过大。" }
-                    onBytes?.invoke(count.toLong())
                     received.write(chunk, 0, count)
-                    if (frame.complete(received)) break
+                    val complete = frame.complete(received)
+                    if (!headersObserved) frame.statusCode?.let { code ->
+                        headersObserved = true
+                        lastPayloadAt = monotonicTimeMillis()
+                        onResponse?.invoke(code, frame.responseHeaders)
+                        if (imageTransfer && code !in 200..299)
+                            return@memScoped NativeScriptResponse(code, frame.responseHeaders, ByteArray(0))
+                    }
+                    val payload = frame.payloadBytes(received)
+                    if (payload > reportedBytes) {
+                        val delta = payload - reportedBytes
+                        reportedBytes = payload
+                        lastPayloadAt = monotonicTimeMillis()
+                        onBytes?.invoke(delta)
+                    }
+                    if (complete) break
                 }
                 frame.requireCompleteAtEnd(received)
                 parseNativeScriptResponse(received.readByteArray(), method == "HEAD", maximumBytes)
@@ -340,7 +398,8 @@ private fun nativeScriptBody(value: Any?, headers: Map<String, String>): ByteArr
     return value.toString().encodeToByteArray()
 }
 /** HTTP message framing lets a complete response finish without waiting for a CDN to close TLS. */
-private class NativeResponseFrame(private val head: Boolean, private val maximum: Int) {
+private class NativeResponseFrame(private val head: Boolean, private val maximum: Int,
+    private val headerOnlyErrors: Boolean = false) {
     private var headerOffset = 0L
     private var bodyOffset: Long? = null
     private var expectedEnd: Long? = null
@@ -351,6 +410,11 @@ private class NativeResponseFrame(private val head: Boolean, private val maximum
     private var trailers = false
     private var trailerStart = 0L
     private var interim = 0
+    private var completedChunkBytes = 0L
+    var statusCode: Int? = null
+        private set
+    var responseHeaders: Map<String, String> = emptyMap()
+        private set
 
     fun complete(buffer: Buffer): Boolean {
         expectedEnd?.let { return buffer.size >= it }
@@ -372,11 +436,14 @@ private class NativeResponseFrame(private val head: Boolean, private val maximum
             lines.drop(1).forEach { line ->
                 val split = line.indexOf(':'); require(split > 0) { "漫画源 HTTP 响应头无效。" }
                 val name = line.substring(0, split).trim().lowercase()
+                require(name.isNotEmpty() && name.none { it <= ' ' || it >= '\u007f' }) { "漫画源 HTTP 响应头无效。" }
                 val value = line.substring(split + 1).trim()
                 headers[name] = headers[name]?.let { "$it, $value" } ?: value
             }
+            statusCode = status
+            responseHeaders = headers
             bodyOffset = end + 4; chunkCursor = end + 4
-            if (head || status in setOf(204, 304) || status in 300..399) {
+            if (head || status in setOf(204, 304) || status in 300..399 || headerOnlyErrors && status !in 200..299) {
                 expectedEnd = end + 4; return true
             }
             val transfer = headers["transfer-encoding"]
@@ -396,6 +463,7 @@ private class NativeResponseFrame(private val head: Boolean, private val maximum
             chunkEnd?.let { end ->
                 if (buffer.size < end + 2) return false
                 require(buffer[end] == 13.toByte() && buffer[end + 1] == 10.toByte()) { "漫画源 chunked 响应无效。" }
+                completedChunkBytes += end - chunkCursor
                 chunkCursor = end + 2; chunkEnd = null
             }
             val lineEnd = buffer.indexOf(CRLF, chunkCursor)
@@ -416,6 +484,16 @@ private class NativeResponseFrame(private val head: Boolean, private val maximum
             if (size == 0L) { trailers = true; trailerStart = chunkCursor }
             else { chunkBytes += size; chunkEnd = chunkCursor + size }
         }
+    }
+
+    /** Actual received payload excludes HTTP headers, chunk lengths, delimiters and trailers. */
+    fun payloadBytes(buffer: Buffer): Long {
+        if (head || statusCode?.let { it in 200..299 } != true) return 0L
+        val offset = bodyOffset ?: return 0L
+        return if (chunked) completedChunkBytes + (chunkEnd?.let { end ->
+            (minOf(buffer.size, end) - chunkCursor).coerceAtLeast(0L)
+        } ?: 0L)
+        else (minOf(buffer.size, expectedEnd ?: buffer.size) - offset).coerceAtLeast(0L)
     }
 
     fun requireCompleteAtEnd(buffer: Buffer) {
@@ -501,7 +579,11 @@ internal actual suspend fun fetchPluginText(context: PlatformContext, url: Strin
 }
 
 internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url: String,
-    headers: Map<String, String>, route: DownloadRouteSnapshot?, onBytes: ((Long) -> Unit)?): ByteArray {
+    headers: Map<String, String>, route: DownloadRouteSnapshot?, onBytes: ((Long) -> Unit)?,
+    onResponse: ((Int, Map<String, String>) -> Unit)?): ByteArray {
     val session = JavascriptHttpSession(true, route, 96 * 1024 * 1024, true)
-    try { return session.imageBytes(url, headers, onBytes) } finally { session.close() }
+    try { return session.imageBytes(url, headers, onBytes, onResponse) } finally { session.close() }
 }
+
+private const val SCRIPT_IMAGE_IDLE_MILLIS = 45_000L
+private const val SCRIPT_IMAGE_TOTAL_MILLIS = 30L * 60L * 1000L

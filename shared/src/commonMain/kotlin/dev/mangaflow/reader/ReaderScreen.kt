@@ -196,6 +196,7 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.storage.DownloadProgress
 import dev.mangaflow.experience.*
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
@@ -242,6 +243,7 @@ import kotlinx.coroutines.IO
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
@@ -459,19 +461,22 @@ fun ReaderScreen(
     val lightChrome = colors.surface.luminance() > .5f
     val readerBackdrop = rememberHazeState()
     val readingChapterId = chapterId
-    val resolvePage: suspend (Page) -> Page = remember(manga.id, chapterId, chapter.sourceId,
+    val resolvePage: ReaderPageResolver = remember(manga.id, chapterId, chapter.sourceId,
         chapter.sourceMangaId, downloadStore, adultImageContext) {
-        { page ->
+        { page, onBytes ->
             experience.withImageAdmission(reader = true) {
                 val local = downloadStore.resolveReaderPage(manga.id, readingChapterId, page)
                 if (local.url.startsWith("file://")) local else {
                     val owner = chapterSourceMangaId(manga.id, chapter)
                     val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, local)
-                    val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved)
+                    val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved, onBytes = onBytes)
                     materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
                 }
             }
         }
+    }
+    val observePageTransfer: (Page) -> Flow<DownloadProgress?> = remember(downloadStore, manga.id, readingChapterId) {
+        { page -> downloadStore.observePageTransfer(manga.id, readingChapterId, page.index, expectedPage = page) }
     }
     val prefetchPage: suspend (Page) -> Page? = remember(manga.id, chapterId, downloadStore) {
         { page -> downloadStore.resolvePrefetchPage(manga.id, readingChapterId, page) }
@@ -485,8 +490,8 @@ fun ReaderScreen(
                         readingChapterId, local, budget, work)
             }
         }
-    val retryPage: suspend (Page) -> Page = remember(manga.id, chapterId, sourceIdentity, repository, downloadStore, adultImageContext) {
-        { sourcePage ->
+    val retryPage: ReaderPageResolver = remember(manga.id, chapterId, sourceIdentity, repository, downloadStore, adultImageContext) {
+        { sourcePage, onBytes ->
             val requestedIdentity = manga.id to sourceIdentity
             if (localImport) throw IllegalStateException("本地文件已损坏，请删除后重新导入")
             val expectedEntry = downloadStore.entryFor(manga.id, readingChapterId)
@@ -516,7 +521,7 @@ fun ReaderScreen(
             if (retried.url.startsWith("file://")) retried else experience.withImageAdmission(reader = true) {
                 val owner = chapterSourceMangaId(manga.id, chapter)
                 val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, retried)
-                val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved)
+                val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved, onBytes = onBytes)
                 materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
             }
         }
@@ -883,6 +888,7 @@ fun ReaderScreen(
                     preferences.panelLayoutKey) {
                     if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
                         pages = pages, headers = headers, resolvePage = resolvePage, retryPage = retryPage,
+                        observePageTransfer = observePageTransfer,
                         sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
                         sourceName = currentSourceName.orEmpty(), sourceAlternatives = alternativeSources,
                         externalRetrySerial = currentPageRetrySerial,
@@ -925,6 +931,7 @@ fun ReaderScreen(
                         headers = headers,
                         resolvePage = resolvePage,
                         retryPage = retryPage,
+                        observePageTransfer = observePageTransfer,
                         sourceAlternatives = alternativeSources,
                         sourceName = currentSourceName.orEmpty(),
                         onShowControls = { controlsVisible = true },
@@ -1453,8 +1460,9 @@ private fun ChapterPages(
     prefetchPage: suspend (Page) -> Page?,
     scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page?,
     headers: Map<String, String>,
-    resolvePage: suspend (Page) -> Page,
-    retryPage: suspend (Page) -> Page,
+    resolvePage: ReaderPageResolver,
+    retryPage: ReaderPageResolver,
+    observePageTransfer: (Page) -> Flow<DownloadProgress?>,
     sourceAlternatives: List<ChapterVariant>,
     sourceName: String,
     onShowControls: () -> Unit,
@@ -1663,7 +1671,8 @@ private fun ChapterPages(
                 verticalArrangement = Arrangement.spacedBy(if (preferences.pageGap) 6.dp else 0.dp)) {
                 itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                     ReaderPage(
-                        page, headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage, paged = false, onTap = onTap,
+                        page, headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage,
+                        observePageTransfer = observePageTransfer, paged = false, onTap = onTap,
                         sourceAlternatives = sourceAlternatives, sourceName = sourceName,
                         pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
                         onQuickSwitch = { variant -> onQuickSwitch(index, variant) },
@@ -1817,7 +1826,8 @@ private fun ChapterPages(
                     val renderImage: @Composable (Int, Modifier, Alignment) -> Unit = { imageIndex, modifier, alignment ->
                         Box(modifier) {
                             ReaderPage(
-                                pages[imageIndex], headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage, paged = true, pagedAlignment = alignment, onTap = onTap,
+                                pages[imageIndex], headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage,
+                                observePageTransfer = observePageTransfer, paged = true, pagedAlignment = alignment, onTap = onTap,
                                 sourceAlternatives = sourceAlternatives, sourceName = sourceName,
                                 pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
                                 onQuickSwitch = { variant -> onQuickSwitch(imageIndex, variant) },
@@ -2092,8 +2102,9 @@ private fun ReaderPage(
     page: Page,
     headers: Map<String, String>,
     sourceId: String = "",
-    resolvePage: suspend (Page) -> Page,
-    retryPage: suspend (Page) -> Page,
+    resolvePage: ReaderPageResolver,
+    retryPage: ReaderPageResolver,
+    observePageTransfer: (Page) -> Flow<DownloadProgress?>,
     paged: Boolean,
     pagedAlignment: Alignment = Alignment.Center,
     onTap: () -> Unit,
@@ -2146,24 +2157,35 @@ private fun ReaderPage(
     var fileRecoveryAttempted by remember(page.url) { mutableStateOf(false) }
     var failedMaterializedUrl by remember(page.url) { mutableStateOf<String?>(null) }
     val attempt = remember(page, headers, sourceId, reload) { ReaderLoadAttempt() }
+    val transferObserver = remember(attempt) { ReaderTransferObserver() }
+    var transportProgress by remember(attempt) { mutableStateOf(transferObserver.snapshot()) }
     var error by remember(attempt) { mutableStateOf<String?>(null) }
     var loading by remember(attempt) { mutableStateOf(true) }
     var slowLoading by remember(attempt) { mutableStateOf(false) }
     var waitClock by remember(attempt) { mutableStateOf<TimeMark?>(null) }
+    var resolvedPage by remember(attempt) { mutableStateOf<Page?>(null) }
+    val pageTransfer by rememberReaderPageTransfer(attempt, page, observePageTransfer,
+        enabled = pageVisible && loading && error == null && resolvedPage == null)
     DisposableEffect(attempt) { onDispose { attempt.active = false } }
     LaunchedEffect(attempt, pageVisible, loading, error) {
         slowLoading = false
         // Composition can prepare an offscreen page; only a visible foreground wait owns this deadline.
         if (pageVisible && loading && error == null && attempt.acceptsResult) {
-            waitClock = TimeSource.Monotonic.markNow()
-            delay(READER_SLOW_LOAD_MILLIS)
-            slowLoading = true
-            delay(READER_PAGE_WAIT_MILLIS - READER_SLOW_LOAD_MILLIS)
-            if (pageVisible && loading && error == null && attempt.acceptsResult) {
-                attempt.stopped = true
-                error = "本页连接超时"
-                loading = false
-                loadChanged(false)
+            val visibleSince = TimeSource.Monotonic.markNow()
+            waitClock = visibleSince
+            while (pageVisible && loading && error == null && attempt.acceptsResult) {
+                val transport = transferObserver.snapshot()
+                transportProgress = transport
+                val idle = attempt.idleMillis(visibleSince, transport.lastProgressAt)
+                slowLoading = idle >= READER_SLOW_LOAD_MILLIS
+                if (idle >= READER_PAGE_WAIT_MILLIS) {
+                    attempt.stopped = true
+                    error = "本页连接超时"
+                    loading = false
+                    loadChanged(false)
+                    break
+                }
+                delay(minOf(1_000L, READER_PAGE_WAIT_MILLIS - idle))
             }
         }
     }
@@ -2175,7 +2197,6 @@ private fun ReaderPage(
     var detailStatus by remember(page.url, reload) { mutableStateOf<ReaderDetailStatus?>(null) }
     var detailRetry by remember(page.url, reload) { mutableIntStateOf(0) }
     var loadedImage by remember(page.url, reload) { mutableStateOf<LoadedReaderImage?>(null) }
-    var resolvedPage by remember(attempt) { mutableStateOf<Page?>(null) }
     LaunchedEffect(attempt, attempt.stopped) {
         if (!attempt.acceptsResult) return@LaunchedEffect
         loadChanged(false)
@@ -2185,7 +2206,8 @@ private fun ReaderPage(
         try {
             failedMaterializedUrl?.let { discardFailedScriptImage(context, it) }
             failedMaterializedUrl = null
-            val resource = if (reload > 0) retrySource(page) else resolve(page)
+            val receiveBytes: (Long) -> Unit = { count -> if (attempt.acceptsResult) transferObserver.onBytes(count) }
+            val resource = if (reload > 0) retrySource(page, receiveBytes) else resolve(page, receiveBytes)
             currentCoroutineContext().ensureActive()
             if (!attempt.acceptsResult) return@LaunchedEffect
             // Start the image immediately; original-size IO can finish alongside its decode.
@@ -2249,6 +2271,7 @@ private fun ReaderPage(
         val resource = resolvedPage
         val request = remember(resource, headers, attempt, previewWidth, previewHeight) {
             resource?.let { requested -> readerImageRequest(context, requested, headers, sourceId)
+                .readerTransferProgress(transferObserver)
                 // The preview need only fit this viewport. Telephoto keeps the original
                 // disk file for full-quality visible tiles and pinch zoom.
                 .size(previewWidth, previewHeight)
@@ -2411,6 +2434,10 @@ private fun ReaderPage(
                 ReaderImageRecovery(
                     index = page.index, pageCount = pageCount, sourceName = sourceName,
                     failure = imageError.orEmpty(), pending = pendingRecovery, slow = slowLoading,
+                    transferProgress = pageTransfer ?: transportProgress.takeIf { it.receivedBytes > 0L }?.let {
+                        DownloadProgress(phase = dev.mangaflow.storage.DownloadPhase.TRANSFERRING,
+                            receivedBytes = it.receivedBytes, expectedBytes = it.expectedBytes)
+                    },
                     stage = when {
                         resource == null -> "检查本机与已有下载"
                         awaitingPrefetch -> "等待已开始的图片请求"
@@ -2438,7 +2465,7 @@ private fun ReaderPageNavigatorDialog(
     visible: Boolean,
     pages: List<Page>,
     headers: Map<String, String>,
-    resolvePage: suspend (Page) -> Page,
+    resolvePage: ReaderPageResolver,
     currentPage: Int,
     collectedPages: Set<Int>,
     onToggleCollection: (Int) -> Unit,
@@ -2471,7 +2498,7 @@ private fun ReaderPageNavigatorDialog(
                         var preview by remember(page) { mutableStateOf<Page?>(null) }
                         LaunchedEffect(page, visible, resolvePage) {
                             if (!visible) return@LaunchedEffect
-                            try { preview = resolvePage(page) }
+                            try { preview = resolvePage(page, null) }
                             catch (cancel: CancellationException) { throw cancel }
                             catch (_: Exception) { preview = null }
                         }

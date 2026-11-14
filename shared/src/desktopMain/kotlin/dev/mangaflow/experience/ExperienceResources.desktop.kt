@@ -8,6 +8,7 @@ import com.sun.management.OperatingSystemMXBean
 import coil3.network.NetworkClient
 import coil3.network.ktor3.asNetworkClient
 import dev.mangaflow.net.platformHttpClient
+import io.ktor.client.plugins.HttpTimeout
 
 internal actual fun readExperienceResources(context: PlatformContext): ExperienceResources {
     val runtime = Runtime.getRuntime()
@@ -29,4 +30,10 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
 /** No portable event source for desktop OS power/thermal state; leave those values unknown. */
 internal actual fun observeExperienceResources(context: PlatformContext, changed: (Boolean) -> Unit): () -> Unit = {}
 
-internal actual fun createExperienceNetworkClient(): NetworkClient = platformHttpClient(false, null) {}.asNetworkClient()
+internal actual fun createExperienceNetworkClient(): NetworkClient = platformHttpClient(false, null) {
+    install(HttpTimeout) {
+        connectTimeoutMillis = 20_000L
+        socketTimeoutMillis = 45_000L
+        requestTimeoutMillis = 30L * 60_000L
+    }
+}.asNetworkClient()

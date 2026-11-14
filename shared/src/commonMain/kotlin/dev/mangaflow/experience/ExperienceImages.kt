@@ -40,6 +40,42 @@ private val workKey = Extras.Key(ExperienceImageWork.VISIBLE)
 private val bytesKey = Extras.Key<PrefetchByteBudget?>(null)
 private val sourceKey = Extras.Key<String?>(null)
 private val workTokenKey = Extras.Key<PrefetchWork?>(null)
+private val readerTransferKey = Extras.Key<ReaderTransferObserver?>(null)
+
+/** Only successfully written body bytes advance this monotonic foreground inactivity clock. */
+internal data class ReaderTransferSnapshot(
+    val receivedBytes: Long = 0L,
+    val expectedBytes: Long? = null,
+    val lastProgressAt: Long? = null,
+)
+
+/** Owned by one reader attempt, including any native/script image materialization before Coil. */
+internal class ReaderTransferObserver {
+    private val lock = StorageLock()
+    private var current = ReaderTransferSnapshot()
+
+    fun snapshot(): ReaderTransferSnapshot = synchronized(lock) { current }
+
+    /** A new response can change its length; headers alone never extend the waiting deadline. */
+    fun beginBody(expectedBytes: Long? = null) = synchronized(lock) {
+        current = current.copy(receivedBytes = 0L, expectedBytes = expectedBytes?.takeIf { it >= 0L })
+    }
+
+    fun onBytes(count: Long, expectedBytes: Long? = null) {
+        if (count <= 0L) return
+        synchronized(lock) {
+            current = current.copy(
+                receivedBytes = current.receivedBytes + count.coerceAtMost(Long.MAX_VALUE - current.receivedBytes),
+                expectedBytes = expectedBytes?.takeIf { it >= 0L } ?: current.expectedBytes,
+                lastProgressAt = monotonicTimeMillis(),
+            )
+        }
+    }
+}
+
+internal fun ImageRequest.Builder.readerTransferProgress(observer: ReaderTransferObserver) = apply {
+    extras[readerTransferKey] = observer
+}
 
 /** Ownership can promote one displayed page without lifting the rest of its byte window. */
 internal class PrefetchWork(private val promoted: () -> Unit = {}) {
@@ -163,6 +199,7 @@ private class ExperienceImageNetworkClient(
         val optional = request.extras[workKey] == ExperienceImageWork.PREFETCH
         val budget = request.extras[bytesKey]
         val token = request.extras[workTokenKey]
+        val readerTransfer = request.extras[readerTransferKey]
         var received = 0L
         var accepted = 0L
         var code: Int? = null
@@ -175,6 +212,13 @@ private class ExperienceImageNetworkClient(
                 retry = response.headers["Retry-After"]
                 val body = response.body
                 if (body == null) return@responseBlock block(response)
+                val successfulBody = response.code in 200..299
+                if (successfulBody) {
+                    val encoding = response.headers["Content-Encoding"]?.trim()
+                    val length = if (encoding.isNullOrEmpty() || encoding.equals("identity", true))
+                        response.headers["Content-Length"]?.toLongOrNull() else null
+                    readerTransfer?.beginBody(length)
+                }
                 if (optional) {
                     requireNotNull(token).ifOptional {
                         if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
@@ -194,8 +238,11 @@ private class ExperienceImageNetworkClient(
                                         accepted += byteCount
                                     }
                                 }
-                                received += byteCount
                                 sink.write(source, byteCount)
+                                if (byteCount > 0L) {
+                                    received += byteCount
+                                    if (successfulBody) readerTransfer?.onBytes(byteCount)
+                                }
                             }
                             override fun flush() = sink.flush()
                             override fun timeout(): Timeout = sink.timeout()

@@ -30,6 +30,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var powerUntil = 0L
     private var warmUntil = 0L
     private var cpuUntil = 0L
+    private var storageLow = false
     private var interactionUntil = 0L
     private var interactionJob: Job? = null
     private var sampleGeneration = 0L
@@ -53,6 +54,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var queued = 0
     private var nextTicket = 0L
     private val pageQueue = linkedMapOf<Long, String>()
+    private val chapterQueue = linkedMapOf<Long, String>()
     private val chapters = mutableSetOf<String>()
     private val sourceActive = mutableMapOf<String, Int>()
     private val sources = mutableMapOf<String, SourceObservation>()
@@ -110,6 +112,11 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 if ((sampled.thermalPressure ?: 0) >= 1) warmUntil = now + 15_000L
                 if ((sampled.cpuLoad ?: 0.0) > .85) cpuUntil = now + 20_000L
                 if (sampled.lowPower == true) powerUntil = now + 15_000L
+                sampled.freeDiskBytes?.let { free ->
+                    val reserve = diskReserve()
+                    if (free <= reserve) storageLow = true
+                    else if (free > reserve + 64L * EXPERIENCE_MIB) storageLow = false
+                }
                 resources = sampled
                 publish()
                 updateUsage()
@@ -230,14 +237,20 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         }
     }
 
-    internal suspend fun <T> withChapterAdmission(id: String, block: suspend () -> T): T =
+    internal suspend fun <T> withChapterAdmission(
+        id: String, maxWaitMillis: Long? = null, onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
+    ): T =
         admit({ chapters.size < mutableState.value.chapterParallelism && id !in chapters },
-            { chapters += id }, { chapters -= id }, block = block)
+            { chapters += id }, { chapters -= id }, chapter = id, maxWaitMillis = maxWaitMillis,
+            waiting = { protectionWait() ?: AdmissionWait(AdmissionWaitReason.CHAPTER_LIMIT) }, onWaiting = onWaiting, block = block)
 
-    internal suspend fun <T> withBackgroundPageAdmission(source: String, block: suspend () -> T): T =
+    internal suspend fun <T> withBackgroundPageAdmission(
+        source: String, maxWaitMillis: Long? = null, onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
+    ): T =
         admit({ activePages < mutableState.value.backgroundPages && sourceAvailable(source) },
             { activePages++; sourceActive[source] = (sourceActive[source] ?: 0) + 1 },
-            { activePages--; releaseSource(source) }, source, fairPages = true, block = block)
+            { activePages--; releaseSource(source) }, source, fairPages = true,
+            maxWaitMillis = maxWaitMillis, waiting = { backgroundWait(source) }, onWaiting = onWaiting, block = block)
 
     internal suspend fun <T> withImageAdmission(reader: Boolean, block: suspend () -> T): T =
         if (reader) admit({ activeReaderImages < mutableState.value.readerRequests },
@@ -268,31 +281,52 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
 
     private suspend fun <T> admit(
         ready: () -> Boolean, enter: () -> Unit, leave: () -> Unit,
-        source: String? = null, abandon: () -> Boolean = { false }, fairPages: Boolean = false, block: suspend () -> T,
+        source: String? = null, abandon: () -> Boolean = { false }, fairPages: Boolean = false,
+        chapter: String? = null, maxWaitMillis: Long? = null,
+        waiting: () -> AdmissionWait = { AdmissionWait(AdmissionWaitReason.GLOBAL_LIMIT) },
+        onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
     ): T {
         var admitted = false
+        val deadline = maxWaitMillis?.let { monotonicTimeMillis() + it.coerceAtLeast(1L) }
+        var previousWait: AdmissionWait? = null
         val ticket = synchronized(lock) {
             queued++
-            (++nextTicket).also { if (fairPages) pageQueue[it] = requireNotNull(source); updateUsage() }
+            (++nextTicket).also {
+                if (fairPages) pageQueue[it] = requireNotNull(source)
+                if (chapter != null) chapterQueue[it] = chapter
+                updateUsage()
+            }
         }
         try {
             while (!admitted) {
                 currentCoroutineContext().ensureActive()
                 var wakeAt: Long? = null
+                var currentWait: AdmissionWait? = null
                 val before = synchronized(lock) {
                     if (abandon()) throw CancellationException("预取预算已收敛")
-                    val fair = !fairPages || pageQueue.entries.firstOrNull { sourceAvailable(it.value) }?.key == ticket
-                    if (fair && ready()) {
+                    val fair = (!fairPages || pageQueue.entries.firstOrNull { sourceAvailable(it.value) }?.key == ticket) &&
+                        (chapter == null || chapterQueue.entries.firstOrNull { it.value !in chapters }?.key == ticket)
+                    val capacity = ready()
+                    if (fair && capacity) {
                         pageQueue.remove(ticket)
+                        chapterQueue.remove(ticket)
                         enter(); admitted = true; queued--; updateUsage()
+                    } else {
+                        currentWait = if (capacity && !fair) AdmissionWait(AdmissionWaitReason.FAIR_QUEUE) else waiting()
+                        wakeAt = source?.let { sources[it]?.blockedUntil }?.takeIf { it > monotonicTimeMillis() }
                     }
-                    else wakeAt = source?.let { sources[it]?.blockedUntil }?.takeIf { it > monotonicTimeMillis() }
                     revision.value
                 }
-                if (!admitted) {
-                    val wait = wakeAt?.let { (it - monotonicTimeMillis()).coerceAtLeast(1L) }
-                    if (wait == null) revision.first { it != before }
-                    else withTimeoutOrNull(wait) { revision.first { it != before } }
+                // Store callbacks may acquire another lock; never call them under the policy lock.
+                if (admitted) onWaiting(null)
+                else {
+                    val state = requireNotNull(currentWait)
+                    if (state != previousWait) { onWaiting(state); previousWait = state }
+                    val now = monotonicTimeMillis()
+                    if (deadline != null && now >= deadline) throw ExperienceAdmissionDeferred(state)
+                    val next = listOfNotNull(wakeAt, deadline).minOrNull()
+                    if (next == null) revision.first { it != before }
+                    else withTimeoutOrNull((next - now).coerceAtLeast(1L)) { revision.first { it != before } }
                 }
             }
             return block()
@@ -300,6 +334,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             synchronized(lock) {
                 if (admitted) leave() else queued--
                 pageQueue.remove(ticket)
+                chapterQueue.remove(ticket)
                 revision.value++
                 updateUsage()
             }
@@ -309,8 +344,35 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private fun sourceAvailable(source: String): Boolean {
         val now = monotonicTimeMillis()
         val observed = sources[source]
-        val limit = if (observed != null && observed.recoverAfter > now) 1 else mutableState.value.sourceParallelism
+        val limit = minOf(observed?.parallelism ?: 1, mutableState.value.sourceParallelism)
         return (observed?.blockedUntil ?: 0L) <= now && (sourceActive[source] ?: 0) < limit
+    }
+
+    private fun protectionWait(): AdmissionWait? = when {
+        resources.networkAvailable == false -> AdmissionWait(AdmissionWaitReason.NO_NETWORK)
+        storageLow -> AdmissionWait(AdmissionWaitReason.STORAGE_LOW)
+        (resources.thermalPressure ?: 0) >= 3 -> AdmissionWait(AdmissionWaitReason.THERMAL)
+        !mutableState.value.foreground && !mutableOverrides.value.allowBackgroundDownloads ->
+            AdmissionWait(AdmissionWaitReason.BACKGROUND_RESTRICTED)
+        mutableState.value.foreground && readerUsers > 0 && readerWaiting && mutableOverrides.value.yieldToReading ->
+            AdmissionWait(AdmissionWaitReason.READING_PRIORITY)
+        else -> null
+    }
+
+    private fun backgroundWait(source: String): AdmissionWait {
+        protectionWait()?.let { return it }
+        val now = monotonicTimeMillis()
+        val observed = sources[source]
+        if (observed != null && observed.blockedUntil > now) {
+            return AdmissionWait(AdmissionWaitReason.SOURCE_BACKOFF, observed.blockedUntil - now)
+        }
+        if (!sourceAvailable(source)) return AdmissionWait(AdmissionWaitReason.SOURCE_LIMIT)
+        return AdmissionWait(when {
+            resources.memoryPressure == true || memoryUntil > now -> AdmissionWaitReason.MEMORY_PRESSURE
+            (resources.thermalPressure ?: 0) >= 1 || warmUntil > now -> AdmissionWaitReason.THERMAL
+            mutableState.value.foreground && readerUsers > 0 && mutableOverrides.value.yieldToReading -> AdmissionWaitReason.READING_PRIORITY
+            else -> AdmissionWaitReason.GLOBAL_LIMIT
+        })
     }
     private fun releaseSource(source: String) {
         val left = (sourceActive[source] ?: 1) - 1
@@ -325,10 +387,24 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             }
             val observed = sources.getOrPut(source) { SourceObservation() }
             if (code == 429 || code == 503) {
-                observed.blockedUntil = now + experienceRetryDelay(retryAfter)
-                observed.recoverAfter = observed.blockedUntil + 30_000L
-            } else if (failed || (bytes >= 64L * 1024L && elapsed > 0L && bytes * 1000L / elapsed < 128L * 1024L)) {
-                observed.recoverAfter = now + 30_000L
+                // Concurrent failures cannot shorten an already advertised source cooldown.
+                observed.blockedUntil = maxOf(observed.blockedUntil, now + experienceRetryDelay(retryAfter))
+                observed.recoverAfter = maxOf(observed.recoverAfter, observed.blockedUntil + 30_000L)
+                observed.parallelism = 1
+                observed.healthySince = 0L; observed.successes = 0
+            } else if (failed || code != null && code >= 500 ||
+                (bytes >= 64L * 1024L && elapsed > 0L && bytes * 1000L / elapsed < 128L * 1024L)) {
+                observed.recoverAfter = maxOf(observed.recoverAfter, now + 30_000L)
+                observed.parallelism = (observed.parallelism - 1).coerceAtLeast(1)
+                observed.healthySince = 0L; observed.successes = 0
+            } else if (code != null && code in 200..299 && bytes > 0L && now >= observed.recoverAfter) {
+                if (observed.healthySince == 0L) observed.healthySince = now
+                observed.successes++
+                if (observed.successes >= 4 && now - observed.healthySince >= 20_000L && now >= observed.nextIncreaseAt) {
+                    observed.parallelism = minOf(observed.parallelism + 1, mutableState.value.sourceParallelism)
+                    observed.nextIncreaseAt = now + 30_000L
+                    observed.healthySince = now; observed.successes = 0
+                }
             }
             measurements.recordTransfer(bytes, elapsed)
             revision.value++
@@ -367,9 +443,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         val power = resources.lowPower == true || powerUntil > now || lowBattery
         val cpuBusy = (resources.cpuLoad ?: 0.0) > .85 || cpuUntil > now
         val constrained = resources.lowMemoryDevice == true || power || warm || warning || heapHigh || cpuBusy
-        val reserve = if (desktop) 1024L * EXPERIENCE_MIB else 256L * EXPERIENCE_MIB
+        val reserve = diskReserve()
         val free = resources.freeDiskBytes
-        val diskLow = free != null && free <= reserve
+        val diskLow = storageLow || free != null && free <= reserve
         val foreground = foregroundUsers > 0
         val reading = foreground && readerUsers > 0 && o.yieldToReading
         var background = o.downloadPages ?: when (mode) {
@@ -378,7 +454,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             ExperienceMode.PERFORMANCE -> maximumBackgroundPageParallelism
         }
         if (reading || constrained) background = minOf(background, if (desktop && !warning && !hot && !readerWaiting) 2 else 1)
-        if (diskLow || (!foreground && !o.allowBackgroundDownloads) || (resources.thermalPressure ?: 0) >= 3) background = 0
+        if (diskLow || resources.networkAvailable == false || (!foreground && !o.allowBackgroundDownloads) ||
+            (resources.thermalPressure ?: 0) >= 3 || reading && readerWaiting) background = 0
         var ahead = if (o.prefetchMode == PrefetchMode.MANUAL) o.ahead ?: 3 else
             when (mode) { ExperienceMode.AUTO -> 6; ExperienceMode.ECO -> 1; ExperienceMode.PERFORMANCE -> 12 }
         var behind = if (o.prefetchMode == PrefetchMode.MANUAL) o.behind ?: 1 else
@@ -467,7 +544,12 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     }
     private fun readMode() = ExperienceMode.entries.firstOrNull { it.name == disk.getString(MODE_KEY) } ?: ExperienceMode.AUTO
     private fun readOverrides() = decodeExperienceOverrides(disk.getString(OVERRIDES_KEY))
-    private class SourceObservation(var blockedUntil: Long = 0L, var recoverAfter: Long = 0L)
+    private fun diskReserve(): Long = (if (platformKind == PlatformKind.DESKTOP) 1024L else 256L) * EXPERIENCE_MIB
+
+    private class SourceObservation(
+        var blockedUntil: Long = 0L, var recoverAfter: Long = 0L, var parallelism: Int = 1,
+        var healthySince: Long = 0L, var successes: Int = 0, var nextIncreaseAt: Long = 0L,
+    )
 
     companion object {
         private const val MODE_KEY = "experience_mode_v1"

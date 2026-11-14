@@ -12,6 +12,7 @@ import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
@@ -289,8 +290,34 @@ suspend fun materializeScriptPage(
                 return@withContext page.copy(url = target.toURI(), headers = emptyMap(), transform = "", sourceSessionEpoch = epoch)
             try {
                 val bytes = withImageSession(context, ref.sourceId, epoch) {
-                    fetchScriptImageBytes(context, page.url, actualHeaders,
-                        route ?: currentCoroutineContext()[ChapterDownloadTransport]?.route, onBytes)
+                    val started = monotonicTimeMillis()
+                    var responseCode: Int? = null
+                    var retryAfter: String? = null
+                    var received = 0L
+                    var failed = false
+                    var ignoreFeedback = false
+                    try {
+                        fetchScriptImageBytes(context, page.url, actualHeaders,
+                            route ?: currentCoroutineContext()[ChapterDownloadTransport]?.route,
+                            onBytes = { count ->
+                                if (count > 0L) {
+                                    received += count
+                                    onBytes?.invoke(count)
+                                }
+                            }, onResponse = { code, responseHeaders ->
+                                responseCode = code
+                                retryAfter = responseHeaders.entries.firstOrNull { it.key.equals("Retry-After", true) }?.value
+                            })
+                    } catch (failure: Exception) {
+                        ignoreFeedback = failure is CancellationException || failure is PrefetchBudgetExceeded || failure is PrefetchPromoted ||
+                            failure is DownloadRouteException || failure is SourceException && responseCode == null && failure.retryAfterSeconds > 0L
+                        failed = !ignoreFeedback
+                        throw failure
+                    } finally {
+                        if (!ignoreFeedback && current()) ExperiencePolicyStore.get(context).recordTransfer(
+                            ref.sourceId, responseCode, received, monotonicTimeMillis() - started, retryAfter, failed,
+                        )
+                    }
                 }
                 require(bytes.size.toLong() in 128L..MAX_IMAGE_BYTES) { "来源原图为空或超过大小限制。" }
                 currentCoroutineContext().ensureActive()

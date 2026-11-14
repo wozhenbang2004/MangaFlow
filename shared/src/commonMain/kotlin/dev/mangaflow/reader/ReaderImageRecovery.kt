@@ -22,6 +22,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -41,24 +42,73 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.mangaflow.data.ChapterVariant
+import dev.mangaflow.data.Page
+import dev.mangaflow.platform.wallTimeMillis
+import dev.mangaflow.platform.monotonicTimeMillis
+import dev.mangaflow.platform.storage.StorageLock
+import dev.mangaflow.storage.DownloadProgress
+import kotlinx.atomicfu.locks.synchronized
 import dev.mangaflow.ui.ChapterSourceLogo
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collect
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
 internal const val READER_SLOW_LOAD_MILLIS = 8_000L
 internal const val READER_PAGE_WAIT_MILLIS = 45_000L
 
+internal typealias ReaderPageResolver = suspend (Page, ((Long) -> Unit)?) -> Page
+
 /** One foreground wait owns its cancellation; shared downloads retain their own owner. */
 internal class ReaderLoadAttempt {
     val startedAt: TimeMark = TimeSource.Monotonic.markNow()
+    private val createdAt = wallTimeMillis()
+    private var observedTransfer: String? = null
+    private var observedBytes = 0L
+    private var byteProgress: TimeMark? = null
+    private val byteLock = StorageLock()
     var stopped by mutableStateOf(false)
     var active = true
     val acceptsResult: Boolean get() = active && !stopped
+
+    /** A new download request never revives the old reader attempt which had awaited another one. */
+    fun observeTransfer(progress: DownloadProgress): Boolean = synchronized(byteLock) {
+        if (!acceptsResult || progress.transferId.isEmpty()) return@synchronized false
+        val first = observedTransfer == null
+        if (first) observedTransfer = progress.transferId
+        if (observedTransfer != progress.transferId) return@synchronized false
+        val bytes = progress.transferredBytes
+        if (bytes > observedBytes && progress.lastProgressAt != null &&
+            (!first || progress.lastProgressAt >= createdAt)) byteProgress = TimeSource.Monotonic.markNow()
+        observedBytes = maxOf(observedBytes, bytes)
+        true
+    }
+
+    /** Visibility starts a fresh bounded wait; only new bytes in this request move its idle clock. */
+    fun idleMillis(visibleSince: TimeMark, transportProgressAt: Long? = null): Long = synchronized(byteLock) {
+        minOf(visibleSince.elapsedNow().inWholeMilliseconds,
+            byteProgress?.elapsedNow()?.inWholeMilliseconds ?: Long.MAX_VALUE,
+            transportProgressAt?.let { monotonicTimeMillis() - it } ?: Long.MAX_VALUE).coerceAtLeast(0L)
+    }
+}
+
+@Composable
+internal fun rememberReaderPageTransfer(attempt: ReaderLoadAttempt, page: Page,
+    observer: (Page) -> Flow<DownloadProgress?>, enabled: Boolean): State<DownloadProgress?> {
+    val progress = remember(attempt) { mutableStateOf<DownloadProgress?>(null) }
+    LaunchedEffect(attempt, page, observer, enabled) {
+        progress.value = null
+        if (!enabled || !attempt.acceptsResult) return@LaunchedEffect
+        observer(page).collect { current ->
+            progress.value = current?.takeIf { attempt.observeTransfer(it) }
+        }
+    }
+    return progress
 }
 
 /** Do not present transport URLs, request keys or raw exception chains as reading UI. */
@@ -110,6 +160,7 @@ internal fun ReaderImageRecovery(
     stage: String = "请求图片",
     pageCount: Int = 0,
     sourceName: String = "",
+    transferProgress: DownloadProgress? = null,
     foreground: Color = MaterialTheme.colorScheme.onSurface,
     onStop: () -> Unit = {},
 ) {
@@ -129,7 +180,11 @@ internal fun ReaderImageRecovery(
                 (if (pageCount > 0) " / $pageCount" else "") + " 页",
                 fontSize = 13.sp, fontWeight = FontWeight.Medium, color = foreground, maxLines = 1)
         }
-        Text(if (pending) stage + if (slow) " · 等待较久" else "" else readerPageErrorLabel(failure),
+        val liveTransfer = transferProgress?.takeIf { pending && attempt.acceptsResult }
+        val transferStage = liveTransfer?.let { transfer ->
+            transfer.phase.label + if (transfer.receivedBytes > 0L) " · " + readerTransferBytes(transfer.receivedBytes) else ""
+        } ?: stage
+        Text(if (pending) transferStage + if (slow) " · 等待较久" else "" else readerPageErrorLabel(failure),
             fontSize = 11.sp, color = foreground.copy(alpha = .66f), maxLines = 2)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (sourceName.isNotBlank()) Text(sourceName, fontSize = 11.sp, color = foreground.copy(alpha = .55f),
@@ -175,3 +230,8 @@ internal fun ReaderImageRecovery(
         }
     }
 }
+
+private fun readerTransferBytes(bytes: Long): String = if (bytes >= 1_048_576L) {
+    val tenths = bytes * 10L / 1_048_576L
+    "${tenths / 10}.${tenths % 10} MB"
+} else "${(bytes / 1024L).coerceAtLeast(1L)} KB"

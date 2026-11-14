@@ -55,11 +55,14 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.reader.ReaderImageRecovery
 import dev.mangaflow.reader.ReaderLoadAttempt
+import dev.mangaflow.reader.ReaderPageResolver
+import dev.mangaflow.reader.rememberReaderPageTransfer
 import dev.mangaflow.reader.ReaderSurface
 import dev.mangaflow.reader.ReaderWaitCaption
 import dev.mangaflow.reader.READER_PAGE_WAIT_MILLIS
 import dev.mangaflow.reader.READER_SLOW_LOAD_MILLIS
 import dev.mangaflow.storage.ReaderPreferences
+import dev.mangaflow.storage.DownloadProgress
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -71,6 +74,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
@@ -84,8 +88,9 @@ internal fun GuidedPanelReader(
     sourceId: String,
     prefetchPage: suspend (Page) -> Page?,
     scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page?,
-    resolvePage: suspend (Page) -> Page,
-    retryPage: suspend (Page) -> Page,
+    resolvePage: ReaderPageResolver,
+    retryPage: ReaderPageResolver,
+    observePageTransfer: (Page) -> Flow<DownloadProgress?>,
     externalRetrySerial: Int,
     preferences: ReaderPreferences,
     initialPage: Int,
@@ -129,12 +134,16 @@ internal fun GuidedPanelReader(
     val currentPage = pages[pageIndex]
     var imageRetry by remember(pageIndex, currentPage.index, currentPage.url, headers, sourceId) { mutableIntStateOf(0) }
     val attempt = remember(pageIndex, currentPage.index, currentPage.url, headers, sourceId, imageRetry) { ReaderLoadAttempt() }
+    val transferObserver = remember(attempt) { ReaderTransferObserver() }
+    var transportProgress by remember(attempt) { mutableStateOf(transferObserver.snapshot()) }
     var resource by remember(attempt) { mutableStateOf<Page?>(null) }
     var detection by remember(attempt) { mutableStateOf<PanelDetection?>(null) }
     var loading by remember(attempt) { mutableStateOf(true) }
     var error by remember(attempt) { mutableStateOf<String?>(null) }
     var imageNotice by remember(attempt) { mutableStateOf<String?>(null) }
     var imageReady by remember(attempt) { mutableStateOf(false) }
+    val pageTransfer by rememberReaderPageTransfer(attempt, currentPage, observePageTransfer,
+        enabled = active && !imageReady && error == null && resource == null)
     val waitClock = remember(attempt, active, imageReady) { TimeSource.Monotonic.markNow() }
     var slowLoading by remember(waitClock) { mutableStateOf(false) }
     var skipDetection by remember(attempt) { mutableStateOf(false) }
@@ -168,16 +177,20 @@ internal fun GuidedPanelReader(
         }
         previousRetrySerial = externalRetrySerial
     }
-    LaunchedEffect(attempt, active, imageReady, waitClock) {
-        if (active && !imageReady && attempt.acceptsResult && error == null) {
-            delay(READER_SLOW_LOAD_MILLIS)
-            slowLoading = true
-            delay(READER_PAGE_WAIT_MILLIS - READER_SLOW_LOAD_MILLIS)
-            if (!imageReady && attempt.acceptsResult && error == null) {
+    LaunchedEffect(attempt, active, imageReady, waitClock, error) {
+        slowLoading = false
+        while (active && !imageReady && attempt.acceptsResult && error == null) {
+            val transport = transferObserver.snapshot()
+            transportProgress = transport
+            val idle = attempt.idleMillis(waitClock, transport.lastProgressAt)
+            slowLoading = idle >= READER_SLOW_LOAD_MILLIS
+            if (idle >= READER_PAGE_WAIT_MILLIS) {
                 attempt.stopped = true
                 error = "本页连接超时"
                 loading = false
+                break
             }
+            delay(minOf(1_000L, READER_PAGE_WAIT_MILLIS - idle))
         }
     }
     LaunchedEffect(detectionRun, loading, imageReady, detectionClock) {
@@ -229,7 +242,8 @@ internal fun GuidedPanelReader(
         error = null
         try {
             val page = pages[pageIndex]
-            val resolved = resource ?: if (imageRetry > 0) retry(page) else resolve(page)
+            val receiveBytes: (Long) -> Unit = { count -> if (attempt.acceptsResult) transferObserver.onBytes(count) }
+            val resolved = resource ?: if (imageRetry > 0) retry(page, receiveBytes) else resolve(page, receiveBytes)
             currentCoroutineContext().ensureActive()
             if (!attempt.acceptsResult || !requestedRun.acceptsResult || latestDetectionRun !== requestedRun) return@LaunchedEffect
             resource = resolved
@@ -308,6 +322,7 @@ internal fun GuidedPanelReader(
         resource?.takeIf { attempt.acceptsResult && error == null }?.let { loaded -> key(attempt, loaded.url) {
             PanelCamera(
                 page = loaded, headers = headers, box = boxes[selected], overview = overview,
+                transferObserver = transferObserver,
                 active = active,
                 onTap = { x ->
                     val forwardZone = if (preferences.panelDirection == PanelDirection.RIGHT_TO_LEFT) x < .3f else x > .7f
@@ -345,6 +360,10 @@ internal fun GuidedPanelReader(
                 ReaderImageRecovery(
                     index = pages[pageIndex].index, pageCount = pages.size, sourceName = sourceName,
                     failure = error.orEmpty(), pending = error == null, slow = slowLoading,
+                    transferProgress = pageTransfer ?: transportProgress.takeIf { it.receivedBytes > 0L }?.let {
+                        DownloadProgress(phase = dev.mangaflow.storage.DownloadPhase.TRANSFERRING,
+                            receivedBytes = it.receivedBytes, expectedBytes = it.expectedBytes)
+                    },
                     stage = if (resource == null) "准备本页图片" else "载入本页图片",
                     attempt = attempt, foreground = recoveryForeground, alternatives = sourceAlternatives,
                     startedAt = waitClock,

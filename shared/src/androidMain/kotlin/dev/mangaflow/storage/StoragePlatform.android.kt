@@ -92,8 +92,10 @@ internal actual suspend fun createWallpaperVideoPoster(media: StorageFile, poste
 }
 
 internal actual class DownloadScheduler actual constructor(context: PlatformContext) {
-    private val manager = WorkManager.getInstance(context.applicationContext)
-    actual fun schedule(chapterId: String, workId: String) {
+    private val app = context.applicationContext
+    private val manager = WorkManager.getInstance(app)
+    actual fun schedule(chapterId: String, workId: String, userInitiated: Boolean) {
+        if (Build.VERSION.SDK_INT >= 34 && userInitiated && ChapterUserInitiatedJobs.schedule(app, chapterId, workId)) return
         val request = OneTimeWorkRequestBuilder<ChapterDownloadWorker>().setId(UUID.fromString(workId))
             .setInputData(workDataOf(ChapterDownloadWorker.KEY_CHAPTER to chapterId))
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
@@ -101,10 +103,12 @@ internal actual class DownloadScheduler actual constructor(context: PlatformCont
         manager.enqueueUniqueWork("mangaflow-download-$chapterId", ExistingWorkPolicy.REPLACE, request).result.get(20, TimeUnit.SECONDS)
     }
     actual suspend fun cancel(workId: String) = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT >= 34) ChapterUserInitiatedJobs.cancel(app, workId)
         manager.cancelWorkById(UUID.fromString(workId)).result.get(20, TimeUnit.SECONDS)
         Unit
     }
     actual suspend fun state(workId: String): DownloadTaskState? = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT >= 34) ChapterUserInitiatedJobs.state(app, workId)?.let { return@withContext it }
         manager.getWorkInfoById(UUID.fromString(workId)).get(20, TimeUnit.SECONDS)?.let {
             when (it.state) {
                 WorkInfo.State.ENQUEUED -> DownloadTaskState.ENQUEUED

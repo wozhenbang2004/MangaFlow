@@ -141,7 +141,7 @@ private fun DownloadConnectionSettings(
         }
     }
     Column(Modifier.fillMaxWidth().motionInputGate(active), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        Text("本应用连接", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+        Text("新任务默认线路", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
         MotionTabs(settings.defaultMode.ordinal, DownloadRouteMode.entries.map(::downloadRouteLabel),
             onSelect = { index ->
                 notice = null

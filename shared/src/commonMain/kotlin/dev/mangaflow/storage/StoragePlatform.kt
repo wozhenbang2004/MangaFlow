@@ -15,7 +15,7 @@ internal expect suspend fun createWallpaperVideoPoster(media: StorageFile, poste
 
 internal enum class DownloadTaskState { ENQUEUED, RUNNING, BLOCKED, FINISHED }
 internal expect class DownloadScheduler(context: PlatformContext) {
-    fun schedule(chapterId: String, workId: String)
+    fun schedule(chapterId: String, workId: String, userInitiated: Boolean = false)
     suspend fun cancel(workId: String)
     suspend fun state(workId: String): DownloadTaskState?
 }

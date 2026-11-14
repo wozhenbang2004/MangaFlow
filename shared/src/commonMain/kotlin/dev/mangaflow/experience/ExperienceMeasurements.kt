@@ -2,10 +2,7 @@ package dev.mangaflow.experience
 
 import kotlinx.serialization.json.*
 import kotlin.math.ceil
-import kotlin.time.Clock
-import kotlinx.datetime.LocalDateTime
-import kotlinx.datetime.TimeZone
-import kotlinx.datetime.toInstant
+import dev.mangaflow.net.retryAfterMillis
 
 internal fun encodeExperienceOverrides(o: ExperienceOverrides) = buildJsonObject {
     put("prefetch", o.prefetchMode.name)
@@ -37,19 +34,7 @@ internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = ru
 }.getOrDefault(ExperienceOverrides())
 
 /** Honor both delay-seconds and IMF-fixdate without storing URLs or credentials. */
-internal fun experienceRetryDelay(header: String?): Long {
-    val seconds = header?.trim()?.toLongOrNull()
-    if (seconds != null) return seconds.coerceIn(1, 86_400) * 1000L
-    val date = runCatching {
-        val match = Regex("^[A-Za-z]{3}, ([0-9]{2}) ([A-Za-z]{3}) ([0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) GMT$")
-            .matchEntire(header?.trim().orEmpty()) ?: return@runCatching null
-        val g = match.groupValues
-        val month = listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec").indexOf(g[2]) + 1
-        LocalDateTime(g[3].toInt(), month, g[1].toInt(), g[4].toInt(), g[5].toInt(), g[6].toInt())
-            .toInstant(TimeZone.UTC).toEpochMilliseconds()
-    }.getOrNull()
-    return date?.let { (it - Clock.System.now().toEpochMilliseconds()).coerceIn(1000L, 86_400_000L) } ?: 30_000L
-}
+internal fun experienceRetryDelay(header: String?): Long = (retryAfterMillis(header) ?: 30_000L).coerceAtLeast(1_000L)
 
 /** Bounded in-memory observations, not an analytics log or synthetic frame counter. */
 internal class ExperienceMeasurements {

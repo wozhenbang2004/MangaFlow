@@ -113,11 +113,8 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
         Text(budget.reason, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
         notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
 
-        SettingsDisclosure("阅读加载", when (custom.prefetchMode) {
-            PrefetchMode.OFF -> "预取已关闭"
-            PrefetchMode.MANUAL -> "已自定义"
-            PrefetchMode.SMART -> "智能调整"
-        }, Icons.Outlined.AutoStories, expanded == "reading", { toggle("reading") }) {
+        SettingsDisclosure("阅读加载", if (custom.prefetchMode == PrefetchMode.OFF) "预取已关闭"
+            else "前 ${budget.prefetchAhead} · 后 ${budget.prefetchBehind} 页", Icons.Outlined.AutoStories, expanded == "reading", { toggle("reading") }) {
             SettingsChoices(PrefetchMode.entries.map { it to when (it) {
                 PrefetchMode.SMART -> "智能"; PrefetchMode.OFF -> "关闭"; PrefetchMode.MANUAL -> "手动"
             } }, custom.prefetchMode) { change(custom.copy(prefetchMode = it)) }
@@ -135,15 +132,22 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             ExperienceBudgetRow("窗口分配", experienceCacheSize(budget.adjacentPrefetchBytes) + " 邻页 · " + experienceCacheSize(budget.nextChapterPrefetchBytes) + " 跨章")
             ExperienceHint("智能预取按方向、翻页速度和原图字节收敛；双页按完整跨页取整。原图先缓存，显示时再解码。原生解密来源仅准备目录。")
         }
-        SettingsDisclosure("下载与并发", if (custom.downloadPages != null || custom.sourcePages != null || custom.chapters != null) "已自定义" else "智能调整",
+        SettingsDisclosure("下载与并发", if (budget.backgroundPages == 0) "等待资源"
+            else "${budget.backgroundPages} 页 · ${budget.chapterParallelism} 章",
             Icons.Outlined.Download, expanded == "downloads", { toggle("downloads") }) {
             ExperienceNumber("总页面请求", custom.downloadPages, if (platformKind == PlatformKind.DESKTOP) 4 else 2,
                 1..maximumBackgroundPageParallelism, "个") { change(custom.copy(downloadPages = it)) }
             ExperienceNumber("每个来源", custom.sourcePages, 2, 1..4, "个") { change(custom.copy(sourcePages = it)) }
             ExperienceNumber("同时下载章节", custom.chapters, 2, 1..4, "章") { change(custom.copy(chapters = it)) }
             SettingsToggle("阅读时下载让路", custom.yieldToReading, Icons.Outlined.AutoStories) { change(custom.copy(yieldToReading = it)) }
-            ExperienceBudgetRow("当前限额", budget.backgroundPages.toString() + " 页 · " + budget.chapterParallelism + " 章 · 每源 " + budget.sourceParallelism)
-            ExperienceHint("每源限额与预取共享；来源限流或变慢时自动收敛。新限额作用于后续请求，已传输的页面继续完成。")
+            if (custom.downloadPages != null || custom.chapters != null || custom.sourcePages != null)
+                ExperienceBudgetRow("手动上限", listOfNotNull(
+                    custom.downloadPages?.let { "$it 页" }, custom.chapters?.let { "$it 章" },
+                    custom.sourcePages?.let { "每源 $it" }).joinToString(" · "))
+            ExperienceBudgetRow("当前上限", budget.backgroundPages.toString() + " 页 · " + budget.chapterParallelism + " 章 · 每源 " + budget.sourceParallelism)
+            ExperienceBudgetRow("正在执行", "${usage.activeBackgroundPages} 页 · ${usage.activeChapters} 章")
+            if (budget.protections.isNotEmpty()) ExperienceBudgetRow("调整原因", budget.protections.joinToString(" · "))
+            ExperienceHint("每源从 1 个请求开始，按真实反馈逐步调整，限流时等待恢复。限额与预取共享，仅限制新请求，已传输的页面继续完成。")
         }
         SettingsDisclosure("缓存与存储", usage.diskBytes?.let(::experienceCacheSize) ?: "读取中",
             Icons.Outlined.Storage, expanded == "cache", { toggle("cache") }) {
@@ -152,7 +156,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             if (active && expanded == "cache") {
                 val downloads = remember(context) { DownloadStore.get(context) }
                 val entries by downloads.entries.collectAsStateWithLifecycle()
-                ExperienceBudgetRow("下载图片", experienceCacheSize(entries.sumOf { it.downloadedBytes }))
+                ExperienceBudgetRow("离线已保存", experienceCacheSize(entries.sumOf { it.downloadedBytes }))
             }
             ExperienceNumber("内存缓存上限", custom.memoryMiB, ((usage.memoryLimit ?: 128L * EXPERIENCE_MIB) / EXPERIENCE_MIB).toInt(),
                 16..512, "MB") { change(custom.copy(memoryMiB = it)) }
@@ -189,6 +193,11 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             SettingsToggle("计费网络也可预取", custom.allowMeteredPrefetch, Icons.Outlined.NetworkCheck) { change(custom.copy(allowMeteredPrefetch = it)) }
             SettingsToggle("低电量减少后台工作", custom.batteryProtection, Icons.Outlined.BatterySaver) { change(custom.copy(batteryProtection = it)) }
             SettingsToggle("允许后台下载", custom.allowBackgroundDownloads, Icons.Outlined.Download) { change(custom.copy(allowBackgroundDownloads = it)) }
+            ExperienceHint(when (platformKind) {
+                PlatformKind.DESKTOP -> "退出应用后停止下载，重新打开后核对并续传。"
+                PlatformKind.IOS -> "在系统允许的延长执行时段内继续；系统暂停或强制退出后，重新打开续传。"
+                else -> "后台下载受系统任务配额和通知权限限制；中断后保留可用断点。"
+            })
             ExperienceHint("网络计费未知时，自动模式采用保守预取，跨章默认不取正文。手动设置仍受字节和资源预算约束；系统省电、严重温度与内存保护始终生效。")
         }
         SettingsDisclosure("实时资源状态", if (budget.protections.isEmpty()) "查看诊断" else budget.protections.first(),
