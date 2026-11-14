@@ -86,6 +86,7 @@ internal fun GuidedPanelReader(
     scriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page?,
     resolvePage: suspend (Page) -> Page,
     retryPage: suspend (Page) -> Page,
+    externalRetrySerial: Int,
     preferences: ReaderPreferences,
     initialPage: Int,
     initialPanel: Int,
@@ -155,6 +156,18 @@ internal fun GuidedPanelReader(
     val foreground = MaterialTheme.colorScheme.onSurface
     DisposableEffect(attempt) { onDispose { attempt.active = false } }
     DisposableEffect(detectionRun) { onDispose { detectionRun.active = false } }
+    var previousRetrySerial by remember(pageIndex, currentPage.index, currentPage.url, headers, sourceId) {
+        mutableIntStateOf(externalRetrySerial)
+    }
+    LaunchedEffect(pageIndex, currentPage.index, currentPage.url, headers, sourceId, externalRetrySerial) {
+        if (externalRetrySerial > previousRetrySerial) {
+            attempt.stopped = true
+            detectionRun.stopped = true
+            forceDetection = true
+            imageRetry++
+        }
+        previousRetrySerial = externalRetrySerial
+    }
     LaunchedEffect(attempt, active, imageReady, waitClock) {
         if (active && !imageReady && attempt.acceptsResult && error == null) {
             delay(READER_SLOW_LOAD_MILLIS)
@@ -269,8 +282,10 @@ internal fun GuidedPanelReader(
         }
     }
     LaunchedEffect(pageIndex, selected, detection, imageReady, active) {
+        // The parent needs the displayed page for retry/source/ordinary-reading actions,
+        // even when this page has no usable image yet. Only ready content is saved.
+        if (active) location(pageIndex, if (detection != null && imageReady) selected else 0)
         if (detection != null && imageReady && active) {
-            location(pageIndex, selected)
             if (pageIndex >= pages.lastIndex - 3) onNearEnd()
             delay(350)
             save(pageIndex, selected)
@@ -333,7 +348,10 @@ internal fun GuidedPanelReader(
                     stage = if (resource == null) "准备本页图片" else "载入本页图片",
                     attempt = attempt, foreground = recoveryForeground, alternatives = sourceAlternatives,
                     startedAt = waitClock,
-                    onRetry = { forceDetection = true; imageRetry++ },
+                    onRetry = {
+                        attempt.stopped = true; detectionRun.stopped = true
+                        forceDetection = true; imageRetry++
+                    },
                     onSwitch = { onQuickSwitch(pageIndex, it) }, onMore = onMoreSources,
                     onControls = onShowControls,
                     onStop = { attempt.stopped = true; error = "已停止等待"; loading = false },

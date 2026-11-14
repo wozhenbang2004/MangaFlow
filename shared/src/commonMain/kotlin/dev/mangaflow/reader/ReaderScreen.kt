@@ -348,19 +348,8 @@ fun ReaderScreen(
     val latestChapterLoadAttempt by rememberUpdatedState(chapterLoadAttempt)
     var chapterLoadStage by remember(chapterLoadAttempt) { mutableStateOf("检查本机章节") }
     var chapterSlowLoading by remember(chapterLoadAttempt) { mutableStateOf(false) }
+    var chapterWaitClock by remember(chapterLoadAttempt) { mutableStateOf<TimeMark?>(null) }
     DisposableEffect(chapterLoadAttempt) { onDispose { chapterLoadAttempt.active = false } }
-    LaunchedEffect(chapterLoadAttempt, loading) {
-        if (loading && chapterLoadAttempt.acceptsResult) {
-            delay(READER_SLOW_LOAD_MILLIS)
-            chapterSlowLoading = true
-            delay(25_000L - READER_SLOW_LOAD_MILLIS)
-            if (chapterLoadAttempt.acceptsResult && loading) {
-                chapterLoadAttempt.stopped = true
-                error = "打开章节超时"
-                loading = false
-            }
-        }
-    }
     var pageIndex by remember(chapterId) { mutableIntStateOf(0) }
     // Pixel offsets are a resume cursor, not UI state. Publishing every scroll delta
     // here used to recompose ReaderScreen and ChapterPages for every animation frame.
@@ -558,6 +547,23 @@ fun ReaderScreen(
     val toolbarTravel = with(LocalDensity.current) { 12.dp.roundToPx() }
     val touchExploration = rememberReaderTouchExploration()
     val delayedLoading = rememberDelayedBusy(loading)
+    val chapterWaitVisible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
+        !showComments && !showSpreadAdjustment && !showPageNavigator && !sourcePickerBlocking
+    LaunchedEffect(chapterLoadAttempt, chapterWaitVisible, loading, error) {
+        chapterSlowLoading = false
+        if (chapterWaitVisible && loading && error == null && chapterLoadAttempt.acceptsResult) {
+            chapterWaitClock = TimeSource.Monotonic.markNow()
+            delay(READER_SLOW_LOAD_MILLIS)
+            chapterSlowLoading = true
+            delay(25_000L - READER_SLOW_LOAD_MILLIS)
+            if (chapterWaitVisible && loading && error == null && latestChapterLoadAttempt === chapterLoadAttempt &&
+                chapterLoadAttempt.acceptsResult) {
+                chapterLoadAttempt.stopped = true
+                error = "打开章节超时"
+                loading = false
+            }
+        }
+    }
     // Old page panes may save their own cursor while a source switch disposes them.
     val chapterPageCount = pages.size
 
@@ -854,13 +860,14 @@ fun ReaderScreen(
                 onClick = { controlsVisible = !controlsVisible },
             ) else Modifier)) {
             when {
-                loading || error != null -> if (delayedLoading || error != null) ReaderImageRecovery(
+                loading || error != null -> if (chapterWaitVisible && (delayedLoading || error != null)) ReaderImageRecovery(
                     index = null, failure = error.orEmpty(), pending = loading,
                     slow = chapterSlowLoading, stage = chapterLoadStage,
                     sourceName = currentSourceName.orEmpty(), attempt = chapterLoadAttempt,
+                    startedAt = chapterWaitClock ?: chapterLoadAttempt.startedAt,
                     foreground = preferences.theme.foreground(), modifier = Modifier.align(Alignment.Center),
                     alternatives = alternativeSources,
-                    onRetry = { retry++ },
+                    onRetry = { chapterLoadAttempt.stopped = true; retry++ },
                     onSwitch = { variant -> onReadVariant(chapter, variant, pageIndex, pages.size) },
                     onMore = { anchor ->
                         sourceTriggerAnchor = anchor
@@ -878,6 +885,7 @@ fun ReaderScreen(
                         pages = pages, headers = headers, resolvePage = resolvePage, retryPage = retryPage,
                         sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
                         sourceName = currentSourceName.orEmpty(), sourceAlternatives = alternativeSources,
+                        externalRetrySerial = currentPageRetrySerial,
                         onShowControls = { controlsVisible = true },
                         recoveryForeground = preferences.theme.foreground(),
                         onQuickSwitch = { failedIndex, variant ->
@@ -1411,8 +1419,13 @@ fun ReaderScreen(
             sourceCloseRequested = true
             if (variant.storageId == chapter.id) {
                 onCancelSourceSelection()
-                currentPageRetryIndex = pageIndex
-                currentPageRetrySerial++
+                if (loading || error != null || pages.isEmpty()) {
+                    chapterLoadAttempt.stopped = true
+                    retry++
+                } else {
+                    currentPageRetryIndex = pageIndex
+                    currentPageRetrySerial++
+                }
             } else {
                 onReadVariant(selected, variant, pageIndex, pages.size)
             }

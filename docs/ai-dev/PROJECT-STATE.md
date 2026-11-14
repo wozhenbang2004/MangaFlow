@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Reader recovery continuation: chapter waits and current-source retry · 2026-11-14
+
+User “继续” continues the original reader loading/console/source-recovery request; exact message ID unavailable. DESIGN READER-RECOVERY-11–13 owns this bounded continuation. Baselineb3957fe2 retainsd7ce61c visible-image/prefetch repair, starter-source installation and the newer live source-choice fixes. Concrete source gaps: chapter timeout still ran while background/blocked; choosing the current source during chapter failure only notified an absent image pane; GuidedPanelReader did not consume that retry pulse and only reported the previous successful page while the next image failed.
+
+The chapter25second deadline/8second disclosure and caption now follow actual reader availability. Current-source selection retries chapter acquisition when required, otherwise the actual current image. Guided retry and transient view position are connected without broadening readiness-gated progress saves, near-end work or cloud reporting. Existing source/headers/native IDs, cursor ownership, persistent download lifetimes, explicit source switching and UI/motion components remain.
+
+Actual Android252/job132450873792 assembled, packaged and signed successfully; its release step stopped with “A newer main revision is available; its workflow owns the next release.” Latest Android253/native91 were triggered for newerb3957fe2 when checked. These facts do not establish this continuation's compilation or installed acceptance. No tests, local builds, device/account/source/network probes or new gate. This entry accompanies one complete latest-main expected-head batch; confirm normal CI trigger once. If already in main, do not replay it; handle concrete CI or installed feedback next.
+
 ## Live source-choice continuation · 2026-11-14
 
 User “继续” extends the same multi-source badge feedback; exact message ID unavailable. DESIGN SOURCE-ALIGN-20261114-05–08 owns this narrow follow-up. Independent source diagnosis confirmed the permanently frozen chooser and never-released requestedVariant click gate after detail-source failure. Preserve the preceding fractional numbering/coverage repair. An active chooser now follows current exact chapter variants while keeping its initial session/anchor and row order, retains its last frame through actual exit and validates every action; busy-row state does not prevent a later retry. Source preparation rechecks fresh catalogue membership and logical identity before publishing an override/session, so delayed acquisition cannot put the old list back.
