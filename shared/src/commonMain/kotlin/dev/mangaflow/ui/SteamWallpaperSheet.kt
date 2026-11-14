@@ -653,17 +653,17 @@ private fun SteamWallpaperBrowser(
                 style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             if (!requested && !state.loading) MotionTextButton(onClick = onSearch) { Text("浏览壁纸") }
         } else {
-            // Keep the grid and its scroll owner through progress, errors and loading refreshes.
+            // Scrolling and previewing never replace a transfer; only new network actions are gated.
             LazyVerticalGrid(columns = GridCells.Adaptive(tileWidth), state = grid,
-                modifier = Modifier.weight(1f).fillMaxWidth().motionInputGate(available),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(state.items, key = { it.id }) { item ->
                     val interaction = remember(item.id) { MutableInteractionSource() }
                     Column(Modifier.fillMaxWidth()
-                        .clickable(enabled = available, interactionSource = interaction, indication = null,
+                        .clickable(interactionSource = interaction, indication = null,
                             role = Role.Button, onClickLabel = "预览 " + item.title) { onPreview(item) }
-                        .motionPress(interaction, available),
+                        .motionPress(interaction),
                         verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Box(Modifier.fillMaxWidth().aspectRatio(1.5f).clip(RoundedCornerShape(12.dp))
                             .background(colors.onSurface.copy(alpha = .045f))) {

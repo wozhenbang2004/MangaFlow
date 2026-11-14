@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Steam / route quality review · 2026-11-14
+
+STEAM-ROUTING-REVIEW-144 in DESIGN owns the user's “还能继续优化吗我们是最佳设计实现吗？”. This source review does not claim a best/verified UI. It fixes the concrete Workshop grid gate: scroll and pure preview remain available during a download/search; mutating client operations keep their existing busy gate and task ownership.
+
+Open prioritized gaps are recorded with exact code paths in the same entry: chapter manifest preparation precedes the chosen route snapshot; Steam Legacy Fetch buffers the entire accepted body and supplies no intermediate progress; visible route choices are category defaults; Steam jobs remain view/foreground-owned. Do not claim the latest routing covers all preparation API calls or that Legacy0% means no transferred bytes. The next full routing slice must acquire/persist one snapshot before preparation and isolate its in-flight sharing, including JS/JM, without altering ordinary reading globally.
+
+223's Android/Windows/iOS jobs actually failed on the same common PanelModelStore context syntax. Latest main24ba012b already contains applicationContext(context); keep that repair and current on-demand connection diagnosis. This batch has one UI file and existing records only; root integrates once on actual latest main with a lease, normal CI trigger, no local/tests/probes or extra gate. Installed scroll/preview/interrupt feel remains for real user evidence; do not submit a status-only follow-up.
+
 ## Native rankings: reviewed gaps and build-context correction · 2026-11-14
 
 Current instruction “目前是最佳设计最佳实现吗如果不是请继续” is implemented as DESIGN.md SITE-RANK-20261114-06–08 / BUILD-CONTEXT-20261114. Keep Copy 热榜 and all prior native identity/metric/snapshot rules. This bounded batch retains successful source hits when a later alias fails, stops after a complete source-query match without treating that spelling as identity proof, persists/restores validated site/kind/scope preferences, and wraps native score/count rows at stable text baselines.
