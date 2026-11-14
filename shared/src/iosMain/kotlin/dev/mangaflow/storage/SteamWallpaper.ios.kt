@@ -11,7 +11,13 @@ actual fun createSteamWallpaperClient(context: PlatformContext): SteamWallpaperC
     override fun loginWithPassword(accountName: String, password: CharArray) { password.fill('\u0000') }
     override fun submitGuardCode(code: String, method: SteamGuardMethod) = Unit
     override fun search(query: String, kind: SteamWallpaperKind, page: Int) = Unit
+    override fun loadLibrary(library: SteamWallpaperLibrary, kind: SteamWallpaperKind, page: Int) = Unit
+    override fun refreshProfile() = Unit
     override fun download(item: SteamWallpaperItem) = Unit
+    override fun cancelAuthentication() = Unit
+    override fun cancelTransfer() = Unit
+    override fun cancelBrowse() = Unit
+    override fun setForeground(foreground: Boolean) = Unit
     override fun cancel() = Unit
     override fun logout() = Unit
     override fun close() = Unit

@@ -31,7 +31,7 @@ SPECS = (
         "licenses": ("QuickJS-kt-APACHE-2.0.txt", "QuickJS-MIT.txt", "c-vector-MIT.txt"),
     },
     {
-        "id": "STEAM", "version": "0.1.2-f541366", "aar": "mangaflow-steam-0.1.2.aar",
+        "id": "STEAM", "version": "0.1.3-f541366", "aar": "mangaflow-steam-0.1.3.aar",
         "libraries": ("libmangaflow_steam.so",),
         "licenses": ("Tapline-MPL-2.0.txt", "Steam-Component-ThirdPartyNotices.txt"),
     },

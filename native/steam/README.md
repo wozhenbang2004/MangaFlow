@@ -1,6 +1,6 @@
 # Steam Workshop native component
 
-MangaFlow media adapter version 0.1.2; component identity 0.1.2-f541366.
+MangaFlow media adapter version 0.1.3; component identity 0.1.3-f541366.
 
 The module links the real tapline core pinned to
 https://github.com/UnhingedSoftware/tapline/tree/f54136611519bef50cf31336e0c28a78eb175657.
@@ -47,7 +47,7 @@ nativePoll is nonblocking: null means pending. A complete or error event is
 terminal. Completed queues also return complete once drained. An invalid handle
 returns error code invalid_job; nativeStart returns0 when unavailable/busy.
 
-All requests are JSON, op is login/passwordLogin/account/search/download.
+All requests are JSON, op is login/passwordLogin/account/profile/library/search/download.
 Every operation also requires an immutable network object. kind is SYSTEM or
 DIRECT, or HTTP/SOCKS5 with an explicit host and port. PROXY mode is resolved by
 the shared Kotlin routing store before nativeStart; a missing/invalid endpoint is
@@ -84,12 +84,31 @@ The adapter never calls TokenStore, automatic login or local Steam discovery.
   guardAccepted or guardRejected as applicable. nativeSubmitGuard enqueues one explicit
   code/type on this same live login job; it never starts another login or resends the
   password. Invalid/expired codes remain recoverable on that pending session.
+  The same PendingLogin is retained across at most3 bounded CM reconnects with a
+  10second heartbeat; passwords and submitted codes are never replayed. A Guard
+  submission with an ambiguous network outcome is queried on the same challenge
+  before the UI permits an explicit retry. guardReconnecting, guardResumed and
+  authVerifying describe that existing attempt, not a newly authenticated account.
   Mobile/email approvals continue polling without a code; successful login uses the
   same verified-client-session and platform-vault handoff as QR. Passwords and codes
   are never persisted, logged, included in state or sent to MangaFlow servers.
 - account validates the passed session and emits account/account/steamId,
   followed by complete. Network/session_unavailable does not mean the token
   was revoked; the Kotlin caller must retain the saved credential.
+- profile is an optional, separate metadata request for the already verified SteamID64.
+  It uses the same fixed route and the public numeric Steam Community profile XML,
+  with a15second/256KiB/4096node bound and DTD disabled. roxmltree0.20.0
+  (MIT OR Apache-2.0) parses actual steamID/avatarFull only after steamID64 matches.
+  HTTPS avatars are restricted to the existing Steam/CDN allowlist. This XML API is
+  deprecated and privacy-limited; failure must not revoke the independent session,
+  block browsing or invent a nickname/avatar. The profile request carries no token
+  to the public endpoint. Valve documents this legacy interface at
+  https://partner.steamgames.com/documentation/community_data .
+- library accepts collection favorites/subscriptions, media image/video and page.
+  It uses the real pinned PublishedFile.GetUserFiles RPC with myfavorites or
+  mysubscriptions (string enum), current verified SteamID64 and app431960.
+  items/page/hasMore retain the server's real collection paging even when unsupported
+  media is filtered out; this is not a search-query approximation of a collection.
 - search accepts query (<=120characters), page (1-based, default1), media
   image/video. Returns items with id/title/previewUrl/media/sizeBytes, page,
   hasMore and unsupportedCount, then complete. Paging belongs to the actual
@@ -97,7 +116,10 @@ The adapter never calls TokenStore, automatic login or local Steam discovery.
 - download accepts itemId (decimal string), an existing empty app-owned absolute
   directory, media and maxBytes<=536870912. It requires explicit credentials,
   verifies the returned item app431960/id, uses a fresh flat download and emits
-  actual progress/completed/total. complete includes directory/bytes/files;
+  phase waiting/connecting/resolving/downloading/verifying events followed by
+  actual progress/completed/total/known. known=false remains indeterminate before
+  real byte progress; callers must not treat preview size as downloaded bytes.
+  complete includes directory/bytes/files;
   actual Legacy primary metadata additionally supplies primaryFile and media.
 
 Video browsing uses the real Video tag. Image browsing does not invent an Image
@@ -113,7 +135,7 @@ are display-only and are never used as download payloads or main-media fallback.
 
 At most8 live jobs,4 shared chunk permits and2 runtime workers. Progress events
 coalesce in a32-entry queue. Login is capped360seconds including connection and
-verification, account/search90seconds, and download30minutes. Password login and guard submission are explicit user actions; no publisher key,
+verification, account/search/library90seconds, profile15seconds, and download30minutes. Password login and guard submission are explicit user actions; no publisher key,
 account probe or token file is introduced. Native credential
 buffers and queued response strings are zeroized; the JVM still owns its strings
 and platform secret storage.
@@ -131,17 +153,34 @@ so each transfer owns a unique disposable directory that is never reused.
 The Kotlin importer controls cancellation, deletion/retry and final persistence;
 an aborted transfer must never be marked imported.
 
-The pinned Fetch API returns Response.body as a complete Vec<u8>. Its HTTP
-adapter supports bounded body reads and Range requests, but exposes no streaming
-body reader, sink or progress callback for Legacy blobs. Consequently Legacy
-payloads are buffered up to the declared accepted size (maximum512MiB), plus
-processing/HTTP-buffer overhead; this is not constant-memory streaming. The
-512MiB disk/payload cap is not a claim of a512MiB peak-RAM limit. SteamPipe uses
-bounded chunk requests. No separate hand-written network stack is introduced.
+Legacy media now uses sequential1MiB identity-encoded Range requests through
+that same maintained Fetch and the owned FileSink. Each bounded response is
+validated for exact206 Content-Range/total/length and strong ETag consistency
+with If-Range, then written before emitting real byte progress. A full-file Vec
+fallback is deliberately absent. A missing/changed range validator or unsupported
+range is a surfaced range_unsupported/content_changed failure, not a silent return
+to the old memory path. Each request has a60second deadline;90seconds without
+material byte progress aborts the transfer. SteamPipe retains bounded chunks and
+the same no-progress watchdog. The512MiB content/disk cap is still not a claim of
+an exact peak-RAM bound for the full import/decoder pipeline.
+
+Authenticated CM operations share a bounded20second gate for their entire
+session-dependent lifetime, avoiding concurrent logons with the same credential.
+Public search always uses an anonymous session and may run while a download is
+active. Profile metadata has a separate lane and no authenticated CM login.
+The JVM client separately owns authentication, browse, transfer and profile jobs,
+with generation/credential-epoch checks; canceling or failing one does not replace
+another lane's handle. Component preparation is shared but canceled only by its
+actual owner. A locally saved session is a candidate until the account job verifies
+it; network/routing failure preserves that candidate rather than deleting it.
 
 Error codes are fixed, sanitized identifiers: invalid_request, auth_required,
 session_unavailable, login_failed, steam_unavailable, not_owned,
 unsupported_media, size_limit, unsafe_path, download_failed, cancelled, timeout,
 native_failed, invalid_job, invalid_credentials, invalid_guard_code,
-expired_guard_code, login_rate_limited, login_refused, unsupported_guard and network_configuration. No remote error string, URL, token or filesystem
+expired_guard_code, login_rate_limited, login_refused, unsupported_guard,
+network_configuration, busy, connection_timeout, metadata_timeout,
+auth_connection_lost, auth_session_expired, guard_submission_unknown,
+profile_timeout, profile_unavailable, range_unsupported, content_changed and
+download_stalled. No remote error string, URL, token or filesystem
 path is logged or propagated as an error.

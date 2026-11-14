@@ -372,6 +372,88 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
                  let entry = ResolvedDepot {
                      depot: tapline_pics::Depot {
                          id: *depot,
+@@ -1267,6 +1310,81 @@
+                     path: name.to_owned(),
+                     reason,
+                 })?;
++
++                // Bounded media receivers reuse Fetch's existing Range transport:
++                // one accepted block is written before the next is requested.
++                if max_bytes != u64::MAX || max_entries != usize::MAX {
++                    const BLOCK: u64 = 1024 * 1024;
++                    if item.size == 0 || item.size > max_bytes {
++                        return Err(InstallError::Io("mangaflow-size-limit".to_owned()));
++                    }
++                    let path = safe.resolve_without_links(&target.install_dir)?;
++                    tapline_fs::remove_symlink(&path)?;
++                    let sink = FileSink::create(&path)?;
++                    observe(Event::Planned {
++                        plan: Plan {
++                            download_bytes: item.size,
++                            reused_bytes: 0,
++                            total_bytes: item.size,
++                            file_count: 1,
++                            chunk_count: item.size.div_ceil(BLOCK),
++                        },
++                    });
++                    let mut offset = 0_u64;
++                    let mut validator: Option<String> = None;
++                    while offset < item.size {
++                        let end = (offset + BLOCK).min(item.size) - 1;
++                        let span = end - offset + 1;
++                        let mut request = tapline_io::Request::get(url.clone())
++                            .header("Accept-Encoding", "identity")
++                            .range(offset, end);
++                        if let Some(etag) = &validator {
++                            request = request.header("If-Range", etag.clone());
++                        }
++                        let response = tokio::time::timeout(
++                            std::time::Duration::from_secs(60),
++                            tapline_io::Fetch::get(self.shared.http.as_ref(), request, span),
++                        ).await
++                            .map_err(|_| InstallError::Io("mangaflow-download-stalled".to_owned()))?
++                            .map_err(|error| match error {
++                                tapline_io::FetchError::BodyTooLarge { .. } =>
++                                    InstallError::Io("mangaflow-range-unsupported".to_owned()),
++                                _ => InstallError::Io("mangaflow-download-network".to_owned()),
++                            })?;
++                        let expected = format!("bytes {offset}-{end}/{}", item.size);
++                        let ranged = response.status == 206 &&
++                            response.header("Content-Range") == Some(expected.as_str());
++                        let complete_small = response.status == 200 && offset == 0 && item.size <= BLOCK;
++                        let identity = response.header("Content-Encoding")
++                            .is_none_or(|encoding| encoding.eq_ignore_ascii_case("identity"));
++                        if !identity || (!ranged && !complete_small) {
++                            return Err(InstallError::Io("mangaflow-range-unsupported".to_owned()));
++                        }
++                        if response.body.len() as u64 != span {
++                            return Err(InstallError::Io("mangaflow-invalid-chunk".to_owned()));
++                        }
++                        let etag = response.header("ETag").filter(|value| {
++                            value.len() <= 512 && value.starts_with('"') && value.ends_with('"') &&
++                                !value.chars().any(char::is_control)
++                        });
++                        if offset == 0 {
++                            validator = etag.map(str::to_owned);
++                            if item.size > BLOCK && validator.is_none() {
++                                return Err(InstallError::Io("mangaflow-range-unsupported".to_owned()));
++                            }
++                        } else if etag != validator.as_deref() {
++                            return Err(InstallError::Io("mangaflow-content-changed".to_owned()));
++                        }
++                        sink.write_at(offset, &response.body).await?;
++                        offset += span;
++                        observe(Event::Progress { bytes_done: offset, bytes_total: item.size });
++                    }
++                    sink.sync().await?;
++                    report.files = 1;
++                    report.bytes_written = offset;
++                    report.bytes_downloaded = offset;
++                    return Ok(report);
++                }
+ 
+                 let response = tapline_io::Fetch::get(
+                     self.shared.http.as_ref(),
 diff --git a/crates/tapline-auth/src/lib.rs b/crates/tapline-auth/src/lib.rs
 --- a/crates/tapline-auth/src/lib.rs
 +++ b/crates/tapline-auth/src/lib.rs

@@ -21,8 +21,8 @@ TAPLINE_SHA = "f54136611519bef50cf31336e0c28a78eb175657"
 RUST = "1.88.0"
 NDK = "27.2.12479018"
 ANDROID_API = 26
-VERSION = "0.1.2-f541366"
-AAR_NAME = "mangaflow-steam-0.1.2.aar"
+VERSION = "0.1.3-f541366"
+AAR_NAME = "mangaflow-steam-0.1.3.aar"
 LIBRARY = "libmangaflow_steam.so"
 LICENSE_NAMES = ("Tapline-MPL-2.0.txt", "Steam-Component-ThirdPartyNotices.txt")
 BUILD = CRATE / "build"
@@ -195,7 +195,7 @@ def dependency_notices():
         })
     heading = ("MangaFlow optional Steam component " + VERSION + "\n"
                "Pinned tapline source: https://github.com/UnhingedSoftware/tapline/tree/" + TAPLINE_SHA + "\n"
-               "The bounded-download/network-route modification is distributed as native/steam/tapline-bounds.patch.\n"
+               "The bounded-download/network-route/session-progress modifications is distributed as native/steam/tapline-bounds.patch.\n"
                "This file records the resolved Cargo dependency graph and includes its license texts.\n\n")
     listing = "\n".join(
         item["name"] + " " + item["version"] + "\nLicense: " + item["license"] +

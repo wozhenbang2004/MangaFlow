@@ -647,7 +647,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         private val HOSTS = setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com")
         private val REDIRECTS = setOf(301, 302, 303, 307, 308)
         private val SPECS = mapOf(
-            PanelRuntimeId.STEAM to PanelRuntimeSpec(PanelRuntimeId.STEAM, "Steam 连接组件", "0.1.2-f541366",
+            PanelRuntimeId.STEAM to PanelRuntimeSpec(PanelRuntimeId.STEAM, "Steam 连接组件", "0.1.3-f541366",
                 "登录 Steam 并下载可直接使用的创意工坊壁纸，仅在启用时下载", "MPL-2.0"),
             PanelRuntimeId.LITERT to PanelRuntimeSpec(PanelRuntimeId.LITERT, "轻量 AI 运行库", "1.4.2", "运行 YOLO26 Nano，仅下载当前应用架构所需组件", "Apache-2.0"),
             PanelRuntimeId.ONNX to PanelRuntimeSpec(PanelRuntimeId.ONNX, "高精度与排序运行库", "1.31.1", "运行 Koharu 和 Inkwell，两个模型共用此运行库", "MIT"),

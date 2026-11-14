@@ -5,16 +5,19 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tapline::{
     AppId, BrowseQuery, BrowseSort, Event, FileModes, InstallError, InstallOptions,
     PublishedFileId, Session, Shared, StoredToken, WorkshopContent, WorkshopLayout,
-    GuardType, LoginError, NetworkRoute, PollOutcome,
+    GuardType, LoginError, NetworkRoute, PendingLogin, PollOutcome,
 };
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard, mpsc};
+use tapline_io::{Fetch, Request};
+use tapline_proto::steammessages_publishedfile_steamclient::CPublishedFile_GetUserFiles_Request;
+use tapline_rt_tokio::HttpClient;
 use tokio::task::{AbortHandle, JoinHandle};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -132,8 +135,7 @@ fn shared() -> Arc<Shared> {
     Arc::clone(SHARED.get_or_init(|| Shared::new(4)))
 }
 
-
-fn routed_shared(request: &mut Value) -> Result<Arc<Shared>, &'static str> {
+fn routed_shared(request: &mut Value) -> Result<(Arc<Shared>, NetworkRoute), &'static str> {
     let network = request.get_mut("network").map(Value::take).ok_or("network_configuration")?;
     let kind = network.get("kind").and_then(Value::as_str).ok_or("network_configuration")?;
     let route = match kind {
@@ -152,7 +154,7 @@ fn routed_shared(request: &mut Value) -> Result<Arc<Shared>, &'static str> {
         }
         _ => return Err("network_configuration"),
     };
-    Ok(shared().with_route(route))
+    Ok((shared().with_route(route.clone()), route))
 }
 
 fn jobs() -> &'static Mutex<HashMap<i64, Arc<Job>>> {
@@ -190,11 +192,59 @@ fn credentials(request: &mut Value) -> Result<StoredToken, &'static str> {
     Ok(token)
 }
 
-async fn authenticated(request: &mut Value, transport: Arc<Shared>) -> Result<(Session, StoredToken), &'static str> {
+fn phase(job: &Job, value: &str) {
+    job.emit(json!({"kind":"phase","phase":value}));
+}
+
+// The pinned client does not establish distinct logon session identities.
+// Hold this guard for the entire authenticated operation so another lane cannot
+// replace its CM session while a manifest or download still depends on it.
+async fn authenticated_slot(job: &Job) -> Result<MutexGuard<'static, ()>, &'static str> {
+    static ACTIVE: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    let gate = ACTIVE.get_or_init(|| AsyncMutex::new(()));
+    if let Ok(permit) = gate.try_lock() { return Ok(permit); }
+    phase(job, "waiting");
+    tokio::time::timeout(Duration::from_secs(20), gate.lock()).await.map_err(|_| "busy")
+}
+
+async fn authenticated(request: &mut Value, job: &Job, transport: Arc<Shared>) -> Result<(Session, StoredToken), &'static str> {
     let token = credentials(request)?;
-    let session = Session::with_token_shared(&token, transport).await
-        .map_err(|_| "session_unavailable")?;
+    phase(job, "connecting");
+    let session = tokio::time::timeout(
+        Duration::from_secs(40), Session::with_token_shared(&token, transport),
+    ).await.map_err(|_| "connection_timeout")?.map_err(|_| "session_unavailable")?;
     Ok((session, token))
+}
+
+async fn profile(token: &StoredToken, route: NetworkRoute) -> Outcome {
+    let steam_id = token.steam_id().filter(|id| *id != 0).ok_or("auth_required")?;
+    // Public profile metadata carries no token, password or account name.
+    let request = Request::get(format!("https://steamcommunity.com/profiles/{steam_id}/?xml=1"))
+        .header("Accept", "application/xml,text/xml")
+        .header("Accept-Encoding", "identity");
+    let response = tokio::time::timeout(
+        Duration::from_secs(15), HttpClient::with_route(route).get(request, 256 * 1024),
+    ).await.map_err(|_| "profile_timeout")?.map_err(|_| "profile_unavailable")?;
+    if !response.is_success() { return Err("profile_unavailable"); }
+    let xml = std::str::from_utf8(&response.body).map_err(|_| "profile_unavailable")?;
+    let document = roxmltree::Document::parse_with_options(xml, roxmltree::ParsingOptions {
+        allow_dtd: false,
+        nodes_limit: 4096,
+    }).map_err(|_| "profile_unavailable")?;
+    let root = document.root_element();
+    if !root.has_tag_name("profile") { return Err("profile_unavailable"); }
+    let field = |name: &str| root.children()
+        .find(|node| node.has_tag_name(name)).and_then(|node| node.text());
+    if field("steamID64").and_then(|id| id.trim().parse::<u64>().ok()) != Some(steam_id) {
+        return Err("profile_unavailable");
+    }
+    let name = field("steamID").map(|name| label(name, 128)).filter(|name| !name.trim().is_empty());
+    let avatar = preview(field("avatarFull"));
+    if name.is_none() && avatar.is_empty() { return Err("profile_unavailable"); }
+    Ok(json!({
+        "kind":"profile","steamId":steam_id.to_string(),"personaName":name,
+        "avatarUrl":(!avatar.is_empty()).then_some(avatar)
+    }))
 }
 
 fn label(value: &str, limit: usize) -> String {
@@ -206,7 +256,8 @@ fn preview(value: Option<&str>) -> String {
     let Some(rest) = value.strip_prefix("https://") else { return String::new(); };
     let host = rest.split('/').next().unwrap_or_default().to_ascii_lowercase();
     if host.contains('@') || host.contains(':') { return String::new(); }
-    if ["steamusercontent.com", "steamstatic.com", "steamuserimages-a.akamaihd.net"]
+    if ["steamusercontent.com", "steamstatic.com", "steamuserimages-a.akamaihd.net",
+        "steamcdn-a.akamaihd.net"]
         .iter().any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}"))) {
         value.to_owned()
     } else {
@@ -253,6 +304,9 @@ fn install_error(error: InstallError) -> &'static str {
         InstallError::Io(message) if message == "mangaflow-size-limit" => "size_limit",
         InstallError::Io(message) if message == "mangaflow-unsupported-entry" => "unsupported_media",
         InstallError::Io(message) if message == "mangaflow-invalid-chunk" => "download_failed",
+        InstallError::Io(message) if message == "mangaflow-download-stalled" => "download_stalled",
+        InstallError::Io(message) if message == "mangaflow-range-unsupported" => "range_unsupported",
+        InstallError::Io(message) if message == "mangaflow-content-changed" => "content_changed",
         _ => "download_failed",
     }
 }
@@ -270,44 +324,98 @@ fn login_error(error: LoginError) -> &'static str {
     }
 }
 
-async fn password_login(request: &mut Value, job: &Arc<Job>, transport: Arc<Shared>) -> Result<StoredToken, &'static str> {
-    let account = Zeroizing::new(take_text(request, "account").ok_or("invalid_request")?);
-    let mut password = Zeroizing::new(take_text(request, "password").ok_or("invalid_request")?);
-    if account.is_empty() || account.len() > 128 || account.chars().any(char::is_control) ||
-        password.is_empty() || password.len() > 4096 {
-        return Err("invalid_request");
+async fn reconnect_pending(
+    session: &mut Session, attempts: &mut u8, job: &Job, transport: &Arc<Shared>,
+) -> Result<(), &'static str> {
+    job.emit(json!({"kind":"guardReconnecting"}));
+    while *attempts < 3 {
+        *attempts += 1;
+        tokio::time::sleep(Duration::from_secs(u64::from(*attempts))).await;
+        if let Ok(Ok(reconnected)) = tokio::time::timeout(
+            Duration::from_secs(20), Session::anonymous_shared(Arc::clone(transport)),
+        ).await {
+            // Keep the original client_id, request_id and confirmation methods.
+            // A reconnect must never begin a new password or QR auth session.
+            *session = reconnected;
+            return Ok(());
+        }
     }
-    let mut session = Session::anonymous_shared(transport).await.map_err(|_| "steam_unavailable")?;
-    let key = session.password_key(&account).await.map_err(login_error)?;
-    // The pinned implementation RSA-encrypts and zeroizes this transferred password.
-    let mut pending = session.begin_password_login(&account, std::mem::take(&mut *password), &key)
-        .await.map_err(login_error)?;
-    if pending.client_id == 0 || pending.request_id.is_empty() || pending.steam_id == 0 {
-        return Err("login_failed");
+    Err("auth_connection_lost")
+}
+
+fn challenge(job: &Job, pending: &PendingLogin) {
+    if let Some(url) = pending.challenge_url.as_deref()
+        .filter(|url| url.len() <= 8192 && url.starts_with("https://")) {
+        job.emit(json!({"kind":"qr","url":url}));
     }
+}
+
+async fn finish_pending_login(
+    mut session: Session, mut pending: PendingLogin, job: &Arc<Job>, transport: Arc<Shared>,
+) -> Result<StoredToken, &'static str> {
+    if pending.client_id == 0 || pending.request_id.is_empty() { return Err("login_failed"); }
     let methods: Vec<i32> = pending.confirmations.iter().map(|kind| kind.as_i32())
-        .filter(|kind| matches!(*kind, 2 | 3 | 4 | 5)).collect();
-    if methods.is_empty() && pending.confirmations.iter().any(|kind|
-        !matches!(kind, GuardType::None)) {
+        .filter(|kind| matches!(*kind, 2 | 3 | 4 | 5))
+        .filter(|kind| pending.steam_id != 0 || !matches!(*kind, 2 | 3)).collect();
+    if methods.is_empty() && pending.challenge_url.is_none() &&
+        pending.confirmations.iter().any(|kind| !matches!(kind, GuardType::None)) {
         return Err("unsupported_guard");
     }
     let (sender, mut codes) = mpsc::channel::<GuardInput>(1);
     if let Ok(mut slot) = job.guard.lock() { *slot = Some(sender); }
+    challenge(job, &pending);
     if !methods.is_empty() { job.emit(json!({"kind":"guard","methods":methods})); }
-    let interval = if pending.interval.is_finite() {
-        pending.interval.clamp(1.0, 10.0)
-    } else { 5.0 };
+    let interval = Duration::from_secs_f32(if pending.interval.is_finite() {
+        pending.interval.clamp(1.0, 30.0)
+    } else { 5.0 });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let mut poll_at = tokio::time::Instant::now() + interval;
+    let mut heartbeat_at = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut reconnects = 0_u8;
+    let mut needs_reconnect = false;
+    let mut recovering = false;
+    let mut ambiguous_submission = false;
     loop {
+        if tokio::time::Instant::now() >= deadline { return Err("auth_session_expired"); }
+        if needs_reconnect {
+            reconnect_pending(&mut session, &mut reconnects, job, &transport).await?;
+            needs_reconnect = false;
+            recovering = true;
+            poll_at = tokio::time::Instant::now();
+            heartbeat_at = tokio::time::Instant::now() + Duration::from_secs(10);
+        }
         tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return Err("auth_session_expired"),
+            _ = tokio::time::sleep_until(heartbeat_at) => {
+                // poll_login itself does not send a CM heartbeat in this pin.
+                if !matches!(tokio::time::timeout(
+                    Duration::from_secs(15), session.keep_alive(),
+                ).await, Ok(Ok(()))) {
+                    needs_reconnect = true;
+                }
+                heartbeat_at = tokio::time::Instant::now() + Duration::from_secs(10);
+            }
             code = codes.recv() => {
                 let Some((code, kind)) = code else { return Err("cancelled"); };
-                if !pending.confirmations.contains(&kind) || !kind.needs_a_code() {
+                if pending.steam_id == 0 || !pending.confirmations.contains(&kind) ||
+                    !kind.needs_a_code() {
                     job.emit(json!({"kind":"guardRejected","code":"invalid_guard_code"}));
                     continue;
                 }
-                match session.submit_guard_code(&pending, &code, kind).await {
-                    Ok(()) => job.emit(json!({"kind":"guardAccepted"})),
-                    Err(error) => {
+                match tokio::time::timeout(
+                    Duration::from_secs(20), session.submit_guard_code(&pending, &code, kind),
+                ).await {
+                    Ok(Ok(())) => {
+                        job.emit(json!({"kind":"guardAccepted"}));
+                        poll_at = tokio::time::Instant::now();
+                    }
+                    Ok(Err(LoginError::Session(_))) | Err(_) => {
+                        // Steam may have received the code. Re-poll the same challenge;
+                        // never automatically submit it a second time.
+                        ambiguous_submission = true;
+                        needs_reconnect = true;
+                    }
+                    Ok(Err(error)) => {
                         let error = login_error(error);
                         if matches!(error, "invalid_guard_code" | "expired_guard_code") {
                             job.emit(json!({"kind":"guardRejected","code":error}));
@@ -315,12 +423,42 @@ async fn password_login(request: &mut Value, job: &Arc<Job>, transport: Arc<Shar
                     }
                 }
             }
-            _ = tokio::time::sleep(Duration::from_secs_f32(interval)) => {
-                match session.poll_login(&pending).await.map_err(login_error)? {
-                    PollOutcome::Pending { .. } => {}
-                    PollOutcome::Moved { client_id, .. } => pending.client_id = client_id,
+            _ = tokio::time::sleep_until(poll_at) => {
+                let outcome = match tokio::time::timeout(
+                    Duration::from_secs(20), session.poll_login(&pending),
+                ).await {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(LoginError::Session(_))) | Err(_) => {
+                        needs_reconnect = true;
+                        continue;
+                    }
+                    Ok(Err(error)) => return Err(login_error(error)),
+                };
+                poll_at = tokio::time::Instant::now() + interval;
+                if recovering {
+                    job.emit(json!({"kind":"guardResumed"}));
+                    recovering = false;
+                }
+                match outcome {
+                    PollOutcome::Pending { .. } => {
+                        if ambiguous_submission {
+                            job.emit(json!({"kind":"guardRejected","code":"guard_submission_unknown"}));
+                            ambiguous_submission = false;
+                        }
+                    }
+                    PollOutcome::Moved { client_id, challenge_url } => {
+                        pending.client_id = client_id;
+                        pending.challenge_url = challenge_url;
+                        challenge(job, &pending);
+                        if ambiguous_submission {
+                            job.emit(json!({"kind":"guardRejected","code":"guard_submission_unknown"}));
+                            ambiguous_submission = false;
+                        }
+                    }
                     PollOutcome::Complete { account, refresh_token, mut access_token } => {
                         access_token.zeroize();
+                        if let Ok(mut sender) = job.guard.lock() { sender.take(); }
+                        job.emit(json!({"kind":"authVerifying"}));
                         return Ok(StoredToken { account, refresh_token });
                     }
                 }
@@ -329,28 +467,50 @@ async fn password_login(request: &mut Value, job: &Arc<Job>, transport: Arc<Shar
     }
 }
 
+async fn password_login(request: &mut Value, job: &Arc<Job>, transport: Arc<Shared>) -> Result<StoredToken, &'static str> {
+    let account = Zeroizing::new(take_text(request, "account").ok_or("invalid_request")?);
+    let mut password = Zeroizing::new(take_text(request, "password").ok_or("invalid_request")?);
+    if account.is_empty() || account.len() > 128 || account.chars().any(char::is_control) ||
+        password.is_empty() || password.len() > 4096 {
+        return Err("invalid_request");
+    }
+    phase(job, "connecting");
+    let mut session = tokio::time::timeout(
+        Duration::from_secs(30), Session::anonymous_shared(Arc::clone(&transport)),
+    ).await.map_err(|_| "connection_timeout")?.map_err(|_| "steam_unavailable")?;
+    let key = tokio::time::timeout(Duration::from_secs(20), session.password_key(&account))
+        .await.map_err(|_| "connection_timeout")?.map_err(login_error)?;
+    // The pinned implementation RSA-encrypts and zeroizes this transferred password.
+    let pending = tokio::time::timeout(Duration::from_secs(20),
+        session.begin_password_login(&account, std::mem::take(&mut *password), &key),
+    ).await.map_err(|_| "connection_timeout")?.map_err(login_error)?;
+    if pending.steam_id == 0 { return Err("login_failed"); }
+    finish_pending_login(session, pending, job, transport).await
+}
+
 async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
     let op = text(&request.0, "op").ok_or("invalid_request")?;
-    let transport = routed_shared(&mut request.0)?;
+    let (transport, route) = routed_shared(&mut request.0)?;
     match op.as_str() {
         "login" | "passwordLogin" => {
             let token = if op == "passwordLogin" {
                 password_login(&mut request.0, &job, Arc::clone(&transport)).await?
             } else {
-            let mut session = Session::anonymous_shared(Arc::clone(&transport)).await
-                .map_err(|_| "steam_unavailable")?;
-            let codes = Arc::clone(&job);
-            let token = session.qr_login(Duration::from_secs(300), &mut |url| {
-                if url.len() <= 8192 && url.starts_with("https://") {
-                    codes.emit(json!({"kind":"qr","url":url}));
-                }
-            }).await.map_err(login_error)?;
-            token
+                phase(&job, "connecting");
+                let mut session = tokio::time::timeout(
+                    Duration::from_secs(30), Session::anonymous_shared(Arc::clone(&transport)),
+                ).await.map_err(|_| "connection_timeout")?.map_err(|_| "steam_unavailable")?;
+                let pending = tokio::time::timeout(Duration::from_secs(20), session.begin_qr_login())
+                    .await.map_err(|_| "connection_timeout")?.map_err(login_error)?;
+                finish_pending_login(session, pending, &job, Arc::clone(&transport)).await?
             };
             let steam_id = token.steam_id().filter(|id| *id != 0).ok_or("login_failed")?;
+            let _permit = authenticated_slot(&job).await?;
             // Validate the content session before the caller commits a new credential.
-            let verified = Session::with_token_shared(&token, Arc::clone(&transport)).await
-                .map_err(|_| "session_unavailable")?;
+            phase(&job, "connecting");
+            let verified = tokio::time::timeout(
+                Duration::from_secs(40), Session::with_token_shared(&token, Arc::clone(&transport)),
+            ).await.map_err(|_| "connection_timeout")?.map_err(|_| "session_unavailable")?;
             if verified.account().is_none() { return Err("login_failed"); }
             job.emit(json!({
                 "kind":"loggedIn","account":&token.account,"steamId":steam_id.to_string(),
@@ -359,10 +519,77 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
             Ok(json!({"kind":"complete"}))
         }
         "account" => {
-            let (session, token) = authenticated(&mut request.0, Arc::clone(&transport)).await?;
+            let _permit = authenticated_slot(&job).await?;
+            let (session, token) = authenticated(&mut request.0, &job, Arc::clone(&transport)).await?;
             job.emit(json!({
                 "kind":"account","account":session.account().unwrap_or(&token.account),
                 "steamId":token.steam_id().ok_or("auth_required")?.to_string()
+            }));
+            Ok(json!({"kind":"complete"}))
+        }
+        "profile" => {
+            // JVM only schedules this for its verified current account; metadata
+            // failure must not invalidate the independently verified credential.
+            let token = credentials(&mut request.0)?;
+            let result = profile(&token, route).await?;
+            job.emit(result);
+            Ok(json!({"kind":"complete"}))
+        }
+        "library" => {
+            let collection = text(&request.0, "collection").ok_or("invalid_request")?;
+            let kind = match collection.as_str() {
+                "favorites" => "myfavorites",
+                "subscriptions" => "mysubscriptions",
+                _ => return Err("invalid_request"),
+            };
+            let page = request.0.get("page").and_then(Value::as_u64).unwrap_or(1);
+            if !(1..=10_000).contains(&page) { return Err("invalid_request"); }
+            let media = text(&request.0, "media").ok_or("invalid_request")?;
+            if media != "image" && media != "video" { return Err("invalid_request"); }
+            let _permit = authenticated_slot(&job).await?;
+            let (mut session, token) = authenticated(&mut request.0, &job, Arc::clone(&transport)).await?;
+            phase(&job, "resolving");
+            let query = CPublishedFile_GetUserFiles_Request {
+                steamid: Some(token.steam_id().ok_or("auth_required")?),
+                appid: Some(APP.get()),
+                page: Some(page as u32),
+                numperpage: Some(PAGE_SIZE),
+                r#type: Some(kind.to_owned()),
+                // Use the schema's documented default order for both collections.
+                sortmethod: Some("lastupdated".to_owned()),
+                requiredtags: if media == "video" { vec!["Video".to_owned()] } else { Vec::new() },
+                excludedtags: if media == "image" {
+                    vec!["Video".to_owned(), "Web".to_owned(), "Application".to_owned()]
+                } else { Vec::new() },
+                return_tags: Some(true),
+                return_previews: Some(true),
+                ..Default::default()
+            };
+            let results = tokio::time::timeout(Duration::from_secs(25), session.call_raw(&query))
+                .await.map_err(|_| "metadata_timeout")?.map_err(|_| "steam_unavailable")?;
+            let depot = tokio::time::timeout(Duration::from_secs(15), session.app_info(APP))
+                .await.ok().and_then(Result::ok).and_then(|info| info.workshop_depot());
+            let mut items = Vec::new();
+            let mut unsupported = 0_u64;
+            for details in &results.publishedfiledetails {
+                let Ok(item) = tapline::classify(details, depot) else { unsupported += 1; continue; };
+                if item.app != APP || item.id.get() == 0 { unsupported += 1; continue; }
+                let actual = legacy_primary(&item.content).map(|(_, kind)| kind)
+                    .or_else(|| details.tags.iter().any(|tag| tag.tag.as_deref()
+                        .is_some_and(|tag| tag.eq_ignore_ascii_case("Video"))).then_some("video"));
+                if actual != Some(media.as_str()) { unsupported += 1; continue; }
+                items.push(json!({
+                    "id":item.id.get().to_string(),"title":label(&item.title,300),
+                    "previewUrl":preview(details.preview_url.as_deref()),"media":media,
+                    "sizeBytes":item.size
+                }));
+            }
+            let total = results.total.unwrap_or(0);
+            // Paging follows the upstream collection, including unsupported rows.
+            let has_more = page.saturating_mul(u64::from(PAGE_SIZE)) < u64::from(total);
+            job.emit(json!({
+                "kind":"items","items":items,"page":page,"hasMore":has_more,
+                "unsupportedCount":unsupported
             }));
             Ok(json!({"kind":"complete"}))
         }
@@ -373,12 +600,12 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
             if !(1..=10_000).contains(&page) { return Err("invalid_request"); }
             let media = text(&request.0, "media").ok_or("invalid_request")?;
             if media != "image" && media != "video" { return Err("invalid_request"); }
-            let mut session = if request.0.get("refreshToken").and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty()) {
-                authenticated(&mut request.0, Arc::clone(&transport)).await?.0
-            } else {
-                Session::anonymous_shared(transport).await.map_err(|_| "steam_unavailable")?
-            };
+            // Public discovery never replaces an authenticated transfer's CM session.
+            phase(&job, "connecting");
+            let mut session = tokio::time::timeout(
+                Duration::from_secs(30), Session::anonymous_shared(Arc::clone(&transport)),
+            ).await.map_err(|_| "connection_timeout")?.map_err(|_| "steam_unavailable")?;
+            phase(&job, "resolving");
             let query = BrowseQuery {
                 app: APP,
                 text: (!query_text.is_empty()).then_some(query_text),
@@ -391,7 +618,8 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
                 page: Some(page as u32),
                 ..BrowseQuery::default()
             };
-            let results = session.browse_workshop(&query).await.map_err(|_| "steam_unavailable")?;
+            let results = tokio::time::timeout(Duration::from_secs(45), session.browse_workshop(&query))
+                .await.map_err(|_| "metadata_timeout")?.map_err(|_| "steam_unavailable")?;
             let mut items = Vec::new();
             let mut unsupported = results.skipped.len() as u64;
             for found in &results.items {
@@ -422,10 +650,14 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
             if limit == 0 || limit > MAX_BYTES { return Err("invalid_request"); }
             let path = text(&request.0, "directory").ok_or("unsafe_path")?;
             let directory = owned_directory(&path)?;
-            let (mut session, _token) = authenticated(&mut request.0, Arc::clone(&transport)).await?;
-            let item = session.workshop_details(&[PublishedFileId(item_id)]).await
-                .map_err(|_| "steam_unavailable")?.into_iter().next()
-                .ok_or("download_failed")?.map_err(|_| "download_failed")?;
+            job.emit(json!({"kind":"progress","completed":0,"total":0,"known":false}));
+            let _permit = authenticated_slot(&job).await?;
+            let (mut session, _token) = authenticated(&mut request.0, &job, Arc::clone(&transport)).await?;
+            phase(&job, "resolving");
+            let item = tokio::time::timeout(
+                Duration::from_secs(35), session.workshop_details(&[PublishedFileId(item_id)]),
+            ).await.map_err(|_| "metadata_timeout")?.map_err(|_| "steam_unavailable")?
+                .into_iter().next().ok_or("download_failed")?.map_err(|_| "download_failed")?;
             if item.app != APP || item.id.get() != item_id { return Err("invalid_request"); }
             if item.size == 0 || item.size > limit { return Err("size_limit"); }
             let primary = legacy_primary(&item.content);
@@ -444,26 +676,60 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
                 workshop_layout: WorkshopLayout::Flat,
                 ..InstallOptions::default()
             };
-            job.emit(json!({"kind":"progress","completed":0,"total":item.size}));
+            let started = Instant::now();
+            let last_activity = Arc::new(AtomicU64::new(0));
+            let most_bytes = Arc::new(AtomicU64::new(0));
+            let planned = Arc::new(AtomicBool::new(false));
             let forward = Arc::clone(&job);
-            let report = session.download_workshop_item_bounded(
-                &item, &options, limit, MAX_ENTRIES, &mut |event| {
-                    match event {
-                        Event::Planned { plan } => forward.emit(json!({
-                            "kind":"progress","completed":0,"total":plan.total_bytes
-                        })),
-                        Event::Progress { bytes_done, bytes_total } => forward.emit(json!({
-                            "kind":"progress","completed":bytes_done,"total":bytes_total
-                        })),
-                        _ => {}
+            let activity = Arc::clone(&last_activity);
+            let maximum = Arc::clone(&most_bytes);
+            let plan_seen = Arc::clone(&planned);
+            let mut observe = move |event| {
+                let elapsed = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                match event {
+                    Event::Planned { plan } => {
+                        if !plan_seen.swap(true, Ordering::AcqRel) {
+                            activity.store(elapsed, Ordering::Release);
+                            phase(&forward, "downloading");
+                            forward.emit(json!({
+                                "kind":"progress","completed":0,"total":plan.total_bytes,"known":false
+                            }));
+                        }
+                    }
+                    Event::Progress { bytes_done, bytes_total } => {
+                        if bytes_done > maximum.fetch_max(bytes_done, Ordering::AcqRel) {
+                            activity.store(elapsed, Ordering::Release);
+                            forward.emit(json!({
+                                "kind":"progress","completed":bytes_done,"total":bytes_total,"known":true
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
+            };
+            let transfer = session.download_workshop_item_bounded(
+                &item, &options, limit, MAX_ENTRIES, &mut observe,
+            );
+            tokio::pin!(transfer);
+            let mut watch = tokio::time::interval(Duration::from_secs(5));
+            watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let report = loop {
+                tokio::select! {
+                    result = &mut transfer => break result.map_err(install_error)?,
+                    _ = watch.tick() => {
+                        let elapsed = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                        if elapsed.saturating_sub(last_activity.load(Ordering::Acquire)) >= 90_000 {
+                            return Err("download_stalled");
+                        }
                     }
                 }
-            ).await.map_err(install_error)?;
+            };
+            phase(&job, "verifying");
             if report.bytes_written == 0 || report.bytes_written > limit || report.files > MAX_ENTRIES as u64 {
                 return Err("size_limit");
             }
             job.emit(json!({
-                "kind":"progress","completed":report.bytes_written,"total":report.bytes_written
+                "kind":"progress","completed":report.bytes_written,"total":report.bytes_written,"known":true
             }));
             let mut complete = json!({
                 "kind":"complete","directory":directory.to_string_lossy(),

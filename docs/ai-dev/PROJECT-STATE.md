@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Steam mail-code return and usable downloads · 2026-11-14
+
+Active requirements STEAM-GUARD-LIFETIME / STEAM-GUARD-INPUT / STEAM-NONBLOCKING / STEAM-ACCOUNT-LIBRARY / STEAM-TRANSFER-PROGRESS-20261114 are maintained in DESIGN.md's “Steam interruption, identity and live downloads”. Raw user/screenshot coverage is recorded there through the latest “继续” at 2026-11-14T06:53:41.252Z. This batch retains a same-process pending challenge, supplies five-cell explicit OTP entry, separates four client lanes/errors, removes unsolicited blank searches and preserves query/scroll/preview interaction during downloads. Actual profile metadata is optional; favorites/subscriptions use the pinned authenticated RPC rather than search approximations.
+
+The old Legacy Fetch full-file buffer explained a source path for0 B. The canonical tapline patch now writes1MiB validated Range responses through its existing FileSink and emits real byte progress, with explicit phases/timeouts and no full-body fallback. Native/component identity and four consumers move together to0.1.3-f541366. Source guards preserve routing, account verification/vault, original-media safety and exact content identities. Process death, perpetual challenges, wallpaper background-worker/resume, universal Range availability and private profile access are not claimed.
+
+Root owns one complete latest-main cloud tree/commit/expected-head update and confirms normal CI trigger only; no local build/test/device/browser/account/service probe or new QA gate. Actual installed mail-return, original download/progress cadence, personal library availability and phone/desktop motion remain pending user evidence. Preserve concurrent6904497 scrolling work,17f14a52 routing,24ba012b common context repair and bf0a3eb8 password-origin/CI-cache/Windows-packaging changes. DESIGN's STEAM-ROUTING-REVIEW-144 preparation-route/per-task-picker/background-task gaps remain OPEN; do not report the whole review as closed.
+
 ## CI caching and Windows package size · 2026-11-14
 
 User additions: “你顺手去看看我们现在的cicd流程怎么这么慢呢能不能优化呢，以及为什么我们之前排查了这么久一直是交到`copy4000.com`呢我们的relay座面也是吗？？？” and “以及给我下exe现在可以下载的exe的也太大了吧我服了”. Continue the password-login correction below; Token import is not its acceptance substitute.
