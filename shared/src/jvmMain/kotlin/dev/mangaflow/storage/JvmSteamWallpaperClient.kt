@@ -49,6 +49,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import kotlin.time.TimeSource
 
 /** Each lane owns its native job; authenticated state is committed only through the vault lock. */
 internal class JvmSteamWallpaperClient(
@@ -357,6 +358,7 @@ internal class JvmSteamWallpaperClient(
         start(transfer, { it.copy(transferId = selected.id, transferName = selected.title,
             transferRoute = frozenRoute,
             receivedBytes = 0, totalBytes = 0, transferProgressKnown = false,
+            transferLastActivity = TimeSource.Monotonic.markNow(),
             transferPhase = SteamWallpaperTransferPhase.CONNECTING, transferError = null) },
             15 * 60_000L, lease = lease, routeOverride = frozenRoute,
             makeRequest = { request("download", lease.record) {
@@ -407,7 +409,7 @@ internal class JvmSteamWallpaperClient(
         if (!closed) _state.update { it.copy(transferId = null, transferName = null,
             transferRoute = null,
             receivedBytes = 0, totalBytes = 0, transferPhase = SteamWallpaperTransferPhase.NONE,
-            transferProgressKnown = false, transferError = null) }
+            transferProgressKnown = false, transferLastActivity = null, transferError = null) }
     }
 
     override fun cancel() {
@@ -419,7 +421,7 @@ internal class JvmSteamWallpaperClient(
             loading = false, transferId = null, transferName = null, receivedBytes = 0,
             transferRoute = null,
             totalBytes = 0, transferPhase = SteamWallpaperTransferPhase.NONE,
-            transferProgressKnown = false, profileLoading = false, authError = null, browseError = null,
+            transferProgressKnown = false, transferLastActivity = null, profileLoading = false, authError = null, browseError = null,
             transferError = null, profileError = null, message = null) }
     }
 
@@ -442,7 +444,7 @@ internal class JvmSteamWallpaperClient(
             loading = false, account = null, canResumeSession = false, transferId = null, transferName = null,
             transferRoute = null,
             receivedBytes = 0, totalBytes = 0, transferPhase = SteamWallpaperTransferPhase.NONE,
-            transferProgressKnown = false, transferError = null, profileLoading = false,
+            transferProgressKnown = false, transferLastActivity = null, transferError = null, profileLoading = false,
             profileError = null, authError = null, browseError = null, message = null, error = null,
             items = if (it.library == SteamWallpaperLibrary.SEARCH) it.items else emptyList(),
             hasMore = it.library == SteamWallpaperLibrary.SEARCH && it.hasMore) }
@@ -566,7 +568,9 @@ internal class JvmSteamWallpaperClient(
                         lane.kind == LaneKind.TRANSFER && event.text("kind") == "phase" -> {
                             val phase = transferPhase(event.text("phase"))
                                 ?: throw SteamFailure("invalid_response")
-                            update(lane, token) { it.copy(transferPhase = phase) }
+                            update(lane, token) { it.copy(transferPhase = phase,
+                                transferLastActivity = if (phase != it.transferPhase)
+                                    TimeSource.Monotonic.markNow() else it.transferLastActivity) }
                         }
                         else -> onEvent(token, event)
                     }
@@ -610,7 +614,11 @@ internal class JvmSteamWallpaperClient(
                     failure.code in SESSION_ERRORS) invalidateSession(lane, token, lease) else true
                 if (failure.code == "component_unavailable")
                     update(lane, token) { it.copy(error = failure.userMessage()) }
-                fail(lane, token, failure.userMessage() +
+                val message = if (lane.kind == LaneKind.TRANSFER &&
+                    failure.code == "download_stalled" && _state.value.receivedBytes == 0L)
+                    "未收到壁纸数据，已停止本次下载。可重试或切换下载线路，Steam 登录仍保留。"
+                    else failure.userMessage()
+                fail(lane, token, message +
                     if (removed) "" else " 旧登录凭据未能清理，请重试退出。")
             } catch (_: SecurityException) {
                 fail(lane, token, if (lane.kind == LaneKind.PROFILE) "暂时无法读取 Steam 公开资料。"
@@ -643,7 +651,8 @@ internal class JvmSteamWallpaperClient(
                             transferName = if (failed) current.transferName else null,
                             receivedBytes = if (failed) current.receivedBytes else 0,
                             totalBytes = if (failed) current.totalBytes else 0,
-                            transferPhase = SteamWallpaperTransferPhase.NONE, transferProgressKnown = false)
+                            transferPhase = SteamWallpaperTransferPhase.NONE, transferProgressKnown = false,
+                            transferLastActivity = if (failed) current.transferLastActivity else null)
                     }
                 } }
             }
@@ -705,6 +714,8 @@ internal class JvmSteamWallpaperClient(
                     val limit = when (phase) {
                         SteamWallpaperTransferPhase.WAITING -> 30_000_000_000L
                         SteamWallpaperTransferPhase.CONNECTING -> 60_000_000_000L
+                        SteamWallpaperTransferPhase.DOWNLOADING ->
+                            if (lastBytes == 0L) 30_000_000_000L else 45_000_000_000L
                         SteamWallpaperTransferPhase.VERIFYING -> 120_000_000_000L
                         else -> 90_000_000_000L
                     }
@@ -756,8 +767,10 @@ internal class JvmSteamWallpaperClient(
         if (received < 0 || total < 0 || received > MAX_MEDIA || total > MAX_MEDIA ||
             (total > 0 && received > total)) throw SteamFailure("too_large")
         val known = event.flag("known") == true && total > 0
-        update(transfer, token) { it.copy(receivedBytes = received, totalBytes = total,
-            transferProgressKnown = known) }
+        update(transfer, token) { it.copy(receivedBytes = maxOf(it.receivedBytes, received), totalBytes = total,
+            transferProgressKnown = known,
+            transferLastActivity = if (received > it.receivedBytes)
+                TimeSource.Monotonic.markNow() else it.transferLastActivity) }
     }
 
     private fun transferPhase(value: String): SteamWallpaperTransferPhase? = when (value) {

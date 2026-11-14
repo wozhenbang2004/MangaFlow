@@ -56,10 +56,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -634,7 +636,12 @@ internal fun SteamWallpaperSheet(
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (display.transferId != null || display.transferError != null) {
                             SteamTransferTask(display, onCancel = client::cancelTransfer,
-                                onRetry = { retryItem?.let(::download) }, canRetry = retryItem != null)
+                                onRetry = {
+                                    retryItem?.let { item ->
+                                        client.cancelTransfer()
+                                        download(item)
+                                    }
+                                }, canRetry = retryItem != null)
                         }
                         val problem = notice ?: when (pane) {
                             WorkshopPane.BROWSE -> display.browseError ?: display.authError
@@ -1020,6 +1027,16 @@ private fun SteamTransferTask(
     canRetry: Boolean,
 ) {
     val colors = MaterialTheme.colorScheme
+    var idleSeconds by remember(state.transferId, state.transferLastActivity) { mutableIntStateOf(0) }
+    LaunchedEffect(state.transferId, state.transferLastActivity) {
+        if (state.transferId != null) while (true) {
+            idleSeconds = state.transferLastActivity?.elapsedNow()?.inWholeSeconds
+                ?.coerceAtLeast(0L)?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0
+            delay(1_000L)
+        }
+    }
+    val waitingForData = state.transferPhase == SteamWallpaperTransferPhase.DOWNLOADING &&
+        (state.receivedBytes == 0L || idleSeconds >= 8)
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(state.transferName ?: "壁纸下载", style = MaterialTheme.typography.labelMedium,
@@ -1036,15 +1053,19 @@ private fun SteamTransferTask(
                 SteamWallpaperTransferPhase.CONNECTING -> "正在连接 Steam…"
                 SteamWallpaperTransferPhase.RESOLVING -> "正在获取下载信息…"
                 SteamWallpaperTransferPhase.DOWNLOADING ->
-                    if (state.transferProgressKnown) null else "正在等待首批数据…"
+                    if (waitingForData) (if (state.receivedBytes == 0L) "等待首批数据" else "等待后续数据") +
+                        " · ${idleSeconds}秒" else null
                 SteamWallpaperTransferPhase.VERIFYING -> "正在校验原文件…"
                 SteamWallpaperTransferPhase.IMPORTING -> "正在加入壁纸库…"
                 SteamWallpaperTransferPhase.NONE -> "正在准备下载…"
             }, known = state.transferProgressKnown &&
                 state.transferPhase == SteamWallpaperTransferPhase.DOWNLOADING)
         }
-        if (state.transferId != null) MotionIconButton(onClick = onCancel, modifier = Modifier.size(44.dp)) {
-            Icon(Icons.Outlined.Close, "取消当前壁纸下载", Modifier.size(18.dp))
+        if (state.transferId != null) {
+            if (canRetry && waitingForData && idleSeconds >= 8) MotionTextButton(onClick = onRetry) { Text("重试") }
+            MotionIconButton(onClick = onCancel, modifier = Modifier.size(44.dp)) {
+                Icon(Icons.Outlined.Close, "取消当前壁纸下载", Modifier.size(18.dp))
+            }
         } else if (canRetry) MotionTextButton(onClick = onRetry) { Text("重试") }
     }
 }
@@ -1070,9 +1091,10 @@ private fun SteamWallpaperProgress(received: Long, total: Long, stage: String?, 
             color = colors.onSurface, trackColor = colors.onSurface.copy(alpha = .08f))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (!determinate) MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
-            Text(stage ?: if (determinate)
+            val bytes = if (determinate)
                 steamWallpaperByteLabel(received) + " / " + steamWallpaperByteLabel(total)
-                else if (known && received > 0L) "已下载 " + steamWallpaperByteLabel(received) else "正在获取下载信息…",
+                else if (known && received > 0L) "已接收 " + steamWallpaperByteLabel(received) else null
+            Text(listOfNotNull(stage, bytes).joinToString(" · ").ifBlank { "正在获取下载信息…" },
                 style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
         }

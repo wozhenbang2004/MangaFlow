@@ -1,6 +1,6 @@
 # Steam Workshop native component
 
-MangaFlow media adapter version 0.1.3; component identity 0.1.3-f541366.
+MangaFlow media adapter version 0.1.4; component identity 0.1.4-f541366.
 
 The module links the real tapline core pinned to
 https://github.com/UnhingedSoftware/tapline/tree/f54136611519bef50cf31336e0c28a78eb175657.
@@ -135,7 +135,8 @@ are display-only and are never used as download payloads or main-media fallback.
 
 At most8 live jobs,4 shared chunk permits and2 runtime workers. Progress events
 coalesce in a32-entry queue. Login is capped360seconds including connection and
-verification, account/search/library90seconds, profile15seconds, and download30minutes. Password login and guard submission are explicit user actions; no publisher key,
+verification, account/search/library90seconds, profile15seconds, and native download30minutes.
+The JVM caps native download work at15minutes, with separate120second extraction/import limits. Password login and guard submission are explicit user actions; no publisher key,
 account probe or token file is introduced. Native credential
 buffers and queued response strings are zeroized; the JVM still owns its strings
 and platform secret storage.
@@ -153,16 +154,23 @@ so each transfer owns a unique disposable directory that is never reused.
 The Kotlin importer controls cancellation, deletion/retry and final persistence;
 an aborted transfer must never be marked imported.
 
-Legacy media now uses sequential1MiB identity-encoded Range requests through
-that same maintained Fetch and the owned FileSink. Each bounded response is
-validated for exact206 Content-Range/total/length and strong ETag consistency
-with If-Range, then written before emitting real byte progress. A full-file Vec
-fallback is deliberately absent. A missing/changed range validator or unsupported
-range is a surfaced range_unsupported/content_changed failure, not a silent return
-to the old memory path. Each request has a60second deadline;90seconds without
-material byte progress aborts the transfer. SteamPipe retains bounded chunks and
-the same no-progress watchdog. The512MiB content/disk cap is still not a claim of
-an exact peak-RAM bound for the full import/decoder pipeline.
+Legacy media uses sequential1MiB identity-encoded Range requests through the
+maintained HttpClient and owned FileSink. Body reads report real received bytes
+immediately; native events keep the first positive sample and coalesce subsequent
+intermediate samples to200ms intervals. A block is still validated for exact206
+Content-Range/total/length and strong ETag/If-Range consistency before it is written.
+There is no full-file Vec fallback. Invalid range/content changes remain surfaced
+failures. Each socket read/connection has a30second idle deadline instead of a
+60second deadline for an entire block, allowing slow but advancing responses to
+finish. JVM first-data waiting ends after30seconds and later no-progress waiting
+after45seconds; native also aborts after45seconds without increasing bytes.
+SteamPipe retains bounded chunks and the no-progress watchdog. The512MiB cap is
+not an exact peak-RAM bound for the import/decoder pipeline.
+
+The compact transfer row shows a monotonic idle timer while waiting, offers retry
+after8seconds and retains cancel. Retry cancels the old generation before starting
+the same item with the current route choice. Failures preserve the Steam login;
+source implementation does not prove the screenshot's exact network is reachable.
 
 Authenticated CM operations share a bounded20second gate for their entire
 session-dependent lifetime, avoiding concurrent logons with the same credential.

@@ -2061,11 +2061,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         // The source returns only URLs/metadata: no preceding images are fetched.
         sourceReadJob = viewModelScope.launch {
             try {
-                val pages = repository.cachedPages(sourceMangaId, selected.id)
-                    ?: withContext(Dispatchers.IO) { downloads.storedPages(work.id, selected.id) }
-                    ?: withContext(Dispatchers.IO) { foregroundRequest("准备本章来源") {
-                        repository.pages(sourceMangaId, selected.id)
-                    } }
+                val pages = withContext(Dispatchers.IO) {
+                    foregroundRequest("准备本章来源") {
+                        repository.cachedPages(sourceMangaId, selected.id)
+                            ?: downloads.storedPages(work.id, selected.id)
+                            ?: repository.pages(sourceMangaId, selected.id)
+                    }
+                }
                 require(pages.isNotEmpty()) { "这个来源暂时没有可读图片。" }
                 if (request != sourceReadRequest) return@launch
                 if (session != null && (readingEpoch != readingRequestId || _reading.value?.manga?.id != work.id)) return@launch
@@ -2095,7 +2097,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             } catch (failure: Exception) {
                 if (request == sourceReadRequest) {
                     val error = failure.message ?: "本章来源未能打开，请重试。"
-                    _chapterSourceOperation.value = ChapterSourceOperation(error = error)
+                    _chapterSourceOperation.value = ChapterSourceOperation(error = error, targetSource = variant.sourceName)
                     messages.send(error)
                 }
             }

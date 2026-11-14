@@ -335,6 +335,24 @@ fun ReaderScreen(
     var pages by remember(chapterId) { mutableStateOf<List<Page>>(emptyList()) }
     var loading by remember(chapterId) { mutableStateOf(true) }
     var error by remember(chapterId) { mutableStateOf<String?>(null) }
+    val chapterLoadAttempt = remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId,
+        retry, initialCollection?.key, initialPageIndex) { ReaderLoadAttempt() }
+    val latestChapterLoadAttempt by rememberUpdatedState(chapterLoadAttempt)
+    var chapterLoadStage by remember(chapterLoadAttempt) { mutableStateOf("检查本机章节") }
+    var chapterSlowLoading by remember(chapterLoadAttempt) { mutableStateOf(false) }
+    DisposableEffect(chapterLoadAttempt) { onDispose { chapterLoadAttempt.active = false } }
+    LaunchedEffect(chapterLoadAttempt, loading) {
+        if (loading && chapterLoadAttempt.acceptsResult) {
+            delay(READER_SLOW_LOAD_MILLIS)
+            chapterSlowLoading = true
+            delay(25_000L - READER_SLOW_LOAD_MILLIS)
+            if (chapterLoadAttempt.acceptsResult && loading) {
+                chapterLoadAttempt.stopped = true
+                error = "打开章节超时"
+                loading = false
+            }
+        }
+    }
     var pageIndex by remember(chapterId) { mutableIntStateOf(0) }
     // Pixel offsets are a resume cursor, not UI state. Publishing every scroll delta
     // here used to recompose ReaderScreen and ChapterPages for every animation frame.
@@ -357,6 +375,7 @@ fun ReaderScreen(
         chapter.variants.filterNot { it.storageId == chapter.id }.distinctBy { it.storageId }
     }
     val currentSourceName = chapter.variants.firstOrNull { it.storageId == chapter.id }?.sourceName
+    val sourceSwitchWait = remember(sourceLoading, sourceSwitchName) { ReaderLoadAttempt() }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -641,7 +660,10 @@ fun ReaderScreen(
         }
     }
 
-    LaunchedEffect(chapterId, chapter.sourceId, chapter.sourceMangaId, retry, initialCollection?.key, initialPageIndex) {
+    LaunchedEffect(chapterId, chapter.sourceId, chapter.sourceMangaId, retry, initialCollection?.key, initialPageIndex,
+        chapterLoadAttempt.stopped) {
+        if (!chapterLoadAttempt.acceptsResult) return@LaunchedEffect
+        val requestedAttempt = chapterLoadAttempt
         val requestedManga = manga
         val requestedChapterId = chapterId
         val requestedChapter = chapter
@@ -654,11 +676,14 @@ fun ReaderScreen(
             val loaded = stored ?: if (localImport) {
                 throw IllegalStateException("本地章节不存在，请重新导入")
             } else dev.mangaflow.data.foregroundRequest("章节图片") {
+                chapterLoadStage = "获取图片目录"
                 repository.pages(chapterSourceMangaId(requestedManga.id, requestedChapter), requestedChapterId, forceRefresh = retry > 0)
             }
             currentCoroutineContext().ensureActive()
-            if (chapterId != requestedChapterId) return@LaunchedEffect
+            if (chapterId != requestedChapterId || latestChapterLoadAttempt !== requestedAttempt ||
+                !requestedAttempt.acceptsResult) return@LaunchedEffect
             if (loaded.isEmpty()) throw IllegalStateException("这一章还没有可读取的图片")
+            chapterLoadStage = "恢复阅读位置"
             val sourcePage = initialPageIndex?.takeIf {
                 sourcePagePending && requestedChapterId == initialChapterId && initialCollection == null
             }
@@ -681,7 +706,8 @@ fun ReaderScreen(
                 catch (_: Exception) { false }
             }
             currentCoroutineContext().ensureActive()
-            if (chapterId != requestedChapterId) return@LaunchedEffect
+            if (chapterId != requestedChapterId || latestChapterLoadAttempt !== requestedAttempt ||
+                !requestedAttempt.acceptsResult) return@LaunchedEffect
             pages = loaded
             if (sourcePage != null) sourcePagePending = false
             restartPending = false
@@ -689,8 +715,11 @@ fun ReaderScreen(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
-            if (chapterId == requestedChapterId) error = failure.message ?: "章节暂时无法读取"
-        } finally { if (chapterId == requestedChapterId) loading = false }
+            if (latestChapterLoadAttempt === requestedAttempt && requestedAttempt.acceptsResult)
+                error = failure.message ?: "章节暂时无法读取"
+        } finally {
+            if (latestChapterLoadAttempt === requestedAttempt && requestedAttempt.acceptsResult) loading = false
+        }
     }
 
     // Legacy picture migration is auxiliary persistence: valid chapter images must
@@ -798,27 +827,24 @@ fun ReaderScreen(
                 onClick = { controlsVisible = !controlsVisible },
             ) else Modifier)) {
             when {
-                loading -> if (delayedLoading) Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(Modifier.size(28.dp), color = preferences.theme.foreground(), strokeWidth = 2.dp)
-                    Spacer(Modifier.height(16.dp))
-                    Text("正在打开章节", color = preferences.theme.foreground().copy(alpha = .6f), fontSize = 13.sp)
-                }
-                error != null -> Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.AutoMirrored.Rounded.MenuBook, null, Modifier.size(32.dp), tint = preferences.theme.foreground().copy(alpha = .5f))
-                    Spacer(Modifier.height(16.dp))
-                    Text(error.orEmpty(), color = preferences.theme.foreground(), style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(16.dp))
-                    TextButton(onClick = { retry++ }) { Text("重新读取", color = preferences.theme.foreground()) }
-                    if (canChooseSource) TextButton(onClick = {
+                loading || error != null -> if (delayedLoading || error != null) ReaderImageRecovery(
+                    index = null, failure = error.orEmpty(), pending = loading,
+                    slow = chapterSlowLoading, stage = chapterLoadStage,
+                    sourceName = currentSourceName.orEmpty(), attempt = chapterLoadAttempt,
+                    foreground = preferences.theme.foreground(), modifier = Modifier.align(Alignment.Center),
+                    alternatives = alternativeSources,
+                    onRetry = { retry++ },
+                    onSwitch = { variant -> onReadVariant(chapter, variant, pageIndex, pages.size) },
+                    onMore = { anchor ->
+                        sourceTriggerAnchor = anchor
                         sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
-                    }, modifier = Modifier.onGloballyPositioned { coordinates ->
-                        val origin = coordinates.localToScreen(Offset.Zero)
-                        if (origin.isSpecified) sourceTriggerAnchor = Rect(origin,
-                            Size(coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
-                    }) {
-                        Text("其他来源", color = preferences.theme.foreground())
-                    }
-                }
+                    },
+                    onControls = { controlsVisible = true },
+                    onStop = {
+                        chapterLoadAttempt.stopped = true
+                        error = "已停止等待"; loading = false
+                    },
+                )
                 pages.isNotEmpty() -> key(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles,
                     preferences.panelLayoutKey) {
                     if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
@@ -855,6 +881,8 @@ fun ReaderScreen(
                         resolvePage = resolvePage,
                         retryPage = retryPage,
                         sourceAlternatives = alternativeSources,
+                        sourceName = currentSourceName.orEmpty(),
+                        onShowControls = { controlsVisible = true },
                         retryTargetIndex = currentPageRetryIndex, retryPulse = currentPageRetrySerial,
                         onQuickSwitch = { failedIndex, variant ->
                             onQuickReadVariant(chapter, variant, failedIndex, pages.size)
@@ -931,20 +959,31 @@ fun ReaderScreen(
             Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
         }
 
-        AnimatedVisibility(visible = sourceLoading && sourceSwitchName.isNotBlank(),
+        AnimatedVisibility(visible = sourceLoading && sourceSwitchName.isNotBlank() || sourceError != null,
             modifier = Modifier.align(Alignment.TopCenter)
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
                 .padding(top = 60.dp),
             enter = fadeIn(tween(if (motionEnabled) MangaMotion.Quick else 0)),
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Quick else 0))) {
-            Row(Modifier.background(colors.surface.copy(alpha = .94f), RoundedCornerShape(14.dp))
-                .padding(horizontal = 13.dp, vertical = 9.dp),
+            Row(Modifier.padding(horizontal = 16.dp).widthIn(max = 420.dp)
+                .background(colors.surface.copy(alpha = .94f), RoundedCornerShape(14.dp))
+                .padding(start = 13.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp,
+                if (sourceLoading) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp,
                     color = colors.onSurfaceVariant)
-                Text("正在切换 · $sourceSwitchName", fontSize = 12.sp,
-                    color = colors.onSurface, maxLines = 1)
+                Column(Modifier.weight(1f, fill = false)) {
+                    Text(if (sourceLoading) "准备来源 · $sourceSwitchName"
+                        else readerPageErrorLabel(sourceError.orEmpty()) + " · 已保留当前页",
+                        fontSize = 12.sp, color = colors.onSurface, maxLines = 2,
+                        overflow = TextOverflow.Ellipsis)
+                    if (sourceLoading) ReaderWaitCaption(sourceSwitchWait.startedAt, true, colors.onSurfaceVariant)
+                }
+                if (!sourceLoading) TextButton(onClick = {
+                    sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
+                }) { Text("其他来源", fontSize = 11.sp, color = colors.onSurface) }
+                ReaderIcon(Icons.Rounded.Close, if (sourceLoading) "停止换源" else "关闭换源提示",
+                    interactive = active && !leavingReader, onClick = onCancelSourceSelection)
             }
         }
 
@@ -1365,6 +1404,8 @@ private fun ChapterPages(
     resolvePage: suspend (Page) -> Page,
     retryPage: suspend (Page) -> Page,
     sourceAlternatives: List<ChapterVariant>,
+    sourceName: String,
+    onShowControls: () -> Unit,
     retryTargetIndex: Int,
     retryPulse: Int,
     onQuickSwitch: (Int, ChapterVariant) -> Unit,
@@ -1570,7 +1611,8 @@ private fun ChapterPages(
                 itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                     ReaderPage(
                         page, headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage, paged = false, onTap = onTap,
-                        sourceAlternatives = sourceAlternatives,
+                        sourceAlternatives = sourceAlternatives, sourceName = sourceName,
+                        pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
                         onQuickSwitch = { variant -> onQuickSwitch(index, variant) },
                         onMoreSources = onMoreSources,
                         externalRetrySerial = if (index == retryTargetIndex) retryPulse else 0,
@@ -1714,7 +1756,8 @@ private fun ChapterPages(
                         Box(modifier) {
                             ReaderPage(
                                 pages[imageIndex], headers, sourceId = sourceId, resolvePage = resolvePage, retryPage = retryPage, paged = true, pagedAlignment = alignment, onTap = onTap,
-                                sourceAlternatives = sourceAlternatives,
+                                sourceAlternatives = sourceAlternatives, sourceName = sourceName,
+                                pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
                                 onQuickSwitch = { variant -> onQuickSwitch(imageIndex, variant) },
                                 onMoreSources = onMoreSources,
                                 externalRetrySerial = if (imageIndex == retryTargetIndex) retryPulse else 0,
@@ -1949,6 +1992,10 @@ private fun ReaderPage(
     paged: Boolean,
     pagedAlignment: Alignment = Alignment.Center,
     onTap: () -> Unit,
+    onShowControls: () -> Unit,
+    sourceName: String,
+    pageCount: Int,
+    foreground: Color,
     sourceAlternatives: List<ChapterVariant> = emptyList(),
     onQuickSwitch: (ChapterVariant) -> Unit = {},
     onMoreSources: (Rect?) -> Unit = {},
@@ -1987,15 +2034,23 @@ private fun ReaderPage(
     }
     var observedDimensions by remember(page.url) { mutableStateOf<IntSize?>(null) }
     var measuredHeight by remember { mutableIntStateOf(0) }
-    var error by remember(page.url) { mutableStateOf<String?>(null) }
-    var loading by remember(page.url) { mutableStateOf(true) }
     var reload by remember(page.url) { mutableIntStateOf(0) }
-    var slowLoading by remember(page.url, reload) { mutableStateOf(false) }
-    LaunchedEffect(page.url, reload, loading) {
-        slowLoading = false
-        if (loading) {
-            delay(12_000)
+    val attempt = remember(page.url, headers, sourceId, reload) { ReaderLoadAttempt() }
+    var error by remember(attempt) { mutableStateOf<String?>(null) }
+    var loading by remember(attempt) { mutableStateOf(true) }
+    var slowLoading by remember(attempt) { mutableStateOf(false) }
+    DisposableEffect(attempt) { onDispose { attempt.active = false } }
+    LaunchedEffect(attempt, loading) {
+        if (loading && attempt.acceptsResult) {
+            delay(READER_SLOW_LOAD_MILLIS)
             slowLoading = true
+            delay(READER_PAGE_WAIT_MILLIS - READER_SLOW_LOAD_MILLIS)
+            if (loading && attempt.acceptsResult) {
+                attempt.stopped = true
+                error = "本页连接超时"
+                loading = false
+                loadChanged(false)
+            }
         }
     }
     var previousRetrySerial by remember(page.url) { mutableIntStateOf(externalRetrySerial) }
@@ -2006,26 +2061,34 @@ private fun ReaderPage(
     var detailStatus by remember(page.url, reload) { mutableStateOf<ReaderDetailStatus?>(null) }
     var detailRetry by remember(page.url, reload) { mutableIntStateOf(0) }
     var loadedImage by remember(page.url, reload) { mutableStateOf<LoadedReaderImage?>(null) }
-    var resolvedPage by remember(page.url) { mutableStateOf<Page?>(null) }
-    LaunchedEffect(page.url, reload) {
+    var resolvedPage by remember(attempt) { mutableStateOf<Page?>(null) }
+    LaunchedEffect(attempt, attempt.stopped) {
+        if (!attempt.acceptsResult) return@LaunchedEffect
         loadChanged(false)
         loading = true
         error = null
         resolvedPage = null
         try {
             val resource = if (reload > 0) retrySource(page) else resolve(page)
+            currentCoroutineContext().ensureActive()
+            if (!attempt.acceptsResult) return@LaunchedEffect
             // Start the image immediately; original-size IO can finish alongside its decode.
             resolvedPage = resource
             readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
                 originalPage = page.takeIf { reload == 0 || resource.url == page.url })?.let {
-                observedDimensions = it
-                dimensionsMeasured(it)
+                currentCoroutineContext().ensureActive()
+                if (attempt.acceptsResult) {
+                    observedDimensions = it
+                    dimensionsMeasured(it)
+                }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {
             // A failed persistent fetch must not immediately repeat the same HTTP request in Coil.
-            loading = false
-            error = failure.message ?: "图片暂时无法读取"
+            if (attempt.acceptsResult) {
+                loading = false
+                error = failure.message ?: "图片暂时无法读取"
+            }
         }
     }
     // A decoded preview may guide layout if header parsing is unavailable. It is never
@@ -2042,13 +2105,16 @@ private fun ReaderPage(
         hasDimensions = true
     }
     val delayedLoading = rememberDelayedBusy(loading)
-    var prefetchError by remember(page.url) { mutableStateOf<String?>(null) }
+    var prefetchError by remember(attempt) { mutableStateOf<String?>(null) }
     var waitingForPrefetch by remember(page.url, prefetch, reload) { mutableStateOf(prefetch != null && reload == 0) }
-    LaunchedEffect(page.url, prefetch, reload) {
+    LaunchedEffect(page.url, prefetch, reload, attempt.stopped) {
+        if (!attempt.acceptsResult) return@LaunchedEffect
         prefetchError = null
         if (prefetch != null && reload == 0) {
             try {
                 val result = prefetch.job.await()
+                currentCoroutineContext().ensureActive()
+                if (!attempt.acceptsResult) return@LaunchedEffect
                 if (result is ErrorResult && result.throwable !is PrefetchBudgetExceeded) {
                     prefetchError = result.throwable.message ?: "图片暂时无法读取"
                     loading = false
@@ -2070,7 +2136,7 @@ private fun ReaderPage(
         val previewWidth = viewportWidthPx.coerceIn(1, 1600)
         val previewHeight = with(density) { screenHeight.roundToPx() }.coerceIn(1, 4096)
         val resource = resolvedPage
-        val request = remember(resource?.url, headers, reload, previewWidth, previewHeight) {
+        val request = remember(resource?.url, headers, attempt, previewWidth, previewHeight) {
             resource?.let { requested -> readerImageRequest(context, requested, headers, sourceId)
                 // The preview need only fit this viewport. Telephoto keeps the original
                 // disk file for full-quality visible tiles and pinch zoom.
@@ -2078,8 +2144,10 @@ private fun ReaderPage(
                 .scale(Scale.FIT)
                 .crossfade(false)
                 .listener(
-                    onStart = { loading = true; error = null; loadChanged(false) },
-                    onSuccess = { _, result ->
+                    onStart = {
+                        if (attempt.acceptsResult) { loading = true; error = null; loadChanged(false) }
+                    },
+                    onSuccess = { _, result -> if (attempt.acceptsResult) {
                         val width = result.image.width
                         val height = result.image.height
                         if (width > 0 && height > 0) {
@@ -2087,8 +2155,8 @@ private fun ReaderPage(
                         }
                         loading = false
                         loadChanged(true)
-                    },
-                    onError = { _, result ->
+                    } },
+                    onError = { _, result -> if (attempt.acceptsResult) {
                         loadChanged(false)
                         if (requested.url.startsWith("file:") && page.url.startsWith("https:")) {
                             // Files can be removed by the download screen while this image is visible.
@@ -2098,7 +2166,7 @@ private fun ReaderPage(
                             loading = false
                             error = result.throwable.message ?: "图片暂时无法读取"
                         }
-                    },
+                    } },
                 )
                 .build() }
         }
@@ -2116,7 +2184,7 @@ private fun ReaderPage(
         val imageError = error ?: prefetchError.takeUnless { resource?.url?.startsWith("file:") == true }
         // A saved/materialized image is ready to display; an old remote prefetch cannot hold it back.
         val awaitingPrefetch = waitingForPrefetch && resource?.url?.startsWith("file:") != true
-        val pendingRecovery = loading && slowLoading && imageError == null
+        val pendingRecovery = loading && imageError == null
         val naturalHeight = maxWidth / aspect
         val naturalHeightPx = with(density) { naturalHeight.roundToPx() }
         val pendingAspect = layoutDimensions?.readerAspectRatio()
@@ -2133,11 +2201,7 @@ private fun ReaderPage(
         // Vertical reading uses one continuous scroll surface for pages and long strips.
         val pageModifier = if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(naturalHeight)
             .onSizeChanged { measuredHeight = it.height }
-        Box(pageModifier.clipToBounds()
-            .then(if (loading || awaitingPrefetch || imageError != null) Modifier.clickable(
-                interactionSource = remember(page.url) { MutableInteractionSource() }, indication = null,
-                onClickLabel = "显示或收起阅读工具", onClick = onTap,
-            ) else Modifier), contentAlignment = Alignment.Center) {
+        Box(pageModifier.clipToBounds(), contentAlignment = Alignment.Center) {
             if (request != null && !awaitingPrefetch && imageError == null) key(reload) {
                 if (paged) {
                     val imageState = rememberZoomableImageState()
@@ -2212,13 +2276,42 @@ private fun ReaderPage(
                     if (status.retryable) TextButton(onClick = { detailStatus = null; detailRetry++ }) { Text("重试原图细节", color = Color.Gray) }
                 }
             }
-            if (delayedLoading && imageError == null && !pendingRecovery) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
-            if (imageError != null || pendingRecovery) ReaderImageRecovery(
-                index = page.index, failure = imageError.orEmpty(), pending = pendingRecovery,
-                alternatives = sourceAlternatives,
-                onRetry = { reload++ }, onSwitch = onQuickSwitch,
-                onMore = onMoreSources,
-            )
+            if (loading || awaitingPrefetch || imageError != null) {
+                // This page-local sibling sits ABOVE Telephoto while it has no usable image.
+                // Its click cancels on drag, so the containing pager/list still owns scrolling.
+                Box(Modifier.matchParentSize().clickable(
+                    interactionSource = remember(page.url) { MutableInteractionSource() }, indication = null,
+                    onClickLabel = "显示或收起阅读工具", onClick = onTap,
+                ))
+            }
+            if (imageError != null || delayedLoading && pendingRecovery) {
+                var feedbackHeight by remember { mutableIntStateOf(0) }
+                val feedbackPosition = if (paged) Modifier.align(Alignment.Center)
+                else Modifier.align(Alignment.TopCenter).offset {
+                    val window = visibleWindow()
+                    val top = window?.top ?: 0
+                    val height = window?.let { it.bottom - it.top } ?: naturalHeightPx
+                    IntOffset(0, top + ((height - feedbackHeight) / 2).coerceAtLeast(0))
+                }
+                ReaderImageRecovery(
+                    index = page.index, pageCount = pageCount, sourceName = sourceName,
+                    failure = imageError.orEmpty(), pending = pendingRecovery, slow = slowLoading,
+                    stage = when {
+                        resource == null -> "检查本机与已有下载"
+                        awaitingPrefetch -> "等待已开始的图片请求"
+                        resource.url.startsWith("file:") -> "解码本机图片"
+                        else -> "请求图片"
+                    },
+                    attempt = attempt, foreground = foreground,
+                    modifier = feedbackPosition.onSizeChanged { feedbackHeight = it.height },
+                    alternatives = sourceAlternatives,
+                    onRetry = { reload++ }, onSwitch = onQuickSwitch, onMore = onMoreSources,
+                    onControls = onShowControls,
+                    onStop = {
+                        attempt.stopped = true; error = "已停止等待"; loading = false; loadChanged(false)
+                    },
+                )
+            }
         }
     }
 }

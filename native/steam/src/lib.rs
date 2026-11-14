@@ -684,6 +684,8 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
             let activity = Arc::clone(&last_activity);
             let maximum = Arc::clone(&most_bytes);
             let plan_seen = Arc::clone(&planned);
+            let mut reported_at = 0_u64;
+            let mut reported_bytes = 0_u64;
             let mut observe = move |event| {
                 let elapsed = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
                 match event {
@@ -699,9 +701,16 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
                     Event::Progress { bytes_done, bytes_total } => {
                         if bytes_done > maximum.fetch_max(bytes_done, Ordering::AcqRel) {
                             activity.store(elapsed, Ordering::Release);
-                            forward.emit(json!({
-                                "kind":"progress","completed":bytes_done,"total":bytes_total,"known":true
-                            }));
+                            // Receive callbacks can fire for every socket read. Keep the
+                            // first byte visible, without flooding the JNI event queue.
+                            if reported_bytes == 0 || elapsed.saturating_sub(reported_at) >= 200 ||
+                                bytes_done == bytes_total {
+                                forward.emit(json!({
+                                    "kind":"progress","completed":bytes_done,"total":bytes_total,"known":true
+                                }));
+                                reported_at = elapsed;
+                                reported_bytes = bytes_done;
+                            }
                         }
                     }
                     _ => {}
@@ -718,7 +727,7 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
                     result = &mut transfer => break result.map_err(install_error)?,
                     _ = watch.tick() => {
                         let elapsed = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-                        if elapsed.saturating_sub(last_activity.load(Ordering::Acquire)) >= 90_000 {
+                        if elapsed.saturating_sub(last_activity.load(Ordering::Acquire)) >= 45_000 {
                             return Err("download_stalled");
                         }
                     }

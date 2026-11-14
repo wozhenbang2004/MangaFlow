@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Current reader recovery and Steam first-data repair · 2026-11-14
+
+Current user request, screenshot1000121717 and continuation are recorded under DESIGN READER-RECOVERY / STEAM-FIRST-DATA. Reader source implements real stage/source/page/elapsed feedback,8second action disclosure,25second chapter/source and45second ordinary-page terminal waits, stop/retry and a loading-time console tap/action. Existing source selection/continuation identity and shared-download ownership remain. Current source has been three-way integrated from01344575 onto2dfa9ec without dropping adaptive cache/admission/prefetch/refresh work; a364efd passive-network changes are retained by the current main parent.
+
+Wallpaper Legacy receives body-byte progress before a complete1MiB block and uses read-idle deadlines rather than a whole-block60second cap. Independent review found and corrected automatic replay after partial bytes; only a no-body stale connection retries. Native first sample and200ms intermediate events, first-data30seconds/later-stall45seconds, retained failure/route and generation-safe manual retry are wired through the compact task row. Native/packager/AAR/runtime identities are0.1.4-f541366. Source review and pinned patch applicability are the evidence; no tests/local builds/real service, device or account probes. The screenshot's exact network availability, compile result and installed UX remain unverified; GuidedPanelReader-specific recovery remains OPEN.
+
+Next exact action: integrate any newer main without replaying old worktrees, publish this complete source batch with an expected-head lease and confirm normal CI activation once. Do not wait for builds or claim an unobserved artifact. User owns installed verification under the project workflow.
+
 ## CI240 image-adapter compiler repair · 2026-11-14
 
 User continued the network delivery. Actual Android240/run43586380957/job132421661177, iOS/run43586380933/job132421661451 and Windows/job132421661735 all failed common image compilation at maina364efd. Logs identify ExperienceImages.kt:88 missing coil3.network.httpHeaders import and :142 ambiguous coil3.request.Options versus okio.Options, invalidating EventListener.fetchEnd override. Native additionally reports :185/:196 ForwardingSink unavailable, cascading write/buffer/flush errors. These are concrete failures in the concurrent experience image layer, not completed artifact or UI acceptance.

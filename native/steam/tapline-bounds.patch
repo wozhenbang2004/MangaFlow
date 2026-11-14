@@ -188,7 +188,7 @@ diff --git a/crates/tapline-rt-tokio/src/http.rs b/crates/tapline-rt-tokio/src/h
  use std::time::{Duration, Instant};
 @@ -20,6 +21,7 @@
  }
- 
+
  pub struct HttpClient {
 +    route: NetworkRoute,
      pools: Mutex<HashMap<String, Vec<Connection>>>,
@@ -211,12 +211,235 @@ diff --git a/crates/tapline-rt-tokio/src/http.rs b/crates/tapline-rt-tokio/src/h
 @@ -55,7 +63,7 @@
              }
          }
- 
+
 -        let stream = connect_tls(host, port)
 +        let stream = connect_tls_with_route(host, port, &self.route)
              .await
              .map_err(|e| FetchError::Transport(e.to_string()))?;
          Ok(Connection {
+@@ -129,6 +137,15 @@
+
+ impl Fetch for HttpClient {
+     async fn get(&self, request: Request, limit: u64) -> Result<Response, FetchError> {
++        self.get_observed(request, limit, &mut |_| {}).await
++    }
++}
++
++impl HttpClient {
++    /// Reports received body bytes without waiting for the bounded response to finish.
++    pub async fn get_observed(
++        &self, request: Request, limit: u64, observe: &mut (dyn FnMut(u64) + Send),
++    ) -> Result<Response, FetchError> {
+         let (host, port, path) = split_url(&request.url)?;
+
+         let mut last_error = None;
+@@ -137,9 +154,19 @@
+             // sat idle, which only shows once a request is written into it.
+             // The retry therefore always dials a new connection: popping a
+             // second pooled one could meet the same fate.
+-            let connection = self.acquire(&host, port, attempt == 0).await?;
+-
+-            match perform(connection, &host, &path, &request, limit).await {
++            let connection = tokio::time::timeout(
++                Duration::from_secs(30), self.acquire(&host, port, attempt == 0),
++            ).await.map_err(|_| FetchError::Transport("mangaflow-download-stalled".into()))??;
++
++            let mut received_body = false;
++            let result = {
++                let mut report = |bytes| {
++                    received_body |= bytes > 0;
++                    observe(bytes);
++                };
++                perform(connection, &host, &path, &request, limit, &mut report).await
++            };
++            match result {
+                 Ok((response, connection)) => {
+                     if let Some(connection) = connection {
+                         self.release(&host, connection).await;
+@@ -148,7 +175,9 @@
+                 }
+                 Err(error) => {
+                     last_error = Some(error);
+-                    if attempt == 1 {
++                    // A partial response is not a stale idle connection. End this
++                    // attempt instead of replaying body bytes under one high-water mark.
++                    if attempt == 1 || received_body {
+                         break;
+                     }
+                 }
+@@ -164,6 +193,7 @@
+     path: &str,
+     request: &Request,
+     limit: u64,
++    observe: &mut (dyn FnMut(u64) + Send),
+ ) -> Result<(Response, Option<Connection>), FetchError> {
+     let mut head =
+         format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: tapline\r\nAccept: */*\r\n");
+@@ -175,16 +205,8 @@
+     }
+     head.push_str("Connection: keep-alive\r\n\r\n");
+
+-    connection
+-        .stream
+-        .write_all(head.as_bytes())
+-        .await
+-        .map_err(|e| FetchError::Transport(e.to_string()))?;
+-    connection
+-        .stream
+-        .flush()
+-        .await
+-        .map_err(|e| FetchError::Transport(e.to_string()))?;
++    guarded_io(connection.stream.write_all(head.as_bytes())).await?;
++    guarded_io(connection.stream.flush()).await?;
+
+     let mut buffer = std::mem::take(&mut connection.leftover);
+     let header_end = loop {
+@@ -192,11 +214,7 @@
+             break index;
+         }
+         let mut chunk = [0_u8; 8192];
+-        let read = connection
+-            .stream
+-            .read(&mut chunk)
+-            .await
+-            .map_err(|e| FetchError::Transport(e.to_string()))?;
++        let read = guarded_io(connection.stream.read(&mut chunk)).await?;
+         if read == 0 {
+             return Err(FetchError::MalformedResponse("headers ended early".into()));
+         }
+@@ -252,16 +270,16 @@
+     let body_start = buffer.get(header_end + 4..).unwrap_or_default().to_vec();
+
+     let (body, reusable) = if chunked {
+-        let body = read_chunked(&mut connection, body_start, limit).await?;
++        let body = read_chunked(&mut connection, body_start, limit, observe).await?;
+         (body, keep_alive)
+     } else {
+         match content_length {
+             Some(length) => {
+-                let body = read_sized(&mut connection, body_start, length, limit).await?;
++                let body = read_sized(&mut connection, body_start, length, limit, observe).await?;
+                 (body, keep_alive)
+             }
+             None => {
+-                let body = read_to_end(&mut connection, body_start, limit).await?;
++                let body = read_to_end(&mut connection, body_start, limit, observe).await?;
+                 (body, false)
+             }
+         }
+@@ -273,6 +291,16 @@
+         body,
+     };
+     Ok((response, reusable.then_some(connection)))
++}
++
++/// Each network read has an idle deadline; a slow response may still complete
++/// while body bytes keep arriving. The native job owns the overall deadline.
++async fn guarded_io<T>(
++    future: impl std::future::Future<Output = std::io::Result<T>> + Send,
++) -> Result<T, FetchError> {
++    tokio::time::timeout(Duration::from_secs(30), future).await
++        .map_err(|_| FetchError::Transport("mangaflow-download-stalled".into()))?
++        .map_err(|error| FetchError::Transport(error.to_string()))
+ }
+
+ fn find_header_end(buffer: &[u8]) -> Option<usize> {
+@@ -284,28 +312,28 @@
+     mut body: Vec<u8>,
+     length: u64,
+     limit: u64,
++    observe: &mut (dyn FnMut(u64) + Send),
+ ) -> Result<Vec<u8>, FetchError> {
+     let length = usize::try_from(length).map_err(|_| FetchError::BodyTooLarge { limit })?;
+
+     if body.len() > length {
+         connection.leftover = body.split_off(length);
++        observe(body.len() as u64);
+         return Ok(body);
+     }
+
++    observe(body.len() as u64);
+     body.reserve(length - body.len());
+     while body.len() < length {
+         let mut chunk = [0_u8; 16 * 1024];
+         let want = (length - body.len()).min(chunk.len());
+         let slice = chunk.get_mut(..want).unwrap_or_default();
+-        let read = connection
+-            .stream
+-            .read(slice)
+-            .await
+-            .map_err(|e| FetchError::Transport(e.to_string()))?;
++        let read = guarded_io(connection.stream.read(slice)).await?;
+         if read == 0 {
+             return Err(FetchError::MalformedResponse("body ended early".into()));
+         }
+         body.extend_from_slice(chunk.get(..read).unwrap_or_default());
++        observe(body.len() as u64);
+     }
+     Ok(body)
+ }
+@@ -314,14 +342,13 @@
+     connection: &mut Connection,
+     mut body: Vec<u8>,
+     limit: u64,
++    observe: &mut (dyn FnMut(u64) + Send),
+ ) -> Result<Vec<u8>, FetchError> {
++    if body.len() as u64 > limit { return Err(FetchError::BodyTooLarge { limit }); }
++    observe(body.len() as u64);
+     loop {
+         let mut chunk = [0_u8; 16 * 1024];
+-        let read = connection
+-            .stream
+-            .read(&mut chunk)
+-            .await
+-            .map_err(|e| FetchError::Transport(e.to_string()))?;
++        let read = guarded_io(connection.stream.read(&mut chunk)).await?;
+         if read == 0 {
+             return Ok(body);
+         }
+@@ -329,6 +356,7 @@
+         if body.len() as u64 > limit {
+             return Err(FetchError::BodyTooLarge { limit });
+         }
++        observe(body.len() as u64);
+     }
+ }
+
+@@ -340,6 +368,7 @@
+     connection: &mut Connection,
+     start: Vec<u8>,
+     limit: u64,
++    observe: &mut (dyn FnMut(u64) + Send),
+ ) -> Result<Vec<u8>, FetchError> {
+     let mut raw = start;
+     let mut out = Vec::new();
+@@ -378,8 +407,13 @@
+         let data_end = data_start
+             .checked_add(size)
+             .ok_or_else(|| FetchError::MalformedResponse("chunk size overflow".into()))?;
++        observe(out.len() as u64 + raw.len().saturating_sub(data_start).min(size) as u64);
+         while raw.len() < data_end + 2 {
+             fill(connection, &mut raw).await?;
++            observe(out.len() as u64 + raw.len().saturating_sub(data_start).min(size) as u64);
++        }
++        if raw.get(data_end..data_end + 2) != Some(b"\r\n".as_slice()) {
++            return Err(FetchError::MalformedResponse("invalid chunk ending".into()));
+         }
+
+         out.extend_from_slice(raw.get(data_start..data_end).unwrap_or_default());
+@@ -397,11 +431,7 @@
+
+ async fn fill(connection: &mut Connection, buffer: &mut Vec<u8>) -> Result<(), FetchError> {
+     let mut chunk = [0_u8; 16 * 1024];
+-    let read = connection
+-        .stream
+-        .read(&mut chunk)
+-        .await
+-        .map_err(|e| FetchError::Transport(e.to_string()))?;
++    let read = guarded_io(connection.stream.read(&mut chunk)).await?;
+     if read == 0 {
+         return Err(FetchError::MalformedResponse("body ended early".into()));
+     }
 diff --git a/crates/tapline/src/shared.rs b/crates/tapline/src/shared.rs
 --- a/crates/tapline/src/shared.rs
 +++ b/crates/tapline/src/shared.rs
@@ -278,10 +501,10 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 +use tapline_rt_tokio::{CmTransport, FileSink, cm_list_with_route};
  use tapline_state::AppState;
  use tapline_wire::Message;
- 
+
 @@ -89,7 +89,7 @@
      }
- 
+
      pub async fn anonymous_shared(shared: Arc<crate::Shared>) -> Result<Self, InstallError> {
 -        let servers = cm_list(0)
 +        let servers = cm_list_with_route(0, &shared.route)
@@ -291,12 +514,12 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 @@ -98,7 +98,7 @@
              .endpoint
              .clone();
- 
+
 -        let transport = CmTransport::connect(&endpoint)
 +        let transport = CmTransport::connect_with_route(&endpoint, &shared.route)
              .await
              .map_err(|e| InstallError::Io(format!("could not connect to {endpoint}: {e}")))?;
- 
+
 @@ -136,7 +136,7 @@
          token: &tapline_auth::StoredToken,
          shared: Arc<crate::Shared>,
@@ -309,12 +532,12 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 @@ -145,7 +145,7 @@
              .endpoint
              .clone();
- 
+
 -        let transport = CmTransport::connect(&endpoint)
 +        let transport = CmTransport::connect_with_route(&endpoint, &shared.route)
              .await
              .map_err(|e| InstallError::Io(format!("could not connect to {endpoint}: {e}")))?;
- 
+
 @@ -1198,6 +1198,23 @@
          options: &InstallOptions,
          observe: &mut (dyn FnMut(Event) + Send),
@@ -338,11 +561,12 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 +        }
          let target = crate::options_for(options, item.app, item.id);
          std::fs::create_dir_all(&target.install_dir)?;
- 
-@@ -1227,6 +1244,32 @@
+
+@@ -1226,6 +1243,32 @@
+                 let content = self
                      .fetch_manifest_from_pool(*depot, manifest.get(), code, &key)
                      .await?;
- 
++
 +                if max_entries != usize::MAX {
 +                    if content.files.len() > max_entries || content.total_size > max_bytes {
 +                        return Err(InstallError::Io("mangaflow-size-limit".to_owned()));
@@ -368,11 +592,10 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 +                        }
 +                    }
 +                }
-+
+
                  let entry = ResolvedDepot {
                      depot: tapline_pics::Depot {
-                         id: *depot,
-@@ -1267,6 +1310,81 @@
+@@ -1267,6 +1310,84 @@
                      path: name.to_owned(),
                      reason,
                  })?;
@@ -407,12 +630,15 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 +                        if let Some(etag) = &validator {
 +                            request = request.header("If-Range", etag.clone());
 +                        }
-+                        let response = tokio::time::timeout(
-+                            std::time::Duration::from_secs(60),
-+                            tapline_io::Fetch::get(self.shared.http.as_ref(), request, span),
-+                        ).await
-+                            .map_err(|_| InstallError::Io("mangaflow-download-stalled".to_owned()))?
++                        let mut received = |bytes: u64| observe(Event::Progress {
++                            bytes_done: offset.saturating_add(bytes.min(span)),
++                            bytes_total: item.size,
++                        });
++                        let response = self.shared.http.get_observed(request, span, &mut received).await
 +                            .map_err(|error| match error {
++                                tapline_io::FetchError::Transport(message)
++                                    if message == "mangaflow-download-stalled" =>
++                                        InstallError::Io(message),
 +                                tapline_io::FetchError::BodyTooLarge { .. } =>
 +                                    InstallError::Io("mangaflow-range-unsupported".to_owned()),
 +                                _ => InstallError::Io("mangaflow-download-network".to_owned()),
@@ -451,7 +677,7 @@ diff --git a/crates/tapline/src/session.rs b/crates/tapline/src/session.rs
 +                    report.bytes_downloaded = offset;
 +                    return Ok(report);
 +                }
- 
+
                  let response = tapline_io::Fetch::get(
                      self.shared.http.as_ref(),
 diff --git a/crates/tapline-auth/src/lib.rs b/crates/tapline-auth/src/lib.rs

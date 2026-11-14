@@ -3,6 +3,7 @@ package dev.mangaflow.storage
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.net.DownloadRouteSnapshot
 import kotlinx.coroutines.flow.StateFlow
+import kotlin.time.TimeMark
 
 enum class SteamWallpaperKind { IMAGE, VIDEO }
 
@@ -55,6 +56,8 @@ data class SteamWallpaperState(
     val transferId: String? = null,
     val transferPhase: SteamWallpaperTransferPhase = SteamWallpaperTransferPhase.NONE,
     val transferProgressKnown: Boolean = false,
+    /** Monotonic time of the last phase change or increase in received bytes. */
+    val transferLastActivity: TimeMark? = null,
     val transferError: String? = null,
     val transferName: String? = null,
     /** The immutable effective route of this transfer, including a retained failed attempt. */
