@@ -91,7 +91,9 @@ class StorageFile(val nativePath: Path) {
     fun writeText(text: String) { FileSystem.SYSTEM.write(nativePath) { writeUtf8(text) } }
     fun appendText(text: String) { FileSystem.SYSTEM.appendingSink(nativePath).buffer().useOkio { it.writeUtf8(text) } }
     fun inputStream(): StorageInput = StorageInput(FileSystem.SYSTEM.source(nativePath).buffer())
-    fun outputStream(): StorageOutput = StorageOutput(FileSystem.SYSTEM.sink(nativePath).buffer())
+    fun outputStream(): StorageOutput = outputStream(append = false)
+    fun outputStream(append: Boolean): StorageOutput = StorageOutput(
+        (if (append) FileSystem.SYSTEM.appendingSink(nativePath) else FileSystem.SYSTEM.sink(nativePath)).buffer())
     fun copyTo(destination: StorageFile, overwrite: Boolean = false): StorageFile {
         require(overwrite || !destination.exists()) { "目标文件已存在。" }
         FileSystem.SYSTEM.copy(nativePath, destination.nativePath)

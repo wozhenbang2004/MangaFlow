@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Loading, resumable downloads and history · 2026-11-14
+
+Current user raw requests, screenshot references, adopted changes and adaptive-design status are DESIGN.md DOWNLOAD-BACKGROUND/RESUME/PARALLEL-20261114, READER-TILES/LOADING-20261114, HISTORY-IDENTITY-20261114 and ADAPTIVE-EXPERIENCE-20261114. Implemented source: early Android foreground protection;2 mobile/4 desktop parallel background pages plus a download-reader lane; safely retained strong-ETag byte checkpoints; exact generation/work-ID publication and consumer-aware cancellation; shared desktop2/iOS1 native decode admission; exact-source history projection with source labels on title conflict; loading-time chrome, direct local-image drawing and pending12s recovery. Original pixels, actual source/page/cursor identities, explicit pause/delete and existing native limits remain.
+
+The adaptive experience work is a concrete candidate design only: automatic/energy/smooth preference, source-local measured feedback, disk/memory/thermal constraints and safe initialization-only disk-cache changes. It is not installed automatic hardware/network tuning or a new settings control. Byte Range is conditional on origin support and strong validators; JM remains completed-page resumable, and iOS remains bounded by its native execution lease. No actual speed/battery/frame/background results have been measured.
+
+Network design ROUTING-DETECT-20261114 refines ROUTING-DESIGN-142: follow system / application-direct / specified proxy, inherited task overrides, and bounded detection with a separate apply action. External proxies need an applicable MangaFlow route, not mandatory device-wide global mode. System VPN/TUN interception remains possible in application-direct mode. Actual adapters/settings/diagnosis remain OPEN; no functioning one-click setup is claimed.
+
+Root-only one-batch integration rebases onto concurrent 401c7ea (preserve latest Steam account-login/workspace stability and newest-comment anchor changes). Separate reviewers inspected actual protocol/header/storage and writer/foreground/cancellation blobs; no evidenced blocking finding remained. All actions were cloud connector/source only, without tests/local builds/probes. Normal main workflows/signing/current-main protections are retained. Latest build identities and installed-user outcomes belong to the submitted commit; do not create a status-only follow-up or claim CI/device acceptance from source.
+
 ## Steam account login and wallpaper stability · 2026-11-14
 
 Active requirements and source/design evidence are DESIGN.md STEAM-UI-141 / ROUTING-DESIGN-142. User requests every download's direct/proxy choice with external-proxy behavior, redesigns Steam/Wallpaper Engine UI, then explicitly asks account/password login and reports continuing jitter. Raw quotes and the complete routing matrix are in that design entry.

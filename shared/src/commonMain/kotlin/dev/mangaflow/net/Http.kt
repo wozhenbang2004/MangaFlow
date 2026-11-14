@@ -129,12 +129,13 @@ class NetworkClient(
     connectTimeoutMillis: Long = 15_000,
     readTimeoutMillis: Long = 30_000,
     callTimeoutMillis: Long = 45_000,
+    acceptCompression: Boolean = true,
 ) {
     private val timeouts = Triple(connectTimeoutMillis, readTimeoutMillis, callTimeoutMillis)
     private val client = platformHttpClient(http1Only) {
         expectSuccess = false
         followRedirects = false
-        install(ContentEncoding) { gzip(); deflate() }
+        if (acceptCompression) install(ContentEncoding) { gzip(); deflate() }
         install(HttpTimeout) {
             this.connectTimeoutMillis = timeouts.first
             this.socketTimeoutMillis = timeouts.second
@@ -147,7 +148,7 @@ class NetworkClient(
     fun close() { cancelAll(); client.close() }
     suspend fun execute(request: Request, maximumBytes: Long = 8L * 1024 * 1024): NetworkResponse = coroutineScope {
         val output = Buffer()
-        val response = transfer(request, maximumBytes, { _, _ -> }) { buffer, count -> output.write(buffer, 0, count) }
+        val response = transfer(request, maximumBytes, { _, _ -> }, { buffer, count -> output.write(buffer, 0, count) })
         NetworkResponse(response.first, response.second, output.readByteArray())
     }
     /** A real bounded download path; chunks are delivered before the next read rather than buffered in memory. */
@@ -155,7 +156,20 @@ class NetworkClient(
         val response = transfer(request, maximumBytes, onProgress, onChunk)
         return NetworkResponse(response.first, response.second, ByteArray(0))
     }
-    private suspend fun transfer(request: Request, maximumBytes: Long, progress: (Long, Long) -> Unit, write: (ByteArray, Int) -> Unit): Pair<Int, Map<String, String>> = coroutineScope {
+    /** Validate response headers before opening an output or consuming its body. */
+    internal suspend fun downloadWithHeaders(
+        request: Request, maximumBytes: Long, onResponse: (NetworkResponse) -> Boolean,
+        onChunk: (ByteArray, Int) -> Unit,
+    ): NetworkResponse {
+        val response = transfer(request, maximumBytes, { _, _ -> }, onChunk) { code, headers ->
+            onResponse(NetworkResponse(code, headers, ByteArray(0)))
+        }
+        return NetworkResponse(response.first, response.second, ByteArray(0))
+    }
+    private suspend fun transfer(
+        request: Request, maximumBytes: Long, progress: (Long, Long) -> Unit,
+        write: (ByteArray, Int) -> Unit, acceptResponse: (Int, Map<String, String>) -> Boolean = { _, _ -> true },
+    ): Pair<Int, Map<String, String>> = coroutineScope {
         require(maximumBytes >= 0)
         val job = currentCoroutineContext()[Job]!!
         synchronized(activeLock) { active.add(job) }
@@ -169,6 +183,8 @@ class NetworkClient(
                     setBody(body.bytes)
                 }
             }.execute { response ->
+                val responseHeaders = response.headers.entries().associate { it.key to it.value.joinToString(", ") }
+                if (!acceptResponse(response.status.value, responseHeaders)) return@execute response.status.value to responseHeaders
                 val announced = response.headers["Content-Length"]?.toLongOrNull()
                 require(announced == null || announced <= maximumBytes) { "Response exceeds the size limit" }
                 val input = response.bodyAsChannel()
@@ -186,7 +202,7 @@ class NetworkClient(
                     progress(received, announced ?: -1)
                 }
                 input.closedCause?.let { throw it }
-                response.status.value to response.headers.entries().associate { it.key to it.value.joinToString(", ") }
+                response.status.value to responseHeaders
             }
         } finally { synchronized(activeLock) { active.remove(job) } }
     }

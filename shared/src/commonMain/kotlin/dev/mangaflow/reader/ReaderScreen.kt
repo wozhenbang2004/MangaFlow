@@ -643,10 +643,10 @@ fun ReaderScreen(
     }
 
     LaunchedEffect(controlsVisible, showSettings, showChapters, showSpreadAdjustment, showComments,
-        showPageNavigator, showReaderActions, readerActionsPresent, sourcePickerBlocking, loading, error, progressInteracting, touchExploration, chromeEngaged) {
+        showPageNavigator, showReaderActions, readerActionsPresent, sourcePickerBlocking, loading, error, imageVisible, progressInteracting, touchExploration, chromeEngaged) {
         if (controlsVisible && !showSettings && !showChapters && !showSpreadAdjustment && !showComments &&
             !showPageNavigator && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking &&
-            !loading && error == null && !progressInteracting && !touchExploration && !chromeEngaged) {
+            !loading && error == null && imageVisible && !progressInteracting && !touchExploration && !chromeEngaged) {
             delay(5000)
             controlsVisible = false
         }
@@ -721,7 +721,12 @@ fun ReaderScreen(
             // image readable, preserve its own zoom/cursor, and never fade to empty.
             alpha = .90f + .10f * sourceArrival.value
             translationX = (1f - sourceArrival.value) * 6.dp.toPx()
-        }.mangaHazeSource(readerBackdrop).background(background)) {
+        }.mangaHazeSource(readerBackdrop).background(background)
+            .then(if (loading || error != null) Modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() }, indication = null,
+                onClickLabel = "显示或收起阅读工具",
+                onClick = { controlsVisible = !controlsVisible },
+            ) else Modifier)) {
             when {
                 loading -> if (delayedLoading) Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(Modifier.size(28.dp), color = preferences.theme.foreground(), strokeWidth = 2.dp)
@@ -1858,6 +1863,14 @@ private fun ReaderPage(
     var error by remember(page.url) { mutableStateOf<String?>(null) }
     var loading by remember(page.url) { mutableStateOf(true) }
     var reload by remember(page.url) { mutableIntStateOf(0) }
+    var slowLoading by remember(page.url, reload) { mutableStateOf(false) }
+    LaunchedEffect(page.url, reload, loading) {
+        slowLoading = false
+        if (loading) {
+            delay(12_000)
+            slowLoading = true
+        }
+    }
     var previousRetrySerial by remember(page.url) { mutableIntStateOf(externalRetrySerial) }
     LaunchedEffect(externalRetrySerial) {
         if (externalRetrySerial > previousRetrySerial) reload++
@@ -1974,6 +1987,9 @@ private fun ReaderPage(
             }
         }
         val imageError = error ?: prefetchError.takeUnless { resource?.url?.startsWith("file:") == true }
+        // A saved/materialized image is ready to display; an old remote prefetch cannot hold it back.
+        val awaitingPrefetch = waitingForPrefetch && resource?.url?.startsWith("file:") != true
+        val pendingRecovery = loading && slowLoading && imageError == null
         val naturalHeight = maxWidth / aspect
         val naturalHeightPx = with(density) { naturalHeight.roundToPx() }
         val pendingAspect = layoutDimensions?.readerAspectRatio()
@@ -1990,8 +2006,12 @@ private fun ReaderPage(
         // Vertical reading uses one continuous scroll surface for pages and long strips.
         val pageModifier = if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(naturalHeight)
             .onSizeChanged { measuredHeight = it.height }
-        Box(pageModifier.clipToBounds(), contentAlignment = Alignment.Center) {
-            if (request != null && !waitingForPrefetch && imageError == null) key(reload) {
+        Box(pageModifier.clipToBounds()
+            .then(if (loading || awaitingPrefetch || imageError != null) Modifier.clickable(
+                interactionSource = remember(page.url) { MutableInteractionSource() }, indication = null,
+                onClickLabel = "显示或收起阅读工具", onClick = onTap,
+            ) else Modifier), contentAlignment = Alignment.Center) {
+            if (request != null && !awaitingPrefetch && imageError == null) key(reload) {
                 if (paged) {
                     val imageState = rememberZoomableImageState()
                     LaunchedEffect(imageState) {
@@ -2010,7 +2030,8 @@ private fun ReaderPage(
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Fit,
                             alignment = pagedAlignment,
-                            gesturesEnabled = true,
+                            // Until the preview arrives, the containing page owns the tap for chrome.
+                            gesturesEnabled = !loading,
                             onClick = { onTap() },
                         )
                     }
@@ -2064,9 +2085,9 @@ private fun ReaderPage(
                     if (status.retryable) TextButton(onClick = { detailStatus = null; detailRetry++ }) { Text("重试原图细节", color = Color.Gray) }
                 }
             }
-            if (delayedLoading && imageError == null) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
-            if (imageError != null) ReaderImageRecovery(
-                index = page.index, failure = imageError,
+            if (delayedLoading && imageError == null && !pendingRecovery) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
+            if (imageError != null || pendingRecovery) ReaderImageRecovery(
+                index = page.index, failure = imageError.orEmpty(), pending = pendingRecovery,
                 alternatives = sourceAlternatives,
                 onRetry = { reload++ }, onSwitch = onQuickSwitch,
                 onMore = onMoreSources,

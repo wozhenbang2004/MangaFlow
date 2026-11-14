@@ -1,13 +1,18 @@
 package dev.mangaflow.storage
 
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.storage.StorageLock
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okio.IOException
 
 internal enum class DownloadOutcome { SUCCESS, RETRY, FAILURE }
+
+internal val backgroundDownloadParallelism = if (platformKind == PlatformKind.DESKTOP) 4 else 2
 
 /** WorkManager and native app sessions execute this exact same persisted chapter protocol. */
 internal suspend fun runChapterDownload(context: PlatformContext, id: String, workId: String, attempt: Int,
@@ -21,24 +26,37 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
         return@withContext DownloadOutcome.FAILURE
     }
     try {
-        store.prepareChapter(id)
         DownloadStore.transferGate.withLock {
             currentCoroutineContext().ensureActive()
-            val record = store.beginTransfer(id, workId, retryAttempt = attempt > 0) ?: return@withLock
+            store.beginTransfer(id, workId, retryAttempt = attempt > 0) ?: return@withLock
             try {
-                progress(record.entry)
+                val selection = Mutex()
+                val progressUpdates = Mutex()
+                suspend fun publishProgress(): Unit = progressUpdates.withLock {
+                    val current = store.record(id)?.takeIf { it.workId == workId }
+                    if (current != null) progress(current.entry)
+                }
+                publishProgress()
+                store.prepareChapter(id)
                 store.directory(id).mkdirs()
                 store.update(id, workId) { it.copy(status = DownloadStatus.RUNNING, error = "") }
                 val visited = mutableSetOf<Int>()
-                while (true) {
-                    currentCoroutineContext().ensureActive()
-                    val current = store.record(id) ?: return@withLock
-                    if (current.workId != workId || current.entry.status == DownloadStatus.PAUSED) return@withLock
-                    if (current.entry.status == DownloadStatus.COMPLETED) break
-                    val index = store.nextPageIndex(id, workId, visited) ?: break
-                    store.downloadPage(id, workId, index) ?: return@withLock
-                    visited += index
-                    store.record(id)?.entry?.let { progress(it) }
+                coroutineScope {
+                    repeat(backgroundDownloadParallelism) {
+                        launch {
+                            while (true) {
+                                currentCoroutineContext().ensureActive()
+                                val index = selection.withLock {
+                                    val current = store.record(id)
+                                    if (current == null || current.workId != workId ||
+                                        current.entry.status in setOf(DownloadStatus.PAUSED, DownloadStatus.COMPLETED, DownloadStatus.FAILED)) null
+                                    else store.nextPageIndex(id, workId, visited)?.also { visited += it }
+                                } ?: break
+                                store.downloadPage(id, workId, index) ?: break
+                                publishProgress()
+                            }
+                        }
+                    }
                 }
                 currentCoroutineContext().ensureActive()
                 val finished = store.record(id) ?: return@withLock

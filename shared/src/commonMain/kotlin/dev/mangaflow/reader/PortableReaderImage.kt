@@ -33,13 +33,16 @@ import coil3.disk.DiskCache
 import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.imagePlatformContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collectLatest
@@ -59,6 +62,37 @@ import kotlin.math.roundToInt
 
 private data class ReaderTile(val source: IntRect, val sample: Int)
 private data class DecodedReaderTile(val spec: ReaderTile, val bitmap: ImageBitmap, val notice: String? = null)
+private data class VerticalTileWindow(val requested: List<ReaderTile> = emptyList(), val visibleCount: Int = 0)
+
+// Share native decode capacity across images, including zoom and long-page bands.
+// iOS constructs a bounded whole-image thumbnail for each region, so keep one in flight.
+private val portableDecodeParallelism = if (platformKind == PlatformKind.DESKTOP) 2 else 1
+private val portableDecodeSlots = Semaphore(portableDecodeParallelism)
+
+private suspend fun decodeReaderTiles(
+    source: String, requested: List<ReaderTile>, retained: MutableMap<ReaderTile, ReaderRegion>,
+    onDecoded: () -> Unit, onFailure: (Exception) -> Unit,
+) = coroutineScope {
+    val pending = requested.filterNot { it in retained }
+    val iterator = pending.iterator()
+    // Workers inherit the reader effect's UI context; only native decoding leaves it.
+    repeat(minOf(portableDecodeParallelism, pending.size)) {
+        launch {
+            while (iterator.hasNext()) {
+                val tile = iterator.next()
+                try {
+                    val region = portableDecodeSlots.withPermit {
+                        withContext(Dispatchers.IO) { decodeNativeReaderRegion(source, tile.source, tile.sample) }
+                    }
+                    currentCoroutineContext().ensureActive()
+                    retained[tile] = region
+                    onDecoded()
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Exception) { onFailure(failure) }
+            }
+        }
+    }
+}
 
 /**
  * The Painter/zoom wiring follows Telephoto 0.16.0 ZoomableImage.kt (Apache-2.0, 2a5e5f5).
@@ -108,7 +142,6 @@ internal fun PortableReaderZoomableImage(
     LaunchedEffect(path, original, zoom) {
         val file = path ?: return@LaunchedEffect
         val imageSize = original ?: return@LaunchedEffect
-        val decoderGate = Semaphore(2)
         val retained = mutableMapOf<ReaderTile, ReaderRegion>()
         snapshotFlow {
             if (viewport.width <= 0 || viewport.height <= 0 || !state.isImageDisplayed) emptyList()
@@ -134,22 +167,13 @@ internal fun PortableReaderZoomableImage(
         }.distinctUntilChanged().collectLatest { requested ->
             retained.keys.retainAll(requested.toSet())
             tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
-            coroutineScope {
-                requested.filterNot { it in retained }.map { tile -> async {
-                    decoderGate.withPermit {
-                        try {
-                            val region = withContext(Dispatchers.IO) { decodeNativeReaderRegion(file, tile.source, tile.sample) }
-                            retained[tile] = region
-                            tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
-                            state.detailNotice = retained.values.firstNotNullOfOrNull { it.notice }
-                        } catch (cancelled: CancellationException) { throw cancelled }
-                        catch (failure: Exception) {
-                            state.detailError = failure.message?.takeIf { "当前显示预览" in it }
-                                ?: "原图细节暂时无法读取，当前显示预览"
-                        }
-                    }
-                } }.awaitAll()
-            }
+            decodeReaderTiles(file, requested, retained, onDecoded = {
+                tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
+                state.detailNotice = retained.values.firstNotNullOfOrNull { it.notice }
+            }, onFailure = { failure ->
+                state.detailError = failure.message?.takeIf { "当前显示预览" in it }
+                    ?: "原图细节暂时无法读取，当前显示预览"
+            })
             if (requested.isNotEmpty() && requested.all { it in retained }) {
                 state.detailError = null
                 state.detailNotice = retained.values.firstNotNullOfOrNull { it.notice }
@@ -244,7 +268,7 @@ internal fun PortableVerticalReaderTiles(
         val retained = mutableMapOf<ReaderTile, ReaderRegion>()
         snapshotFlow {
             val window = liveWindow()
-            if (window == null || window.bottom <= window.top) emptyList()
+            if (window == null || window.bottom <= window.top) VerticalTileWindow()
             else {
                 val first = floor(window.top * scale / sourceBand).toInt().coerceIn(0, count - 1)
                 val last = floor((window.bottom - 1) * scale / sourceBand).toInt().coerceIn(first, count - 1)
@@ -256,21 +280,19 @@ internal fun PortableVerticalReaderTiles(
                     if (last < count - 1) add(last + 1)
                     if (first > 0) add(first - 1)
                 }
-                bands.map { band -> ReaderTile(IntRect(0, band * sourceBand, imageSize.width,
-                    minOf((band + 1) * sourceBand, imageSize.height)), sample) }
+                VerticalTileWindow(bands.map { band -> ReaderTile(IntRect(0, band * sourceBand, imageSize.width,
+                    minOf((band + 1) * sourceBand, imageSize.height)), sample) }, last - first + 1)
             }
-        }.distinctUntilChanged().collectLatest { requested ->
+        }.distinctUntilChanged().collectLatest { (requested, visibleCount) ->
             retained.keys.retainAll(requested.toSet())
-            decoded = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
-            for (tile in requested) if (tile !in retained) {
-                try { retained[tile] = withContext(Dispatchers.IO) { decodeNativeReaderRegion(source, tile.source, tile.sample) } }
-                catch (cancelled: CancellationException) { throw cancelled }
-                catch (failure: Exception) {
-                    reportStatus(ReaderDetailStatus(failure.message ?: "原图细节暂时无法读取，当前显示预览", true))
-                    continue
-                }
-                decoded = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
+            val publishTiles = { decoded = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) } }
+            val reportFailure = { failure: Exception ->
+                reportStatus(ReaderDetailStatus(failure.message ?: "原图细节暂时无法读取，当前显示预览", true))
             }
+            publishTiles()
+            // Complete the visible batch before spending capacity on neighboring bands.
+            decodeReaderTiles(source, requested.take(visibleCount), retained, publishTiles, reportFailure)
+            decodeReaderTiles(source, requested.drop(visibleCount), retained, publishTiles, reportFailure)
             if (requested.isNotEmpty() && requested.all { it in retained }) {
                 reportStatus(retained.values.firstNotNullOfOrNull { it.notice }?.let { ReaderDetailStatus(it, false) })
             }

@@ -84,6 +84,7 @@ class DownloadStore private constructor(context: Context) {
     private val records = linkedMapOf<String, DownloadRecord>()
     private val writers = mutableMapOf<String, ChapterWriter>()
     private val pageTransfers = mutableMapOf<PageTransferKey, Deferred<Page?>>()
+    private val foregroundPageUsers = mutableMapOf<PageTransferKey, Int>()
     private val transferFailures = mutableMapOf<String, TransferFailure>()
     private val chapterChanges = ConcurrentMap<String, Mutex>()
     private val availablePages = mutableMapOf<String, MutableSet<Int>>()
@@ -95,7 +96,8 @@ class DownloadStore private constructor(context: Context) {
     private val reconcileLock = Mutex()
     private val pageWriteVersions = mutableMapOf<String, MutableMap<Int, Long>>()
     private var entryOrder = emptyList<String>()
-    private val transferSlots = Semaphore(3)
+    // Background workers leave one transfer slot available for the current reader.
+    private val transferSlots = Semaphore(backgroundDownloadParallelism + 1)
     private val _entries = MutableStateFlow<List<DownloadEntry>>(emptyList())
     val entries: StateFlow<List<DownloadEntry>> = _entries.asStateFlow()
     private val initialized = CompletableDeferred<Unit>()
@@ -145,12 +147,11 @@ class DownloadStore private constructor(context: Context) {
         chapterChanges.getOrPut(id) { Mutex() }.withLock {
             if (synchronized(lock) { id in restoredMetadata || id in records }) return@withLock
             val folder = directory(id)
-            // This is done before a restored worker can run, never during validation of live transfers.
-            folder.listFiles()?.filter { it.name.endsWith(".part") }?.forEach { it.delete() }
             val restored = runCatching {
                 val json = JSONObject(AtomicFile(File(folder, "manifest.json")).openRead().bufferedReader().use { it.readText() })
                 readRecord(json).takeIf { it.entry.id == id }
             }.getOrNull()
+            prunePartialDownloads(id, restored?.pages.orEmpty(), restored?.headers.orEmpty())
             // File metadata is enough for the initial index. Decode only a requested page now;
             // all remaining image headers are checked by background validation.
             val presentBytes = restored?.pages?.indices?.mapNotNull { index ->
@@ -426,6 +427,7 @@ class DownloadStore private constructor(context: Context) {
                     downloadedBytes = files.sumOf(File::length),
                     createdAt = old?.entry?.createdAt ?: wallTimeMillis(),
                 )
+                prunePartialDownloads(id, pages, headers)
                 save(DownloadRecord(entry, pages, headers))
                 if (!complete) schedule(id)
             }
@@ -598,55 +600,80 @@ class DownloadStore private constructor(context: Context) {
 
     internal suspend fun downloadPage(id: String, workId: String, index: Int): Page? {
         val snapshot = synchronized(lock) { records[id]?.takeIf { it.workId == workId } } ?: return null
-        return requestPage(snapshot, index)
+        return requestPage(snapshot, index, background = true)
     }
 
-    private suspend fun requestPage(snapshot: DownloadRecord, index: Int): Page? {
+    private suspend fun requestPage(snapshot: DownloadRecord, index: Int, background: Boolean = false): Page? {
         localPage(snapshot, index)?.let { return it }
         val key = PageTransferKey(snapshot.entry.id, snapshot.generation, index)
-        val transfer = synchronized(lock) {
-            val current = records[key.id] ?: return null
-            if (current.generation != key.generation || index !in current.pages.indices) return null
-            transferFailures[key.id]?.takeIf { it.generation == key.generation }?.let { throw it.error }
-            if (current.entry.needsSourceRefresh) throw PermanentDownloadException(current.entry.error.ifBlank { "图片地址需要刷新，请重试" }, true)
-            if (current.entry.status in setOf(DownloadStatus.FAILED, DownloadStatus.WAITING) && current.entry.error.isNotBlank()) {
-                throw IOException(current.entry.error)
-            }
-            if (current.entry.status !in ACTIVE_STATUSES) return null
-            pageTransfers[key] ?: scope.async(start = CoroutineStart.LAZY) {
-                try {
-                    transferSlots.withPermit { transferPage(current, key) }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    synchronized(lock) {
-                        val latest = records[key.id]
-                        if (latest?.generation == key.generation && latest.entry.status in ACTIVE_STATUSES) {
-                            val permanent = failure as? PermanentDownloadException
-                            transferFailures[key.id] = TransferFailure(key.generation, failure)
-                            val failed = latest.copy(entry = latest.entry.copy(
-                                status = if (permanent != null || failure is DownloadStorageException) DownloadStatus.FAILED else DownloadStatus.WAITING,
-                                error = failure.message ?: "下载未完成",
-                                needsSourceRefresh = permanent?.needsSourceRefresh == true,
-                            ))
-                            try { save(failed) }
-                            catch (_: DownloadStorageException) {
-                                records[key.id] = failed
-                                publish()
+        while (true) {
+            var foregroundClaimed = false
+            val transfer = synchronized(lock) {
+                val current = records[key.id] ?: return null
+                if (current.generation != key.generation || index !in current.pages.indices) return null
+                transferFailures[key.id]?.takeIf { it.generation == key.generation }?.let { throw it.error }
+                if (current.entry.needsSourceRefresh) throw PermanentDownloadException(current.entry.error.ifBlank { "图片地址需要刷新，请重试" }, true)
+                if (current.entry.status in setOf(DownloadStatus.FAILED, DownloadStatus.WAITING) && current.entry.error.isNotBlank()) {
+                    throw IOException(current.entry.error)
+                }
+                if (current.entry.status !in ACTIVE_STATUSES) return null
+                val pending = pageTransfers[key] ?: scope.async(start = CoroutineStart.LAZY) {
+                    try {
+                        transferSlots.withPermit { transferPage(current, key) }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        synchronized(lock) {
+                            val latest = records[key.id]
+                            if (latest?.generation == key.generation && latest.entry.status in ACTIVE_STATUSES) {
+                                val permanent = failure as? PermanentDownloadException
+                                transferFailures[key.id] = TransferFailure(key.generation, failure)
+                                val failed = latest.copy(entry = latest.entry.copy(
+                                    status = if (permanent != null || failure is DownloadStorageException) DownloadStatus.FAILED else DownloadStatus.WAITING,
+                                    error = failure.message ?: "下载未完成",
+                                    needsSourceRefresh = permanent?.needsSourceRefresh == true,
+                                ))
+                                try { save(failed) }
+                                catch (_: DownloadStorageException) {
+                                    records[key.id] = failed
+                                    publish()
+                                }
                             }
                         }
+                        throw failure
                     }
-                    throw failure
+                }.also { deferred ->
+                    pageTransfers[key] = deferred
+                    deferred.invokeOnCompletion {
+                        synchronized(lock) { if (pageTransfers[key] === deferred) pageTransfers.remove(key) }
+                    }
+                    deferred.start()
                 }
-            }.also { deferred ->
-                pageTransfers[key] = deferred
-                deferred.invokeOnCompletion {
-                    synchronized(lock) { if (pageTransfers[key] === deferred) pageTransfers.remove(key) }
+                if (!background && !pending.isCancelled) {
+                    foregroundPageUsers[key] = (foregroundPageUsers[key] ?: 0) + 1
+                    foregroundClaimed = true
                 }
-                deferred.start()
+                pending
+            }
+            // A stopped background writer must close its partial before a new reader reuses it.
+            if (!foregroundClaimed && transfer.isCancelled) {
+                transfer.join()
+                currentCoroutineContext().ensureActive()
+                continue
+            }
+            return try {
+                transfer.await()
+            } finally {
+                if (foregroundClaimed) synchronized(lock) {
+                    val remaining = (foregroundPageUsers[key] ?: 1) - 1
+                    if (remaining > 0) foregroundPageUsers[key] = remaining
+                    else {
+                        foregroundPageUsers.remove(key)
+                        if (writers[key.id] == null) pageTransfers[key]?.cancel()
+                    }
+                }
             }
         }
-        return transfer.await()
     }
 
     private fun localPage(snapshot: DownloadRecord, index: Int): Page? {
@@ -679,7 +706,8 @@ class DownloadStore private constructor(context: Context) {
         localPage(snapshot, key.index)?.let { return it }
         val page = snapshot.pages[key.index]
         val destination = pageFile(key.id, key.index)
-        val partial = File(destination.parentFile, "${destination.name}.${key.generation}.part")
+        val partial = downloadPagePartial(destination, page.url, snapshot.headers)
+        var materializedJm = false
         try {
             val canWrite = synchronized(lock) {
                 records[key.id]?.let { it.generation == key.generation && it.entry.status in ACTIVE_STATUSES } == true
@@ -691,6 +719,8 @@ class DownloadStore private constructor(context: Context) {
             val decoded = decryptedJmPageBytes(context, snapshot.entry.manga.id,
                 snapshot.entry.chapter.id, page)
             val bounds = if (decoded != null) {
+                materializedJm = true
+                discardDownloadPartial(partial)
                 if (decoded.size.toLong() !in 128L..(96L * 1024L * 1024L))
                     throw PermanentDownloadException("图片解码后大小无效")
                 partial.writeBytes(decoded)
@@ -728,7 +758,9 @@ class DownloadStore private constructor(context: Context) {
                 updatedPages[key.index].copy(url = destination.toURI().toString())
             }
         } finally {
-            partial.delete()
+            // Generic HTTP partials retain their verified resume metadata across interruptions.
+            // JM is materialized as a complete decoded image and only resumes by saved page.
+            if (materializedJm || !partial.exists()) discardDownloadPartial(partial)
         }
     }
 
@@ -750,11 +782,19 @@ class DownloadStore private constructor(context: Context) {
         record
     }
 
-    internal fun endTransfer(id: String, workId: String) {
-        val writer = synchronized(lock) {
-            writers[id]?.takeIf { it.workId == workId }?.also { writers.remove(id) }
-        }
-        writer?.finished?.complete(Unit)
+    internal suspend fun endTransfer(id: String, workId: String) = withContext(NonCancellable) {
+        val closing = synchronized(lock) {
+            val writer = writers[id]?.takeIf { it.workId == workId } ?: return@synchronized null
+            writers.remove(id)
+            // Reader-owned transfers can finish; system-stopped background work retains its bytes.
+            val transfers = pageTransfers.filter { (key, _) ->
+                key.id == id && (foregroundPageUsers[key] ?: 0) == 0
+            }.values.toList()
+            transfers.forEach { it.cancel() }
+            writer to transfers
+        } ?: return@withContext
+        try { closing.second.forEach { it.join() } }
+        finally { closing.first.finished.complete(Unit) }
     }
 
     private fun detachWriter(record: DownloadRecord): FileChange {
@@ -917,6 +957,25 @@ class DownloadStore private constructor(context: Context) {
             verifiedPageFiles.remove(key)
             verifiedPageFiles[key] = VerifiedPageFile(bytes, actualModified)
             while (verifiedPageFiles.size > MAX_VERIFIED_PAGES) verifiedPageFiles.remove(verifiedPageFiles.keys.first())
+        }
+    }
+
+    /** Called only at startup or after old writers have stopped. */
+    private fun prunePartialDownloads(id: String, pages: List<Page>, headers: Map<String, String>) {
+        val folder = directory(id)
+        val files = folder.listFiles().orEmpty().filter { ".part" in it.name }
+        if (files.isEmpty()) return
+        val expected = pages.mapIndexed { index, page ->
+            downloadPagePartial(pageFile(id, index), page.url, headers).name
+        }.toSet()
+        for (file in files) {
+            val partialName = when {
+                file.name.endsWith(".part") -> file.name
+                ".part.json" in file.name -> file.name.substringBefore(".part.json") + ".part"
+                else -> continue
+            }
+            val partial = File(folder, partialName)
+            if (partialName !in expected || !partial.exists()) discardDownloadPartial(partial)
         }
     }
 

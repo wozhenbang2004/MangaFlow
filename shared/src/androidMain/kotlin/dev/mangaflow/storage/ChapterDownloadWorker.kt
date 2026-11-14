@@ -16,8 +16,18 @@ import androidx.work.WorkerParameters
 class ChapterDownloadWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
         val chapter = inputData.getString(KEY_CHAPTER) ?: return Result.failure()
+        val manager = applicationContext.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "漫画下载", NotificationManager.IMPORTANCE_LOW))
+        // Protect preparation and queue waits, before the shared protocol starts transferring pages.
+        setForeground(foreground(chapter))
+        var previousCompleted = -1
+        var previousTotal = -1
         return when (runChapterDownload(applicationContext, chapter, id.toString(), runAttemptCount) { entry ->
-            setForeground(foreground(entry))
+            if (entry.completedPages != previousCompleted || entry.totalPages != previousTotal) {
+                setForeground(foreground(chapter, entry))
+                previousCompleted = entry.completedPages
+                previousTotal = entry.totalPages
+            }
         }) {
             DownloadOutcome.SUCCESS -> Result.success()
             DownloadOutcome.RETRY -> Result.retry()
@@ -25,17 +35,17 @@ class ChapterDownloadWorker(context: Context, parameters: WorkerParameters) : Co
         }
     }
 
-    private fun foreground(entry: DownloadEntry): ForegroundInfo {
-        val manager = applicationContext.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "漫画下载", NotificationManager.IMPORTANCE_LOW))
+    private fun foreground(chapterId: String, entry: DownloadEntry? = null): ForegroundInfo {
+        val total = entry?.totalPages ?: 0
+        val completed = entry?.completedPages ?: 0
         val launch = applicationContext.packageManager.getLaunchIntentForPackage(applicationContext.packageName)
             ?.putExtra("open_downloads", true)
             ?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(entry.manga.title)
-            .setContentText("${entry.chapter.title} · ${entry.completedPages}/${entry.totalPages} 页")
-            .setProgress(entry.totalPages, entry.completedPages, entry.totalPages == 0)
+            .setContentTitle(entry?.manga?.title ?: "漫画下载")
+            .setContentText(entry?.let { "${it.chapter.title} · ${it.completedPages}/${it.totalPages} 页" } ?: "正在准备下载")
+            .setProgress(total, completed, total == 0)
             .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
@@ -44,8 +54,8 @@ class ChapterDownloadWorker(context: Context, parameters: WorkerParameters) : Co
             }
             .build()
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ForegroundInfo(entry.id.hashCode().and(Int.MAX_VALUE), notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else ForegroundInfo(entry.id.hashCode().and(Int.MAX_VALUE), notification)
+            ForegroundInfo(chapterId.hashCode().and(Int.MAX_VALUE), notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else ForegroundInfo(chapterId.hashCode().and(Int.MAX_VALUE), notification)
     }
 
     companion object {

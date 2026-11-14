@@ -48,6 +48,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.data.Manga
+import dev.mangaflow.data.SourceChapterRef
+import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.sourceDisplayName
+import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReaderCatalogStore
 import dev.mangaflow.storage.ReadingProgress
@@ -56,6 +60,22 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+
+private data class ChapterHistoryRow(
+    val progress: ReadingProgress,
+    val source: SourceChapterRef?,
+    val sourceName: String,
+)
+
+/** Exact native identity only: titles and page counts never establish equivalent records. */
+private fun historyChapterSource(manga: Manga, chapterId: String): SourceChapterRef? = runCatching {
+    when {
+        SourceKeys.isEncoded(chapterId) -> SourceKeys.decodeChapter(manga.id, chapterId)
+        manga.sourceUrl == LOCAL_SOURCE_URL -> SourceChapterRef("local", manga.id, chapterId)
+        SourceKeys.isEncoded(manga.id) -> SourceKeys.decodeChapter(manga.id, chapterId)
+        else -> SourceChapterRef(manga.sourceId, manga.sourceMangaId.ifBlank { manga.id }, chapterId)
+    }
+}.getOrNull()
 
 /** The existing sheet/list language, backed solely by local chapter positions and cached titles. */
 @Composable
@@ -71,23 +91,51 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
     onContinue: (ReadingProgress) -> Unit, onBack: (() -> Unit)? = null) {
     val context = LocalContext.current.applicationContext
     val revision by library.chapterHistoryRevision.collectAsStateWithLifecycle()
-    var records by remember(manga.id) { mutableStateOf<List<ReadingProgress>?>(null) }
+    var records by remember(manga.id) { mutableStateOf<List<ChapterHistoryRow>?>(null) }
     var failed by remember(manga.id) { mutableStateOf(false) }
     var retry by remember(manga.id) { mutableStateOf(0) }
     val secondary = MaterialTheme.colorScheme.onSurfaceVariant
+    val repeatedTitles = remember(records) {
+        records.orEmpty().groupingBy { it.progress.chapterTitle }.eachCount().filterValues { it > 1 }.keys
+    }
     LaunchedEffect(manga.id, revision, retry) {
         failed = false
         try {
             records = withContext(Dispatchers.IO) {
                 val chapters = ReaderCatalogStore(context).read(manga.id)?.chapters.orEmpty()
-                val titles = chapters.associate { it.id to it.title }
-                val order = chapters.associate { it.id to it.index }
+                val titles = buildMap {
+                    chapters.forEach { chapter ->
+                        put(chapter.id, chapter.title)
+                        chapter.variants.forEach { put(it.storageId, it.title) }
+                    }
+                }
+                val order = buildMap {
+                    chapters.forEach { chapter ->
+                        put(chapter.id, chapter.index)
+                        chapter.variants.forEach { put(it.storageId, chapter.index) }
+                    }
+                }
+                val sources = buildMap {
+                    put(manga.sourceId, manga.sourceName.ifBlank { sourceDisplayName(manga.sourceId) })
+                    chapters.forEach { chapter -> chapter.variants.forEach { variant ->
+                        if (variant.sourceName.isNotBlank()) put(variant.sourceId, variant.sourceName)
+                    } }
+                }
+                val identities = buildMap<String, SourceChapterRef> {
+                    chapters.forEach { chapter -> chapter.variants.forEach { variant ->
+                        put(variant.storageId, SourceChapterRef(variant.sourceId, variant.mangaId, variant.chapterId))
+                    } }
+                }
                 library.chapterHistoryFor(manga).map { record ->
                     val title = record.chapterTitle.takeUnless { it.isBlank() || it == "正在阅读" }
                         ?: titles[record.chapterId].orEmpty().takeUnless { it == "正在阅读" }.orEmpty()
-                    record.copy(chapterTitle = title)
-                }.sortedWith(compareByDescending<ReadingProgress> { it.updatedAt }
-                    .thenByDescending { order[it.chapterId] ?: -1 }.thenBy { it.chapterTitle })
+                    val source = identities[record.chapterId] ?: historyChapterSource(manga, record.chapterId)
+                    ChapterHistoryRow(record.copy(chapterTitle = title), source,
+                        source?.sourceId?.let { sources[it] ?: sourceDisplayName(it) } ?: "来源未确认")
+                }.sortedWith(compareByDescending<ChapterHistoryRow> { it.progress.updatedAt }
+                    .thenByDescending { order[it.progress.chapterId] ?: -1 }.thenBy { it.progress.chapterTitle })
+                    // Keep the latest exact-source position without rewriting any original cursor.
+                    .distinctBy { it.source ?: it.progress.chapterId }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: Exception) { failed = true }
@@ -116,7 +164,8 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
             } else if (records.orEmpty().isEmpty()) item(key = "empty") {
                 Text("还没有章节记录", Modifier.padding(vertical = 24.dp), color = secondary, fontSize = 13.sp)
             }
-            items(records.orEmpty(), key = { it.chapterId }) { progress ->
+            items(records.orEmpty(), key = { it.progress.chapterId }) { row ->
+                val progress = row.progress
                 val interaction = remember(progress.chapterId) { MutableInteractionSource() }
                 Row(Modifier.fillMaxWidth().clickable(role = Role.Button,
                     interactionSource = interaction, indication = null,
@@ -128,7 +177,8 @@ internal fun ChapterHistoryContent(manga: Manga, library: LibraryStore,
                             fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         val pageLabel = if (progress.pageCount > 0) "${progress.pageIndex + 1}/${progress.pageCount} 页"
                             else "第 ${progress.pageIndex + 1} 页"
-                        Text(mangaNumberText("$pageLabel · ${historyTime(progress.updatedAt)}"),
+                        val sourceLabel = if (progress.chapterTitle in repeatedTitles) row.sourceName + " · " else ""
+                        Text(mangaNumberText("$sourceLabel$pageLabel · ${historyTime(progress.updatedAt)}"),
                             fontSize = 12.sp, lineHeight = 16.sp, color = secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Spacer(Modifier.width(12.dp))
