@@ -884,7 +884,7 @@ fun ReaderScreen(
                 // Retain Surface's input shield on blank chrome without consuming child gestures.
                 Row(Modifier.fillMaxWidth().heightIn(min = 52.dp).pointerInput(Unit) {}.padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回", interactive = controlsVisible, onClick = leaveReader)
+                    ReaderIcon(Icons.AutoMirrored.Rounded.ArrowBack, "返回漫画详情", interactive = controlsVisible, onClick = leaveReader)
                     Column(Modifier.weight(1f).padding(start = 2.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)) {
                         Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)

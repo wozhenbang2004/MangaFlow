@@ -510,7 +510,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 !recentReadingOpen && !tagSearchVisible && !drawerVisible
             if (canGoBack) {
                 if (event.type == KeyEventType.KeyUp) when {
-                    reading != null -> model.closeReader()
+                    reading != null -> model.returnToMangaDetail()
                     detail != null -> model.closeDetail()
                     searchExpanded -> { searchExpanded = false; model.suspendBrowseSearch(); focus.clearFocus(force = true) }
                     section != Section.DISCOVER -> changeSection(Section.DISCOVER)
@@ -672,7 +672,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     state = currentBack,
                 ) {
                     when {
-                        reading != null -> model.closeReader()
+                        reading != null -> model.returnToMangaDetail()
                         detail != null -> model.closeDetail()
                         else -> changeSection(Section.DISCOVER)
                     }
@@ -694,7 +694,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         repository = model.repository, libraryStore = model.library, downloadStore = model.downloads,
                         communityRepository = model.community,
                         reviewRepository = model.reviews,
-                        onBack = model::closeReader, onRequestNotificationPermission = onRequestNotifications,
+                        onBack = model::returnToMangaDetail, onRequestNotificationPermission = onRequestNotifications,
                         onChapterVisible = model::onChapterVisible,
                         onNearChapterEnd = model::prefetchNextChapter,
                         chaptersLoading = current.session.chaptersLoading,

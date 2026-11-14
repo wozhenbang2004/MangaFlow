@@ -427,10 +427,10 @@ fun LibraryScreen(
         }
     }
         if (desktop) {
+            val stackedTools = maxWidth < 680.dp * density.fontScale.coerceAtLeast(1f)
             DesktopManagementToolbar("书架", Modifier.align(Alignment.TopCenter)
                 .onSizeChanged { headerHeightPx = it.height },
                 navigation = navigation, minimumToolsWidth = 680.dp) {
-                val stackedTools = maxWidth < 680.dp * density.fontScale.coerceAtLeast(1f)
                 MotionTabs(if (showHistory) 1 else 0, listOf("收藏", "最近阅读"),
                     { index -> if (showHistory != (index == 1)) onCancelOpen(); showHistory = index == 1 },
                     modifier = if (stackedTools) Modifier.width(260.dp * density.fontScale.coerceAtLeast(1f))

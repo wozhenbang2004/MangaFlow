@@ -2065,6 +2065,22 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }
     }
 
+    /** Leave reading at this work, retaining an already-open directory and its UI state. */
+    fun returnToMangaDetail() {
+        val session = _reading.value ?: return
+        closeReader()
+        if (_detail.value?.manga?.id == session.manga.id) return
+        if (session.manga.sourceUrl == LOCAL_SOURCE_URL) {
+            // openManga intentionally starts local reading; return must only show its directory.
+            closeDetail()
+            _detail.value = DetailState(session.manga,
+                detail = MangaDetail(session.manga, downloadedChapters(session.manga.id)),
+                loading = false, reviewsLoading = false)
+        } else {
+            openManga(session.manga)
+        }
+    }
+
     fun closeReader() {
         cancelSourceResumeChoice()
         cancelSourceSelection()

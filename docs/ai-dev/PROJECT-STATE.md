@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Reader return to work detail · 2026-11-14 (READER-RETURN-136)
+
+User request in this thread: “我觉得得在看漫画那里做一个回到漫画详情页的功能或者说点击左上角那个退出就是回到详情页”. Reuse the existing top-left arrow, labelled“返回漫画详情”; reader Back and desktop Alt+Left use the same work-detail return action. Retain a matching detail state and its saved catalogue context; direct shelf/history/download/picture entries open the current work through the existing cached/offline detail path. Imported local books publish their real saved directory directly, avoiding openManga's intentional direct-reader branch. Existing page/offset/panel persistence remains; unrelated closeReader cleanup for search and explicit destinations is unchanged.
+
+While preparing this small change, observed Android208/run43541608933/job132284827902 and applications43541608986 jobs132283309829/132283309984 all failed on the same two Kotlin DSL receiver errors: DownloadsScreen571 and LibraryScreen433 accessed BoxWithConstraints.maxWidth from the nested toolbar RowScope. Move only each existing stackedTools calculation into the enclosing constraints scope; preserve desktop layout and callbacks. This batch includes that necessary compile repair without changing workflows or current-main/tag/signing guards.
+
+Evidence: source inspection and prior decoded compiler logs only. One complete latest-main batch with expected-head protection and normal compile/package CI; no tests, local commands/builds, device/browser/service probes or new gate. Returning to the retained/remote/local detail and preserved progress are implemented in source; compilation, installed appearance and actual navigation remain pending the new build/user feedback. Do not submit a documentation-only follow-up.
+
 ## Windows desktop workspace · 2026-11-14
 
 Active user authorization: after the complete desktop review, “去我要的全部一次性全改造好”. DESIGN.md DESKTOP-125–135 is the single adopted specification, based on the preceding raw request“桌面端要不要好好重做下 uiux 现在完全就是大号平板吧很诡异啊这个 uiux 你去完全 review 下”. All reviewed areas are one integrated batch: stable sidebar and actual remaining workspace; full-area retained search; guarded wheel/touchpad pagination; desktop recommendation/list/gallery density; summary/catalogue detail; separate volume/text chapter density; optional reader assistance; classified management with ordinary context/more actions; hover/focus/tooltips and actual draggable scrollbars; Windows geometry/picker ownership. Android/iOS UI keeps its existing paths and common business/data/source identities.

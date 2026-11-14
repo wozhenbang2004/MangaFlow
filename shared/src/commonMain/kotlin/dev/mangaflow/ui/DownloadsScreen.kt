@@ -565,10 +565,10 @@ fun DownloadsScreen(
             }
         }
         if (desktop) {
+            val stackedTools = maxWidth < 840.dp * density.fontScale.coerceAtLeast(1f)
             DesktopManagementToolbar("下载", Modifier.align(Alignment.TopCenter)
                 .onSizeChanged { headerHeightPx = it.height },
                 navigation = navigation, minimumToolsWidth = 840.dp) {
-                val stackedTools = maxWidth < 840.dp * density.fontScale.coerceAtLeast(1f)
                 MotionTabs(filter.ordinal, DownloadFilter.entries.map { it.label }, { index ->
                     filter = DownloadFilter.entries[index]; selectedIds = emptySet()
                 }, modifier = if (stackedTools) Modifier.width(360.dp * density.fontScale.coerceAtLeast(1f))
