@@ -11,7 +11,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -47,7 +46,6 @@ import dev.mangaflow.platform.*
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.ChapterProgress
-import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.MotionButton as Button
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
@@ -81,6 +79,8 @@ fun AccountScreen(
     onRefreshFavorites: () -> Unit,
     onRefreshHistory: () -> Unit,
     onSearch: (() -> Unit)? = null,
+    favoriteAddedAt: (String) -> Long? = { null },
+    onOpenSync: (() -> Unit)? = null,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val profile = state.profile
@@ -95,8 +95,6 @@ fun AccountScreen(
     var cookie by remember { mutableStateOf("") }
     var showSecret by remember { mutableStateOf(false) }
     var submitting by remember { mutableStateOf(false) }
-    var showHistory by rememberSaveable(profile?.username) { mutableStateOf(false) }
-    var removeFavorite by remember(profile?.username) { mutableStateOf<Manga?>(null) }
     val clearSecrets = {
         password = ""
         cookie = ""
@@ -108,7 +106,7 @@ fun AccountScreen(
         focus.clearFocus()
     }
     LaunchedEffect(state.busy) { if (!state.busy) submitting = false }
-    LaunchedEffect(active) { if (!active) { clearInputs(); removeFavorite = null } }
+    LaunchedEffect(active) { if (!active) clearInputs() }
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) clearSecrets()
@@ -140,13 +138,14 @@ fun AccountScreen(
     Layout(modifier = Modifier.fillMaxSize().background(colors.background.copy(alpha = .98f)), content = {
     CloudAccountHeader(
         state = state, backdrop = backdrop, navigation = navigation, active = active,
-        refreshing = if (showHistory) state.historyLoading else state.favoritesLoading,
-        refreshError = if (showHistory) state.historyError else state.favoritesError,
+        refreshing = state.favoritesLoading,
+        refreshError = state.favoritesError,
         onSearch = onSearch,
-        onRefresh = if (profile == null) onRefresh else if (showHistory) onRefreshHistory else onRefreshFavorites,
+        onRefresh = if (profile == null) onRefresh else onRefreshFavorites,
         onRetrySync = onRetrySync,
-        onLogout = { clearInputs(); removeFavorite = null; onLogout() },
+        onLogout = { clearInputs(); onLogout() },
         modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top)),
+        onOpenSync = onOpenSync,
     )
     Box(Modifier.fillMaxSize()) {
     if (profile == null) {
@@ -161,7 +160,7 @@ fun AccountScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("匿名阅读已启用", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-            Text("连接账号，同步个人收藏与阅读记录。", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+            Text("连接账号，导入拷贝收藏；阅读进度可在漫画详情中选择采用。", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
             if (cookieMode) {
                 OutlinedTextField(
                     value = cookie, onValueChange = { cookie = it },
@@ -229,15 +228,11 @@ fun AccountScreen(
         key(profile.username) {
             CloudAccountLibrary(
                 state = state, repository = repository, backdrop = backdrop, active = active,
-                showHistory = showHistory, onShowHistory = { showHistory = it },
                 localFavorites = localFavorites, localHistory = localHistory,
-                chapterHistoryRevision = chapterHistoryRevision, readChapterProgress = readChapterProgress,
                 contentTopPadding = contentTopPadding,
-                onOpen = onOpen, onContinue = onContinue, onContinueLocal = onContinueLocal,
-                onAddToLibrary = onAddToLibrary, onRemoveFavorite = { removeFavorite = it },
-                onMoreFavorites = onMoreFavorites, onMoreHistory = onMoreHistory,
-                onRefreshFavorites = onRefreshFavorites, onRefreshHistory = onRefreshHistory,
-                onRefreshAccount = onRefresh,
+                onOpen = onOpen, onAddToLibrary = onAddToLibrary,
+                onMoreFavorites = onMoreFavorites, onRefreshFavorites = onRefreshFavorites,
+                onRefreshAccount = onRefresh, favoriteAddedAt = favoriteAddedAt, onOpenSync = onOpenSync,
             )
         }
     }
@@ -252,28 +247,6 @@ fun AccountScreen(
         }
     }
 
-    removeFavorite?.let { manga ->
-        AlertDialog(
-            onDismissRequest = { removeFavorite = null },
-            shape = RoundedCornerShape(24.dp), containerColor = colors.surface,
-            title = { Text("移出拷贝书架？", style = MaterialTheme.typography.titleLarge) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
-                        style = MaterialTheme.typography.bodyMedium)
-                    Text("会同步到拷贝账号。本机书架、下载和阅读进度会保留。",
-                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                }
-            },
-            confirmButton = {
-                TextButton(enabled = manga.id !in state.syncingFavorites, onClick = {
-                    removeFavorite = null
-                    onSetFavorite(manga, false)
-                }) { Text("移除", color = colors.error) }
-            },
-            dismissButton = { TextButton(onClick = { removeFavorite = null }) { Text("取消") } },
-        )
-    }
 }
 
 @Composable

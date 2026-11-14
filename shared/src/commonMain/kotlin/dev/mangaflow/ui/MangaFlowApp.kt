@@ -287,6 +287,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val refreshingDownloads by model.refreshingDownloads.collectAsStateWithLifecycle()
     val chapterPreparations by model.chapterPreparations.collectAsStateWithLifecycle()
     val account by model.account.collectAsStateWithLifecycle()
+    val copyShelfSync by model.copyShelfSync.state.collectAsStateWithLifecycle()
+    val copyProgress by model.copyProgress.collectAsStateWithLifecycle()
+    val adoptedResumeTargets by model.library.resumeTargets.collectAsStateWithLifecycle()
+    val favoriteAddedTimes by model.library.favoriteAddedTimes.collectAsStateWithLifecycle()
+    var copySyncOpen by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(account.profile?.username) { copySyncOpen = false }
     val update by model.updates.state.collectAsStateWithLifecycle()
     var restrictedMode by remember { mutableStateOf(false) }
     var profileSourcesOpen by remember { mutableStateOf(false) }
@@ -298,6 +304,21 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val section = Section.entries.firstOrNull {
         it.name == sectionName && (!restrictedMode || it != Section.BOARDS)
     } ?: Section.DISCOVER
+    LaunchedEffect(account.profile?.username, account.busy, section, reading == null, detail == null, restrictedMode) {
+        if (!restrictedMode && account.profile != null && !account.busy && reading == null && detail == null &&
+            section in setOf(Section.ACCOUNT, Section.LIBRARY) && !copyShelfSync.checked && !copyShelfSync.busy)
+            model.copyShelfSync.check()
+    }
+    LaunchedEffect(detail?.manga?.id, account.profile?.username, account.busy, reading == null, restrictedMode) {
+        val work = detail?.manga
+        if (!restrictedMode && work != null && reading == null && !account.busy) model.refreshCopyProgress(work)
+        else model.clearCopyProgress()
+    }
+    LaunchedEffect(detail?.detail, adoptedResumeTargets) { model.reconcileCopyProgress() }
+    val displayedAccount = if (account.profile != null && copyShelfSync.owner == account.profile?.username && copyShelfSync.checked)
+        account.copy(favorites = copyShelfSync.cloudFavorites, favoritesHasMore = false,
+            favoritesLoading = copyShelfSync.checking, favoritesRefreshing = copyShelfSync.checking)
+    else account
     val restrictedMetrics = remember(model) { MangaMetricState(model.metrics, { _ -> }, { _ -> }) }
     val displayedMetrics = if (restrictedMode) restrictedMetrics else metricState
     var drawerAction by remember { mutableStateOf<DrawerAction?>(null) }
@@ -485,6 +506,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val desktopDestinations = remember(profileSections, restrictedMode) {
         profileSections.map { DesktopDestination(it.navigationTitle(restrictedMode), it.icon) }
     }
+    CopyShelfSyncSheet(
+        visible = copySyncOpen && account.profile != null && !restrictedMode,
+        state = copyShelfSync, backdrop = drawerBackdrop,
+        onCheck = model.copyShelfSync::check, onImport = model.copyShelfSync::importFavorites,
+        onUpload = model.copyShelfSync::upload, onDismiss = { copySyncOpen = false },
+    )
     sourceManagement?.let { state ->
         UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
             onSearch = model::searchBodySource, onAttach = { candidate -> model.attachBodySource(state.work.id, candidate) },
@@ -893,6 +920,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 isFavorite = favorites.any { it.id == current.state.manga.id },
                                 progress = history.firstOrNull { it.manga.id == current.state.manga.id },
                                 chapterPositions = chapterPositions,
+                                cloudProgress = copyProgress?.takeIf { it.mangaId == current.state.manga.id &&
+                                    it.owner == account.profile?.username },
+                                onAdoptCloudProgress = model::adoptCopyProgress,
+                                onRetryCloudProgress = { model.refreshCopyProgress(current.state.manga) },
+                                preferredResumeChapter = adoptedResumeTargets[current.state.manga.id]
+                                    ?.takeIf { it.accountOwner == account.profile?.username }
+                                    ?.let { target -> current.state.detail?.chapters?.firstOrNull { it.id == target.chapterId } },
+                                onContinuePreferred = { model.continuePreferredResume(current.state.manga) },
                                 downloadEntries = downloads,
                                 downloadPreparations = chapterPreparations,
                                 loadVolumeCover = { chapter, refresh -> model.volumeCover(current.state.manga.id, chapter, refresh) },
@@ -1130,6 +1165,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         )
                                     }
                                     Section.LIBRARY -> LibraryScreen(
+                                        copySyncState = copyShelfSync.takeIf { !restrictedMode &&
+                                            account.profile != null && it.owner == account.profile?.username },
+                                        onCopySync = if (restrictedMode) null else {
+                                            { if (account.profile == null) changeSection(Section.ACCOUNT) else copySyncOpen = true }
+                                        },
+                                        onImportCopy = if (restrictedMode) null else {
+                                            { copySyncOpen = true; model.copyShelfSync.importFavorites() }
+                                        },
                                         favorites = ordinaryFavorites, history = ordinaryHistory,
                                         libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
                                         repository = model.repository, opening = libraryOpening, active = rootActive,
@@ -1160,7 +1203,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         active = rootActive, onSources = manageProfileSources,
                                         onSessionChange = scopedBrowse::refresh, contentTopPadding = chromePadding,
                                     ) else AccountScreen(
-                                        state = account, repository = model.repository,
+                                        state = displayedAccount, repository = model.repository,
                                         active = rootActive && !searchVisible,
                                         backdrop = searchBackdrop, navigation = navigation,
                                         onSearch = if (desktop && !desktopNavigationVisible) openDesktopSearch else null,
@@ -1173,7 +1216,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             }
                                         },
                                         onAddToLibrary = model::addCloudMangaToLibrary, onContinueLocal = model::continueReading,
-                                        onRefreshFavorites = model::refreshCloudFavorites, onRefreshHistory = model::refreshCloudHistory,
+                                        onRefreshFavorites = model.copyShelfSync::check, onRefreshHistory = model::refreshCloudHistory,
+                                        favoriteAddedAt = { favoriteAddedTimes[it] },
+                                        onOpenSync = { copySyncOpen = true },
                                         onLoginWithPassword = model::loginWithPassword,
                                         onLoginWithCookie = model::loginWithCookie,
                                         onLogout = model::logout,

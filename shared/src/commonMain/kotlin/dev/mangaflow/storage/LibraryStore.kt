@@ -83,6 +83,8 @@ class LibraryStore(context: Context) {
     private val backupLock = Mutex()
     private var restoreLegacyLongImages = false
     private val _favorites = MutableStateFlow<List<Manga>>(emptyList())
+    private val _favoriteAddedTimes = MutableStateFlow<Map<String, Long>>(emptyMap())
+    private val _resumeTargets = MutableStateFlow<Map<String, SavedResumeTarget>>(emptyMap())
     private val _history = MutableStateFlow<List<ReadingProgress>>(emptyList())
     private val _chapterHistoryRevision = MutableStateFlow(0L)
     private val _backupRestored = MutableStateFlow(0L)
@@ -112,6 +114,8 @@ class LibraryStore(context: Context) {
     private var writesIdle = CompletableDeferred(Unit)
 
     val favorites: StateFlow<List<Manga>> = _favorites.asStateFlow()
+    val favoriteAddedTimes: StateFlow<Map<String, Long>> = _favoriteAddedTimes.asStateFlow()
+    val resumeTargets: StateFlow<Map<String, SavedResumeTarget>> = _resumeTargets.asStateFlow()
     val history: StateFlow<List<ReadingProgress>> = _history.asStateFlow()
     val chapterHistoryRevision: StateFlow<Long> = _chapterHistoryRevision.asStateFlow()
     val shelfStates: StateFlow<Map<String, ShelfState>> = _shelfStates.asStateFlow()
@@ -133,6 +137,8 @@ class LibraryStore(context: Context) {
                 val legacy = readLegacyLongImageMigration()
                 val favorites = readArray("favorites", ::readManga).distinctBy(Manga::id)
                 val history = readArray("history", ::readProgress).distinctBy { it.manga.id }
+                val favoriteTimes = readFavoriteAddedTimes().filterKeys { id -> favorites.any { it.id == id } }
+                val resumeTargets = readResumeTargets()
                 val states = readShelfStates()
                 val pictures = readArray(PAGE_COLLECTIONS_KEY, ::readPageCollection).distinctBy(PageCollection::key)
                 val activity = readArray(READING_ACTIVITY_KEY, ::readReadingActivity).distinctBy { it.manga.id }
@@ -141,6 +147,8 @@ class LibraryStore(context: Context) {
                 synchronized(lock) {
                     restoreLegacyLongImages = legacy
                     _favorites.value = favorites
+                    _favoriteAddedTimes.value = favoriteTimes
+                    _resumeTargets.value = resumeTargets
                     _history.value = history
                     _shelfStates.value = states
                     _pageCollections.value = pictures
@@ -194,14 +202,42 @@ class LibraryStore(context: Context) {
 
     fun isFavorite(mangaId: String): Boolean = _favorites.value.any { it.id == mangaId }
 
+    /** Unknown legacy addition times stay unknown instead of becoming the upgrade time. */
+    fun favoriteAddedAt(mangaId: String): Long? = _favoriteAddedTimes.value[mangaId]
+
+    /** Add one complete imported collection without rewriting the existing shelf per item. */
+    fun mergeFavorites(mangas: List<Manga>): Int = synchronized(lock) {
+        require(stateRestored) { "本机书架尚未完成恢复。" }
+        val existing = _favorites.value
+        val existingIds = existing.mapTo(mutableSetOf(), Manga::id)
+        val additions = mangas.distinctBy(Manga::id).filter { it.id !in existingIds }
+        if (additions.isEmpty()) return@synchronized 0
+        // New imports retain their supplied order; existing entries keep their relative order.
+        val next = additions + existing
+        val importedAt = wallTimeMillis()
+        val times = _favoriteAddedTimes.value + additions.associate { it.id to importedAt }
+        disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString())
+            .putString(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times)).apply()
+        _favoriteAddedTimes.value = times
+        _favorites.value = next
+        additions.size
+    }
+
     fun toggleFavorite(manga: Manga): Unit = synchronized(lock) {
         if (deferUntilReady { toggleFavorite(manga) }) return@synchronized
         val removing = isFavorite(manga.id)
         val next = if (removing) _favorites.value.filterNot { it.id == manga.id }
         else listOf(manga) + _favorites.value
         _favorites.value = next
-        disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString()).apply()
-        if (removing) removeShelfStateLocked(manga.id)
+        val times = _favoriteAddedTimes.value.toMutableMap()
+        if (removing) times.remove(manga.id) else times[manga.id] = wallTimeMillis()
+        _favoriteAddedTimes.value = times
+        disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString())
+            .putString(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times)).apply()
+        if (removing) {
+            removeShelfStateLocked(manga.id)
+            clearResumeTarget(manga.id)
+        }
     }
 
     /** Idempotent removal: a stale item menu can never add the manga back. */
@@ -210,9 +246,79 @@ class LibraryStore(context: Context) {
         val next = _favorites.value.filterNot { it.id == mangaId }
         if (next.size == _favorites.value.size) return@synchronized
         _favorites.value = next
-        disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString()).apply()
+        val times = _favoriteAddedTimes.value - mangaId
+        _favoriteAddedTimes.value = times
+        disk.edit().putString("favorites", JSONArray(next.map { it.toJson() }).toString())
+            .putString(FAVORITE_ADDED_TIMES_KEY, favoriteTimesJson(times)).apply()
         removeShelfStateLocked(mangaId)
+        clearResumeTarget(mangaId)
     }
+
+    private fun readFavoriteAddedTimes(): Map<String, Long> = runCatching {
+        val json = JSONObject(disk.getString(FAVORITE_ADDED_TIMES_KEY, "{}") ?: "{}")
+        buildMap {
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val id = keys.next()
+                json.optLong(id).takeIf { it > 0L }?.let { put(id, it) }
+            }
+        }
+    }.getOrDefault(emptyMap())
+
+    private fun favoriteTimesJson(times: Map<String, Long>): String = JSONObject().apply {
+        times.forEach { (id, addedAt) -> put(id, addedAt) }
+    }.toString()
+
+    fun resumeTargetFor(mangaId: String, accountOwner: String? = null): SavedResumeTarget? =
+        _resumeTargets.value[mangaId]?.takeIf { accountOwner == null || it.accountOwner == accountOwner }
+
+    fun adoptResumeTarget(target: SavedResumeTarget): Unit = synchronized(lock) {
+        if (deferUntilReady { adoptResumeTarget(target) }) return@synchronized
+        require(target.mangaId.isNotBlank() && target.chapterId.isNotBlank() && target.accountOwner.isNotBlank())
+        require(target.mangaId.length <= 1024 && target.chapterId.length <= 1024 && target.accountOwner.length <= 256)
+        val bounded = target.copy(chapterTitle = target.chapterTitle.take(160))
+        persistResumeTargets(_resumeTargets.value + (bounded.mangaId to bounded))
+    }
+
+    fun clearResumeTarget(mangaId: String): Unit = synchronized(lock) {
+        if (deferUntilReady { clearResumeTarget(mangaId) }) return@synchronized
+        if (mangaId in _resumeTargets.value) persistResumeTargets(_resumeTargets.value - mangaId)
+    }
+
+    /** Account transitions may clear one owner's choices without touching any reading history. */
+    fun clearResumeTargets(accountOwner: String? = null): Unit = synchronized(lock) {
+        if (deferUntilReady { clearResumeTargets(accountOwner) }) return@synchronized
+        val next = if (accountOwner == null) emptyMap() else
+            _resumeTargets.value.filterValues { it.accountOwner != accountOwner }
+        if (next != _resumeTargets.value) persistResumeTargets(next)
+    }
+
+    private fun persistResumeTargets(targets: Map<String, SavedResumeTarget>) {
+        val json = JSONObject()
+        targets.forEach { (id, target) ->
+            json.put(id, JSONObject().put("chapterId", target.chapterId)
+                .put("chapterTitle", target.chapterTitle).put("accountOwner", target.accountOwner))
+        }
+        disk.edit().putString(RESUME_TARGETS_KEY, json.toString()).apply()
+        _resumeTargets.value = targets
+    }
+
+    private fun readResumeTargets(): Map<String, SavedResumeTarget> = runCatching {
+        val json = JSONObject(disk.getString(RESUME_TARGETS_KEY, "{}") ?: "{}")
+        buildMap {
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val id = keys.next()
+                val value = json.optJSONObject(id) ?: continue
+                val chapterId = value.optString("chapterId")
+                val owner = value.optString("accountOwner")
+                if (id.isNotBlank() && id.length <= 1024 && chapterId.isNotBlank() && chapterId.length <= 1024 &&
+                    owner.isNotBlank() && owner.length <= 256) {
+                    put(id, SavedResumeTarget(id, chapterId, value.optString("chapterTitle").take(160), owner))
+                }
+            }
+        }
+    }.getOrDefault(emptyMap())
 
     fun setShelfState(mangaId: String, state: ShelfState): Unit = synchronized(lock) {
         if (deferUntilReady { setShelfState(mangaId, state) }) return@synchronized
@@ -258,7 +364,7 @@ class LibraryStore(context: Context) {
             waitForProgressWriter()
             val root = synchronized(lock) {
                 val entries = JSONArray()
-                disk.all.entries.sortedBy { it.key }.forEach { (key, value) ->
+                disk.all.entries.filter { it.key != RESUME_TARGETS_KEY }.sortedBy { it.key }.forEach { (key, value) ->
                     val entry = JSONObject().put("key", key)
                     when (value) {
                         is String -> entry.put("type", "string").put("value", value)
@@ -311,7 +417,8 @@ class LibraryStore(context: Context) {
                 synchronized(lock) {
                     val previous = disk.all.toMap()
                     val writeFailure = try {
-                        if (writeBackupValues(decoded.values)) null
+                        // A backup cannot restore an account-specific continuation choice.
+                        if (writeBackupValues(decoded.values - RESUME_TARGETS_KEY)) null
                         else IllegalStateException("无法写入备份，请检查存储空间。")
                     } catch (failure: Exception) { failure }
                     if (writeFailure != null) {
@@ -333,6 +440,8 @@ class LibraryStore(context: Context) {
                     ignoreStoredProgress = false
                     restoreLegacyLongImages = readLegacyLongImageMigration()
                     _favorites.value = readArray("favorites") { readManga(it) }.distinctBy(Manga::id)
+                    _favoriteAddedTimes.value = readFavoriteAddedTimes().filterKeys { id -> _favorites.value.any { it.id == id } }
+                    _resumeTargets.value = emptyMap()
                     _history.value = readArray("history", ::readProgress).distinctBy { it.manga.id }
                     _chapterHistoryRevision.value++
                     _shelfStates.value = readShelfStates()
@@ -588,6 +697,8 @@ class LibraryStore(context: Context) {
                 _history.value = next
                 write.history = next
             }
+            // Only actual confirmed reading consumes the explicitly selected cloud target.
+            if (updateRecent && manga.id in _resumeTargets.value) clearResumeTarget(manga.id)
             _chapterHistoryRevision.value++
             startProgressWriter()
         }
@@ -596,6 +707,7 @@ class LibraryStore(context: Context) {
     fun clearHistory(): Unit = synchronized(lock) {
         if (deferUntilReady { clearHistory() }) return@synchronized
         _history.value = emptyList()
+        clearResumeTargets()
         _chapterHistoryRevision.value++
         pendingChapterPositions.clear()
         pendingLongImagePositions.clear()
@@ -613,6 +725,7 @@ class LibraryStore(context: Context) {
         if (deferUntilReady { removeHistory(mangaId) }) return@synchronized
         val next = _history.value.filterNot { it.manga.id == mangaId }
         _history.value = next
+        clearResumeTarget(mangaId)
         _chapterHistoryRevision.value++
         pendingChapterPositions.keys.removeAll { isProgressKeyFor(it, mangaId) }
         pendingLongImagePositions.keys.removeAll { isProgressKeyFor(it, mangaId) }
@@ -994,6 +1107,8 @@ class LibraryStore(context: Context) {
         const val MAX_DECODED_CHAPTER_POSITIONS = 512
         const val MAX_BACKUP_SOURCE_PACKAGES = 64
         const val SHELF_STATES_KEY = "shelf_states"
+        const val FAVORITE_ADDED_TIMES_KEY = "favorite_added_times_v1"
+        const val RESUME_TARGETS_KEY = "adopted_resume_targets_v1"
         const val PAGE_COLLECTIONS_KEY = "page_collections"
         const val READING_ACTIVITY_KEY = "reading_activity"
         const val MANGA_READER_PREFERENCES_KEY = "reader_preferences_by_manga"

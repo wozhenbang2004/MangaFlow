@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Current Copy collection and progress batch · 2026-11-14
+
+Active user scope and latest raw correction are DESIGN COPY-SYNC-159–165: one Copy shelf, actual recent/heat/local-added/title sorting, explicit collection import/upload preview with full-import eligibility and per-account native identity, read-only detail progress adoption and effective-reading-only chapter reporting. Source implementation and independent reviews are complete; installed/compiled acceptance remains pending. Preserve the concurrent main6535b7b local channel and ranking compile corrections already applied to this worktree. No tests/local builds/service/device probes were run.
+
+Current source lives in MangaFlow-sync; its local parent is a source-equivalent snapshot of mainfe716ab, with main6535b7b changes integrated. Older MangaFlow/MangaFlow-next worktrees contain already published historical changes and must not be replayed. Next exact action: publish this whole batch against the actual latest main with an expected-head lease, confirm ordinary CI trigger once and leave main stable for artifact/user feedback. Do not treat a partial collection feed or backup restore as completed full import; do not restore the rejected recent-reading tab or automatic favorite writes.
+
 ## Local channel D-drive correction and compiler unblock · 2026-11-14
 
 User corrected storage explicitly: “都别弄到c盘啊我操了弄到其他盘有个kayokoi目录”; then asked “cmd到底可以没已经有可以用的exe没”. Root answered accurately that no local executable had been produced. The local channel now defaults to D:/Kayokoi/MangaFlowLocal, with program/source/SDK/Gradle/Cargo/Rust/Android-user caches and temp/socket paths isolated there. Existing installed tools are reused via physical executable paths; do not invoke mise shims after overriding tool cache homes, which can cause an unrelated global Rust auto-install. App launch redirects only this channel's LOCALAPPDATA to its userdata folder, preserving an initial copy of existing reading data. The former Desktop CMD was removed after confirming it was this task's generated entry; primary CMD is inside D. Online release behavior remains.

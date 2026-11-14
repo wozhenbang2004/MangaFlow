@@ -229,6 +229,11 @@ fun DetailScreen(
     repository: MangaRepository? = null,
     commentsAvailable: Boolean = true,
     downloadPreparations: List<ChapterPreparationState> = emptyList(),
+    cloudProgress: CopyProgressHintState? = null,
+    onAdoptCloudProgress: (() -> Unit)? = null,
+    onRetryCloudProgress: (() -> Unit)? = null,
+    preferredResumeChapter: Chapter? = null,
+    onContinuePreferred: (() -> Unit)? = null,
 ) {
     val current = detail?.manga ?: manga
     var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
@@ -251,6 +256,7 @@ fun DetailScreen(
             .filter(String::isNotBlank).distinct().count()
     }
     val resume = progress?.takeIf { it.manga.id == manga.id && it.chapterId.isNotBlank() }
+    val copyProgress = cloudProgress?.takeIf { it.mangaId == current.id && it.owner != null }
     var section by rememberSaveable(manga.id) { mutableIntStateOf(0) }
     var chapterDownloadMode by rememberSaveable(manga.id) { mutableStateOf(false) }
     val sections = rememberSaveableStateHolder()
@@ -565,7 +571,9 @@ fun DetailScreen(
                             hidden = false, active = active, persistent = true,
                             modifier = Modifier.fillMaxWidth(),
                             onContinue = onContinue, onRead = onRead, onRestart = onRestart,
-                            onContents = openContents)
+                            onContents = openContents, preferredResumeChapter = preferredResumeChapter,
+                            onContinuePreferred = onContinuePreferred, cloudProgress = copyProgress,
+                            onAdoptCloudProgress = onAdoptCloudProgress, onRetryCloudProgress = onRetryCloudProgress)
                     }
                     sectionPane(Modifier.weight(1f).fillMaxHeight().background(informationTone),
                         16.dp + bottomInset)
@@ -737,7 +745,10 @@ fun DetailScreen(
                 .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Bottom))
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             onHeightChanged = { measuredDockHeight = maxOf(measuredDockHeight, it) },
-            onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents)
+            onContinue = onContinue, onRead = onRead, onRestart = onRestart, onContents = openContents,
+            preferredResumeChapter = preferredResumeChapter, onContinuePreferred = onContinuePreferred,
+            cloudProgress = copyProgress, onAdoptCloudProgress = onAdoptCloudProgress,
+            onRetryCloudProgress = onRetryCloudProgress)
     }
     }
     if (fullIntroduction) DetailIntroduction(current, backdrop = readingBackdrop,

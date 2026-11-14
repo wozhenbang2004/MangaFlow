@@ -6,6 +6,9 @@ import androidx.lifecycle.viewModelScope
 import dev.mangaflow.account.AccountProfile
 import dev.mangaflow.account.CloudHistoryEntry
 import dev.mangaflow.account.CopyAccountRepository
+import dev.mangaflow.account.CopyShelfSyncController
+import dev.mangaflow.storage.SavedResumeTarget
+import dev.mangaflow.ui.CopyProgressHintState
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.CopyAnonymousIdentityStore
 import dev.mangaflow.data.CopyMangaRepository
@@ -271,8 +274,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private val _metrics = MutableStateFlow<Map<String, List<MangaMetric>>>(emptyMap())
     val metrics = _metrics.asStateFlow()
     private val accountRepository = CopyAccountRepository(application)
+    val copyShelfSync = CopyShelfSyncController(application, accountRepository, library, repository, viewModelScope)
     private val _account = MutableStateFlow(AccountUiState())
     val account = _account.asStateFlow()
+    private val _copyProgress = MutableStateFlow<CopyProgressHintState?>(null)
+    val copyProgress = _copyProgress.asStateFlow()
+    private var copyProgressJob: Job? = null
+    private var copyProgressRequest = 0L
     private val _browse = MutableStateFlow(BrowseState())
     val browse = _browse.asStateFlow()
     private var retainedBrowse: BrowseState? = null
@@ -345,8 +353,6 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private var cloudFavoritesRequestId = 0L
     private var cloudHistoryRequestId = 0L
     private var chapterSyncJob: Job? = null
-    private val favoriteSyncJobs = mutableMapOf<String, Job>()
-    private val pendingFavoriteSync = mutableMapOf<String, Pair<Manga, Boolean>>()
     private var pendingChapterSync: Pair<Manga, Chapter>? = null
     private var cloudFavoritesPage = -1
     private var cloudHistoryPage = -1
@@ -393,6 +399,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }
         viewModelScope.launch {
             library.backupRestored.drop(1).collect {
+                copyShelfSync.invalidateAfterRestore()
+                clearCopyProgress()
                 try {
                     bodySources.reload()
                     _sourceResumePolicy.value = sourcePreferences.getString("source_resume_policy", "same_page")
@@ -2087,6 +2095,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     fun closeDetail() {
+        clearCopyProgress()
         rankedWorkRequest++
         rankedWorkJob?.cancel()
         cancelSourceResumeChoice()
@@ -2140,6 +2149,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     fun readFromLibrary(manga: Manga) {
         if (_libraryOpening.value?.let { it.manga.id == manga.id && it.loading } == true) return
         cancelLibraryReading()
+        if (library.ready.value && continuePreferredResume(manga)) return
         library.progressFor(manga.id)?.takeIf { library.ready.value && it.chapterId.isNotBlank() }?.let {
             continueReading(it)
             return
@@ -2150,6 +2160,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             try {
                 library.awaitReady()
                 if (requestId != libraryOpenRequestId) return@launch
+                if (continuePreferredResume(manga)) return@launch
                 library.progressFor(manga.id)?.takeIf { it.chapterId.isNotBlank() }?.let {
                     libraryOpenJob = null
                     _libraryOpening.value = null
@@ -2470,7 +2481,82 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
 
     private fun restoreAccount() = authenticate(restoring = true) { accountRepository.restore() }
 
+    /** The chosen cloud chapter is a resume target, never a fabricated local reading event. */
+    fun continuePreferredResume(manga: Manga): Boolean {
+        val owner = _account.value.profile?.username ?: return false
+        val target = library.resumeTargetFor(manga.id, owner) ?: return false
+        libraryOpenJob = null
+        _libraryOpening.value = null
+        openSavedChapter(manga, target.chapterId, target.chapterTitle)
+        return true
+    }
+
+    fun clearCopyProgress() {
+        copyProgressRequest++
+        copyProgressJob?.cancel()
+        _copyProgress.value = null
+    }
+
+    /** This calls only the read-only account query, never the authenticated chapter-view endpoint. */
+    fun refreshCopyProgress(manga: Manga) {
+        clearCopyProgress()
+        val owner = _account.value.profile?.username ?: return
+        if (_account.value.busy || manga.sourceId != "copy" || SourceKeys.isEncoded(manga.id) ||
+            manga.sourceUrl == LOCAL_SOURCE_URL || _detail.value?.manga?.id != manga.id) return
+        val version = accountRepository.sessionVersion
+        val request = copyProgressRequest
+        _copyProgress.value = CopyProgressHintState(owner, manga.id, loading = true)
+        copyProgressJob = viewModelScope.launch {
+            try {
+                val cloud = foregroundRequest("拷贝阅读进度", 30_000L) { accountRepository.cloudProgress(manga.id) }
+                if (request != copyProgressRequest || !isCurrentAccount(version) || _detail.value?.manga?.id != manga.id)
+                    return@launch
+                _copyProgress.value = cloud?.takeIf { it.chapterId.isNotBlank() }?.let {
+                    CopyProgressHintState(owner, manga.id, cloudChapterId = it.chapterId, cloudChapterTitle = it.chapterTitle)
+                }
+                reconcileCopyProgress()
+            } catch (cancel: CancellationException) { throw cancel
+            } catch (failure: Exception) {
+                if (request == copyProgressRequest && isCurrentAccount(version) && _detail.value?.manga?.id == manga.id)
+                    _copyProgress.value = CopyProgressHintState(owner, manga.id,
+                        error = accountError(failure, "暂未能读取拷贝进度"))
+            }
+        }
+    }
+
+    fun reconcileCopyProgress() {
+        val state = _copyProgress.value ?: return
+        val current = _detail.value ?: return
+        val owner = _account.value.profile?.username ?: return
+        if (state.owner != owner || state.mangaId != current.manga.id || state.loading || state.error != null) return
+        val exact = current.detail?.chapters?.let { findSourceChapter(it, state.cloudChapterId) }
+            ?.takeIf { it.sourceId == "copy" && !SourceKeys.isEncoded(it.id) }
+        val target = library.resumeTargetFor(current.manga.id, owner)
+        val selectedChapter = target?.chapterId ?: library.progressFor(current.manga.id)?.chapterId
+        if (selectedChapter == state.cloudChapterId) {
+            _copyProgress.value = null
+            return
+        }
+        _copyProgress.value = state.copy(
+            cloudChapterTitle = exact?.title?.takeIf(String::isNotBlank) ?: state.cloudChapterTitle,
+            adopted = target?.chapterId == state.cloudChapterId,
+            canAdopt = exact != null && selectedChapter != state.cloudChapterId,
+        )
+    }
+
+    fun adoptCopyProgress() {
+        val state = _copyProgress.value?.takeIf { it.canAdopt && !it.loading && it.error == null } ?: return
+        val owner = _account.value.profile?.username ?: return
+        val current = _detail.value ?: return
+        if (state.owner != owner || state.mangaId != current.manga.id) return
+        val chapter = current.detail?.chapters?.let { findSourceChapter(it, state.cloudChapterId) }
+            ?.takeIf { it.sourceId == "copy" && !SourceKeys.isEncoded(it.id) } ?: return
+        library.adoptResumeTarget(SavedResumeTarget(current.manga.id, chapter.id, chapter.title, owner))
+        reconcileCopyProgress()
+    }
+
     private fun authenticate(restoring: Boolean = false, action: suspend () -> AccountProfile?) {
+        clearCopyProgress()
         val browserAttempt = websiteLoginAttempt
         websiteLoginAttempt = null
         browserAttempt?.let(accountRepository::cancelWebsiteLogin)
@@ -2488,11 +2574,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 val profile = action()
                 if (requestId != accountRequestId) return@launch
                 _account.value = AccountUiState(profile = profile, busy = false)
+                copyShelfSync.accountChanged()
                 cloudFavoritesPage = -1
                 cloudHistoryPage = -1
                 if (profile != null) {
                     loadCloudFavorites(refresh = true)
-                    loadCloudHistory(refresh = true)
                     visibleReading?.let { (manga, chapter) -> onChapterVisible(manga, chapter) }
                 }
             } catch (cancel: CancellationException) {
@@ -2508,6 +2594,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     fun logout() {
+        val previousOwner = _account.value.profile?.username
+        clearCopyProgress()
         websiteLoginAttempt = null
         accountRequestId++
         accountJob?.cancel()
@@ -2520,6 +2608,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             accountRepository.logout()
             accountCleanupFailed = false
             _account.value = AccountUiState(busy = false)
+            previousOwner?.let(library::clearResumeTargets)
+            copyShelfSync.accountChanged()
         } catch (failure: Exception) {
             accountCleanupFailed = true
             _account.value = AccountUiState(busy = false,
@@ -2534,7 +2624,6 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         else {
             _account.update { it.copy(error = null) }
             loadCloudFavorites(refresh = true)
-            loadCloudHistory(refresh = true)
         }
     }
 
@@ -2641,10 +2730,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             library.awaitReady()
             if (!isCurrentAccount(version)) return@launch
             val current = _account.value.favorites.firstOrNull { it.id == manga.id }
+                ?: copyShelfSync.state.value.takeIf { it.owner == _account.value.profile?.username && it.checked }
+                    ?.cloudFavorites?.firstOrNull { it.id == manga.id }
                 ?: _account.value.history.firstOrNull { it.manga.id == manga.id }?.manga
                 ?: return@launch
             if (!library.isFavorite(current.id)) {
                 library.toggleFavorite(current)
+                copyShelfSync.onLocalFavoriteChanged(current, true)
                 messages.send("已加入本机书架")
             }
         }
@@ -2666,9 +2758,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             return
         }
         library.toggleFavorite(manga)
-        if (_account.value.profile != null && !_account.value.busy) {
-            setCloudFavorite(manga, library.favorites.value.any { it.id == manga.id })
-        }
+        copyShelfSync.onLocalFavoriteChanged(manga, library.favorites.value.any { it.id == manga.id })
     }
 
     fun removeFavorite(manga: Manga) {
@@ -2679,9 +2769,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (_libraryOpening.value?.manga?.id == manga.id) cancelLibraryReading()
         if (!library.isFavorite(manga.id)) return
         library.removeFavorite(manga.id)
-        if (_account.value.profile != null && !_account.value.busy) {
-            setCloudFavorite(manga, false)
-        }
+        copyShelfSync.onLocalFavoriteChanged(manga, false)
     }
 
     fun removeHistory(mangaId: String) {
@@ -2689,55 +2777,19 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         library.removeHistory(mangaId)
     }
 
+    /** Compatibility entry: membership changes stay local until the explicit collection preview. */
     fun setCloudFavorite(manga: Manga, favorite: Boolean) {
-        if (manga.sourceId != "copy" || SourceKeys.isEncoded(manga.id)) return
-        val state = _account.value
-        if (state.profile == null || state.busy) return
-        val version = accountRepository.sessionVersion
-        // Coalesce only the desired state. Never cancel or replay an in-flight account POST.
-        pendingFavoriteSync[manga.id] = manga to favorite
-        if (favoriteSyncJobs[manga.id]?.isActive == true) return
-        _account.update { it.copy(syncingFavorites = it.syncingFavorites + manga.id,
-            syncMessage = "正在同步收藏…", canRetrySync = hasPendingSync()) }
-        val request = viewModelScope.launch(start = CoroutineStart.LAZY) {
-            try {
-                while (isCurrentAccount(version)) {
-                    val desired = pendingFavoriteSync[manga.id] ?: break
-                    val confirmed = foregroundRequest("云端收藏同步", 45_000L) {
-                        val uuid = repository.comicUuid(manga.id)
-                        if (!isCurrentAccount(version)) throw CancellationException("Account changed")
-                        accountRepository.setFavorite(manga.id, uuid, desired.second)
-                    }
-                    if (!isCurrentAccount(version)) return@launch
-                    if (!confirmed) throw SourceException("来源尚未确认收藏同步，请稍后重试。")
-                    if (pendingFavoriteSync[manga.id]?.second == desired.second) {
-                        pendingFavoriteSync.remove(manga.id)
-                        _account.update { it.copy(syncMessage = if (desired.second) "已加入云端收藏" else "已从云端收藏移除",
-                            canRetrySync = hasPendingSync()) }
-                        break
-                    }
-                }
-                loadCloudFavorites(refresh = true)
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (failure: Exception) {
-                if (isCurrentAccount(version)) {
-                    val message = accountError(failure, "云端收藏同步失败，请稍后重试。")
-                    _account.update { it.copy(syncMessage = "$message 本地书架不受影响。", canRetrySync = true) }
-                    messages.send("$message 本地书架不受影响。")
-                }
-            } finally {
-                if (isCurrentAccount(version)) _account.update { it.copy(syncingFavorites = it.syncingFavorites - manga.id) }
-                if (favoriteSyncJobs[manga.id] === currentCoroutineContext()[Job]) favoriteSyncJobs.remove(manga.id)
-            }
+        if (!library.ready.value) {
+            viewModelScope.launch { library.awaitReady(); setCloudFavorite(manga, favorite) }
+            return
         }
-        favoriteSyncJobs[manga.id] = request
-        request.start()
+        if (library.isFavorite(manga.id) != favorite) library.toggleFavorite(manga)
+        copyShelfSync.onLocalFavoriteChanged(manga, favorite)
     }
 
     fun retryAccountSync() {
         if (_account.value.profile == null || _account.value.busy) return
-        pendingFavoriteSync.values.toList().forEach { (manga, favorite) -> setCloudFavorite(manga, favorite) }
+        copyShelfSync.check()
         pendingChapterSync?.let { (manga, chapter) ->
             if (chapterSyncJob?.isActive != true) syncChapterProgress(manga, chapter, accountRepository.sessionVersion)
         }
@@ -2768,10 +2820,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 accountRepository.syncChapter(manga.id, chapter.id)
                 if (!isCurrentAccount(version)) return@launch
                 _account.update { it.copy(
-                    syncMessage = if (pendingFavoriteSync.isEmpty()) "云端记录已同步至 ${chapter.title}；页内位置保存在本机。" else it.syncMessage,
+                    syncMessage = "云端记录已同步至 ${chapter.title}；页内位置保存在本机。",
                     canRetrySync = hasPendingSync(),
                 ) }
-                loadCloudHistory(refresh = true)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
@@ -2787,7 +2838,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private fun isCurrentAccount(version: Long) = accountRepository.sessionVersion == version &&
         _account.value.profile != null && !_account.value.busy
 
-    private fun hasPendingSync() = pendingFavoriteSync.isNotEmpty() || pendingChapterSync != null
+    private fun hasPendingSync() = pendingChapterSync != null
 
     private fun cancelAccountRequests() {
         cloudFavoritesRequestId++
@@ -2795,9 +2846,6 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         cloudFavoritesJob?.cancel()
         cloudHistoryJob?.cancel()
         chapterSyncJob?.cancel()
-        favoriteSyncJobs.values.toList().forEach { it.cancel() }
-        favoriteSyncJobs.clear()
-        pendingFavoriteSync.clear()
         pendingChapterSync = null
         lastChapterSync = null
     }

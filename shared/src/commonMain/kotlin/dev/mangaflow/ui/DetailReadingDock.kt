@@ -82,8 +82,15 @@ internal fun DetailReadingDock(
     onRead: (Chapter) -> Unit,
     onRestart: (Chapter) -> Unit,
     onContents: () -> Unit,
+    preferredResumeChapter: Chapter? = null,
+    onContinuePreferred: (() -> Unit)? = null,
+    cloudProgress: CopyProgressHintState? = null,
+    onAdoptCloudProgress: (() -> Unit)? = null,
+    onRetryCloudProgress: (() -> Unit)? = null,
 ) {
-    val canRead = resume != null || firstChapter != null
+    val preferred = preferredResumeChapter?.takeIf { onContinuePreferred != null }
+    val displayedResume = resume?.takeIf { preferred == null || it.chapterId == preferred.id }
+    val canRead = preferred != null || resume != null || firstChapter != null
     val interaction = remember { MutableInteractionSource() }
     var actions by remember(mangaId) { mutableStateOf(false) }
     val motion = LocalMotionEnabled.current
@@ -102,13 +109,15 @@ internal fun DetailReadingDock(
     val visibility by animateFloatAsState(if (!desktop && !persistent && hidden && !actions) 0f else 1f,
         tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),
         label = "reading-dock")
-    val fraction = detailReadingFraction(resume)
+    val fraction = detailReadingFraction(displayedResume)
     val displayedProgress by animateFloatAsState(fraction ?: 0f,
         if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(), label = "dock-saved-progress")
-    val percent = detailReadingPercent(resume)
-    val chapterTitle = if (resume != null) resume.chapterTitle.ifBlank { "上次章节" } else firstChapter?.title.orEmpty()
-    val actionTitle = if (resume != null) "继续阅读" else "开始阅读"
+    val percent = detailReadingPercent(displayedResume)
+    val chapterTitle = preferred?.title?.ifBlank { "拷贝章节" }
+        ?: if (resume != null) resume.chapterTitle.ifBlank { "上次章节" } else firstChapter?.title.orEmpty()
+    val actionTitle = if (preferred != null || resume != null) "继续阅读" else "开始阅读"
     val subtitle = when {
+        preferred != null -> "已采用拷贝章节"
         resume != null -> percent?.let { "上次读至 $it%" } ?: "继续上次位置"
         firstChapter != null -> ""
         loading -> "正在读取章节"
@@ -123,26 +132,36 @@ internal fun DetailReadingDock(
                 alpha = visibility
                 translationY = (1f - visibility) * 86.dp.toPx()
             }.motionInputGate(active && visibility > .9f)) {
-            DesktopContextMenuArea(desktopActions) {
-            Box(Modifier.fillMaxWidth()
-            .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
-                enabled = active && canRead,
-                onLongClickLabel = "阅读选项", onLongClick = if (desktop) null else ({ actions = true }),
-                onClick = { if (resume != null) onContinue(resume) else firstChapter?.let(onRead) })
-            .then(if (desktop) Modifier else Modifier.pointerInput(mangaId, canRead, active) {
-                if (canRead && active) {
-                    var travel = 0f
-                    detectVerticalDragGestures(onDragStart = { travel = 0f }, onVerticalDrag = { change, dy ->
-                        travel += dy
-                        if (travel < -24.dp.toPx()) { change.consume(); actions = true }
-                    })
-                }
-            }).motionPress(interaction, enabled = canRead, pressedScale = .985f)) {
             LiquidGlassSurface(backdrop, Modifier.fillMaxWidth().align(Alignment.Center),
                 cornerRadius = lerp(28.dp, 18.dp, collapse), role = GlassSurfaceRole.READING_DOCK,
                 interactionSource = interaction, trackPointer = true,
                 softCard = true) {
-                Row(Modifier.fillMaxWidth().heightIn(min = minimumHeight)
+                Column(Modifier.fillMaxWidth()) {
+                cloudProgress?.let { hint ->
+                    CopyProgressHint(hint, hasLocalProgress = resume != null, active = active,
+                        revealFraction = (1f - collapse * 2f).coerceIn(0f, 1f),
+                        onAdopt = onAdoptCloudProgress, onRetry = onRetryCloudProgress)
+                }
+                DesktopContextMenuArea(desktopActions) {
+                Row(Modifier.fillMaxWidth()
+                    .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
+                        enabled = active && canRead,
+                        onLongClickLabel = "阅读选项", onLongClick = if (desktop) null else ({ actions = true }),
+                        onClick = {
+                            if (preferred != null) onContinuePreferred?.invoke()
+                            else if (resume != null) onContinue(resume)
+                            else firstChapter?.let(onRead)
+                        })
+                    .then(if (desktop) Modifier else Modifier.pointerInput(mangaId, canRead, active) {
+                        if (canRead && active) {
+                            var travel = 0f
+                            detectVerticalDragGestures(onDragStart = { travel = 0f }, onVerticalDrag = { change, dy ->
+                                travel += dy
+                                if (travel < -24.dp.toPx()) { change.consume(); actions = true }
+                            })
+                        }
+                    }).motionPress(interaction, enabled = canRead, pressedScale = .985f)
+                    .heightIn(min = minimumHeight)
                     .padding(horizontal = lerp(20.dp, 10.dp, collapse), vertical = 4.dp)
                     .semantics(mergeDescendants = true) {
                         contentDescription = listOf(actionTitle, chapterTitle, subtitle)

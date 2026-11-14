@@ -65,6 +65,7 @@ import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -109,6 +110,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import dev.mangaflow.LibraryOpenState
+import dev.mangaflow.account.CopyShelfSyncState
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
@@ -131,7 +133,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private enum class LibraryToolDestination { COLLECTIONS, STATS }
+private enum class LibraryToolDestination { COLLECTIONS, STATS, COPY_SYNC }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -147,6 +149,9 @@ fun LibraryScreen(
     backgroundInParent: Boolean = false,
     includedSourceIds: Set<String>? = null,
     excludedSourceIds: Set<String> = emptySet(),
+    copySyncState: CopyShelfSyncState? = null,
+    onCopySync: (() -> Unit)? = null,
+    onImportCopy: (() -> Unit)? = null,
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -210,6 +215,10 @@ fun LibraryScreen(
     var pendingHistory by remember { mutableStateOf<Set<String>>(emptySet()) }
     val visibleFavorites = remember(scopedFavorites, pendingFavorites) { scopedFavorites.filterNot { it.id in pendingFavorites } }
     val visibleHistory = remember(scopedHistory, pendingHistory) { scopedHistory.filterNot { it.manga.id in pendingHistory } }
+    val copyNotice = copySyncState?.takeIf {
+        it.owner != null && it.checked && it.error == null && it.cloudAdded.isNotEmpty()
+    }
+    val importCopy = onImportCopy ?: onCopySync
     fun removeFavoriteWithUndo(manga: Manga) {
         if (!sourceIncluded(manga.sourceId) || manga.id in pendingFavorites) return
         pendingFavorites = pendingFavorites + manga.id
@@ -334,6 +343,11 @@ fun LibraryScreen(
                             horizontalArrangement = Arrangement.spacedBy(gap),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
+                            if (copyNotice != null && importCopy != null) item(key = "copy-new-favorites", span = {
+                                androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                            }) {
+                                CopyShelfImportHint(copyNotice, active, importCopy)
+                            }
                             if (visibleFavorites.isEmpty()) item(key = "empty-collection", span = {
                                 androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                             }) { EmptyBookshelf(onDiscover) }
@@ -453,6 +467,10 @@ fun LibraryScreen(
                         else Modifier.widthIn(max = 320.dp).weight(1f, fill = false),
                     treatment = MotionTabTreatment.Soft, controlHeight = 36.dp)
                 if (!stackedTools) Spacer(Modifier.weight(1f))
+                if (onCopySync != null) MotionIconButton(onClick = onCopySync, enabled = active,
+                    modifier = Modifier.size(36.dp), tooltip = "拷贝收藏同步") {
+                    Icon(Icons.Outlined.Sync, "拷贝收藏同步", Modifier.size(19.dp))
+                }
                 MotionIconButton(onClick = { showCollections = true }, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Outlined.Collections, "画面收藏", Modifier.size(19.dp))
                 }
@@ -490,6 +508,7 @@ fun LibraryScreen(
                                         if (active) when (destination) {
                                             LibraryToolDestination.COLLECTIONS -> showCollections = true
                                             LibraryToolDestination.STATS -> showStats = true
+                                            LibraryToolDestination.COPY_SYNC -> onCopySync?.invoke()
                                             null -> Unit
                                         }
                                     }
@@ -500,6 +519,11 @@ fun LibraryScreen(
                                 }
                                 LibraryToolAction(Icons.Outlined.BarChart, "阅读统计") {
                                     pendingLibraryTool = LibraryToolDestination.STATS
+                                    libraryActionsOpen = false
+                                }
+                                if (onCopySync != null) LibraryToolAction(Icons.Outlined.Sync, "拷贝同步",
+                                    copySyncState?.cloudAdded?.size?.takeIf { it > 0 }?.toString()) {
+                                    pendingLibraryTool = LibraryToolDestination.COPY_SYNC
                                     libraryActionsOpen = false
                                 }
                             }
@@ -544,6 +568,21 @@ fun LibraryScreen(
         }
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
             .padding(horizontal = 20.dp, vertical = 12.dp))
+    }
+}
+
+/** One additive, factual notice belongs to the collection rather than another account feed. */
+@Composable
+private fun CopyShelfImportHint(state: CopyShelfSyncState, active: Boolean, onImport: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("拷贝新增 ${state.cloudAdded.size} 本", Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (state.importing) dev.mangaflow.ui.motion.MotionBusyIndicator(Modifier.padding(horizontal = 14.dp).size(17.dp),
+            strokeWidth = 1.6.dp)
+        else TextButton(onClick = onImport, enabled = active && !state.busy) { Text("导入") }
     }
 }
 

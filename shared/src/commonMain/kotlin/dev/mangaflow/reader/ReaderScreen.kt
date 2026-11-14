@@ -389,7 +389,7 @@ fun ReaderScreen(
     val dimPreview = remember { mutableStateOf<Float?>(null) }
     var imageVisible by remember(chapterId) { mutableStateOf(false) }
     var recentConfirmed by remember(manga.id, chapterId) { mutableStateOf(false) }
-    var chapterVisibilityReported by rememberSaveable(manga.id, chapterId) { mutableStateOf(false) }
+    var chapterVisibilityReported by remember(manga.id, chapterId) { mutableStateOf(false) }
     var nextChapterPrefetched by remember(manga.id, chapterId) { mutableStateOf(false) }
     var leavingReader by remember { mutableStateOf(false) }
     val nextChapter = siblings.getOrNull(chapterIndex + 1).takeIf { chapterIndex >= 0 }
@@ -505,6 +505,14 @@ fun ReaderScreen(
             libraryStore.saveProgress(manga, chapter, pageIndex, chapterPageCount, cursor.scrollOffset,
                 panelIndex = if (preferences.panelEngine != PanelEngine.OFF) cursor.panelIndex else -1,
                 panelLayout = if (preferences.panelEngine != PanelEngine.OFF) preferences.panelLayoutKey else "")
+        }
+    }
+    // A displayed/preloaded image is not itself a confirmed reading event. The cloud
+    // chapter follows the same deliberate navigation/dwell confirmation as local recent.
+    LaunchedEffect(manga.id, chapterId, recentConfirmed, readingEligible, readerForeground) {
+        if (recentConfirmed && readingEligible && readerForeground && chapterId == chapter.id && !chapterVisibilityReported) {
+            chapterVisibilityReported = true
+            chapterVisible(manga, chapter)
         }
     }
     fun updatePreferences(next: ReaderPreferences) {
@@ -805,10 +813,6 @@ fun ReaderScreen(
                         onReadingNavigation = { if (chapterId == chapter.id && readingEligible) recentConfirmed = true },
                         onVisibleImageChanged = { visible ->
                             imageVisible = visible
-                            if (visible && readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !chapterVisibilityReported) {
-                                chapterVisibilityReported = true
-                                chapterVisible(manga, chapter)
-                            }
                         },
                         onNearEnd = {
                             val next = nextChapter
@@ -859,10 +863,6 @@ fun ReaderScreen(
                         longImagePosition = { index -> libraryStore.longImagePositionFor(manga.id, chapter.id, index) },
                         onVisibleImageChanged = { visible ->
                             imageVisible = visible
-                            if (visible && readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !chapterVisibilityReported) {
-                                chapterVisibilityReported = true
-                                chapterVisible(manga, chapter)
-                            }
                         },
                         onNearEnd = {
                             val next = nextChapter

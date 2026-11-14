@@ -179,7 +179,9 @@ class CopyAccountRepository(context: Context) {
         store.clear()
     }
 
-    suspend fun favorites(page: Int): CloudPage<Manga> {
+    suspend fun favorites(page: Int): CloudPage<Manga> = favoritePage(page, strict = false)
+
+    private suspend fun favoritePage(page: Int, strict: Boolean): CloudPage<Manga> {
         val lease = requireSession()
         return withContext(Dispatchers.IO) {
             requirePage(page, 1200)
@@ -190,8 +192,55 @@ class CopyAccountRepository(context: Context) {
                 val rows = pageRows(data, offset, 18, "个人收藏")
                 val items = rows.items.mapNotNull { row -> row.optJSONObject("comic")?.let(::parseManga) }.distinctBy(Manga::id)
                 if (rows.items.isNotEmpty() && items.isEmpty()) throw SourceException("个人收藏中没有可识别的作品资料。")
+                if (strict && (rows.items.size != data.optJSONArray("list")?.length() || items.size != rows.items.size)) {
+                    throw SourceException("拷贝收藏中有无法识别或重复的作品，尚不能建立完整同步状态。")
+                }
                 ensureLease(lease)
                 CloudPage(items, rows.hasMore)
+            }
+        }
+    }
+
+    /** Full, stable membership only; a partially loaded UI feed never authorizes deletions. */
+    suspend fun completeFavorites(): List<Manga> {
+        val expected = sessionVersion
+        suspend fun scan(): List<Manga> {
+            val result = mutableListOf<Manga>()
+            val seen = mutableSetOf<String>()
+            for (page in 0..1200) {
+                ensureVersion(expected)
+                val next = favoritePage(page, strict = true)
+                ensureVersion(expected)
+                for (manga in next.items) {
+                    if (!seen.add(manga.id)) throw SourceException("拷贝收藏在读取期间发生变化，请重新检查。")
+                    result += manga
+                }
+                if (!next.hasMore) return result
+            }
+            throw SourceException("拷贝收藏尚未完整读取，请稍后重试。")
+        }
+        val first = scan()
+        val second = scan()
+        if (first.map(Manga::id) != second.map(Manga::id)) {
+            throw SourceException("拷贝收藏在读取期间发生变化，请重新检查后同步。")
+        }
+        ensureVersion(expected)
+        return second
+    }
+
+    /** Query is read-only. Never open the authenticated chapter route to inspect a cursor. */
+    suspend fun cloudProgress(mangaId: String): CloudHistoryEntry? {
+        val lease = requireSession()
+        val slug = segment(mangaId)
+        return withContext(Dispatchers.IO) {
+            requests.withLock {
+                val data = accountObject(lease, apiUrl("comic2/$slug/query", "platform" to "3"), "拷贝阅读状态")
+                ensureLease(lease)
+                val browse = data.optJSONObject("browse") ?: return@withLock null
+                val chapterId = browse.text("chapter_uuid")
+                if (chapterId.isBlank()) return@withLock null
+                val id = uuid(chapterId)
+                CloudHistoryEntry(Manga(slug, "", "", sourceId = "copy"), id, browse.text("chapter_name").take(120))
             }
         }
     }
@@ -427,9 +476,12 @@ class CopyAccountRepository(context: Context) {
         val authors = comic.optJSONArray("author")?.let { values ->
             (0 until values.length()).mapNotNull { values.optJSONObject(it)?.text("name")?.takeIf(String::isNotBlank) }
         }.orEmpty()
+        val popularity = comic.opt("popular")?.toString()?.toLongOrNull()?.takeIf { it >= 0 }
         return Manga(slug, title, cover, authors = authors,
             latestChapter = comic.text("last_chapter_name").ifBlank { comic.optJSONObject("last_chapter")?.text("name").orEmpty() },
-            sourceUrl = "${publicConfig.websiteOrigin}/comic/$slug")
+            sourceUrl = "${publicConfig.websiteOrigin}/comic/$slug",
+            sourceUuid = comic.text("uuid").takeIf(UUID_PATTERN::matches).orEmpty(),
+            popularity = popularity, totalPopularity = popularity)
     }
 
     private fun collected(data: JSONObject): Boolean? = data.integer("collect")?.takeIf { it >= 0 }?.let { it > 0 }
