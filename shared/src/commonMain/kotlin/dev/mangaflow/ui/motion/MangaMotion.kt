@@ -319,12 +319,17 @@ internal fun MotionDialog(
     onDismissRequest: () -> Unit,
     properties: DialogProperties = DialogProperties(),
     maximumWidth: Dp = MangaLayout.PanelWidth,
+    onClosed: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
     val state = remember { MutableTransitionState(false) }
     state.targetState = visible
     val transition = rememberTransition(state, label = "panel-presence")
+    val closed = rememberUpdatedState(onClosed)
+    if (onClosed != null) LaunchedEffect(state.currentState, state.targetState, state.isIdle) {
+        if (state.isIdle && !state.currentState && !state.targetState) closed.value?.invoke()
+    }
     val alpha = transition.animateFloat(
         transitionSpec = { tween(if (!motion) 0 else if (targetState) MangaMotion.Content else MangaMotion.Quick) },
         label = "panel-alpha",

@@ -1,5 +1,18 @@
 # MangaFlow detail · 2026-11-12
 
+## Copy shelf motion continuity · 2026-11-14 (COPY-MOTION-171–176)
+
+User feedback: “拷贝书架这里的动画做的不好每个地方都要有动画动效”. Exact message ID unavailable. Scope is every existing Copy shelf interaction: entry, header/refresh, sorting/direction, grid/list, loaded/error/empty states, book actions, cloud chapter captions, account menus/confirmation and collection-sync groups/selection/footer. Keep the single cloud-owned shelf, actual Copy ordering/chapter metadata, local-only adoption, explicit sync preview/eligibility and all owner/session/route identities.
+
+| ID | Adopted motion and observable acceptance |
+| --- | --- |
+| COPY-MOTION-171 | Adapt existing beUI/Ovio MotionSwap, MotionTabContent, MotionDialog, SettingsDisclosure-style reveal and LibraryScreen keyed animateItem. Keep quiet typography/materials and current density. One short content arrival supports root navigation; no full-list replay on every progress event or unbounded cascade. Reduced motion snaps. |
+| COPY-MOTION-172 | Stable toolbar slots swap refresh/busy/error and grid/list glyphs; sorting labels/checks and direction/chevrons follow state continuously. Joining-time tools expand horizontally. Explicit sort changes smoothly return the active feed to its start; inactive feed resets are not painted and initial restored positions survive. Book IDs own animated reordering/append/removal. |
+| COPY-MOTION-173 | Loading/error/empty/more states and cloud chapter captions retain their leaving content through local reveals/swaps. Local adoption gives a brief checkmark; busy feedback works in grid and rows. A per-book popup remains composed when its action becomes unavailable, allowing its actual exit. No invented progress, local reading caption or permanent extra badge. |
+| COPY-MOTION-174 | Account menu closes before opening sync or logout confirmation. The handoff is active/owner-bound and can be cancelled by reopening/navigation; no delayed operation targets a different account. Confirmation reuses the retained MotionDialog. Auth state and secret clearing remain immediate rather than retaining another owner's shelf. |
+| COPY-MOTION-175 | Sync scope, phase/messages, comparison entries, group chevrons/counts, selection and footer actions animate using actual state. Lazy book rows remain virtualized and keyed. Closing retains disclosure/selection state through exit and reopening; only account/candidate changes reset the corresponding state. Outgoing controls cannot dispatch stale sync work. |
+| COPY-MOTION-176 | Root completes one latest-main batch and ordinary CI trigger under the existing no-tests/no-local-build/no-device-or-service-probe workflow. Source/diff and bounded independent review do not establish installed hand feel, visual acceptance or successful compilation. |
+
 ## Reader recovery and Steam first data · 2026-11-14 (READER-RECOVERY / STEAM-FIRST-DATA)
 
 Raw current request: “深度定制优化设计我们的多源补页系统这个页包括网络超时，不要一直 loading 这样用户根本不知道进度啥情况以及有个小 bug loading 的时候点不出控制台”. Follow-up with screenshot1000121717.jpg: “之后记得去修这个一直在这个状态没办法下载”; screenshot shows video104MB and “正在等待首批数据…”. The user subsequently instructed “继续”. Exact message IDs unavailable. These requirements supersede READER-LOADING-20261114's12second disclosure without a terminal wait, while preserving actual source/chapter/page identities and foreground-only reading intent.
