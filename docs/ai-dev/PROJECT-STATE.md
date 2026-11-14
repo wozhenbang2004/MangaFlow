@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Native rankings: reviewed gaps and build-context correction · 2026-11-14
+
+Current instruction “目前是最佳设计最佳实现吗如果不是请继续” is implemented as DESIGN.md SITE-RANK-20261114-06–08 / BUILD-CONTEXT-20261114. Keep Copy 热榜 and all prior native identity/metric/snapshot rules. This bounded batch retains successful source hits when a later alias fails, stops after a complete source-query match without treating that spelling as identity proof, persists/restores validated site/kind/scope preferences, and wraps native score/count rows at stable text baselines.
+
+Main Android223/run43565196341 and applications43565196363 failed; decoded jobs132358256077/132357462214/132357462432 all identify the same PanelModelStore44 applicationContext invocation error.222 runs43564989764/43564989941 were cancelled, not passed. Concurrent main24ba012b already applies the identical applicationContext(context) repair; this batch preserves it and removes its redundant PanelModelStore draft.
+
+Root alone integrates these four ranking production source changes and existing records on latest main with a lease; existing compile/package/sign/release workflows remain unchanged. No tests/local build/device/browser/service/account probes were run. Source/diff/file integrity is the evidence completed here; replacement CI and installed reboot/return/source-lookup/font-scale behavior remain pending. Do not claim “best”, build success or device acceptance from these source changes.
+
 ## Download connection diagnosis · 2026-11-14
 
 NETWORK-DETECT-20261114 in DESIGN owns the latest external-proxy question and repeated “继续”. Four source files add an explicitly invoked diagnostic disclosure to DOWNLOAD-ROUTING-143's actual NetworkDownloadSettings: system/direct/saved-proxy comparisons for Copy catalogue or public update metadata, bounded two-route/two-sample requests, content/error-aware results, and a separate apply-to-download-default action. Real stored-state guards and owned cancellation preserve manual/category choices and active jobs. Response time is not bandwidth, native Steam validation or proof of bypassing an external VPN/TUN.

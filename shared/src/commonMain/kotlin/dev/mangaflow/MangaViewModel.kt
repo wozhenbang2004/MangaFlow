@@ -1025,37 +1025,46 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     slots.withPermit {
                         if (!rankedWorkCurrent(token, work) || source.source.id !in bodySources.enabledSourceIds)
                             return@withPermit
+                        // Keep successful earlier attempts even when a later alias times out.
+                        val collected = mutableListOf<Manga>()
                         try {
-                            val candidates = withTimeout(8_000L) {
-                                val rows = mutableListOf<Manga>()
+                            withTimeout(8_000L) {
                                 val terms = bodySourceSearchTerms(query, work.manga.alternativeTitles).take(3)
                                 for (term in terms) {
-                                    rows.addAll(repository.searchSource(source.source.id, term, 0).items)
-                                    if (rows.any { SourceDiscoveryIdentity.titleMatches(work.manga, it,
-                                            work.manga.alternativeTitles) }) break
+                                    val found = repository.searchSource(source.source.id, term, 0).items
+                                    collected.addAll(found)
+                                    val queryIdentity = work.manga.copy(title = term, alternativeTitles = emptyList())
+                                    if (found.any {
+                                            SourceDiscoveryIdentity.titleMatches(work.manga, it, work.manga.alternativeTitles) ||
+                                                SourceDiscoveryIdentity.titleMatches(queryIdentity, it, emptyList())
+                                        }) break
                                 }
-                                rows.distinctBy(Manga::id).filterNot { siteRankingsRepository.conflicts(work, it) }
-                                    .sortedByDescending { SourceDiscoveryIdentity.titleMatches(work.manga, it, work.manga.alternativeTitles) }
-                                    .take(12).map { it.copy(sourceName = source.source.name) }
                             }
-                            val exact = candidates.filter {
-                                SourceDiscoveryIdentity.workMatches(work.manga, it,
-                                    work.manga.alternativeTitles, sameChapterSystem = false)
-                            }
-                            // Several editions in the same source remain an explicit choice.
-                            val confirmed = exact.singleOrNull()?.id
-                            val rows = candidates.map { RankedReadingSource(it, it.id == confirmed) }
-                            if (rankedWorkCurrent(token, work) && source.source.id in bodySources.enabledSourceIds)
-                                _detail.update { current ->
-                                    if (current?.rankedWork?.key != work.key || token != rankedWorkRequest) current
-                                    else current.copy(rankedSources = (current.rankedSources + rows)
-                                        .distinctBy { it.manga.id })
-                                }
                         } catch (cancel: CancellationException) {
                             if (cancel !is kotlinx.coroutines.TimeoutCancellationException) throw cancel
-                            failureLock.withLock { failures.add(source.source.name + "搜索超时") }
+                            failureLock.withLock { failures.add(source.source.name + if (collected.isNotEmpty()) "搜索超时，可继续选择已找到的结果" else "搜索超时，请重试") }
                         } catch (failure: Exception) {
-                            failureLock.withLock { failures.add(source.source.name + "暂时无法搜索") }
+                            val reason = (failure as? SourceException)?.message?.take(160)
+                                ?: "暂时无法完成搜索"
+                            failureLock.withLock { failures.add(source.source.name + "：" + reason) }
+                        }
+                        if (!rankedWorkCurrent(token, work) || source.source.id !in bodySources.enabledSourceIds)
+                            return@withPermit
+                        val candidates = collected.distinctBy(Manga::id)
+                            .filter { it.sourceId == source.source.id && !siteRankingsRepository.conflicts(work, it) }
+                            .sortedByDescending {
+                                SourceDiscoveryIdentity.titleMatches(work.manga, it, work.manga.alternativeTitles)
+                            }.take(12).map { it.copy(sourceName = source.source.name) }
+                        val exact = candidates.filter {
+                            SourceDiscoveryIdentity.workMatches(work.manga, it,
+                                work.manga.alternativeTitles, sameChapterSystem = false)
+                        }
+                        // Several editions remain explicit choices; query spelling alone is never identity proof.
+                        val confirmed = exact.singleOrNull()?.id
+                        val rows = candidates.map { RankedReadingSource(it, it.id == confirmed) }
+                        if (rows.isNotEmpty()) _detail.update { current ->
+                            if (current?.rankedWork?.key != work.key || token != rankedWorkRequest) current
+                            else current.copy(rankedSources = (current.rankedSources + rows).distinctBy { it.manga.id })
                         }
                     }
                 } }.forEach { it.await() }

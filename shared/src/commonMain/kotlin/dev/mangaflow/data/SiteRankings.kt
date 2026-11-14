@@ -76,6 +76,11 @@ data class SiteRankedWork(
     val key: String get() = site.id + ":" + subjectId
 }
 
+data class SiteRankingViewState(
+    val selected: SiteRankingSelection,
+    val perSite: Map<RankingSite, SiteRankingSelection>,
+)
+
 data class SiteRankingEntry(val position: Int, val work: SiteRankedWork)
 data class SiteRankingSnapshot(
     val selection: SiteRankingSelection,
@@ -94,6 +99,36 @@ class SiteRankingsRepository(context: PlatformContext) {
     private val diskLock = Mutex()
     private val linkLock = Mutex()
     private var cacheEpoch = 0L
+
+    suspend fun readViewState(): SiteRankingViewState? = withContext(Dispatchers.IO) {
+        runCatching {
+            val value = links.getString("view-state-v1", null) ?: return@runCatching null
+            val root = JSONObject(value)
+            fun selection(record: JSONObject?): SiteRankingSelection? {
+                if (record == null) return null
+                val site = RankingSite.entries.firstOrNull { it.id == record.reviewText("site") } ?: return null
+                val kind = SiteRankingKind.entries.firstOrNull { it.name == record.reviewText("kind") } ?: return null
+                val scope = SiteRankingScope.entries.firstOrNull { it.name == record.reviewText("scope") } ?: return null
+                return SiteRankingSelection(site, kind, scope).takeIf { it.valid() }
+            }
+            val selected = selection(root.optJSONObject("selected")) ?: return@runCatching null
+            val perSite = root.optJSONArray("perSite")?.reviewObjects().orEmpty()
+                .mapNotNull(::selection).associateBy { it.site }
+            SiteRankingViewState(selected, perSite + (selected.site to selected))
+        }.getOrNull()
+    }
+
+    suspend fun writeViewState(state: SiteRankingViewState) = withContext(Dispatchers.IO) {
+        linkLock.withLock {
+            fun encode(value: SiteRankingSelection): JSONObject =
+                JSONObject().put("site", value.site.id).put("kind", value.kind.name).put("scope", value.scope.name)
+            require(state.selected.valid())
+            val perSite = JSONArray()
+            state.perSite.values.filter { it.valid() }.distinctBy { it.site }.forEach { perSite.put(encode(it)) }
+            check(links.edit().putString("view-state-v1", JSONObject().put("selected", encode(state.selected))
+                .put("perSite", perSite).toString()).commit()) { "当前榜单选择未能保存。" }
+        }
+    }
 
     suspend fun page(selection: SiteRankingSelection, page: Int): SiteRankingPage = withContext(Dispatchers.IO) {
         require(selection.valid() && page in 0..199) { "榜单范围或页码无效。" }

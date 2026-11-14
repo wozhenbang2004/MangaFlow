@@ -22,6 +22,8 @@ data class SiteRankingsState(
     val error: String? = null,
     val linkedIds: Set<String> = emptySet(),
     val failedPage: Int? = null,
+    val restoringSelection: Boolean = false,
+    val preferenceError: String? = null,
 )
 data class RankedReadingSource(val manga: Manga, val verified: Boolean)
 
@@ -30,7 +32,7 @@ class SiteRankingsController(
     val repository: SiteRankingsRepository,
     private val scope: CoroutineScope,
 ) {
-    private val mutable = MutableStateFlow(SiteRankingsState())
+    private val mutable = MutableStateFlow(SiteRankingsState(restoringSelection = true))
     val state = mutable.asStateFlow()
     private val snapshots = LinkedHashMap<String, SiteRankingsState>()
     private val selections = mutableMapOf<RankingSite, SiteRankingSelection>()
@@ -40,6 +42,40 @@ class SiteRankingsController(
     private var job: Job? = null
     private var visible = false
 
+    private var restored = false
+    private var selectionChanges = 0L
+    private var preferenceWrite: Job? = null
+
+    init {
+        scope.launch {
+            val saved = try { repository.readViewState() }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { null }
+            if (selectionChanges == 0L && saved != null) {
+                selections.putAll(saved.perSite)
+                mutable.value = SiteRankingsState(saved.selected)
+            }
+            restored = true
+            mutable.update { it.copy(restoringSelection = false) }
+            if (visible && (mutable.value.entries.isEmpty() || stale(mutable.value))) load()
+        }
+    }
+
+    private fun persistSelection(selection: SiteRankingSelection) {
+        preferenceWrite?.cancel()
+        val saved = SiteRankingViewState(selection, selections.toMap() + (selection.site to selection))
+        preferenceWrite = scope.launch {
+            try {
+                repository.writeViewState(saved)
+                mutable.update { if (it.selection == selection) it.copy(preferenceError = null) else it }
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) {
+                mutable.update { if (it.selection == selection)
+                    it.copy(preferenceError = "当前选择尚未保存，重启后可能恢复上次选择。") else it }
+            }
+        }
+    }
+
     fun setVisible(value: Boolean) {
         if (visible == value) return
         visible = value
@@ -47,7 +83,7 @@ class SiteRankingsController(
             request++
             job?.cancel()
             mutable.update { it.copy(refreshing = false, loadingMore = false) }
-        } else if (mutable.value.entries.isEmpty() || stale(mutable.value)) load()
+        } else if (restored && (mutable.value.entries.isEmpty() || stale(mutable.value))) load()
     }
 
     fun selectSite(site: RankingSite) {
@@ -59,6 +95,8 @@ class SiteRankingsController(
 
     private fun select(selection: SiteRankingSelection) {
         if (!selection.valid() || selection == mutable.value.selection) return
+        selectionChanges++
+        restored = true
         val old = mutable.value
         if (old.entries.isNotEmpty() && old.entries.size <= 600)
             snapshots[old.selection.key] = old.copy(loading = false, refreshing = false, loadingMore = false, error = null)
@@ -67,6 +105,7 @@ class SiteRankingsController(
         request++
         job?.cancel()
         mutable.value = snapshots[selection.key] ?: SiteRankingsState(selection)
+        persistSelection(selection)
         if (visible && (mutable.value.entries.isEmpty() || stale(mutable.value))) load()
     }
 
@@ -81,7 +120,7 @@ class SiteRankingsController(
     }
 
     private fun load(force: Boolean = false) {
-        if (!visible) return
+        if (!visible || !restored) return
         val token = ++request
         job?.cancel()
         val selected = mutable.value.selection
@@ -94,7 +133,8 @@ class SiteRankingsController(
                     if (token != request) return@launch
                     if (cached != null) {
                         mutable.value = SiteRankingsState(selected, cached.entries, loading = false,
-                            hasMore = cached.hasMore, page = cached.page, fetchedAt = cached.fetchedAt)
+                            hasMore = cached.hasMore, page = cached.page, fetchedAt = cached.fetchedAt,
+                            preferenceError = mutable.value.preferenceError)
                         publishLinks(token, cached.entries)
                         if (!stale(mutable.value)) return@launch
                         mutable.update { it.copy(refreshing = true) }
@@ -116,7 +156,8 @@ class SiteRankingsController(
                 val snapshot = SiteRankingSnapshot(selected, rows.distinctBy { it.work.key },
                     receivedPage, hasMore, wallTimeMillis())
                 mutable.value = SiteRankingsState(selected, snapshot.entries, loading = false,
-                    hasMore = hasMore, page = receivedPage, fetchedAt = snapshot.fetchedAt)
+                    hasMore = hasMore, page = receivedPage, fetchedAt = snapshot.fetchedAt,
+                    preferenceError = mutable.value.preferenceError)
                 publishLinks(token, snapshot.entries)
                 save(snapshot, epoch)
             } catch (cancel: CancellationException) { throw cancel }

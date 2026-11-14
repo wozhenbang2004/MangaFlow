@@ -1,5 +1,6 @@
 @file:OptIn(androidx.compose.animation.ExperimentalSharedTransitionApi::class,
-    androidx.compose.foundation.ExperimentalFoundationApi::class)
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 package dev.mangaflow.ui
 
 import androidx.compose.foundation.background
@@ -97,6 +98,7 @@ internal fun SiteRankingsScreen(
     }) }
     val top = with(density) { headerHeight.toDp() } + HeaderContentGap
     val positions = rememberSaveableStateHolder()
+    val controlsReady = active && !state.restoringSelection
     Box(Modifier.fillMaxSize().semantics { paneTitle = "各站榜单" }) {
         MotionTabContent(selected = state, contentKey = { it.selection.key },
             order = { it.selection.site.ordinal * 100 + it.selection.kind.ordinal * 10 + it.selection.scope.ordinal },
@@ -106,7 +108,7 @@ internal fun SiteRankingsScreen(
             SideEffect { if (selected) retainedTop = top }
             positions.SaveableStateProvider(pane.selection.key) {
                 RankingPane(pane, backdrop, if (selected) top else retainedTop,
-                    active = active && selected && !siteMenu && !filterMenu,
+                    active = controlsReady && selected && !siteMenu && !filterMenu,
                     onRetry = controller::retry, onMore = controller::more, onOpen = onOpen, onInspect = onInspect)
             }
         }
@@ -120,12 +122,12 @@ internal fun SiteRankingsScreen(
                 Row(Modifier.heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.weight(1f)) {
                         MotionTextButton(onClick = { filterMenu = !filterMenu; siteMenu = false },
-                            enabled = active, modifier = Modifier.fillMaxWidth(),
+                            enabled = controlsReady, modifier = Modifier.fillMaxWidth(),
                             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
-                            Text(state.selection.scope.label, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
+                            Text(if (state.restoringSelection) "范围" else state.selection.scope.label, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
                             Icon(Icons.Outlined.FilterList, "榜单范围与说明", Modifier.padding(start = 4.dp).size(17.dp))
                         }
-                        CompactGlassPopover(filterMenu && active, backdrop, onDismiss = { filterMenu = false },
+                        CompactGlassPopover(filterMenu && controlsReady, backdrop, onDismiss = { filterMenu = false },
                             maximumWidth = 320.dp) {
                             Text("范围", modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.labelMedium)
                             state.selection.site.scopes.forEach { value ->
@@ -136,6 +138,10 @@ internal fun SiteRankingsScreen(
                             }
                             Text(state.selection.explanation, Modifier.padding(12.dp),
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            state.preferenceError?.let {
+                                Text(it, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                             if (state.fetchedAt > 0) Text("本地获取：" +
                                 formatInstantMillis(state.fetchedAt, "MM-dd HH:mm"),
                                 Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -143,7 +149,7 @@ internal fun SiteRankingsScreen(
                         }
                     }
                     MotionIconButton(onClick = controller::refresh,
-                        enabled = active && !state.loading && !state.refreshing && !state.loadingMore,
+                        enabled = controlsReady && !state.loading && !state.refreshing && !state.loadingMore,
                         modifier = Modifier.size(44.dp)) {
                         if (state.refreshing) MotionBusyIndicator(Modifier.size(17.dp))
                         else Icon(Icons.Outlined.Refresh, "刷新当前站点榜单", Modifier.size(19.dp))
@@ -160,25 +166,25 @@ internal fun SiteRankingsScreen(
                         role = GlassSurfaceRole.NAVIGATION) {
                         MotionTabs(selected = kinds.indexOf(pane.kind).coerceAtLeast(0),
                             labels = kinds.map { it.label },
-                            onSelect = { if (active && pane.site == state.selection.site) controller.selectKind(kinds[it]) },
+                            onSelect = { if (controlsReady && pane.site == state.selection.site) controller.selectKind(kinds[it]) },
                             treatment = MotionTabTreatment.Underline, fontSize = 12.sp, controlHeight = 44.dp,
-                            modifier = Modifier.fillMaxWidth().motionInputGate(active && pane.site == state.selection.site))
+                            modifier = Modifier.fillMaxWidth().motionInputGate(controlsReady && pane.site == state.selection.site))
                     }
                 }
             },
         ) {
             Box(Modifier.fillMaxWidth()) {
                 MotionTextButton(onClick = { siteMenu = !siteMenu; filterMenu = false },
-                    enabled = active, modifier = Modifier.fillMaxWidth(),
+                    enabled = controlsReady, modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
-                    ReviewSourceMark(state.selection.site.id, size = 17.dp)
-                    Text(state.selection.site.title, modifier = Modifier.weight(1f).padding(start = 6.dp),
+                    if (!state.restoringSelection) ReviewSourceMark(state.selection.site.id, size = 17.dp)
+                    Text(if (state.restoringSelection) "各站榜单" else state.selection.site.title, modifier = Modifier.weight(1f).padding(start = 6.dp),
                         maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 13.sp)
-                    if (state.selection.site.kinds.size == 1) Text("评分", fontSize = 11.sp,
+                    if (!state.restoringSelection && state.selection.site.kinds.size == 1) Text("评分", fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Icon(Icons.Outlined.ExpandMore, "选择榜单站点", Modifier.size(17.dp))
                 }
-                CompactGlassPopover(siteMenu && active, backdrop, onDismiss = { siteMenu = false }) {
+                CompactGlassPopover(siteMenu && controlsReady, backdrop, onDismiss = { siteMenu = false }) {
                     RankingSite.entries.forEach { site ->
                         CompactMenuAction(if (site == state.selection.site) Icons.Outlined.Check else Icons.Outlined.Language,
                             site.title) { siteMenu = false; controller.selectSite(site) }
@@ -266,21 +272,22 @@ private fun SiteRankingRow(entry: SiteRankingEntry, kind: SiteRankingKind, linke
                     fontSize = 11.sp, lineHeight = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(verticalArrangement = Arrangement.spacedBy(3.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val value = when (kind) {
                     SiteRankingKind.SCORE -> w.score?.toString()?.removeSuffix(".0")
                     SiteRankingKind.POPULARITY -> w.popularity?.let(::rankingCount)
                     SiteRankingKind.TRENDING -> w.trending?.let(::rankingCount)
                     SiteRankingKind.FAVOURITES -> w.favourites?.let(::rankingCount)
                 }
-                if (value != null) Text(value, style = mangaMetricValueStyle(16.sp, 20.sp))
+                if (value != null) Text(value, modifier = Modifier.alignByBaseline(), style = mangaMetricValueStyle(16.sp, 20.sp))
                 if (kind == SiteRankingKind.SCORE && w.ratingCount != null)
-                    Text(rankingCount(w.ratingCount.toLong()) + "人评分", fontSize = 10.sp,
+                    Text(rankingCount(w.ratingCount.toLong()) + "人评分", modifier = Modifier.alignByBaseline(), fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                 else if (kind != SiteRankingKind.SCORE && value != null)
                     Text(if (kind == SiteRankingKind.POPULARITY) "书单" else kind.label,
-                        fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                if (linked) Icon(Icons.Outlined.Check, "已关联阅读来源", Modifier.size(13.dp),
+                        modifier = Modifier.alignByBaseline(), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                if (linked) Icon(Icons.Outlined.Check, "已关联阅读来源", Modifier.align(Alignment.CenterVertically).size(13.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
