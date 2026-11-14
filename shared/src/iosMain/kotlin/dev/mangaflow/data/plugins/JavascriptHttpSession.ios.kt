@@ -23,6 +23,7 @@ import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.cinterop.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -35,6 +36,7 @@ import okio.ByteString.Companion.encodeUtf8
 import okio.Buffer
 import okio.GzipSource
 import okio.buffer
+import okio.use
 import platform.CFNetwork.*
 import platform.CoreFoundation.*
 import platform.darwin.dispatch_get_global_queue
@@ -259,20 +261,42 @@ private fun nativePublicAddresses(host: String, port: Int): List<String> = memSc
 }
 
 private fun nativePublicAddress(address: String): Boolean = memScoped {
-    val bytes = allocArray<UByteVar>(16)
-    if (inet_pton(AF_INET, address, bytes) == 1) {
-        val a = bytes[0].toInt(); val b = bytes[1].toInt(); val c = bytes[2].toInt()
-        return@memScoped a !in setOf(0, 10, 127) && a < 224 && !(a == 100 && b in 64..127) &&
-            !(a == 169 && b == 254) && !(a == 172 && b in 16..31) && !(a == 192 && b in setOf(0, 168)) &&
-            !(a == 198 && (b in 18..19 || b == 51 && c == 100)) && !(a == 203 && b == 0 && c == 113)
+    // AI_NUMERICHOST parses the already numeric DNS answer without another lookup.
+    val result = alloc<CPointerVar<addrinfo>>().apply { value = null }
+    val hints = alloc<addrinfo>().apply {
+        memset(ptr, 0, sizeOf<addrinfo>().convert())
+        ai_flags = AI_NUMERICHOST
+        ai_family = AF_UNSPEC; ai_socktype = SOCK_STREAM; ai_protocol = IPPROTO_TCP
     }
-    if (inet_pton(AF_INET6, address, bytes) != 1) return@memScoped false
-    if ((0..9).all { bytes[it] == 0.toUByte() } && bytes[10] == 255.toUByte() && bytes[11] == 255.toUByte())
-        return@memScoped nativePublicAddress((12..15).joinToString(".") { bytes[it].toString() })
-    if (bytes[0] == 0.toUByte() && bytes[1] == 0x64.toUByte() && bytes[2] == 0xff.toUByte() && bytes[3] == 0x9b.toUByte() && (4..11).all { bytes[it] == 0.toUByte() })
-        return@memScoped nativePublicAddress((12..15).joinToString(".") { bytes[it].toString() })
-    bytes[0].toInt() and 0xe0 == 0x20 && !(bytes[0] == 0x20.toUByte() && bytes[1] == 1.toUByte() && bytes[2] == 0x0d.toUByte() && bytes[3] == 0xb8.toUByte()) &&
-        !(bytes[0] == 0x20.toUByte() && bytes[1] == 2.toUByte()) && !(bytes[0] == 0x20.toUByte() && bytes[1] == 1.toUByte() && bytes[2] == 0.toUByte() && bytes[3] == 0.toUByte())
+    if (getaddrinfo(address, null, hints.ptr, result.ptr) != 0) return@memScoped false
+    val first = result.value ?: return@memScoped false
+    try {
+        val item = first.pointed
+        val socket = item.ai_addr ?: return@memScoped false
+        val bytes = when (item.ai_family) {
+            AF_INET -> {
+                if (item.ai_addrlen.toLong() < sizeOf<sockaddr_in>()) return@memScoped false
+                socket.reinterpret<sockaddr_in>().pointed.sin_addr.ptr.reinterpret<UByteVar>()
+            }
+            AF_INET6 -> {
+                if (item.ai_addrlen.toLong() < sizeOf<sockaddr_in6>()) return@memScoped false
+                socket.reinterpret<sockaddr_in6>().pointed.sin6_addr.ptr.reinterpret<UByteVar>()
+            }
+            else -> return@memScoped false
+        }
+        if (item.ai_family == AF_INET) {
+            val a = bytes[0].toInt(); val b = bytes[1].toInt(); val c = bytes[2].toInt()
+            return@memScoped a !in setOf(0, 10, 127) && a < 224 && !(a == 100 && b in 64..127) &&
+                !(a == 169 && b == 254) && !(a == 172 && b in 16..31) && !(a == 192 && b in setOf(0, 168)) &&
+                !(a == 198 && (b in 18..19 || b == 51 && c == 100)) && !(a == 203 && b == 0 && c == 113)
+        }
+        if ((0..9).all { bytes[it] == 0.toUByte() } && bytes[10] == 255.toUByte() && bytes[11] == 255.toUByte())
+            return@memScoped nativePublicAddress((12..15).joinToString(".") { bytes[it].toString() })
+        if (bytes[0] == 0.toUByte() && bytes[1] == 0x64.toUByte() && bytes[2] == 0xff.toUByte() && bytes[3] == 0x9b.toUByte() && (4..11).all { bytes[it] == 0.toUByte() })
+            return@memScoped nativePublicAddress((12..15).joinToString(".") { bytes[it].toString() })
+        bytes[0].toInt() and 0xe0 == 0x20 && !(bytes[0] == 0x20.toUByte() && bytes[1] == 1.toUByte() && bytes[2] == 0x0d.toUByte() && bytes[3] == 0xb8.toUByte()) &&
+            !(bytes[0] == 0x20.toUByte() && bytes[1] == 2.toUByte()) && !(bytes[0] == 0x20.toUByte() && bytes[1] == 1.toUByte() && bytes[2] == 0.toUByte() && bytes[3] == 0.toUByte())
+    } finally { freeaddrinfo(first) }
 }
 
 private fun checkNativeSystemProxy() {

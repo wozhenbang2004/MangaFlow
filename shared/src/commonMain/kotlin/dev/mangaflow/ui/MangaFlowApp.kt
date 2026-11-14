@@ -85,6 +85,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import dev.mangaflow.data.SearchTarget
+import dev.mangaflow.data.Manga
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -148,6 +149,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import dev.mangaflow.experience.ExperiencePolicyStore
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.CancellationException
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.mangaflow.storage.WallpaperStore
 import dev.mangaflow.DetailState

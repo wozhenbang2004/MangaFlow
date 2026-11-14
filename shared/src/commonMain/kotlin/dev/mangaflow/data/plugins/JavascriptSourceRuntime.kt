@@ -1,7 +1,6 @@
 package dev.mangaflow.data.plugins
 
 import com.dokar.quickjs.QuickJs
-import com.dokar.quickjs.evaluate
 import com.dokar.quickjs.binding.AsyncFunctionBinding
 import com.dokar.quickjs.binding.FunctionBinding
 import dev.mangaflow.data.ChapterDownloadTransport

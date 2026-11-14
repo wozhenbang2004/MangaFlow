@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## CI246 compiler correction · 2026-11-14
+
+User asked twice “ci 是不是失败了”. Actual main db0efef Android run43591800939/job132437913562, Windows run43591801012/job132437914194 and iOS job132437914354 all failed compilation. Common MangaFlowApp.kt errors identify missing dev.mangaflow.data.Manga and kotlinx.coroutines.CancellationException imports in the preserved source-hosting additions, with cascading inference/sourceId errors. iOS additionally reports JavascriptSourceRuntime.kt:4 evaluate and JavascriptHttpSession.ios.kt IO/inet_pton/use API errors. This is a concrete failed246 build, not an installation result.
+
+This bounded correction retains all Copy merge, settings/network and source-hosting behavior, changing only the imports and the precise fixed-dependency platform interop causing these errors. Source review/whitespace only; no tests, local builds or service/device probes. Root publishes one expected-head correction preserving newer main, confirms ordinary CI activation and does not claim a successful new build or released246 APK. Installed behavior and source-hosting platform capability remain pending actual artifacts/user feedback.
+
 ## Settings workspaces and unified Copy difference review · 2026-11-14
 
 Current four user messages and screenshots1000121718–1722 are recorded under DESIGN SETTINGS-WORKSPACE-177–180 and COPY-DIFF-181. Experience settings now opens a retained independent panel from one compact row. Network keeps Ovio selection/fades with three retained panes, one measured target and one height animation; editing closes on SYSTEM/DIRECT and explicit pending proxy use is distinct from detected drafts. Local shelf captions/actions/accessibility now use the current-owner adopted chapter target without mixing old pages.
