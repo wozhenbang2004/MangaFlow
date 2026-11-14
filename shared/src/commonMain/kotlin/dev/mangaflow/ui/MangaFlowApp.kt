@@ -705,6 +705,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         onRetryChapters = model::retryReadingChapters,
                         active = current.key == frame.key && sourceManagement == null && sourceResumeChoice == null,
                         onReadVariant = model::readReaderChapterVariant,
+                        onQuickReadVariant = model::quickReadReaderChapterVariant,
+                        sourceSwitchName = sourceOperation.targetSource,
                         onSetPreferredSource = model::preferBodySource,
                         onClearChapterSource = model::clearChapterSource,
                         onCancelSourceSelection = model::cancelSourceSelection,

@@ -93,6 +93,7 @@ import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.storage.preferences
 import kotlin.concurrent.Volatile
+import kotlin.math.roundToInt
 
 data class BrowseState(
     val query: String = "",
@@ -140,10 +141,11 @@ data class DetailState(
     val reviewsLoading: Boolean = true,
 )
 
-data class ChapterSourceOperation(val loading: Boolean = false, val error: String? = null)
+data class ChapterSourceOperation(val loading: Boolean = false, val error: String? = null,
+    val targetSource: String = "")
 
 data class SourceResumeChoice(val workId: String, val chapter: Chapter, val variant: ChapterVariant,
-    val fromPageIndex: Int)
+    val fromPageIndex: Int, val fromPageCount: Int = 0)
 
 data class SourceManagementState(
     val work: Manga,
@@ -259,7 +261,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     val chapterSourceOperation = _chapterSourceOperation.asStateFlow()
     private val _sourceResumeChoice = MutableStateFlow<SourceResumeChoice?>(null)
     val sourceResumeChoice = _sourceResumeChoice.asStateFlow()
-    private val _sourceResumePolicy = MutableStateFlow(sourcePreferences.getString("source_resume_policy", "ask")
+    private val _sourceResumePolicy = MutableStateFlow(sourcePreferences.getString("source_resume_policy", "same_page")
         ?.takeIf { it in setOf("ask", "same_page", "source_record") } ?: "ask")
     val sourceResumePolicy = _sourceResumePolicy.asStateFlow()
     private var sourceResumeEpoch = 0L
@@ -356,7 +358,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             library.backupRestored.drop(1).collect {
                 try {
                     bodySources.reload()
-                    _sourceResumePolicy.value = sourcePreferences.getString("source_resume_policy", "ask")
+                    _sourceResumePolicy.value = sourcePreferences.getString("source_resume_policy", "same_page")
                         ?.takeIf { it in setOf("ask", "same_page", "source_record") } ?: "ask"
                 } catch (cancel: CancellationException) { throw cancel
                 } catch (failure: Exception) {
@@ -1617,11 +1619,19 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         requestSourceVariant(chapter, variant, library.progressFor(workId, chapter.id)?.pageIndex)
     }
 
-    fun readReaderChapterVariant(chapter: Chapter, variant: ChapterVariant, pageIndex: Int) {
-        requestSourceVariant(chapter, variant, pageIndex.coerceAtLeast(0))
+    fun readReaderChapterVariant(chapter: Chapter, variant: ChapterVariant, pageIndex: Int, pageCount: Int) {
+        requestSourceVariant(chapter, variant, pageIndex.coerceAtLeast(0), pageCount.coerceAtLeast(0))
     }
 
-    private fun requestSourceVariant(chapter: Chapter, variant: ChapterVariant, fromPageIndex: Int?) {
+    /** Fast one-tap fallback for a failed image: the alternative source owns the new page. */
+    fun quickReadReaderChapterVariant(chapter: Chapter, variant: ChapterVariant, pageIndex: Int, pageCount: Int) {
+        if (chapter.variants.none { it.storageId == variant.storageId } || variant.storageId == chapter.id) return
+        _sourceResumeChoice.value = null
+        prepareReadChapterVariant(chapter, variant, pageIndex.coerceAtLeast(0), pageCount.coerceAtLeast(0))
+    }
+
+    private fun requestSourceVariant(chapter: Chapter, variant: ChapterVariant,
+        fromPageIndex: Int?, fromPageCount: Int = 0) {
         if (chapter.variants.none { it.storageId == variant.storageId }) return
         val work = _reading.value?.manga ?: _detail.value?.manga ?: return
         _sourceResumeChoice.value = null
@@ -1630,9 +1640,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (page != null && _sourceResumePolicy.value == "ask") {
             sourceResumeFromReader = _reading.value != null
             sourceResumeEpoch = if (sourceResumeFromReader) readingRequestId else detailRequestId
-            _sourceResumeChoice.value = SourceResumeChoice(work.id, chapter, variant, page)
+            _sourceResumeChoice.value = SourceResumeChoice(work.id, chapter, variant, page, fromPageCount)
         } else prepareReadChapterVariant(chapter, variant,
-            page?.takeIf { _sourceResumePolicy.value == "same_page" })
+            page?.takeIf { _sourceResumePolicy.value == "same_page" }, fromPageCount)
     }
 
     fun cancelSourceResumeChoice() {
@@ -1666,11 +1676,12 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             val valid = if (reader) readingRequestId == epoch && _reading.value?.manga?.id == choice.workId
                 else detailRequestId == epoch && _detail.value?.manga?.id == choice.workId && _reading.value == null
             if (valid) prepareReadChapterVariant(choice.chapter, choice.variant,
-                choice.fromPageIndex.takeIf { samePage })
+                choice.fromPageIndex.takeIf { samePage }, choice.fromPageCount)
         }
     }
 
-    private fun prepareReadChapterVariant(chapter: Chapter, variant: ChapterVariant, samePageIndex: Int?) {
+    private fun prepareReadChapterVariant(chapter: Chapter, variant: ChapterVariant,
+        samePageIndex: Int?, fromPageCount: Int = 0) {
         if (chapter.variants.none { it.storageId == variant.storageId }) return
         val session = _reading.value
         val detail = _detail.value
@@ -1681,25 +1692,39 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         cancelSourceSelection()
         val request = sourceReadRequest
         val selected = resolveChapter(chapter, variant)
-        _chapterSourceOperation.value = ChapterSourceOperation(loading = true)
+        val sourceMangaId = chapterSourceMangaId(work.id, selected)
+        _chapterSourceOperation.value = ChapterSourceOperation(loading = true, targetSource = variant.sourceName)
+        // Keep the old readable page mounted until the target manifest is ready.
+        // The source returns only URLs/metadata: no preceding images are fetched.
         sourceReadJob = viewModelScope.launch {
             try {
-                val pages = downloads.storedPages(work.id, selected.id) ?: foregroundRequest("准备本章来源") {
-                    repository.pages(chapterSourceMangaId(work.id, selected), selected.id)
-                }
+                val pages = repository.cachedPages(sourceMangaId, selected.id)
+                    ?: withContext(Dispatchers.IO) { downloads.storedPages(work.id, selected.id) }
+                    ?: withContext(Dispatchers.IO) { foregroundRequest("准备本章来源") {
+                        repository.pages(sourceMangaId, selected.id)
+                    } }
                 require(pages.isNotEmpty()) { "这个来源暂时没有可读图片。" }
                 if (request != sourceReadRequest) return@launch
                 if (session != null && (readingEpoch != readingRequestId || _reading.value?.manga?.id != work.id)) return@launch
                 if (session == null && (detailEpoch != detailRequestId || _detail.value?.manga?.id != work.id)) return@launch
+                // Page cuts may differ between editions. Preserve approximate progress
+                // rather than treating the same integer page as the same artwork.
+                val initialPage = samePageIndex?.let { oldIndex ->
+                    if (fromPageCount > 1 && pages.size > 1)
+                        (oldIndex.coerceIn(0, fromPageCount - 1).toDouble() /
+                            (fromPageCount - 1) * (pages.size - 1)).roundToInt().coerceIn(0, pages.lastIndex)
+                    else oldIndex.coerceIn(0, pages.lastIndex)
+                }
+                val projected = withContext(Dispatchers.Default) { selectedChapters(catalog, selected) }
+                if (request != sourceReadRequest) return@launch
                 withContext(Dispatchers.IO) {
                     unifiedChapters.choose(work.id, selected.logicalId.ifBlank { selected.id }, selected.id)
                 }
                 if (request != sourceReadRequest) return@launch
                 _chapterSourceOperation.value = ChapterSourceOperation()
-                val initialPage = samePageIndex?.coerceIn(0, pages.lastIndex)
-                beginReading(ReadingSession(work, selectedChapters(catalog, selected), selected.id,
-                    initialPageIndex = initialPage))
-                messages.send(if (initialPage != null) "已切换到 ${variant.sourceName}，尝试第${initialPage + 1}页，内容可能不对应。"
+                beginReading(ReadingSession(work, projected, selected.id, initialPageIndex = initialPage))
+                messages.send(if (initialPage != null)
+                    "已切换到 ${variant.sourceName}，从约第${initialPage + 1}页继续。不同版本分图可能不同。"
                 else if (library.progressFor(work.id, selected.id) != null)
                     "已切换到 ${variant.sourceName}，恢复该版本的位置。"
                 else "已切换到 ${variant.sourceName}，从本话开头阅读。")

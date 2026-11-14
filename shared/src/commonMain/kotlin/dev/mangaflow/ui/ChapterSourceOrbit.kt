@@ -134,7 +134,8 @@ internal fun ChapterSourceOrbit(
     val close = { if (!closing) { cancel(); closing = true } }
     val progress = remember(identity) { Animatable(0f) }
     val canInteract by remember(identity, closing) {
-        derivedStateOf { !closing && progress.value >= .9f }
+        // Rows are already separated at 0.6; delaying taps to 0.9 swallowed the first touch.
+        derivedStateOf { !closing && origin != null && progress.value >= .6f }
     }
     val scrim = MaterialTheme.colorScheme.scrim
     // A Popup is another window: explicit source layers carry the actual page across it.
@@ -317,6 +318,7 @@ internal fun ChapterSourceDisc(
     resolution: ChapterResolutionState? = null,
     actionLabel: String,
     onInspect: (() -> Unit)? = null,
+    resolutionActionEnabled: Boolean = true,
     revealProgress: () -> Float = { 1f },
     onClick: () -> Unit,
 ) {
@@ -370,11 +372,14 @@ internal fun ChapterSourceDisc(
                     // Always consume its own tap, including while busy/unavailable;
                     // this never delegates to source selection.
                     Row(Modifier.fillMaxWidth().height(14.dp * fontScale)
-                        .clickable(interactionSource = resolutionInteraction, indication = null,
+                        .then(if (resolutionActionEnabled) Modifier.clickable(
+                            interactionSource = resolutionInteraction, indication = null,
                             role = Role.Button,
                             onClickLabel = if (sample.known) "重新读取原图尺寸" else "读取原图尺寸",
                             onClick = { if (sample.canMeasure && !sample.busy) sample.measure() })
-                        .motionPress(resolutionInteraction, enabled = sample.canMeasure && !sample.busy, pressedScale = .98f)
+                            .motionPress(resolutionInteraction,
+                                enabled = sample.canMeasure && !sample.busy, pressedScale = .98f)
+                            else Modifier)
                         .semantics(mergeDescendants = true) {
                             contentDescription = variant.sourceName + "，" + sample.detail
                             stateDescription = when {
@@ -384,7 +389,7 @@ internal fun ChapterSourceDisc(
                                 sample.canMeasure -> "尚未读取原图尺寸"
                                 else -> "尺寸未知"
                             }
-                            if (!sample.canMeasure || sample.busy) disabled()
+                            if (!resolutionActionEnabled || !sample.canMeasure || sample.busy) disabled()
                         }, verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                         if (sample.busy) MotionBusyIndicator(Modifier.size(9.dp),

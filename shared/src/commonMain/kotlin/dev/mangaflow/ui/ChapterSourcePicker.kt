@@ -228,7 +228,8 @@ internal fun ChapterSourcePicker(
             repository = repository.takeIf { sourceMangaId != null },
             mangaId = sourceMangaId.orEmpty(), chapterId = variant.storageId,
             entry = entry, declaredPages = variant.pageCount,
-            autoMeasure = true, active = sourceActive)
+            // Idle-only measurement. Cancels pending source probes as soon as a row is chosen.
+            autoMeasure = true, active = sourceActive && requestedVariant == null && !loading)
         val details = listOfNotNull(
             variant.language.takeIf(String::isNotBlank),
             variant.edition.takeIf(String::isNotBlank),
@@ -241,11 +242,17 @@ internal fun ChapterSourcePicker(
         ChapterSourceDisc(variant, backdrop, modifier, selected = selected,
             busy = loading && requestedVariant?.storageId == variant.storageId,
             enabled = !loading, details = details, secondary = secondary,
-            entry = entry, resolution = resolution, revealProgress = reveal,
-            actionLabel = "使用${variant.sourceName}阅读本章",
+            entry = entry, resolution = resolution, resolutionActionEnabled = false,
+            revealProgress = reveal,
+            actionLabel = if (selected) "重新加载当前来源此页" else "使用${variant.sourceName}阅读本章",
             onInspect = { inspected = listOf(variant.sourceName, secondary, details)
                 .filter(String::isNotBlank).distinct().joinToString(" · ") },
-            onClick = { requestedVariant = variant; onReadVariant(frozen, variant) })
+            onClick = {
+                if (requestedVariant == null && !loading) {
+                    requestedVariant = variant
+                    onReadVariant(frozen, variant)
+                }
+            })
     }
 }
 

@@ -259,7 +259,9 @@ fun ReaderScreen(
     onRetryChapters: () -> Unit = {},
     active: Boolean = true,
     startAtBeginning: Boolean = false,
-    onReadVariant: (Chapter, ChapterVariant, Int) -> Unit = { _, _, _ -> },
+    onReadVariant: (Chapter, ChapterVariant, Int, Int) -> Unit = { _, _, _, _ -> },
+    onQuickReadVariant: (Chapter, ChapterVariant, Int, Int) -> Unit = { _, _, _, _ -> },
+    sourceSwitchName: String = "",
     onSetPreferredSource: (String) -> Unit = {},
     onClearChapterSource: (Chapter) -> Unit = {},
     onCancelSourceSelection: () -> Unit = {},
@@ -314,6 +316,8 @@ fun ReaderScreen(
     val hasMultipleGroups = remember(chapters) { chapters.map(Chapter::group).distinct().size > 1 }
     val chapterIndex = siblings.indexOfFirst { it.id == chapterId }
     var retry by remember(chapterId) { mutableIntStateOf(0) }
+    var currentPageRetrySerial by remember(chapterId) { mutableIntStateOf(0) }
+    var currentPageRetryIndex by remember(chapterId) { mutableIntStateOf(-1) }
     var pages by remember(chapterId) { mutableStateOf<List<Page>>(emptyList()) }
     var loading by remember(chapterId) { mutableStateOf(true) }
     var error by remember(chapterId) { mutableStateOf<String?>(null) }
@@ -335,6 +339,9 @@ fun ReaderScreen(
     var sourcePickerPresent by remember(manga.id) { mutableStateOf(false) }
     val sourcePickerBlocking = sourceChapter != null || sourcePickerPresent
     val canChooseSource = !localImport && chapter.variants.size > 1
+    val alternativeSources = remember(chapter.id, chapter.variants) {
+        chapter.variants.filterNot { it.storageId == chapter.id }.distinctBy { it.storageId }
+    }
     val currentSourceName = chapter.variants.firstOrNull { it.storageId == chapter.id }?.sourceName
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
@@ -775,6 +782,17 @@ fun ReaderScreen(
                         headers = headers,
                         resolvePage = resolvePage,
                         retryPage = retryPage,
+                        sourceAlternatives = alternativeSources,
+                        retryTargetIndex = currentPageRetryIndex, retryPulse = currentPageRetrySerial,
+                        onQuickSwitch = { failedIndex, variant ->
+                            onQuickReadVariant(chapter, variant, failedIndex, pages.size)
+                        },
+                        onMoreSources = { anchor ->
+                            sourceTriggerAnchor = anchor
+                            sourceCloseRequested = false
+                            sourceChapter = chapter
+                            controlsVisible = true
+                        },
                         preferences = preferences,
                         manualSingles = manualSingles,
                         initialPage = pageIndex,
@@ -843,6 +861,23 @@ fun ReaderScreen(
 
             // Read the live dim preview during drawing; dragging does not publish or persist preferences.
             Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black.copy(alpha = dimPreview.value ?: preferences.dimAmount)) })
+        }
+
+        AnimatedVisibility(visible = sourceLoading && sourceSwitchName.isNotBlank(),
+            modifier = Modifier.align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+                .padding(top = 60.dp),
+            enter = fadeIn(tween(if (motionEnabled) MangaMotion.Quick else 0)),
+            exit = fadeOut(tween(if (motionEnabled) MangaMotion.Quick else 0))) {
+            Row(Modifier.background(colors.surface.copy(alpha = .94f), RoundedCornerShape(14.dp))
+                .padding(horizontal = 13.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp,
+                    color = colors.onSurfaceVariant)
+                Text("正在切换 · $sourceSwitchName", fontSize = 12.sp,
+                    color = colors.onSurface, maxLines = 1)
+            }
         }
 
         if (!localImport && active && !leavingReader && atChapterEnd && !loading && error == null &&
@@ -1220,12 +1255,15 @@ fun ReaderScreen(
         onDismiss = { sourceChapter = null; sourceCloseRequested = false },
         onCancelSelection = onCancelSourceSelection,
         onReadVariant = { selected, variant ->
+            // Always close the orbit after a real selection; the old reader stays interactive
+            // while the target source prepares off the UI thread.
+            sourceCloseRequested = true
             if (variant.storageId == chapter.id) {
                 onCancelSourceSelection()
-                sourceCloseRequested = true
+                currentPageRetryIndex = pageIndex
+                currentPageRetrySerial++
             } else {
-                if (sourceResumePolicy == "ask") sourceCloseRequested = true
-                onReadVariant(selected, variant, pageIndex)
+                onReadVariant(selected, variant, pageIndex, pages.size)
             }
         },
         onSetPreferredSource = onSetPreferredSource,
@@ -1250,6 +1288,11 @@ private fun ChapterPages(
     headers: Map<String, String>,
     resolvePage: suspend (Page) -> Page,
     retryPage: suspend (Page) -> Page,
+    sourceAlternatives: List<ChapterVariant>,
+    retryTargetIndex: Int,
+    retryPulse: Int,
+    onQuickSwitch: (Int, ChapterVariant) -> Unit,
+    onMoreSources: (Rect?) -> Unit,
     preferences: ReaderPreferences,
     manualSingles: Set<Int>,
     initialPage: Int,
@@ -1447,6 +1490,10 @@ private fun ChapterPages(
                 itemsIndexed(pages, key = { index, page -> "${page.index}:$index" }, contentType = { _, _ -> "page" }) { index, page ->
                     ReaderPage(
                         page, headers, resolvePage = resolvePage, retryPage = retryPage, paged = false, onTap = onTap,
+                        sourceAlternatives = sourceAlternatives,
+                        onQuickSwitch = { variant -> onQuickSwitch(index, variant) },
+                        onMoreSources = onMoreSources,
+                        externalRetrySerial = if (index == retryTargetIndex) retryPulse else 0,
                         onLoadChanged = { ready ->
                             if (currentPages.getOrNull(index)?.url == page.url) {
                                 if (ready) loadedPages[index] = page.url
@@ -1586,6 +1633,10 @@ private fun ChapterPages(
                         Box(modifier) {
                             ReaderPage(
                                 pages[imageIndex], headers, resolvePage = resolvePage, retryPage = retryPage, paged = true, pagedAlignment = alignment, onTap = onTap,
+                                sourceAlternatives = sourceAlternatives,
+                                onQuickSwitch = { variant -> onQuickSwitch(imageIndex, variant) },
+                                onMoreSources = onMoreSources,
+                                externalRetrySerial = if (imageIndex == retryTargetIndex) retryPulse else 0,
                                 onLoadChanged = { ready ->
                                     val url = pages[imageIndex].url
                                     if (currentPages.getOrNull(imageIndex)?.url == url) {
@@ -1766,6 +1817,10 @@ private fun ReaderPage(
     paged: Boolean,
     pagedAlignment: Alignment = Alignment.Center,
     onTap: () -> Unit,
+    sourceAlternatives: List<ChapterVariant> = emptyList(),
+    onQuickSwitch: (ChapterVariant) -> Unit = {},
+    onMoreSources: (Rect?) -> Unit = {},
+    externalRetrySerial: Int = 0,
     onLoadChanged: (Boolean) -> Unit,
     onHeightMeasured: (Int) -> Unit = {},
     onComposed: (Boolean) -> Unit = {},
@@ -1803,6 +1858,11 @@ private fun ReaderPage(
     var error by remember(page.url) { mutableStateOf<String?>(null) }
     var loading by remember(page.url) { mutableStateOf(true) }
     var reload by remember(page.url) { mutableIntStateOf(0) }
+    var previousRetrySerial by remember(page.url) { mutableIntStateOf(externalRetrySerial) }
+    LaunchedEffect(externalRetrySerial) {
+        if (externalRetrySerial > previousRetrySerial) reload++
+        previousRetrySerial = externalRetrySerial
+    }
     var detailStatus by remember(page.url, reload) { mutableStateOf<ReaderDetailStatus?>(null) }
     var detailRetry by remember(page.url, reload) { mutableIntStateOf(0) }
     var loadedImage by remember(page.url, reload) { mutableStateOf<LoadedReaderImage?>(null) }
@@ -2005,11 +2065,12 @@ private fun ReaderPage(
                 }
             }
             if (delayedLoading && imageError == null) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Gray, strokeWidth = 1.5.dp)
-            if (imageError != null) Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("第 ${page.index + 1} 页未加载", color = Color.Gray, fontSize = 13.sp)
-                Text(imageError, color = Color.Gray, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                TextButton(onClick = { reload++ }) { Text("重载这页", color = Color.Gray) }
-            }
+            if (imageError != null) ReaderImageRecovery(
+                index = page.index, failure = imageError,
+                alternatives = sourceAlternatives,
+                onRetry = { reload++ }, onSwitch = onQuickSwitch,
+                onMore = onMoreSources,
+            )
         }
     }
 }
