@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Native site rankings · 2026-11-14
+
+Current user correction/implementation authorization and the source-level contract are DESIGN.md SITE-RANK-20261114-01–05. Copy stays in discovery 热榜 with its original period/audience/heat/reader/cache behavior. A separate 各站榜单 destination adds Bangumi rating rankings, AniList score/list-members/trending/favourites and the existing MAL Tenrai native ranking transport, each with its real supported scope. The concurrent shared content-profile change is retained in full; unsupported profiles show an explicit native-ranking capability notice and do not request ordinary charts. Composite ranking is deferred; unverified website-only chart sorts and later sources are not presented as implemented.
+
+Five source files implement anonymous native pagination, distinct catalogue identities, separate score/count/rating-rank meanings, bounded atomic snapshots and existing cache clearing, retained Ovio/header/list transitions, adaptive desktop rows, native metadata and verified/manual enabled-source reading associations. Catalogue items never become fake Copy paths, downloaded chapters or library entries; reading selection does not copy native rating IDs or silently merge chapter-number systems. Linked work goes directly to the existing reader-source detail. Long press reopens metadata/reselection; failed searches remain retryable and an edited query cancels the previous search.
+
+Initial source base2eb1c6c and the final rebase onto5c0b60e preserve current desktop/font/Steam/source-quality/comment/refresh work. Root is the only writer and integrates the complete batch on latest main with expected-head protection. Only source/diff/file-integrity review was done; no local commands/builds/tests/device/browser/service/account probes or extra gate. Native endpoint availability, generated compilation/packages and actual phone/desktop layout, transition/return feel and source matching remain pending normal CI/user feedback. Confirm matching CI trigger only and keep main stable; do not create a status-only follow-up.
+
 ## Shared-interface content profiles · 2026-11-14
 
 Current user authorisation: the whole app should keep its ordinary UI and switch the content scope through one control, then “快去” / “继续”. DESIGN.md CONTENT-MODE-20261114 now owns the implemented shared-profile slice. The ordinary/adult switch is in the existing drawer and desktop sidebar; the standalone adult destination is removed. Discovery/search/detail/reading/library/history/downloads keep their existing mature shared views. Account/source management reuses existing forms and registry operations; no new source, anonymous endpoint or authentication mechanism.

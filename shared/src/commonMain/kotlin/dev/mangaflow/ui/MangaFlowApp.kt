@@ -72,6 +72,7 @@ import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.CloudQueue
 import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material.icons.outlined.Leaderboard
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Menu
@@ -162,7 +163,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 private enum class Section(val title: String, val icon: ImageVector) {
-    DISCOVER("发现", Icons.Outlined.Explore),
+    DISCOVER("发现", Icons.Outlined.Explore), BOARDS("各站榜单", Icons.Outlined.Leaderboard),
     LIBRARY("书架", Icons.Outlined.Bookmarks),
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
@@ -821,6 +822,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         sourceLoading = sourceOperation.loading, sourceError = sourceOperation.error,
                     )
                     is Frame.Detail -> savedState.SaveableStateProvider(current.key) {
+                        if (current.state.rankedWork != null) {
+                            RankedWorkDetailScreen(current.state, onBack = model::closeDetail,
+                                onSearch = model::searchRankedSources, onUseSource = model::useRankedSource,
+                                active = current.key == frame.key && !currentBack.gesturing && !currentBack.completed,
+                                wallpaper = {
+                                    if (wallpaper.mediaPath != null) AppWallpaper(wallpaperStore, Modifier.fillMaxSize(),
+                                        active = current.key == frame.key)
+                                })
+                        } else {
                         val downloadFlow = remember(model, current.state.manga.id) {
                             model.downloads.observeManga(current.state.manga.id)
                         }
@@ -885,6 +895,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         active = current.key == frame.key && authorWorks == null && !tagSearchVisible)
                                 },
                             )
+                        }
                         }
                     }
                     is Frame.Root -> {
@@ -1057,6 +1068,21 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 )
                                             }
                                         }) else gallery()
+                                    }
+                                    Section.BOARDS -> {
+                                        if (restrictedMode) Box(Modifier.fillMaxSize()) {
+                                            Box(Modifier.fillMaxSize().padding(top = chromePadding)) {
+                                                EmptyMessage("当前范围暂无站点榜单", "已接入的站点尚不提供此内容范围的榜单。")
+                                            }
+                                            PageTitleHeader("各站榜单", searchBackdrop, navigation,
+                                                modifier = Modifier.align(Alignment.TopCenter)
+                                                    .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
+                                                    .padding(horizontal = 8.dp, vertical = 2.dp))
+                                        } else SiteRankingsScreen(
+                                            controller = model.siteRankings, backdrop = searchBackdrop,
+                                            navigation = navigation, active = rootActive,
+                                            onOpen = model::openRankedWork, onInspect = model::inspectRankedWork,
+                                        )
                                     }
                                     Section.LIBRARY -> LibraryScreen(
                                         favorites = ordinaryFavorites, history = ordinaryHistory,
