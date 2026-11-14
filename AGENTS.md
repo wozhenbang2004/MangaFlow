@@ -1,5 +1,7 @@
 # MangaFlow
 
+- FONT-PICKER-20261114 in DESIGN.md owns1000121663's font settings redesign: one shared Ovio scene strip/current candidate pane, real preview first, one download/progress/More slot, management/licensing on demand. Preserve actual role selections/inheritance, optional modern assets and complete FontStore behavior; no permanent delete/info pair or four nested role accordions. FontSettings/SettingsScreen only, plus existing docs. Rebase on latest main preserving Steam/source-quality and prior UI; one lease/normal CI trigger, no tests/local builds/probes/new gate. Actual phone appearance remains pending.
+
 - SOURCE-MAX-125 / STEAM-DIRECT-126 in DESIGN.md own the current source-local quality and direct Steam implementation. User explicitly says each source's own highest and asks deeper larger-image probes; keep source choice, native URLs/bytes/identities, safe availability and real metadata. Copy native JPEG only; never restore the withdrawn blind tier rewrite. Steam QR/client/UI/native/build agents return isolated blobs; root alone integrates one complete cloud main lease/normal CI. Android native Steam is same-signer optional, Windows bundled, iOS unsupported; actual original image/video import only, no Scene-preview substitution. No tests/local builds/device/account/quota probes; bounded anonymous image exploration is the current explicit exception. Additional research is OPEN and must not obscure the Steam priority or become repeated partial pushes.
 
 

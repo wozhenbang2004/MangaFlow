@@ -371,7 +371,7 @@ fun SettingsScreen(
                 }
                 SettingsSection("外观", sourceBackdrop) {
                     DetailAppearanceSettings()
-                    SettingsDisclosure("字体", "按场景设置", Icons.Outlined.TextFields,
+                    SettingsDisclosure("字体", "", Icons.Outlined.TextFields,
                         expandedSetting == "fonts", { toggleSetting("fonts") }) {
                         FontSettings()
                     }
@@ -926,7 +926,10 @@ private fun SettingsDisclosure(
         if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(), label = "setting-disclosure")
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-            .semantics { stateDescription = "$value，${if (expanded) "已展开" else "已收起"}" }
+            .semantics {
+                stateDescription = listOf(value, if (expanded) "已展开" else "已收起")
+                    .filter(String::isNotBlank).joinToString("，")
+            }
             .clickable(interactionSource = interaction, indication = null, onClick = onToggle)
             .motionPress(interaction, pressedScale = .99f)
             .heightIn(min = 48.dp).padding(vertical = 6.dp),

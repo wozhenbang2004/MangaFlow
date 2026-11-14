@@ -1,5 +1,9 @@
 # Optional scene fonts
 
+## Font selection UI · 2026-11-14
+
+FONT-PICKER-20261114 adapts the existing FontChoiceRow/SettingsDisclosure/PANEL, the app's Ovio MotionTabs (source reference81a1bcb in MotionTabs.kt), keyed MotionTabContent and compact real download feedback. One role is shown at a time; real font samples lead, names/status follow and one trailing slot owns download/cancel/More. Management and original licensing disclose on demand. Row selection/long-press semantics, outgoing input gates, large-text control sizing and reduced motion remain. No new font assets, catalog choice, font-store operation, platform loader or dependency is introduced. Original before-state screenshot1000121663.jpg is observed; the new artifact's visual/motion/device result remains pending user feedback.
+
 The selector retains MangaFlow's existing SettingsDisclosure/PANEL, motionPress and MotionIconButton controls. Four roles remain independently system-default: interface, work titles, prose, and numbers. Follow-interface remains an explicit choice outside the interface role. Optional fonts never rewrite other role selections or original manga image pixels.
 
 ## Current direction · 2026-11-14

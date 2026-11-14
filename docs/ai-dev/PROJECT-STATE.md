@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Current UI batch: font picker · 2026-11-14
+
+FONT-PICKER-20261114 in DESIGN.md owns the latest user complaint and1000121663.jpg. FontSettings now presents one current role using the shared Ovio scene strip/keyed retained content, preview-first real candidates and one download/progress/More action slot. Repeated role headers/descriptions and permanent delete/info actions are removed from the main choice flow. Explicit management owns removal/affected roles and optional full licensing; background downloads retain a compact genuine role progress indicator. Saved fonts, modern optional assets, explicit inheritance and the font-store lifecycle are preserved.
+
+Source ownership is FontSettings.kt and the font entry/empty-value semantics in SettingsScreen.kt only. Latest-main source files were unchanged by the concurrent75f52e6b Steam/source-quality batch; prepend documentation to that latest state, preserving every other source. Root integrates the complete UI/doc batch once with an expected-head lease and confirms its Android/native CI trigger; no tests/local builds/device/browser/service probes or additional review gate. Do not resubmit prior UI batches or make a status-only push. Parent201 Android43537747600 is successful; actual new font appearance, transitions and interaction remain pending artifact/user feedback.
+
 ## Active: source-local image quality and direct Steam Workshop · 2026-11-14
 
 Current raw requirements and decisions are DESIGN.md SOURCE-MAX-125 / STEAM-DIRECT-126. All visible messages through “你和你的代理们分工推进啊别忘了关键的 steam wallpaperengine 啊” are covered there (exact message IDs unavailable). “去做” authorizes the prior direct Steam proposal; subsequent quality clarification means every selected source's own full-quality path, not automatic cross-source switching.
