@@ -42,7 +42,8 @@ class JavascriptSourceRuntime(context: PlatformContext) {
     suspend fun call(bundle: ScriptSourcePackage, method: String, args: JSONArray = JSONArray()): String {
         require(method in METHODS) { "不支持的漫画源操作。" }
         require(args.toString().length <= MAX_ARGUMENT_CHARS) { "漫画源操作参数过大。" }
-        return execute(bundle, reading = method == "getPageList" || method == "resolveImage", allowNetwork = true, allowRedirects = method != "login") { js ->
+        return execute(bundle, reading = method == "getPageList" || method == "resolveImage", allowNetwork = true,
+            allowRedirects = method !in setOf("login", "loginCookies")) { js ->
             val invoke = if (bundle.isVenera) "__mfVeneraInvoke" else "__mfInvoke"
             val result = js.evaluate<String>("$invoke(globalThis.__mfProvider, ${JSONObject.quote(method)}, $args)", "operation.js")
             require(result.length <= MAX_RESPONSE_BYTES) { "漫画源返回内容过大。" }
@@ -86,7 +87,8 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                         val raw = argument(values)
                         if (JSONObject(raw).optString("op") == "get")
                             preference(preferenceScope, raw, allowNetwork, bundle.isVenera)
-                        else withScriptSourceImageEpoch(application, bundle.sourceId, sourceEpoch) {
+                        else withScriptSourceImageEpoch(application, bundle.sourceId, sourceEpoch,
+                            replaceAfter = bundle.isVenera && JSONObject(raw).optString("op") == "batch") {
                             preference(preferenceScope, raw, allowNetwork, bundle.isVenera)
                         }
                     })
@@ -112,6 +114,7 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                     val unsupported = Regex("Unsupported source capability: ([A-Za-z -]{1,100})")
                         .find(failure.message.orEmpty())?.groupValues?.get(1)
                     val message = when {
+                        failure.message.orEmpty().contains("Source cursor expired") -> "列表分页已失效，请刷新后继续。"
                         status == 401 || Regex("(?i)not[ _-]?logged|login required|login expired|session expired|需要登录|未登录")
                             .containsMatchIn(failure.message.orEmpty()) -> "此来源需要登录，请先设置来源账号。"
                         unsupported != null -> when {
@@ -147,6 +150,25 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                 writeSecret(application, secretKey, values.toString())
                 "true"
             }
+            "batch" -> {
+                check(writable && secure) { "验证漫画源时不允许修改会话。" }
+                val changes = request.getJSONArray("value")
+                require(changes.length() <= 128) { "漫画源会话操作过多。" }
+                for (index in 0 until changes.length()) {
+                    val change = changes.getJSONObject(index)
+                    val name = change.getString("key")
+                    require(name.length in 1..160) { "漫画源偏好名称无效。" }
+                    when (change.getString("op")) {
+                        "set" -> values.put(name, change.opt("value") ?: JSONObject.NULL)
+                        "remove" -> values.remove(name)
+                        else -> throw IllegalArgumentException("漫画源会话操作无效。")
+                    }
+                }
+                val encoded = values.toString()
+                require(values.length() <= 128 && encoded.length <= 65_536) { "漫画源偏好存储超出限制。" }
+                writeSecret(application, secretKey, encoded)
+                "true"
+            }
             "set", "remove" -> {
                 check(writable) { "验证漫画源时不允许修改偏好。" }
                 if (request.getString("op") == "remove") values.remove(key)
@@ -166,7 +188,7 @@ class JavascriptSourceRuntime(context: PlatformContext) {
         const val MAX_ARGUMENT_CHARS = 2 * 1024 * 1024
         const val MAX_RESPONSE_BYTES = 8 * 1024 * 1024
         val METHODS = setOf("search", "getDetail", "getPageList", "getPopular", "getLatestUpdates", "getFilterList", "getSourcePreferences", "getHeaders",
-            "capabilities", "feeds", "browse", "searchFilters", "accountState", "login", "logout", "favoriteFolders", "favorites", "setFavorite", "comments", "settings", "saveSetting", "resolveImage", "feedFilters")
+            "capabilities", "feeds", "browse", "searchFilters", "accountState", "login", "loginCookies", "logout", "favoriteFolders", "favorites", "setFavorite", "comments", "settings", "saveSetting", "resolveImage", "feedFilters")
         val readingContexts = Semaphore(1)
         val otherContexts = Semaphore(1)
         val preferenceLock = SynchronizedObject()

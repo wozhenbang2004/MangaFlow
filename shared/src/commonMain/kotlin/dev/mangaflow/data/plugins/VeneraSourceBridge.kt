@@ -6,7 +6,20 @@ internal val VENERA_SOURCE_BRIDGE: String = """
 (() => {
   const enc = JSON.stringify.bind(JSON), dec = JSON.parse.bind(JSON);
   const fail = name => { throw new Error('Unsupported source capability: ' + name); };
-  const pref = (op, key, value) => dec(__mfPrefs(enc({op, key, value})));
+  let stagedPreferences = null;
+  const nativePref = (op,key,value) => dec(__mfPrefs(enc({op,key,value})));
+  function pref(op,key,value) {
+    if(stagedPreferences) {
+      if(op==='get' && stagedPreferences.has(key)) {
+        const change=stagedPreferences.get(key); return change.op==='remove'?null:change.value;
+      }
+      if(op==='set' || op==='remove') {
+        if(stagedPreferences.size>=128 && !stagedPreferences.has(key)) throw new Error('Source session quota exceeded');
+        stagedPreferences.set(key,{op,key,value}); return true;
+      }
+    }
+    return nativePref(op,key,value);
+  }
   const bytes = value => Array.from(value instanceof ArrayBuffer ? new Uint8Array(value) : value || []);
   const buffer = value => new Uint8Array(value).buffer;
   const nativeConvert = (type, value, extra = {}) => dec(__mfCodec(enc({op:'venera', type, value:typeof value === 'string' ? value : bytes(value), ...extra})));
@@ -33,7 +46,7 @@ internal val VENERA_SOURCE_BRIDGE: String = """
     constructor(element) { this.element = element; }
     querySelector(selector) { return wrap(this.element.selectFirst(selector)); }
     querySelectorAll(selector) { return this.element.select(selector).map(wrap); }
-    get attributes() { return new Proxy({}, {get:(_,name)=>this.element.attr(String(name))}); }
+    get attributes() { return new Proxy({}, {get:(_,name)=>typeof name==='string' && this.element.hasAttr(name)?this.element.attr(name):undefined}); }
     get text() { return this.element.text; }
     get innerHTML() { return this.element.innerHtml; }
     get html() { return this.element.html; }
@@ -47,7 +60,7 @@ internal val VENERA_SOURCE_BRIDGE: String = """
     get localName() { return this.element.localName; }
     get tagName() { return this.element.tagName; }
     get classNames() { return this.className.split(/\s+/).filter(Boolean); }
-    getAttribute(name) { return this.element.attr(name); }
+    getAttribute(name) { return this.element.hasAttr(name)?this.element.attr(name):null; }
     getElementById(id) { return wrap(this.element.getElementById(id)); }
     getElementsByTagName(name) { return this.element.getElementsByTagName(name).map(wrap); }
     dispose() {}
@@ -55,31 +68,54 @@ internal val VENERA_SOURCE_BRIDGE: String = """
   const wrap = element => element == null ? null : new HtmlElement(element);
   class HtmlDocument extends HtmlElement { constructor(html) { super(new Document(html)); } }
   globalThis.HtmlDocument = HtmlDocument; globalThis.HtmlElement = HtmlElement;
-  for(const name of ['Comic','ComicDetails','Comment','ImageLoadingConfig']) globalThis[name] = function(fields) { Object.assign(this,fields); };
+  for(const name of ['Comic','ComicDetails','Comment','ImageLoadingConfig','Cookie']) globalThis[name] = function(fields) { Object.assign(this,fields); };
   globalThis.APP = Object.freeze({locale:'zh-CN',platform:'mangaflow'});
   globalThis.UI = Object.freeze({showMessage() {}, showDialog:()=>fail('interactive script UI'), showLoading:()=>fail('interactive script UI')});
   let source = null;
   const cookieCache=new Map();
-  function cookieKey(url) { return 'cookie:' + new URL(String(url).includes('://')?String(url):'https://'+String(url)).hostname; }
+  const cookieUrl = url => new URL(String(url).includes('://')?String(url):'https://'+String(url));
+  function cookieKeys(url) {
+    const parts=cookieUrl(url).hostname.toLowerCase().split('.'),keys=[];
+    for(let i=0;i<parts.length-1;i++) keys.push('cookie:'+parts.slice(i).join('.'));
+    return keys;
+  }
+  function cookieJar(key) {
+    if(!cookieCache.has(key)) cookieCache.set(key,pref('get',key) || []);
+    return cookieCache.get(key);
+  }
   function readCookies(url) {
     if(!url) return [];
-    const key=cookieKey(url);
-    if(!cookieCache.has(key)) cookieCache.set(key,pref('get',key) || []);
-    const saved=cookieCache.get(key);
-    return saved.filter(c=>!c.expires || c.expires>Date.now()).filter(c=>new URL(url).pathname.startsWith(c.path || '/'));
+    const target=cookieUrl(url),path=target.pathname || '/',cookies=[];
+    for(const key of cookieKeys(url)) for(const item of cookieJar(key)) {
+      const domain=item.domain || key.slice(7),hostOnly=item.hostOnly ?? true,prefix=item.path || '/';
+      if(hostOnly?target.hostname!==domain:target.hostname!==domain && !target.hostname.endsWith('.'+domain)) continue;
+      if(item.secure && target.protocol!=='https:' || item.expires && item.expires<=Date.now()) continue;
+      if(path!==prefix && !(path.startsWith(prefix) && (prefix.endsWith('/') || path[prefix.length]==='/'))) continue;
+      cookies.push({...item,domain:hostOnly?domain:'.'+domain});
+    }
+    return cookies.sort((a,b)=>(b.path || '/').length-(a.path || '/').length);
   }
   function storeCookies(url, items) {
-    const host = new URL(url).hostname;
-    const old = pref('get',cookieKey(url)) || [];
+    const host = cookieUrl(url).hostname.toLowerCase(),updated=new Map();
+    if(!Array.isArray(items) || items.length>64) throw new Error('Source cookie quota exceeded');
     for(const item of items) {
       if(!item || !/^[!#${'$'}%&'*+.^_`|~\w-]+${'$'}/.test(item.name || '') || typeof item.value !== 'string' || /[\r\n;]/.test(item.value)) continue;
-      if(item.domain) { const domain=item.domain.replace(/^\./,'').toLowerCase(); if(!domain.includes('.') || host!==domain && !host.endsWith('.'+domain)) continue; }
-      const at = old.findIndex(c=>c.name===item.name && (c.path || '/')===(item.path || '/'));
-      const value = {name:item.name,value:item.value,path:item.path || '/',expires:item.expires || 0};
-      if(at<0) old.push(value); else old[at]=value;
+      const domain=String(item.domain || host).replace(/^\./,'').toLowerCase();
+      if(!domain.includes('.') || host!==domain && !host.endsWith('.'+domain)) continue;
+      const key='cookie:'+domain;
+      if(!updated.has(key)) updated.set(key,cookieJar(key).filter(c=>!c.expires || c.expires>Date.now()).map(c=>({...c})));
+      const old=updated.get(key),path=String(item.path || '/');
+      if(!path.startsWith('/') || path.length>2048) continue;
+      const at=old.findIndex(c=>c.name===item.name && (c.path || '/')===path);
+      const value={name:item.name,value:item.value,path,domain,hostOnly:item.hostOnly ?? !item.domain,
+        secure:Boolean(item.secure),expires:Number(item.expires) || 0};
+      if(value.expires && value.expires<=Date.now()) { if(at>=0) old.splice(at,1); }
+      else if(at<0) old.push(value); else old[at]=value;
     }
-    if(old.length>64) throw new Error('Source cookie quota exceeded');
-    pref('set',cookieKey(url),old); cookieCache.set(cookieKey(url),old);
+    for(const [key,old] of updated) {
+      if(old.length>64) throw new Error('Source cookie quota exceeded');
+      pref('set',key,old); cookieCache.set(key,old);
+    }
   }
   function acceptCookies(url, header) {
     if(!header) return;
@@ -92,6 +128,7 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         const index=attribute.indexOf('='), key=(index<0?attribute:attribute.slice(0,index)).toLowerCase(), value=index<0?'':attribute.slice(index+1);
         if(key==='path') cookie.path=value;
         if(key==='domain') cookie.domain=value;
+        if(key==='secure') cookie.secure=true;
         if(key==='max-age') cookie.expires=Date.now()+Number(value)*1000;
         if(key==='expires' && !cookie.expires) cookie.expires=Date.parse(value);
       }
@@ -101,7 +138,10 @@ internal val VENERA_SOURCE_BRIDGE: String = """
   async function request(method,url,headers={},body=null) {
     headers={...headers}; url=String(url);
     const cookies=readCookies(url);
-    if(cookies.length && !Object.keys(headers).some(k=>k.toLowerCase()==='cookie')) headers.Cookie=cookies.map(c=>c.name+'='+c.value).join('; ');
+    const explicit=Object.keys(headers).find(k=>k.toLowerCase()==='cookie');
+    const names=new Set(String(explicit?headers[explicit]:'').split(';').map(pair=>pair.trim().split('=')[0]));
+    const automatic=cookies.filter(cookie=>!names.has(cookie.name)).map(c=>c.name+'='+c.value).join('; ');
+    if(automatic) headers[explicit || 'Cookie']=automatic+(explicit && headers[explicit]?'; '+headers[explicit]:'');
     const res=dec(await __mfHttp(enc({method:String(method).toUpperCase(),url,headers,body})));
     const cookie=Object.entries(res.headers || {}).find(([key])=>key.toLowerCase()==='set-cookie');
     if(cookie) acceptCookies(res.url || url,cookie[1]);
@@ -113,7 +153,7 @@ internal val VENERA_SOURCE_BRIDGE: String = """
     put:(url,headers,data)=>request('PUT',url,headers,data), patch:(url,headers,data)=>request('PATCH',url,headers,data),
     delete:(url,headers,data)=>request('DELETE',url,headers,data), head:(url,headers)=>request('HEAD',url,headers),
     sendRequest:request, getCookies:async url=>readCookies(url), setCookies:async (url,cookies)=>storeCookies(url,cookies),
-    deleteCookies:url=>{ cookieCache.delete(cookieKey(url)); return pref('remove',cookieKey(url)); },
+    deleteCookies:url=>{ for(const key of cookieKeys(url)) { cookieCache.delete(key); pref('remove',key); } return true; },
     fetch:()=>fail('binary network fetch'),
   });
   globalThis.fetch=async (url,options={})=>{ const res=await request(options.method || 'GET',url,options.headers || {},options.body ?? null); return {status:res.status,ok:res.status>=200 && res.status<300,text:async()=>res.body,json:async()=>dec(res.body)}; };
@@ -123,6 +163,7 @@ internal val VENERA_SOURCE_BRIDGE: String = """
     saveData(key,value) { if(/^(password|pwd|account)${'$'}/i.test(key)) return; return pref('set','data:'+String(key),value); }
     deleteData(key) { return pref('remove','data:'+String(key)); }
     loadSetting(key) {
+      if(this.settings?.[key]?.mangaflowSupported===false) return false;
       const value=pref('get','setting:'+key);
       if(value!=null) return value;
       // A script's optional unattended account mutation is never enabled by its default.
@@ -130,7 +171,7 @@ internal val VENERA_SOURCE_BRIDGE: String = """
       return this.settings?.[key]?.default ?? null;
     }
     get isLogged() { return pref('get','session:logged')===true; }
-    translate(key) { return this.translation?.[APP.locale]?.[key] ?? key; }
+    translate(key) { return this.translation?.[APP.locale]?.[key] ?? this.translation?.[APP.locale.replace('-','_')]?.[key] ?? key; }
     init() {}
   }
   globalThis.ComicSource=ComicSource;
@@ -152,7 +193,10 @@ internal val VENERA_SOURCE_BRIDGE: String = """
     return specs.map((spec,index)=>{
       const choices=(spec.options || []).map(option);
       if(!choices.length) return null;
-      return {id:String(index),title:String(spec.label || spec.title || '筛选'),choices,defaultValue:choices[0].id};
+      const multiple=spec.type==='multi-select',allowed=new Set(choices.map(choice=>choice.id));
+      const selected=multiple?(Array.isArray(spec.default)?spec.default:[]).map(String).filter(id=>allowed.has(id)):[];
+      const defaultValue=multiple?enc([...new Set(selected)]):allowed.has(String(spec.default))?String(spec.default):choices[0].id;
+      return {id:String(index),title:String(spec.label || spec.title || '筛选'),choices,defaultValue,multiple};
     }).filter(Boolean);
   }
   function filterValues(specs,selected) { return filters(specs).map((filter,index)=>selected?.[index] ?? filter.defaultValue); }
@@ -161,7 +205,14 @@ internal val VENERA_SOURCE_BRIDGE: String = """
     let tags=value.tags instanceof Map?Array.from(value.tags.values()).flat():Array.isArray(value.tags)?value.tags:Object.values(value.tags || {}).flat();
     return {id:String(value.id),title:String(value.title),cover:String(value.cover || ''),author:value.subtitle ?? value.subTitle ?? '',genre:tags,description:value.description || ''};
   }
-  async function listing(value,page,single=false) {
+  const hasLoader = value => typeof value?.load==='function' || typeof value?.loadNext==='function';
+  function nextInput(args,page) {
+    if(page===1) return null;
+    const cursor=args[3];
+    if(typeof cursor!=='string' || !cursor || cursor.length>8192) throw new Error('Source cursor expired; refresh this list');
+    return cursor;
+  }
+  async function listing(value,page,single=false,cursorMode=false,input=null) {
     let rows,maxPage=1;
     if(Array.isArray(value)) rows=value.flatMap(item=>Array.isArray(item)?item:item?.comics || (item?.id!=null?[item]:[]));
     else if(Array.isArray(value?.comics)) { rows=value.comics; maxPage=Number(value.maxPage || 1); }
@@ -179,18 +230,24 @@ internal val VENERA_SOURCE_BRIDGE: String = """
       if(cookies.length) converted.headers.Cookie=cookies.map(c=>c.name+'='+c.value).join('; ');
       list.push(converted);
     }
+    if(cursorMode) {
+      const next=value?.next ?? null;
+      if(next!==null && (typeof next!=='string' || !next || next.length>8192 || /[\u0000-\u001f\u007f]/.test(next) || next===input))
+        throw new Error('Invalid source continuation');
+      return {list,hasNextPage:next!==null,cursorMode:true,nextCursor:next};
+    }
     return {list,hasNextPage:!single && page<maxPage};
   }
   async function feeds(provider) {
     const result=[];
-    for(const [index,feed] of (provider.explore || []).entries()) if(typeof feed.load==='function') result.push({id:'explore:'+index,title:String(feed.title || '推荐'),kind:'EXPLORE',filters:[]});
+    for(const [index,feed] of (provider.explore || []).entries()) if(hasLoader(feed)) result.push({id:'explore:'+index,title:String(feed.title || '推荐'),kind:'EXPLORE',filters:[]});
     const ranking=provider.categoryComics?.ranking;
-    if(typeof ranking?.load==='function') result.push({id:'ranking',title:'排行榜',kind:'RANKING',filters:[{id:'0',title:'排行',choices:(ranking.options || []).map(option),defaultValue:option((ranking.options || [''])[0]).id}]});
+    if(hasLoader(ranking)) result.push({id:'ranking',title:'排行榜',kind:'RANKING',filters:[{id:'0',title:'排行',choices:(ranking.options || []).map(option),defaultValue:option((ranking.options || [''])[0]).id}]});
     for(const [partIndex,part] of (provider.category?.parts || []).entries()) {
       if(part.type!=='fixed') continue;
       for(const [index,name] of (part.categories || []).entries()) {
-        const canSearch=part.itemType==='search' && typeof provider.search?.load==='function';
-        if(!canSearch && typeof provider.categoryComics?.load!=='function') continue;
+        const canSearch=part.itemType==='search' && hasLoader(provider.search);
+        if(!canSearch && !hasLoader(provider.categoryComics)) continue;
         let spec=canSearch?provider.search.optionList:provider.categoryComics.optionList;
         if(!canSearch && !spec && typeof provider.categoryComics.optionLoader==='function') {
           // Dynamic options are loaded only when that category is actually opened.
@@ -205,18 +262,21 @@ internal val VENERA_SOURCE_BRIDGE: String = """
     validate(provider);
     const page=Number(args[0] || 1);
     let result,headers={};
-    if(!['capabilities','accountState','settings','saveSetting','searchFilters','logout'].includes(method)) await provider.init?.();
+    if(!['capabilities','accountState','settings','saveSetting','searchFilters','logout','login','loginCookies'].includes(method)) await provider.init?.();
     switch(method) {
       case 'capabilities': {
         const features=[];
-        if((provider.explore || []).some(feed=>typeof feed.load==='function')) features.push('DISCOVERY');
-        if(typeof provider.search?.load==='function') features.push('SEARCH');
-        if(typeof provider.categoryComics?.load==='function' || provider.category?.parts?.length) features.push('CATEGORIES');
-        if(typeof provider.categoryComics?.ranking?.load==='function') features.push('RANKING');
-        if(typeof provider.account?.login==='function') features.push('ACCOUNT');
-        if(typeof provider.favorites?.loadComics==='function') features.push('FAVORITES');
+        if((provider.explore || []).some(hasLoader)) features.push('DISCOVERY');
+        if(hasLoader(provider.search)) features.push('SEARCH');
+        if(hasLoader(provider.categoryComics) || provider.category?.parts?.length) features.push('CATEGORIES');
+        if(hasLoader(provider.categoryComics?.ranking)) features.push('RANKING');
+        const passwordLogin=typeof provider.account?.login==='function';
+        const cookieFields=typeof provider.account?.loginWithCookies?.validate==='function'?provider.account.loginWithCookies.fields || []:[];
+        if(cookieFields.length>16 || cookieFields.some(field=>typeof field!=='string' || !field || field.length>160)) throw new Error('Invalid source login fields');
+        if(passwordLogin || cookieFields.length) features.push('ACCOUNT');
+        if(typeof provider.favorites?.loadComics==='function' || typeof provider.favorites?.loadNext==='function') features.push('FAVORITES');
         if(typeof provider.comic?.loadComments==='function') features.push('COMMENTS');
-        result={features,loginRequired:__mfMetadata.key==='picacg'}; break;
+        result={features,loginRequired:__mfMetadata.key==='picacg',passwordLogin,cookieFields}; break;
       }
       case 'feeds': result=await feeds(provider); break;
       case 'searchFilters': result=filters(provider.search?.optionList); break;
@@ -233,25 +293,36 @@ internal val VENERA_SOURCE_BRIDGE: String = """
       case 'getPopular': case 'browse': {
         const feedId=method==='getPopular'?'explore:0':String(args[0]), p=method==='getPopular'?page:Number(args[1]), values=method==='getPopular'?[]:(args[2] || []);
         if(feedId.startsWith('explore:')) {
-          const feed=provider.explore?.[Number(feedId.split(':')[1])]; if(!feed?.load) fail('explore');
+          const feed=provider.explore?.[Number(feedId.split(':')[1])]; if(!hasLoader(feed)) fail('explore');
           const single=feed.type==='multiPartPage';
-          result=await listing(await feed.load(single?null:feed.type==='mixed'?p-1:p),p,single);
+          if(typeof feed.load==='function') result=await listing(await feed.load(single?null:feed.type==='mixed'?p-1:p),p,single);
+          else { const cursor=nextInput(args,p); result=await listing(await feed.loadNext(cursor),p,false,true,cursor); }
         } else if(feedId==='ranking') {
-          const ranking=provider.categoryComics?.ranking; if(!ranking?.load) fail('ranking');
-          result=await listing(await ranking.load(values[0] ?? option(ranking.options[0]).id,p),p);
+          const ranking=provider.categoryComics?.ranking; if(!hasLoader(ranking)) fail('ranking');
+          const selected=values[0] ?? option(ranking.options[0]).id;
+          if(typeof ranking.load==='function') result=await listing(await ranking.load(selected,p),p);
+          else { const cursor=nextInput(args,p); result=await listing(await ranking.loadNext(selected,cursor),p,false,true,cursor); }
         } else if(feedId.startsWith('category:')) {
           const [_,partIndex,index]=feedId.split(':'), part=provider.category.parts[Number(partIndex)], name=part.categories[Number(index)], param=part.categoryParams?.[Number(index)] ?? null;
-          if(part.itemType==='search') result=await listing(await provider.search.load(name,filterValues(provider.search.optionList,values),p),p);
-          else {
+          if(part.itemType==='search') {
+            const selected=filterValues(provider.search.optionList,values);
+            if(typeof provider.search.load==='function') result=await listing(await provider.search.load(name,selected,p),p);
+            else { const cursor=nextInput(args,p); result=await listing(await provider.search.loadNext(name,selected,cursor),p,false,true,cursor); }
+          } else {
             const spec=provider.categoryComics.optionList ?? await provider.categoryComics.optionLoader?.(name,param) ?? [];
-            result=await listing(await provider.categoryComics.load(name,param,filterValues(spec,values),p),p);
+            const selected=filterValues(spec,values);
+            if(typeof provider.categoryComics.load==='function') result=await listing(await provider.categoryComics.load(name,param,selected,p),p);
+            else { const cursor=nextInput(args,p); result=await listing(await provider.categoryComics.loadNext(name,param,selected,cursor),p,false,true,cursor); }
           }
         } else fail('feed');
         break;
       }
       case 'search': {
-        if(typeof provider.search?.load!=='function') fail('search');
-        result=await listing(await provider.search.load(String(args[0]),filterValues(provider.search.optionList,args[2]),Number(args[1])),Number(args[1])); break;
+        if(!hasLoader(provider.search)) fail('search');
+        const p=Number(args[1]),selected=filterValues(provider.search.optionList,args[2]);
+        if(typeof provider.search.load==='function') result=await listing(await provider.search.load(String(args[0]),selected,p),p);
+        else { const cursor=nextInput(args,p); result=await listing(await provider.search.loadNext(String(args[0]),selected,cursor),p,false,true,cursor); }
+        break;
       }
       case 'getDetail': {
         const native=String(args[0]), value=await provider.comic.loadInfo(native);
@@ -261,7 +332,10 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         result={...comic({...value,id:native}),author:author.length?author:(value.subtitle || value.subTitle || ''),chapters:chapterMap.length?chapterMap.map(([id,title])=>({id:String(id),title:String(title)})):[{id:'__mf_single__',title:'正文'}]};
         const cover=provider.comic.onThumbnailLoad?await provider.comic.onThumbnailLoad(result.cover):null;
         if(cover?.modifyImage || cover?.onResponse) fail('cover image transformation');
-        if(cover?.url) result.cover=cover.url; headers=cover?.headers || {}; break;
+        if(cover?.url) result.cover=cover.url;
+        const coverHeaders={...(cover?.headers || {})},cookies=readCookies(result.cover);
+        if(cookies.length) coverHeaders.Cookie=cookies.map(c=>c.name+'='+c.value).join('; ');
+        result.headers=coverHeaders; break;
       }
       case 'getPageList': {
         const mangaId=String(args[1]),ep=String(args[0]);
@@ -272,8 +346,9 @@ internal val VENERA_SOURCE_BRIDGE: String = """
       }
       case 'resolveImage': {
         const image=String(args[0]),mangaId=String(args[1]),ep=String(args[2]),episode=ep==='__mf_single__'?null:ep;
-        const config=provider.comic.onImageLoad?await provider.comic.onImageLoad(image,mangaId,episode):{};
-        if(config?.onResponse || config?.onLoadFailed) fail('binary image response transformation');
+        let config=provider.comic.onImageLoad?await provider.comic.onImageLoad(image,mangaId,episode):{};
+        if(args[3]===true && typeof config?.onLoadFailed==='function') config=await config.onLoadFailed();
+        if(config?.onResponse) fail('binary image response transformation');
         let transform='';
         if(config?.modifyImage) {
           const program=String(config.modifyImage);
@@ -287,15 +362,29 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         break;
       }
       case 'accountState': result={signedIn:provider.isLogged,displayName:pref('get','session:username') || ''}; break;
-      case 'login': {
-        if(typeof provider.account?.login!=='function') fail('account login');
-        const value=await provider.account.login(String(args[0]),String(args[1]));
-        if(value!==true && value!=='ok') throw new Error('Source did not confirm login');
-        pref('set','session:logged',true); pref('set','session:username',String(args[0])); result=true; break;
+      case 'login': case 'loginCookies': {
+        stagedPreferences=new Map();
+        try {
+          await provider.init?.();
+          let value;
+          if(method==='login') {
+            if(typeof provider.account?.login!=='function') fail('account login');
+            value=await provider.account.login(String(args[0]),String(args[1]));
+          } else {
+            const login=provider.account?.loginWithCookies,values=args[0];
+            if(typeof login?.validate!=='function') fail('cookie login');
+            if(!Array.isArray(values) || values.length!==login.fields.length || values.some(v=>typeof v!=='string' || v.length>8192 || /[\r\n;]/.test(v))) throw new Error('Invalid source login values');
+            value=await login.validate(values);
+          }
+          if(value!==true && value!=='ok') throw new Error('Source did not confirm login');
+          pref('set','session:logged',true); pref('set','session:username',method==='login'?String(args[0]):'');
+          nativePref('batch','session',Array.from(stagedPreferences.values())); result=true;
+        } finally { stagedPreferences=null; }
+        break;
       }
       case 'logout': { try { await provider.account?.logout?.(); } finally { pref('clearSession','session'); cookieCache.clear(); } result=true; break; }
       case 'favoriteFolders': {
-        if(!provider.favorites?.loadComics) fail('site favorites');
+        if(typeof provider.favorites?.loadComics!=='function' && typeof provider.favorites?.loadNext!=='function') fail('site favorites');
         if(!provider.favorites.multiFolder) result=[{id:'default',title:'站点收藏'}];
         else {
           const value=await provider.favorites.loadFolders(null), folders=value.folders instanceof Map?Array.from(value.folders.entries()):Object.entries(value.folders || {});
@@ -303,7 +392,12 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         }
         break;
       }
-      case 'favorites': result=await listing(await provider.favorites.loadComics(Number(args[1]),provider.favorites.multiFolder?String(args[0]):null),Number(args[1])); break;
+      case 'favorites': {
+        const p=Number(args[1]),folder=provider.favorites.multiFolder?String(args[0]):null;
+        if(typeof provider.favorites.loadComics==='function') result=await listing(await provider.favorites.loadComics(p,folder),p);
+        else { const cursor=nextInput(args,p); result=await listing(await provider.favorites.loadNext(cursor,folder),p,false,true,cursor); }
+        break;
+      }
       case 'setFavorite': {
         if(typeof provider.favorites?.addOrDelFavorite!=='function') fail('edit site favorites');
         const native=String(args[0]), adding=Boolean(args[2]), info=await provider.comic.loadInfo(native);
@@ -319,10 +413,10 @@ internal val VENERA_SOURCE_BRIDGE: String = """
         const rows=value.comments || value.data || [];
         result={items:rows.map((row,index)=>({id:String(row.id ?? ('local:'+Number(args[1])+':'+index)),author:String(row.userName || ''),content:String(row.content || ''),avatar:String(row.avatar || ''),time:String(row.time || ''),likes:Number(row.score || 0)})),hasMore:Number(args[1])<Number(value.maxPage || 1)}; break;
       }
-      case 'settings': result=Object.entries(provider.settings || {}).filter(([key,spec])=>['input','select','switch'].includes(spec.type)).map(([key,spec])=>({key,title:String(spec.title || key),value:String(provider.loadSetting(key) ?? ''),type:spec.type,choices:(spec.options || []).map(option)})); break;
+      case 'settings': result=Object.entries(provider.settings || {}).filter(([key,spec])=>spec.mangaflowSupported!==false && ['input','select','switch'].includes(spec.type)).map(([key,spec])=>({key,title:String(provider.translate(spec.title || key)),value:String(provider.loadSetting(key) ?? ''),type:spec.type,choices:(spec.options || []).map(option)})); break;
       case 'saveSetting': {
         const key=String(args[0]), spec=provider.settings?.[key], value=String(args[1]);
-        if(!spec || !['input','select','switch'].includes(spec.type) || value.length>4096) fail('setting');
+        if(!spec || spec.mangaflowSupported===false || !['input','select','switch'].includes(spec.type) || value.length>4096) fail('setting');
         if(spec.type==='select' && !(spec.options || []).map(option).some(choice=>choice.id===value)) throw new Error('Invalid source setting choice');
         if(typeof spec.validator==='function') { const error=await spec.validator(value); if(error) throw new Error('Invalid source setting'); }
         pref('set','setting:'+key,spec.type==='switch'?value==='true':value); result=true; break;

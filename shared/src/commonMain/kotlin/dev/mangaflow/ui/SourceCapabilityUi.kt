@@ -47,6 +47,7 @@ import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.data.plugins.StarterSourceInstaller
 import dev.mangaflow.data.sources.*
+import dev.mangaflow.json.JSONArray
 import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.ui.motion.*
 import kotlinx.coroutines.CancellationException
@@ -65,10 +66,10 @@ internal fun SourceCapabilityBrowseControls(
     val browse by controller.state.collectAsStateWithLifecycle()
     var feedPicker by remember(current.selectedSource) { mutableStateOf(false) }
     var pendingFeed by remember(current.selectedSource) { mutableStateOf<String?>(null) }
-    var pendingOption by remember(current.selectedSource, browse.isSearch) { mutableStateOf<Pair<Int, String>?>(null) }
+    var pendingOption by remember(current.selectedSource, current.feedId, browse.isSearch) { mutableStateOf<Pair<Int, String>?>(null) }
     var failuresOpen by remember(current.selectedSource, browse.isSearch) { mutableStateOf(false) }
     var pendingInspect by remember(current.selectedSource, browse.isSearch) { mutableStateOf<String?>(null) }
-    var filterIndex by remember(current.selectedSource, browse.isSearch) { mutableStateOf<Int?>(null) }
+    var filterIndex by remember(current.selectedSource, current.feedId, browse.isSearch) { mutableStateOf<Int?>(null) }
     val failed = browse.searchSources.values.filter { it.error != null }
     val filters = if (browse.isSearch) current.searchFilters else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
     val sourceName = current.sources.firstOrNull { it.id == current.selectedSource }?.name ?: "全部来源"
@@ -108,7 +109,8 @@ internal fun SourceCapabilityBrowseControls(
             filters.forEachIndexed { index, filter ->
                 val choice = filter.choices.firstOrNull { it.id == current.options.getOrNull(index) }
                 MotionTextButton(onClick = { filterIndex = index }, contentPadding = PaddingValues(horizontal = 7.dp, vertical = 3.dp)) {
-                    Text(choice?.title ?: filter.title, fontSize = 11.sp)
+                    Text(if (filter.multiple) filter.title + " · " + filter.selectedIds(current.options.getOrNull(index)).size
+                        else choice?.title ?: filter.title, fontSize = 11.sp)
                     Icon(Icons.Outlined.ExpandMore, null, Modifier.size(14.dp))
                 }
             }
@@ -190,6 +192,9 @@ internal fun SourceCapabilityBrowseControls(
         }
     }
     filterIndex?.let { index -> filters.getOrNull(index)?.let { filter ->
+        var selectedIds by remember(current.selectedSource, current.feedId, browse.isSearch, filter.id) {
+            mutableStateOf(filter.selectedIds(current.options.getOrNull(index)))
+        }
         MotionBottomSheet(onDismissRequest = {
             filterIndex = null
             val chosen = pendingOption; pendingOption = null
@@ -197,11 +202,22 @@ internal fun SourceCapabilityBrowseControls(
                 controller.state.value.isSearch == browse.isSearch && chosen != null) controller.selectOption(chosen.first, chosen.second)
         }) { dismiss ->
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp), contentPadding = PaddingValues(20.dp)) {
-                item { Text(filter.title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(bottom = 8.dp)) }
+                item { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(filter.title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f).padding(bottom = 8.dp))
+                    if (filter.multiple) MotionTextButton(onClick = {
+                        pendingOption = index to JSONArray(filter.choices.filter { it.id in selectedIds }.map { it.id }).toString()
+                        dismiss()
+                    }, enabled = pendingOption == null) { Text("完成", fontSize = 12.sp) }
+                } }
                 items(filter.choices, key = { it.id }) { choice ->
-                    MotionTextButton(onClick = { pendingOption = index to choice.id; dismiss() }, enabled = pendingOption == null, modifier = Modifier.fillMaxWidth()) {
+                    MotionTextButton(onClick = {
+                        if (filter.multiple) selectedIds = if (choice.id in selectedIds) selectedIds - choice.id else selectedIds + choice.id
+                        else { pendingOption = index to choice.id; dismiss() }
+                    }, enabled = pendingOption == null, modifier = Modifier.fillMaxWidth()
+                        .semantics { selected = if (filter.multiple) choice.id in selectedIds else choice.id == current.options.getOrNull(index) }) {
                         Text(choice.title, Modifier.weight(1f), fontSize = 13.sp)
-                        if (choice.id == current.options.getOrNull(index)) Icon(Icons.Outlined.Check, null, Modifier.size(17.dp))
+                        if (if (filter.multiple) choice.id in selectedIds else choice.id == current.options.getOrNull(index))
+                            Icon(Icons.Outlined.Check, null, Modifier.size(17.dp))
                     }
                 }
             }

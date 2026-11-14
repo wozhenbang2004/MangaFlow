@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## E-Hentai and missing ComicSource interfaces · 2026-11-14
+
+User: “不接通的接口那我们就改造它啊或者改造我们适配层啊”. DESIGN SOURCE-COMPAT-177–180 extends SOURCE-STARTER-176 and the existing source-host batch. Baseline b3957fe, integrated on ab7f06b, retains all concurrent source-choice/reader recovery and iOS compiler-memory work. The shared bridge now recognizes loadNext discovery/search/category/ranking/site-favorites, while ScriptBodySource owns bounded logical-page continuations by request and source session. Existing numeric loaders remain. Multi-select filters preserve actual upstream defaults, canonical selection arrays and one confirmed sheet submission. Unchanged source adapters retain their live cursors when another package is installed.
+
+Cookie-only source login uses the existing masked account form and discards entered values after submit/inactivation. Validation stages preference/cookie changes, then one protected batch commits them and advances the image epoch under the same lock; old image responses cannot overwrite a new session. Parent-domain and host-only cookies are retained separately, and detail-cover secrets remain URL-specific. Explicit image retry arms at most one failure hook for the exact existing image/revision/epoch/route. The third pinned starter is E-Hentai1.2.0,61741 bytes, original Git blob0f6fb42cbc8e078be17c039016d715fa1244a776, SHA256 in StarterSourceInstaller; the three scripts total153485 bytes and remain downloaded app data, not bundled scripts.
+
+Exact-version E-Hentai repairs split E/Ex Cookie targets and clear old forum credentials inside the transaction, normalize the uncollected-gallery label while keeping absent membership unknown, and omit the unsupported optional external-game dialog. Existing install/removal history, user settings/source partitions, local shelves, page identity and frozen routes remain. Bounded independent review found the cover-header fallback, old-forum validation and login/image-commit race; this batch corrects them rather than weakening the boundary.
+
+Root is the sole writer. Source inspection, JS syntax and whitespace checks are the available evidence; no tests/local builds/service/account/device probes. Next exact action: preserve actual latest main, submit this one complete expected-head batch, confirm ordinary Android/native CI activation, and stop without waiting for artifacts. Final compilation, source connectivity and installed appearance/behavior remain unverified; do not claim every Venera script or the complete original roadmap is validated.
+
 ## Experience-policy takeover and iOS compiler memory · 2026-11-14
 
 User: “接手体验策略升级提交以及派一个子代理去查是不是 ci 失败了那就去🫸”. Root resumed EXPERIENCE-166–173, COPY-MOTION-171–180 and SOURCE-ALIGN-20261114-01–08 from the published source, with one delegated CI investigator. These changes are already on main; do not replay them. Integrate this bounded build correction on 9e81f81, retaining its concurrent reader-recovery continuation.
@@ -34,7 +44,7 @@ Evidence is bounded source and file-integrity inspection only; no tests, local b
 
 ## Selected source provisioning · 2026-11-14
 
-User now explicitly requests a few quality sources installed by default without APK bloat. DESIGN SOURCE-STARTER-176 owns the raw request, pinned selection, byte/digest evidence, existing-component UX and limits. First adult entry prepares nhentai and WNACG automatically through the normal protected importer; scripts total91744 original bytes and are fetched into app data, while the APK includes only references and installer/UI code. Signed Android runtime remains optional/downloaded. Existing packages and descriptor tombstones win over defaults, including concurrent manual choices and damaged-store refusal. EH loadNext compatibility remains open, and no source/site/device runtime verification is claimed. Root submits one complete latest-main lease and confirms existing CI trigger; no tests/local builds/probes.
+User now explicitly requests a few quality sources installed by default without APK bloat. DESIGN SOURCE-STARTER-176 owns the raw request, pinned selection, byte/digest evidence, existing-component UX and limits. First adult entry prepares nhentai and WNACG automatically through the normal protected importer; scripts total91744 original bytes and are fetched into app data, while the APK includes only references and installer/UI code. Signed Android runtime remains optional/downloaded. Existing packages and descriptor tombstones win over defaults, including concurrent manual choices and damaged-store refusal. EH loadNext compatibility was open at that initial checkpoint; SOURCE-COMPAT-177–180 now supersedes that exclusion. No source/site/device runtime verification is claimed. Root submits one complete latest-main lease and confirms existing CI trigger; no tests/local builds/probes.
 
 ## Fractional chapter alignment and source badges · 2026-11-14
 

@@ -27,7 +27,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 internal data class StarterSourceState(val running: Boolean = false, val phase: String = "",
-    val completed: Int = 0, val total: Int = 2, val progress: Int? = null,
+    val completed: Int = 0, val total: Int = 3, val progress: Int? = null,
     val preparingEngine: Boolean = false, val error: String? = null)
 
 /** Tiny pinned references, not redistributed source code, covers, manga or native libraries. */
@@ -133,6 +133,8 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
                 "0f68757f89d493926cbf4c039c256d34365d0639aaa6996acbcde7c162257982"),
             Starter("wnacg", "WNACG", "wnacg.js", "js_ac54e53a451f4f84f635c7c6cfac9ecd2cdb", 32_774,
                 "545a6d818d012c1e5799d6aaf7ecd09798969acb840166ee7c56de6d02201df0"),
+            Starter("ehentai", "E-Hentai", "ehentai.js", "js_d0e1410e9d2b0f26739feea876b7b82d11e9", 61_741,
+                "ef15f80d8090cb9ec1fcb18b502017a47694484e81d51c85e6b06ea162c58e4a"),
         )
         fun digest(bytes: ByteArray): String = sha256(bytes).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
         fun failureReason(failure: Exception): String = when {

@@ -7,6 +7,26 @@ import dev.mangaflow.json.JSONObject
 internal fun repairVeneraScript(code: String, metadata: JSONObject): Pair<String, JSONArray> {
     val repairs = JSONArray()
     var result = code
+    if (metadata.optString("key") == "ehentai" && metadata.optString("version") == "1.2.0") {
+        val original = "Network.setCookies('https://e-hentai.org', cookies)"
+        if (result.split(original).size == 2 && result.contains("loginWithCookies:")) {
+            result = result.replace(original, "Network.deleteCookies('https://forums.e-hentai.org')\n                Network.deleteCookies('https://exhentai.org')\n                Network.setCookies('https://e-hentai.org', cookies.filter(c => c.domain === '.e-hentai.org'))\n                Network.setCookies('https://exhentai.org', cookies.filter(c => c.domain === '.exhentai.org'))")
+            repairs.put(JSONObject().put("id", "ehentai-1.2.0-cookie-domain-targets")
+                .put("reason", "Store each login cookie against its actual origin; keep cross-domain cookie rejection and validate the parent-domain forum session before committing."))
+        }
+        val favorite = "let isFavorited = true;\n            if(document.querySelector(\"a#favoritelink\")?.text === \" Add to Favorites\") {"
+        if (result.split(favorite).size == 2) {
+            result = result.replace(favorite, "const favoriteText = document.querySelector(\"a#favoritelink\")?.text?.trim();\n            let isFavorited = favoriteText ? true : null;\n            if(favoriteText === \"Add to Favorites\") {")
+            repairs.put(JSONObject().put("id", "ehentai-1.2.0-favorite-label-whitespace")
+                .put("reason", "Compare the actual trimmed DOM label; an absent membership control stays unknown instead of parsing a nonexistent favorite-folder icon."))
+        }
+        val encounter = "hvevent: {\n            title: \"hvevent\",\n            type: \"switch\",\n            default: false"
+        if (result.split(encounter).size == 2) {
+            result = result.replace(encounter, "hvevent: {\n            title: \"hvevent\",\n            type: \"switch\",\n            mangaflowSupported: false,\n            default: false")
+            repairs.put(JSONObject().put("id", "ehentai-1.2.0-optional-game-dialog")
+                .put("reason", "The optional external-game encounter requires interactive script UI; keep it inactive and omit its control without blocking gallery reading."))
+        }
+    }
     if (metadata.optString("key") == "nhentai" && metadata.optString("version") == "1.1.0") {
         val original = "let currentPage = page || 1;"
         if (result.split(original).size == 2 && result.contains("type: \"mixed\"")) {

@@ -56,6 +56,8 @@ internal fun ContentProfileAccountScreen(
     var capabilities by remember(selectedId) { mutableStateOf(SourceCapabilities(emptySet())) }
     var user by remember(selectedId) { mutableStateOf("") }
     var password by remember(selectedId) { mutableStateOf("") }
+    var cookieValues by remember(selectedId) { mutableStateOf<List<String>>(emptyList()) }
+    var cookieMode by remember(selectedId) { mutableStateOf(false) }
     var busy by remember(selectedId) { mutableStateOf(false) }
     var message by remember(selectedId) { mutableStateOf<String?>(null) }
     var folders by remember(selectedId) { mutableStateOf<List<SourceFavoriteFolder>>(emptyList()) }
@@ -66,7 +68,7 @@ internal fun ContentProfileAccountScreen(
     var operation by remember(selectedId) { mutableStateOf<Job?>(null) }
     DisposableEffect(selectedId) { onDispose { operation?.cancel() } }
     LaunchedEffect(sources, active) {
-        if (!active) { password = ""; operation?.cancel(); return@LaunchedEffect }
+        if (!active) { password = ""; cookieValues = emptyList(); operation?.cancel(); return@LaunchedEffect }
         val capable = mutableListOf<BodySourceInfo>()
         for (entry in sources) {
             try { if (repository.sourceCapabilities(entry.id).supports(SourceFeature.ACCOUNT)) capable.add(entry) }
@@ -106,7 +108,7 @@ internal fun ContentProfileAccountScreen(
                 catch (_: Exception) { /* Keep the previous state when its refresh also fails. */ }
                 if (selectedId == owner && currentActive) message = failedMessage
             }
-            finally { if (selectedId == owner) { busy = false; password = "" } }
+            finally { if (selectedId == owner) { busy = false; password = ""; cookieValues = emptyList() } }
         }
     }
     suspend fun loadFavorites(folder: String, next: Int) {
@@ -140,7 +142,36 @@ internal fun ContentProfileAccountScreen(
                 }
             }
             if (!account.signedIn) item {
+                val useCookies = capabilities.cookieFields.isNotEmpty() && (!capabilities.passwordLogin || cookieMode)
                 Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    if (capabilities.passwordLogin && capabilities.cookieFields.isNotEmpty()) Row {
+                        MotionTextButton(onClick = { cookieMode = false; cookieValues = emptyList() }, enabled = !busy) { Text("账号密码", fontSize = 12.sp) }
+                        MotionTextButton(onClick = { cookieMode = true; password = "" }, enabled = !busy) { Text("Cookie", fontSize = 12.sp) }
+                    }
+                    if (useCookies) {
+                        Text("填写此来源的 Cookie，验证成功后保存登录状态。", fontSize = 11.sp, color = colors.onSurfaceVariant)
+                        capabilities.cookieFields.forEachIndexed { index, field ->
+                            val value = cookieValues.getOrNull(index).orEmpty()
+                            BasicTextField(value, { changed ->
+                                if (changed.length <= 8_192 && changed.none { it == '\r' || it == '\n' || it == ';' })
+                                    cookieValues = capabilities.cookieFields.indices.map { if (it == index) changed else cookieValues.getOrNull(it).orEmpty() }
+                            }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp))
+                                .background(colors.onSurface.copy(alpha = .045f)).padding(12.dp), singleLine = true, enabled = !busy,
+                                visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                textStyle = MaterialTheme.typography.bodySmall.copy(color = colors.onSurface),
+                                decorationBox = { inner -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(field, fontSize = 11.sp, color = colors.onSurfaceVariant); inner()
+                                } })
+                        }
+                        MotionButton(onClick = {
+                            val submitted = capabilities.cookieFields.indices.map { cookieValues.getOrNull(it).orEmpty() }
+                            cookieValues = emptyList()
+                            operate { repository.sourceLoginCookies(source.id, submitted)
+                                account = repository.sourceAccountState(source.id); onSessionChange() }
+                        }, enabled = !busy && cookieValues.any(String::isNotBlank)) {
+                            Text(if (busy) "验证中…" else "验证并登录", fontSize = 12.sp)
+                        }
+                    } else if (capabilities.passwordLogin) {
                     Text("使用来源账号登录，密码只用于这一次提交。", fontSize = 11.sp, color = colors.onSurfaceVariant)
                     BasicTextField(user, { if (it.length <= 160) user = it }, modifier = Modifier.fillMaxWidth()
                         .clip(RoundedCornerShape(11.dp)).background(colors.onSurface.copy(alpha = .045f)).padding(12.dp),
@@ -156,6 +187,7 @@ internal fun ContentProfileAccountScreen(
                         operate { repository.sourceLogin(source.id, submittedUser, submittedPassword)
                             account = repository.sourceAccountState(source.id); onSessionChange() }
                     }, enabled = !busy && user.isNotBlank() && password.isNotBlank()) { Text(if (busy) "登录中…" else "登录", fontSize = 12.sp) }
+                    }
                 }
             }
             if (account.signedIn && capabilities.supports(SourceFeature.FAVORITES)) {

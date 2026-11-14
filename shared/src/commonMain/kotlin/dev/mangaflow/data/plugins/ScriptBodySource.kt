@@ -12,6 +12,8 @@ import dev.mangaflow.data.sources.*
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +45,10 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
     private val coverHeaders = LinkedHashMap<String, Map<String, String>>()
     private val venera: Boolean get() = bundle.metadata.optString("protocol") == "venera"
     private val capabilityLock = Mutex()
+    private val paginationLock = Mutex()
+    private data class CursorChain(val next: LinkedHashMap<Int, String> = linkedMapOf())
+    private val cursorChains = LinkedHashMap<String, CursorChain>()
+    @Volatile private var sessionGeneration = 0L
     @Volatile private var declaredCapabilities: SourceCapabilities? = null
     @Volatile private var publicHeaders: Map<String, String> = manifestHeaders(bundle.metadata)
 
@@ -51,6 +57,8 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
     private fun clearSessionImages() {
         declaredCapabilities = null
         synchronized(headerLock) {
+            sessionGeneration++
+            cursorChains.clear()
             chapterHeaders.clear()
             coverHeaders.clear()
             publicHeaders = manifestHeaders(bundle.metadata)
@@ -64,7 +72,11 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
         val features = value.getJSONArray("features")
         SourceCapabilities((0 until features.length()).mapNotNull { index ->
             SourceFeature.entries.firstOrNull { it.name == features.getString(index) }
-        }.toSet(), value.optBoolean("loginRequired", false)).also { declaredCapabilities = it }
+        }.toSet(), value.optBoolean("loginRequired", false), value.optBoolean("passwordLogin", true),
+            value.optJSONArray("cookieFields")?.let { fields ->
+                require(fields.length() <= 16) { "来源登录字段过多。" }
+                (0 until fields.length()).map { fields.getString(it).also { name -> require(name.length in 1..160) } }
+            }.orEmpty()).also { declaredCapabilities = it }
     }
 
     override suspend fun feeds(): List<SourceFeed> {
@@ -112,6 +124,14 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
         require(venera) { "此脚本源未提供账号能力。" }
         clearSessionImages()
         try { call("logout", JSONArray()) }
+        finally { clearSessionImages() }
+    }
+
+    override suspend fun loginWithCookies(values: List<String>) {
+        require(venera && values.size in 1..16 && values.any(String::isNotBlank) &&
+            values.all { it.length <= 8_192 && it.none { char -> char == '\r' || char == '\n' || char == ';' } }) { "Cookie 登录信息无效。" }
+        clearSessionImages()
+        try { call("loginCookies", JSONArray().put(JSONArray(values))) }
         finally { clearSessionImages() }
     }
 
@@ -178,7 +198,8 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
         if (values == null) return emptyList()
         require(values.length() <= 64) { "源筛选组过多。" }
         return (0 until values.length()).map { index -> values.getJSONObject(index).let {
-            SourceFilter(it.getString("id"), it.getString("title"), choices(it.optJSONArray("choices")), it.optString("defaultValue"))
+            SourceFilter(it.getString("id"), it.getString("title"), choices(it.optJSONArray("choices")),
+                it.optString("defaultValue"), it.optBoolean("multiple", false))
         } }
     }
 
@@ -189,8 +210,29 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
         return listing("search", JSONArray().put(query.trim()).put(upstreamPage(page)).put(JSONArray()))
     }
 
-    private suspend fun listing(method: String, args: JSONArray): MangaPage = withContext(Dispatchers.IO) {
+    private fun paginationSession(): String = "$sessionGeneration:" + context?.let { scriptSourceImageEpoch(it, info.id) }.orEmpty()
+
+    /** Logical pages stay in the app; opaque continuations never become a manga or chapter id. */
+    private suspend fun listing(method: String, args: JSONArray): MangaPage = withContext(Dispatchers.IO) { paginationLock.withLock {
+        val upstream = if (method in setOf("search", "browse", "favorites")) args.getInt(1) else args.getInt(0)
+        val session = paginationSession()
+        val lane = JSONArray().put(method).put(if (method == "getPopular") "" else args.opt(0))
+            .put(if (method in setOf("search", "browse")) args.opt(2) else JSONObject.NULL).toString()
+        val key = session + ":" + lane
+        val cursor = synchronized(headerLock) {
+            if (upstream == 1) cursorChains.remove(key)
+            val chain = cursorChains[key]
+            if (venera && upstream > 1 && chain != null && chain.next[upstream] == null)
+                throw SourceException("列表分页已失效，请刷新后继续。")
+            chain?.next?.get(upstream)
+        }
+        if (venera) {
+            while (args.length() < 3) args.put(JSONObject.NULL)
+            args.put(cursor ?: JSONObject.NULL)
+        }
         val envelope = call(method, args)
+        currentCoroutineContext().ensureActive()
+        if (session != paginationSession()) throw CancellationException("来源账号或设置已变化，请刷新列表。")
         val result = envelope.get("result")
         val list = when (result) {
             is JSONArray -> result
@@ -201,9 +243,22 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
         require(list.length() <= 2_000) { "源返回的单页作品过多。" }
         val rows = (0 until list.length()).map { manga(list.getJSONObject(it)) }.distinctBy(Manga::id)
         val hasMore = (result as? JSONObject)?.optBoolean("hasNextPage", false) ?: false
-        val upstream = if (method in setOf("search", "browse", "favorites")) args.getInt(1) else args.getInt(0)
+        if (venera && result is JSONObject && result.optBoolean("cursorMode", false)) synchronized(headerLock) {
+            if (session != paginationSession()) throw CancellationException("来源账号或设置已变化，请刷新列表。")
+            val chain = cursorChains.remove(key) ?: CursorChain()
+            if (hasMore) {
+                val next = result.getString("nextCursor")
+                require(next.isNotBlank() && next.length <= 8_192 && next.none(Char::isISOControl) &&
+                    chain.next.none { (page, value) -> page <= upstream && value == next }) { "来源返回了重复或无效的分页游标。" }
+                if (chain.next[upstream + 1] != next) chain.next.keys.filter { it > upstream }.forEach(chain.next::remove)
+                chain.next[upstream + 1] = next
+                while (chain.next.size > 64) chain.next.remove(chain.next.keys.first())
+            }
+            cursorChains[key] = chain
+            while (cursorChains.size > 16) cursorChains.remove(cursorChains.keys.first())
+        }
         MangaPage(rows, hasMore, if (hasMore) upstream else null)
-    }
+    } }
 
     override suspend fun detail(mangaId: String): MangaDetail = withContext(Dispatchers.IO) {
         val native = nativeManga(mangaId)

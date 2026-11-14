@@ -39,6 +39,7 @@ interface BodySource : MangaRepository {
     suspend fun saveSetting(key: String, value: String): Unit = unsupportedSourceFeature()
     suspend fun accountState(): SourceAccountState = SourceAccountState()
     suspend fun login(username: String, password: String): Unit = unsupportedSourceFeature()
+    suspend fun loginWithCookies(values: List<String>): Unit = unsupportedSourceFeature()
     suspend fun logout(): Unit = unsupportedSourceFeature()
     suspend fun favoriteFolders(): List<SourceFavoriteFolder> = unsupportedSourceFeature()
     suspend fun favorites(folderId: String, page: Int): dev.mangaflow.data.MangaPage = unsupportedSourceFeature()

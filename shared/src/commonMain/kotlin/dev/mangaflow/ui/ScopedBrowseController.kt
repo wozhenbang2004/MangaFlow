@@ -179,7 +179,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         val feed = current.feeds.firstOrNull { it.id == id } ?: return
         if (id == current.feedId) return
         retainCurrent(); cancelControls()
-        mutableControls.value = current.copy(feedId = id, options = optionSelections["$sourceId:$id:false"] ?: feed.filters.map { it.defaultValue.ifBlank { it.choices.firstOrNull()?.id.orEmpty() } })
+        mutableControls.value = current.copy(feedId = id, options = normalizeOptions(feed.filters, optionSelections["$sourceId:$id:false"].orEmpty()))
         show(homeSelection(state.value), retain = false)
     }
 
@@ -187,9 +187,10 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         val current = controls.value
         if (current.loading) return
         val filters = if (state.value.isSearch) current.searchFilters else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
-        if (filters.getOrNull(index)?.choices?.none { it.id == id } != false) return
+        val filter = filters.getOrNull(index) ?: return
+        if (!filter.accepts(id) || filter.normalize(id) == current.options.getOrNull(index)) return
         retainCurrent()
-        val values = filters.mapIndexed { i, filter -> if (i == index) id else current.options.getOrNull(i) ?: filter.defaultValue }
+        val values = filters.mapIndexed { i, item -> item.normalize(if (i == index) id else current.options.getOrNull(i)) }
         optionSelections["$sourceId:${current.feedId}:${state.value.isSearch}"] = values
         mutableControls.value = current.copy(options = values)
         show(selection(state.value), retain = false)
@@ -201,9 +202,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
         metadataKey() in readyMetadata && (searching || controls.value.feedId.isEmpty() ||
             filterKey(sourceId, controls.value.feedId) in feedFilterCache)
     private fun normalizeOptions(filters: List<SourceFilter>, saved: List<String>): List<String> = filters.mapIndexed { index, filter ->
-        saved.getOrNull(index)?.takeIf { value -> filter.choices.any { it.id == value } }
-            ?: filter.defaultValue.takeIf { value -> filter.choices.any { it.id == value } }
-            ?: filter.choices.firstOrNull()?.id.orEmpty()
+        filter.normalize(saved.getOrNull(index))
     }
     private fun cancelControls() {
         controlsGeneration++; controlsJob?.cancel(); controlsJob = null; controlsOwner = null; pendingLoad = null
@@ -287,8 +286,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
             val current = controls.value
             optionSelections["$sourceId:${current.feedId}:$wasSearch"] = current.options
             val filters = if (isSearch) current.searchFilters else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
-            mutableControls.value = current.copy(options = optionSelections["$sourceId:${current.feedId}:$isSearch"] ?: filters.map {
-                it.defaultValue.ifBlank { it.choices.firstOrNull()?.id.orEmpty() } })
+            mutableControls.value = current.copy(options = normalizeOptions(filters, optionSelections["$sourceId:${current.feedId}:$isSearch"].orEmpty()))
         }
         show(selection(state.value).copy(query = query), debounce = query.isNotBlank(), retain = wasSearch == isSearch)
     }
@@ -390,7 +388,7 @@ internal class ScopedBrowseController(private val repository: UnifiedMangaReposi
                                     }
                                     if (value.isSearch) repository.sourceFilteredSearch(id, value.query.trim(), page,
                                         if (selectedSource == ALL) emptyList() else selectedControls.searchFilters.mapIndexed { index, filter ->
-                                            selectedControls.options.getOrNull(index)?.takeIf { value -> filter.choices.any { it.id == value } } ?: filter.defaultValue }, forceRefresh = force)
+                                            filter.normalize(selectedControls.options.getOrNull(index)) }, forceRefresh = force)
                                     else repository.browseSource(id, page, selectedControls.feedId.takeIf { selectedSource != ALL && it.isNotEmpty() }
                                         ?.let { SourceBrowseRequest(it, page, selectedControls.options) })
                                 }

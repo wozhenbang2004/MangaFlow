@@ -55,6 +55,7 @@ private data class ImageRequestKey(val sourceId: String, val owner: String, val 
 private data class ResolvedImage(val at: Long, val page: Page)
 private val imageStateLock = SynchronizedObject()
 private val resolvedImages = linkedMapOf<ImageRequestKey, ResolvedImage>()
+private val failedImageRetries = linkedSetOf<ImageRequestKey>()
 private val imageGates = Array(16) { Mutex() }
 private val decodeGates = Array(16) { Mutex() }
 private val decodeSlots = Semaphore(2)
@@ -72,26 +73,35 @@ fun scriptSourceImageEpoch(context: PlatformContext, sourceId: String): String {
 
 /** A late script callback must not restore cookies or settings after its session was replaced. */
 internal fun <T> withScriptSourceImageEpoch(context: PlatformContext, sourceId: String,
-    expected: String, operation: () -> T): T = synchronized(imageStateLock) {
-    val current = sourceEpochOverrides[sourceId]
-        ?: context.getSharedPreferences("mangaflow_script_image_sessions")
-            .getString("epoch_$sourceId", "initial").orEmpty()
-    if (current != expected) throw CancellationException("来源账号或设置已变化。")
-    operation()
+    expected: String, replaceAfter: Boolean = false, operation: () -> T): T {
+    var interrupted: List<Job> = emptyList()
+    val result = synchronized(imageStateLock) {
+        val current = sourceEpochOverrides[sourceId]
+            ?: context.getSharedPreferences("mangaflow_script_image_sessions")
+                .getString("epoch_$sourceId", "initial").orEmpty()
+        if (current != expected) throw CancellationException("来源账号或设置已变化。")
+        operation().also { if (replaceAfter) interrupted = replaceScriptImageSessionLocked(context, sourceId) }
+    }
+    interrupted.forEach { it.cancel(CancellationException("来源图片会话已变化。")) }
+    return result
+}
+
+/** Caller owns imageStateLock: committing credentials and advancing their fence are indivisible. */
+private fun replaceScriptImageSessionLocked(context: PlatformContext, sourceId: String): List<Job> {
+    val epoch = randomUuid()
+    sourceEpochOverrides[sourceId] = epoch
+    resolvedImages.entries.removeAll { it.key.sourceId == sourceId }
+    failedImageRetries.removeAll { it.sourceId == sourceId }
+    headerSecrets.entries.removeAll { JSONObject(it.value).optString("sourceId") == sourceId }
+    check(context.getSharedPreferences("mangaflow_script_image_sessions").edit()
+        .putString("epoch_$sourceId", epoch).commit()) { "来源图片会话状态未能保存，请检查存储空间。" }
+    return imageSessionJobs.remove(sourceId).orEmpty().toList()
 }
 
 /** Account/settings changes invalidate late image resolutions and protected headers across restarts. */
 fun invalidateScriptSourceImages(context: PlatformContext, sourceId: String) {
     if (!sourceId.startsWith("js_")) return
-    val epoch = randomUuid()
-    val interrupted = synchronized(imageStateLock) {
-        sourceEpochOverrides[sourceId] = epoch
-        resolvedImages.entries.removeAll { it.key.sourceId == sourceId }
-        headerSecrets.entries.removeAll { JSONObject(it.value).optString("sourceId") == sourceId }
-        check(context.getSharedPreferences("mangaflow_script_image_sessions").edit()
-            .putString("epoch_$sourceId", epoch).commit()) { "来源图片会话状态未能保存，请检查存储空间。" }
-        imageSessionJobs.remove(sourceId).orEmpty().toList()
-    }
+    val interrupted = synchronized(imageStateLock) { replaceScriptImageSessionLocked(context, sourceId) }
     interrupted.forEach { it.cancel(CancellationException("来源图片会话已变化。")) }
 }
 
@@ -125,7 +135,13 @@ internal fun scriptImageOwner(mangaId: String, chapterId: String): String {
 fun invalidateScriptImage(mangaId: String, chapterId: String, token: String) {
     if (token.isEmpty()) return
     val owner = scriptImageOwner(mangaId, chapterId)
-    synchronized(imageStateLock) { resolvedImages.entries.removeAll { it.key.owner == owner && it.key.token == token } }
+    synchronized(imageStateLock) {
+        // Only an explicit retry of an already resolved image arms its source failure hook.
+        // Preserve the exact revision, session and frozen route; optional loads cannot rearm it.
+        failedImageRetries.addAll(resolvedImages.keys.filter { it.owner == owner && it.token == token })
+        while (failedImageRetries.size > 128) failedImageRetries.remove(failedImageRetries.first())
+        resolvedImages.entries.removeAll { it.key.owner == owner && it.key.token == token }
+    }
 }
 
 /** Removes only a failed generated cache image; downloaded/user-imported files are never touched. */
@@ -182,8 +198,9 @@ suspend fun resolveScriptPage(
             resolvedImages[key]?.takeIf { wallTimeMillis() - it.at in 0L until 30_000L }?.page
         }?.let { return@withLock it.copy(index = original.index, width = original.width, height = original.height) }
         try {
+            val retryFailure = synchronized(imageStateLock) { failedImageRetries.remove(key) }
             val call: suspend () -> String = { store.runtime.call(bundle, "resolveImage", JSONArray()
-                .put(original.sourceImageToken).put(ref.mangaId).put(ref.chapterId)) }
+                .put(original.sourceImageToken).put(ref.mangaId).put(ref.chapterId).put(retryFailure)) }
             val response = withImageSession(context, ref.sourceId, epoch) {
                 if (selectedRoute == null || transport?.route == selectedRoute) call() else {
                     val client = NetworkClient(route = selectedRoute)

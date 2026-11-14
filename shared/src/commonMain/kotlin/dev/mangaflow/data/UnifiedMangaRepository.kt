@@ -132,7 +132,12 @@ class UnifiedMangaRepository(
         require(adapters.size <= 64 && adapters.map { it.info.id }.distinct().size == adapters.size) { "导入源数量或身份无效。" }
         require(adapters.all { it is ScriptBodySource && it.info.id.matches(Regex("js_[a-f0-9]{36}")) &&
             it.info.id !in builtinAdapters && it.info.id != "copy" && it.info.id != "local" }) { "导入源不能覆盖内置来源。" }
-        val imported = adapters.associateBy { it.info.id }
+        // Keep unchanged adapters: their opaque pagination belongs to the still-visible feed.
+        val previous = sourceSnapshot.adapters
+        val imported = adapters.associate { source ->
+            val retained = (previous[source.info.id] as? ScriptBodySource)?.takeIf { it.digest == (source as ScriptBodySource).digest }
+            source.info.id to (retained ?: source)
+        }
         val digests = adapters.associate { it.info.id to (it as ScriptBodySource).digest }
         val next = SourceSnapshot(builtinAdapters + imported, listOf(copyInfo) + builtinAdapters.values.map { it.info } +
             adapters.map { it.info }, digests)
@@ -259,6 +264,9 @@ class UnifiedMangaRepository(
     suspend fun sourceAccountState(id: String): SourceAccountState = adapter(id).accountState()
     suspend fun sourceLogin(id: String, user: String, password: String) = diagnostics.track(id, SourceStage.ACCOUNT) {
         adapter(id).login(user, password); invalidatePageCache(id)
+    }
+    suspend fun sourceLoginCookies(id: String, values: List<String>) = diagnostics.track(id, SourceStage.ACCOUNT) {
+        adapter(id).loginWithCookies(values); invalidatePageCache(id)
     }
     suspend fun sourceLogout(id: String) = diagnostics.track(id, SourceStage.ACCOUNT) {
         adapter(id).logout(); invalidatePageCache(id)
