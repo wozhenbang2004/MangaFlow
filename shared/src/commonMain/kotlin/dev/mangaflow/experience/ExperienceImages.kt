@@ -18,7 +18,9 @@ import coil3.network.NetworkFetcher
 import coil3.network.NetworkRequest
 import coil3.network.NetworkResponse
 import coil3.network.NetworkResponseBody
+import coil3.network.httpHeaders
 import coil3.request.*
+import coil3.request.Options
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.imagePlatformContext
@@ -182,7 +184,7 @@ private class ExperienceImageNetworkClient(
                 }
                 val bounded = object : NetworkResponseBody {
                     override suspend fun writeTo(sink: BufferedSink) {
-                        val counter = object : ForwardingSink(sink) {
+                        val counter = object : Sink {
                             override fun write(source: Buffer, byteCount: Long) {
                                 if (optional) {
                                     requireNotNull(token).ifOptional {
@@ -193,8 +195,11 @@ private class ExperienceImageNetworkClient(
                                     }
                                 }
                                 received += byteCount
-                                super.write(source, byteCount)
+                                sink.write(source, byteCount)
                             }
+                            override fun flush() = sink.flush()
+                            override fun timeout(): Timeout = sink.timeout()
+                            override fun close() = sink.close()
                         }.buffer()
                         body.writeTo(counter)
                         counter.flush()

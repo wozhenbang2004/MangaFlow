@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## CI240 image-adapter compiler repair · 2026-11-14
+
+User continued the network delivery. Actual Android240/run43586380957/job132421661177, iOS/run43586380933/job132421661451 and Windows/job132421661735 all failed common image compilation at maina364efd. Logs identify ExperienceImages.kt:88 missing coil3.network.httpHeaders import and :142 ambiguous coil3.request.Options versus okio.Options, invalidating EventListener.fetchEnd override. Native additionally reports :185/:196 ForwardingSink unavailable, cascading write/buffer/flush errors. These are concrete failures in the concurrent experience image layer, not completed artifact or UI acceptance.
+
+Bounded correction explicitly imports the pinned Coil extension/options and uses the common Okio Sink interface to retain the original streaming budget/foreground promotion/measurement and sink ownership semantics. Preserve current network recognition/UI, cloud-shelf semantics, ranking identity and all experience policy behavior. No new dependency, tests, local build or service/device probe. Next exact action is to publish this compiler repair once against latest main and inspect actual resulting compilation; do not retry the identical failed240 source or claim a released240 APK exists.
+
 ## Current passive network recognition and workspace refinement · 2026-11-14
 
 User screenshot1000121716 and current raw request are DESIGN NETWORK-REFINE-171–175. Source implements a compact content-sized network dialog, status before default route, on-demand address/help, compact category/check controls and passive Android/Windows/iOS public proxy metadata. Detected endpoints only fill a protocol-preserving draft; PAC/unknown/system-only configurations are not falsely made importable. Do not restore guessed ports, unsupported universal proxy claims or the rejected fixed-height blank space. Independent reviews corrected stale-fill and draft-event replay paths; source compilation and installed observation remain unverified.
