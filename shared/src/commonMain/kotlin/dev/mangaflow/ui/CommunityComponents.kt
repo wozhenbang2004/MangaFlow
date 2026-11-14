@@ -193,13 +193,11 @@ internal fun CommunityPanel(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     SideEffect { if (active) { onScrollTarget(listState); onFilterChanged(selectedSource != null || longOnly || !hidePromotions) } }
-    // SaveableStateProvider retains the scroll position while switching tabs. A new
-    // visit to the work's comments must start at the newest item, not yesterday's
-    // last-read offset. Never reset for paging or a live provider update.
+    // A fresh visit starts at the newest item, including a restored tab. Requesting
+    // the next layout also prevents its old item key from restoring the prior offset.
     LaunchedEffect(mangaId, active) {
         if (active) {
-            listState.stopScroll()
-            listState.scrollToItem(0)
+            listState.requestScrollToItem(0)
         } else {
             onFilterDismiss()
             listState.stopScroll()
@@ -219,9 +217,14 @@ internal fun CommunityPanel(
         val prepared = withContext(Dispatchers.Default) {
             prepareReviewClusters(reviewRows, selectedSource, longOnly)
         }
+        // Keep new arrivals at the top only while the reader is still parked there.
+        // Once they scroll into older comments, retain the existing item key and offset.
+        val keepNewestVisible = !listState.isScrollInProgress &&
+            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         // Cancelled inputs cannot replace the current filter. Existing rows remain during an append.
         clusters = prepared
         preparing = false
+        if (prepared.isNotEmpty() && keepNewestVisible) listState.requestScrollToItem(0)
     }
     val nearEnd by remember(listState) {
         derivedStateOf {

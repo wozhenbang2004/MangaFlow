@@ -1,5 +1,19 @@
 # MangaFlow detail · 2026-11-12
 
+## Work comments and shared content-mode direction · 2026-11-14
+
+Current user feedback (message IDs unavailable): “评论应该是一打开显示最上面的评论啊也就是最新的以及我现在在评论那里上滑会带着整个界面上滑，我说的是漫画详情页”; “以及成人专区的 uiux 要重新设计功能你看看能不能用匿名接口”. Subsequent direction: “成人区弄成我们正常弄成一个切换按钮点击后我我们整个软件 uiux 不变啊直接东西都变成对应的成人的这样如何？”. The mode-switch proposal replaces this slice's separate-zone layout draft; that draft is not submitted.
+
+| ID | Current decision | Observable boundary / evidence |
+| --- | --- | --- |
+| COMMENTS-OPEN-20261114 | Reuse the existing CommunityPanel and parsed-date descending mixed feed. Each fresh entry requests item0 on the next layout, avoiding restoration by the old first-item key. Initial/source arrivals keep the newest item aligned only while the user is parked at index0/offset0 and no scroll is in progress. | Reading older comments retains its item key/offset. No new latest/featured toolbar, invented provider sort parameter or all-pages crawl. Unknown dates retain existing provider/native fallback; this does not establish a complete server-side chronology. |
+| COMMENTS-SCROLL-20261114 | Preserve concurrent c234a9a's chapter-only outer nested-scroll attachment and chapter-only surrounding scrollables. On entry to comments, cancel catalogue positioning and stop its prior fling before the header can keep moving. | Comment drag, edge overscroll and fling stay inside the comments surface; the artwork remains at its entry position. Chapter collapse, replies, filtering, source identity and pagination retain their existing ownership. |
+| CONTENT-MODE-20261114 / design direction | Recommend one content-mode control inside the existing navigation, with the same discovery/search/detail/reader/library/history/download UI, typography, glass and motion. The selected mode scopes the content journey together; it is not a second set of pages or a recolored skin. | Keep separate query, source selection, list/reader position and records per content scope; switching back restores ordinary browsing. Cancel old-scope requests and reject late results. Global appearance/account/application settings remain shared. This is a recorded direction, not a shipped toggle. No empty switch or claimed working integration. |
+
+Reuse/evidence: existing MangaFlow components and the currently loaded Ovio-derived tab/list infrastructure; existing shared content-profile research above supplies the scope distinction. The comment layout change is based on the actual shared implementation and user report, with pinned Compose1.12.2 LazyListState.requestScrollToItem source confirming cancellation/next-layout key behavior. No new dependency, source adapter, content retrieval endpoint or authentication path is added. Explicit-site anonymous/content integration is outside this implementation; no such capability is claimed.
+
+The source-only batch preserves c234a9a's concurrent comment repair plus the current desktop/high-refresh/Steam/quality work. One latest-main expected-head update and normal CI trigger only; no local files, commands, builds, tests, browser/device/service/account probes or new review gate. Installed comment motion/entry and the new build result remain pending actual user feedback/normal CI evidence.
+
 ## High-refresh rendering and frame budget · 2026-11-14 (HIGH-REFRESH-137–140)
 
 User request in this thread: “你看看能不能提高下帧率和流畅度呢手机一般都是至少 120hz 了电脑能多高多高电脑很多都是 300hz”. Adopt device-driven high-refresh hints and remove demonstrated redundant work; a preferred refresh rate is not measured rendered FPS. Keep the current shared app, accepted glass/motion/geometry, original image quality, exact source/chapter/progress identities and READER-RETURN-136.

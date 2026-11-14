@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Detail comments / content-mode direction · 2026-11-14
+
+Active user wording and the adopted decisions are DESIGN.md COMMENTS-OPEN-20261114, COMMENTS-SCROLL-20261114 and CONTENT-MODE-20261114. Latest user prefers one switch that keeps the ordinary app UI and changes content scope throughout; the separate AdultZoneScreen layout draft is withdrawn and must not be integrated. Shared-mode UX is a recorded design direction, not an implemented toggle; no new explicit-site anonymous/retrieval integration is provided.
+
+Concurrent main c234a9a already detaches the artwork nested-scroll connection and disables both surrounding scrollables for comments, plus a first-entry scroll. Preserve it instead of overwriting with the earlier equivalent two-agent draft. This batch adds cancellation of the prior catalogue fling/positioning on comment entry and uses next-layout requestScrollToItem(0) to avoid the restored-item-key anchor. When asynchronous prepared rows arrive, keep the newest visible only if the user is still parked at the top; scrolling older rows retains their exact key/offset. Existing mixed-feed parsed-date descending order, unknown-date fallback, source/filter/reply/paging and real work/chapter identities remain unchanged.
+
+Root alone integrates these two shared source files and these existing state/design entries as one finished batch on latest main with an expected-head lease. Preserve current Android/JM packaging, desktop/high-refresh, reader-return, fonts, Steam and source-quality changes. No local files/commands/builds/tests, source/account/device/browser probes or added review gate; normal compile/package CI trigger only. Actual latest-first entry, stable artwork while comments scroll, edge/fling feel and the resulting artifact remain pending user feedback/normal CI evidence.
+
 ## High-refresh and frame-work reduction · 2026-11-14
 
 Current user request and adopted bounded changes are DESIGN.md HIGH-REFRESH-137–140. Mobile: maximum same-resolution Android window refresh hint scoped to resumed activity plus actual Compose high-category drawing votes; generated iPhone Info gains the ProMotion opt-in. Shared detail collapse reads move to the dock; reader tile state updates draw through a stable Painter. Desktop ordinary8bit sRGB region conversion uses the current official Compose converter instead of PNG encoding/decoding, retaining the old path elsewhere and native VSync.

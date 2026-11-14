@@ -24,6 +24,7 @@ import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.rememberScrollableState
 import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -312,6 +313,13 @@ fun DetailScreen(
     var catalogGrid by remember(current.id) { mutableStateOf<LazyGridState?>(null) }
     val artworkBackdrop = rememberHazeState()
     val readingBackdrop = rememberHazeState()
+
+    LaunchedEffect(active, activeSection) {
+        if (active && activeSection == 1) {
+            contentsJump?.cancel()
+            catalogGrid?.stopScroll()
+        }
+    }
 
     // Both layouts keep one catalogue/comment implementation and the same saved section state.
     val sectionPane: @Composable (Modifier, Dp) -> Unit = { paneModifier, paneBottomPadding ->
