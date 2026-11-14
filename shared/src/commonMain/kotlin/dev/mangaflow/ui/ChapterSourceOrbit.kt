@@ -115,7 +115,7 @@ internal fun ChapterSourceOrbit(
     onCancel: () -> Unit = {},
     onPresenceChange: (Boolean) -> Unit = {},
     hasStatus: Boolean = false,
-    status: @Composable () -> Unit = {},
+    status: @Composable (active: Boolean) -> Unit = {},
     item: @Composable (index: Int, modifier: Modifier, dismiss: () -> Unit, reveal: () -> Float, active: Boolean) -> Unit,
 ) {
     val sourceAnchor = remember(identity) { anchor }
@@ -267,8 +267,9 @@ internal fun ChapterSourceOrbit(
                         }
                     }
                     if (hasStatus) Column(Modifier.fillMaxWidth().heightIn(max = 72.dp)
+                        .motionInputGate(canInteract)
                         .graphicsLayer { alpha = ((progress.value - .5f) / .5f).coerceIn(0f, 1f) }
-                        .verticalScroll(rememberScrollState()).padding(horizontal = 4.dp, vertical = 4.dp)) { status() }
+                        .verticalScroll(rememberScrollState()).padding(horizontal = 4.dp, vertical = 4.dp)) { status(canInteract) }
                 }
                 // A second tap at the original stack takes over the same retained flight.
                 if (localAnchor != null) Box(Modifier.absoluteOffset {

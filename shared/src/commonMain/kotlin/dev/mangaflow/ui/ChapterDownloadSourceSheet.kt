@@ -17,6 +17,8 @@ import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.data.sourceDisplayName
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 
@@ -27,7 +29,7 @@ internal fun ChapterDownloadSourceSheet(
     chapter: Chapter,
     entries: Map<String, DownloadEntry>,
     backdrop: HazeState,
-    onSelect: (ChapterVariant) -> Unit,
+    onSelect: (ChapterVariant, DownloadRouteMode?) -> Unit,
     onDismiss: () -> Unit,
     anchor: Rect? = null,
     repository: MangaRepository? = null,
@@ -35,11 +37,14 @@ internal fun ChapterDownloadSourceSheet(
     val variants = remember(manga.id, manga.sourceName, chapter) { downloadSourceVariants(manga, chapter) }
     var submitted by remember(manga.id, chapter.logicalId, chapter.id) { mutableStateOf(false) }
     var inspected by remember(manga.id, chapter.logicalId, chapter.id) { mutableStateOf<String?>(null) }
+    var route by remember(manga.id, chapter.logicalId, chapter.id) { mutableStateOf<DownloadRouteMode?>(null) }
     val colors = MaterialTheme.colorScheme
     ChapterSourceOrbit("download:${manga.id}:${chapter.logicalId.ifBlank { chapter.id }}",
         anchor, backdrop, variants.size, onDismiss,
-        hasStatus = variants.isEmpty() || inspected != null,
-        status = {
+        hasStatus = true,
+        status = { routeActive ->
+            TaskDownloadRouteControl(DownloadCategory.CHAPTERS, route, { route = it },
+                enabled = routeActive && !submitted, backdrop = backdrop)
             if (variants.isEmpty()) Text("本章暂无可用来源，更新目录后重试。",
                 color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 18.sp)
             inspected?.let { Text(it, color = colors.onSurfaceVariant, fontSize = 11.sp, lineHeight = 17.sp) }
@@ -91,7 +96,7 @@ internal fun ChapterDownloadSourceSheet(
             onClick = {
                 if (!submitted) {
                     submitted = true
-                    onSelect(variant)
+                    onSelect(variant, route)
                     dismiss()
                 }
             })

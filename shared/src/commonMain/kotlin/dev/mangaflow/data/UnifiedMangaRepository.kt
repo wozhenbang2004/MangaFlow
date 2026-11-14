@@ -11,6 +11,11 @@ import dev.mangaflow.data.sources.BodySource
 import dev.mangaflow.data.sources.BodySourceInfo
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
+import dev.mangaflow.data.sources.createJmDownloadSession
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.NetworkClient
+import dev.mangaflow.net.checked
 import dev.mangaflow.data.plugins.ScriptBodySource
 import dev.mangaflow.storage.UnifiedChapterStore
 import dev.mangaflow.storage.UnifiedWorkSettings
@@ -811,6 +816,48 @@ class UnifiedMangaRepository(
                     if (!request.result.isCompleted) request.result.cancel()
                 }
             }
+        }
+    }
+
+    /** One task owns metadata, redirects and page bytes on the same frozen route. */
+    suspend fun prepareDownload(
+        context: PlatformContext,
+        mangaId: String,
+        chapterId: String,
+        route: DownloadRouteSnapshot,
+        forceRefresh: Boolean = false,
+    ): PreparedChapterDownload {
+        val selected = route.checked()
+        val ref = SourceKeys.decodeChapter(mangaId, chapterId)
+        val snapshot = sourceSnapshot
+        val installed = if (ref.sourceId == "copy") null else (snapshot.adapters[ref.sourceId]
+            ?: throw SourceException("这个正文来源尚未安装或已移除。"))
+        // Script header caches belong to this request, even while the reader uses the same script.
+        val source = if (installed is ScriptBodySource) installed.forDownload() else installed
+        val client = NetworkClient(route = selected)
+        try {
+            return withContext(Dispatchers.IO + ChapterDownloadTransport(selected, client)) {
+                currentCoroutineContext().ensureActive()
+                val owner = SourceKeys.manga(ref.sourceId, ref.mangaId)
+                val pages = when (ref.sourceId) {
+                    "copy" -> copy.downloadPages(ref.mangaId, ref.chapterId)
+                    "jmcomic" -> {
+                        val session = createJmDownloadSession(context, mangaId, chapterId, selected)
+                            ?: throw DownloadRouteException("当前平台不支持这个来源的下载。")
+                        try { session.pages() } finally { session.close() }
+                    }
+                    else -> requireNotNull(source).pages(owner, chapterId, forceRefresh)
+                }.toList()
+                currentCoroutineContext().ensureActive()
+                if (ref.sourceId != "copy" && sourceSnapshot.adapters[ref.sourceId] !== installed)
+                    throw CancellationException("来源已更新或移除，请重新开始下载。")
+                if (pages.isEmpty()) throw SourceException("这个来源没有返回本章图片，请重试或选择其他来源。")
+                val headers = if (ref.sourceId == "copy") copy.imageHeaders(ref.mangaId, ref.chapterId)
+                    else requireNotNull(source).imageHeaders(owner, chapterId)
+                PreparedChapterDownload(pages, headers.toMap())
+            }
+        } finally {
+            client.close()
         }
     }
 

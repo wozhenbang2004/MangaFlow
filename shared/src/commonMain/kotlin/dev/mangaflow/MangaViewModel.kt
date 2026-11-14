@@ -29,6 +29,9 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.MangaReview
 import dev.mangaflow.data.foregroundRequest
 import dev.mangaflow.data.SourceException
+import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.UnifiedMangaRepository
@@ -1251,7 +1254,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private fun loadReviews(manga: Manga, requestId: Long) {
-        if (isAdultSource(manga.sourceId)) return
+        if (isAdultSource(manga.sourceId)) {
+            _detail.update { current ->
+                if (requestId == detailRequestId && current?.manga?.id == manga.id)
+                    current.copy(reviewsLoading = false) else current
+            }
+            return
+        }
         reviewJob = viewModelScope.launch {
             try {
                 coroutineScope {
@@ -2252,9 +2261,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         _refreshingDownloads.update { it + entry.id }
         viewModelScope.launch {
             try {
-                val pages = repository.pages(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id, forceRefresh = true)
-                val refreshed = downloads.refreshReadingDownload(entry.manga, entry.chapter, pages,
-                    repository.imageHeaders(chapterSourceMangaId(entry.manga.id, entry.chapter), entry.chapter.id), expectedEntry = expected)
+                val route = DownloadRoutingStore.get(application).snapshot(DownloadCategory.CHAPTERS)
+                val prepared = dev.mangaflow.data.foregroundRequest("刷新下载图片地址") {
+                    repository.prepareDownload(application, chapterSourceMangaId(entry.manga.id, entry.chapter),
+                        entry.chapter.id, route, forceRefresh = true)
+                }
+                val refreshed = downloads.refreshReadingDownload(entry.manga, entry.chapter, prepared.pages,
+                    prepared.headers, expectedEntry = expected, route = route)
                 if (refreshed) messages.send("图片地址已刷新，继续下载")
             } catch (cancel: CancellationException) {
                 throw cancel
@@ -2655,28 +2668,29 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private fun accountError(failure: Exception, fallback: String) =
         (failure as? SourceException)?.message ?: fallback
 
-    fun downloadChapter(chapter: Chapter) {
+    fun downloadChapter(chapter: Chapter, route: DownloadRouteMode? = null) {
         val manga = _detail.value?.manga ?: return
-        enqueueChapterDownload(manga, chapter)
+        enqueueChapterDownload(manga, chapter, route)
     }
 
-    fun downloadChapterVariant(manga: Manga, chapter: Chapter, variant: ChapterVariant) {
+    fun downloadChapterVariant(manga: Manga, chapter: Chapter, variant: ChapterVariant, route: DownloadRouteMode? = null) {
         if (chapter.variants.none { it == variant }) return
-        enqueueChapterDownload(manga, resolveChapter(chapter, variant))
+        enqueueChapterDownload(manga, resolveChapter(chapter, variant), route)
     }
 
-    private fun enqueueChapterDownload(manga: Manga, chapter: Chapter) {
+    private fun enqueueChapterDownload(manga: Manga, chapter: Chapter, routeMode: DownloadRouteMode? = null) {
         val key = "${manga.id}/${chapter.id}"
         if (!preparingDownloads.add(key)) return
         viewModelScope.launch {
             try {
+                val route = DownloadRoutingStore.get(application).snapshot(DownloadCategory.CHAPTERS, routeMode)
                 // A bulk selection still uses the ordinary queue, with bounded source preparation.
                 downloadPreparationSlots.withPermit {
                     messages.send("正在准备 ${chapter.title}")
-                    val pages = dev.mangaflow.data.foregroundRequest("下载章节图片") {
-                        repository.pages(chapterSourceMangaId(manga.id, chapter), chapter.id)
+                    val prepared = dev.mangaflow.data.foregroundRequest("下载章节图片") {
+                        repository.prepareDownload(application, chapterSourceMangaId(manga.id, chapter), chapter.id, route)
                     }
-                    downloads.enqueue(manga, chapter, pages, repository.imageHeaders(chapterSourceMangaId(manga.id, chapter), chapter.id))
+                    downloads.enqueue(manga, chapter, prepared.pages, prepared.headers, route = route)
                     messages.send("已加入下载，可在下载页查看进度")
                 }
             } catch (cancel: CancellationException) {

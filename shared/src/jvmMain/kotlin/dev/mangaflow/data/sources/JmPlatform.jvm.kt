@@ -236,6 +236,27 @@ private class RoutedJmDownloadSession(
     private val metadata = Mutex()
     private var images: List<JmImage>? = null
 
+    override suspend fun pages(): List<Page> = withContext(Dispatchers.IO) {
+        val active = activeClient()
+        val loaded = chapterImages(active)
+        currentCoroutineContext().ensureActive()
+        if (closed) throw CancellationException("下载已停止")
+        loaded.mapIndexed { index, image ->
+            val url = image.downloadUrl
+            require(url.startsWith("https://") && url.length <= 4096) { "来源返回的图片地址无效。" }
+            Page(index, url)
+        }
+    }
+
+    private suspend fun chapterImages(active: JmApiClient): List<JmImage> = metadata.withLock {
+        images ?: active.getPhoto(chapterId).let { photo ->
+            if (!photo.albumId().isNullOrBlank() && photo.albumId() != mangaId)
+                throw SourceException("章节作品编号不一致，已停止下载。")
+            photo.images()?.takeIf { it.isNotEmpty() && it.size <= 10_000 }?.toList()
+                ?: throw SourceException("章节没有可下载图片。")
+        }.also { images = it }
+    }
+
     override suspend fun read(page: Page): ByteArray = withContext(Dispatchers.IO) {
         currentCoroutineContext().ensureActive()
         if (closed) throw CancellationException("下载已停止")
@@ -249,12 +270,7 @@ private class RoutedJmDownloadSession(
             return@withContext cached.readBytes()
         val active = activeClient()
         currentCoroutineContext().ensureActive()
-        val pages = metadata.withLock { images ?: active.getPhoto(chapterId).let { photo ->
-            if (!photo.albumId().isNullOrBlank() && photo.albumId() != mangaId)
-                throw SourceException("章节作品编号不一致，已停止下载。")
-            photo.images()?.takeIf { it.isNotEmpty() && it.size <= 10_000 }?.toList()
-                ?: throw SourceException("章节没有可下载图片。")
-        }.also { images = it } }
+        val pages = chapterImages(active)
         val image = pages.getOrNull(page.index) ?: throw SourceException("图片页码超出范围。")
         require(image.downloadUrl.startsWith("https://") && image.downloadUrl.length <= 4096) {
             "来源返回的图片地址无效。"

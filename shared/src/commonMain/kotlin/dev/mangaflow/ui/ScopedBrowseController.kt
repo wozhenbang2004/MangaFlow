@@ -108,8 +108,10 @@ internal class ScopedBrowseController(
         sourceId = saved.getOrNull(0).orEmpty()
         val restored = emptyState().copy(
             query = saved.getOrNull(1).orEmpty(),
-            searchTarget = SearchTarget.entries.firstOrNull { it.name == saved.getOrNull(2) } ?: SearchTarget.TITLE,
-            mode = DiscoveryMode.entries.firstOrNull { it.name == saved.getOrNull(3) } ?: DiscoveryMode.RECOMMENDED,
+            // The opaque source contract provides only catalogue browsing and title search.
+            // Older UI selections must not restore an unreachable ordinary-source operation.
+            searchTarget = SearchTarget.TITLE,
+            mode = DiscoveryMode.RECOMMENDED,
             period = RankPeriod.entries.firstOrNull { it.name == saved.getOrNull(4) } ?: RankPeriod.WEEK,
             audience = RankAudience.entries.firstOrNull { it.name == saved.getOrNull(5) } ?: RankAudience.MALE,
             sourceScope = scopeKey(),

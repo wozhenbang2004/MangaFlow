@@ -1,6 +1,7 @@
 package dev.mangaflow.storage
 
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.net.DownloadRouteSnapshot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -13,7 +14,7 @@ actual fun createSteamWallpaperClient(context: PlatformContext): SteamWallpaperC
     override fun search(query: String, kind: SteamWallpaperKind, page: Int) = Unit
     override fun loadLibrary(library: SteamWallpaperLibrary, kind: SteamWallpaperKind, page: Int) = Unit
     override fun refreshProfile() = Unit
-    override fun download(item: SteamWallpaperItem) = Unit
+    override fun download(item: SteamWallpaperItem, route: DownloadRouteSnapshot?) = Unit
     override fun cancelAuthentication() = Unit
     override fun cancelTransfer() = Unit
     override fun cancelBrowse() = Unit

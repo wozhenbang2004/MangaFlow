@@ -100,6 +100,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.net.DownloadCategory
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.storage.SteamGuardMethod
@@ -139,6 +142,7 @@ private class SteamWorkshopOwner(context: PlatformContext) : ViewModel() {
     val pendingLibrary = mutableStateOf<SteamWallpaperLibrary?>(null)
     val preview = mutableStateOf<SteamWallpaperItem?>(null)
     val retryItem = mutableStateOf<SteamWallpaperItem?>(null)
+    val nextTransferRoute = mutableStateOf<DownloadRouteMode?>(null)
     val retryPage = mutableStateOf(1)
     val notice = mutableStateOf<String?>(null)
 
@@ -209,6 +213,7 @@ internal fun SteamWallpaperSheet(
     var pendingLibrary by owner.pendingLibrary
     var preview by owner.preview
     var retryItem by owner.retryItem
+    var nextTransferRoute by owner.nextTransferRoute
     var retryPage by owner.retryPage
     var notice by owner.notice
     // Passwords and Guard codes are not retained in the owner or in saveable state.
@@ -285,7 +290,10 @@ internal fun SteamWallpaperSheet(
         retryItem = item
         notice = null
         clearFocus()
-        client.download(item)
+        try {
+            val route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.STEAM_WALLPAPERS, nextTransferRoute)
+            client.download(item, route)
+        } catch (failure: DownloadRouteException) { notice = failure.message }
     }
     fun passwordLogin() {
         val current = client.state.value
@@ -310,7 +318,10 @@ internal fun SteamWallpaperSheet(
         preview = null
         notice = null
         clearFocus()
-        if (owner.owns(viewLease)) client.cancel()
+        if (owner.owns(viewLease)) {
+            client.cancelAuthentication()
+            client.cancelBrowse()
+        }
         onDismiss()
     }
     fun backToBrowse() {
@@ -357,13 +368,16 @@ internal fun SteamWallpaperSheet(
             passwordVisible = false
             pendingLibrary = null
             showLogin = false
-            client.cancel()
+            // A closed panel releases its browsing/authentication work, not the retained transfer.
+            client.cancelAuthentication()
+            client.cancelBrowse()
             owner.detach(viewLease)
         }
     }
     LaunchedEffect(client, state.importedCount) {
         if (state.importedCount > owner.acknowledgedImports) {
             owner.acknowledgedImports = state.importedCount
+            nextTransferRoute = null
             notice = "已加入壁纸库"
         }
     }
@@ -408,7 +422,13 @@ internal fun SteamWallpaperSheet(
         }
     }
     val onPreview: (SteamWallpaperItem) -> Unit = remember(owner, focus, keyboard) {
-        { item -> owner.preview.value = item; focus.clearFocus(force = true); keyboard?.hide() }
+        { item ->
+            if (owner.preview.value?.id != item.id || owner.preview.value?.kind != item.kind)
+                owner.nextTransferRoute.value = null
+            owner.preview.value = item
+            focus.clearFocus(force = true)
+            keyboard?.hide()
+        }
     }
 
     MotionDialog(visible = visible, onDismissRequest = dismiss,
@@ -459,7 +479,8 @@ internal fun SteamWallpaperSheet(
                             }
                         }
                         MotionIconButton(onClick = dismiss, modifier = Modifier.size(44.dp)) {
-                            Icon(Icons.Outlined.Close, "关闭创意工坊", Modifier.size(20.dp))
+                            Icon(Icons.Outlined.Close, if (display.transferId != null)
+                                "收起创意工坊，当前下载继续" else "关闭创意工坊", Modifier.size(20.dp))
                         }
                     }
                     if (pane == WorkshopPane.BROWSE || pane == WorkshopPane.ACCOUNT) Row(
@@ -599,7 +620,8 @@ internal fun SteamWallpaperSheet(
                             }
                         }
                     }
-                    Column(Modifier.fillMaxWidth().heightIn(max = footerHeight).verticalScroll(rememberScrollState()),
+                    // Reserve the same task viewport before and after live status arrives.
+                    Column(Modifier.fillMaxWidth().height(footerHeight).verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (display.transferId != null || display.transferError != null) {
                             SteamTransferTask(display, onCancel = client::cancelTransfer,
@@ -659,6 +681,10 @@ internal fun SteamWallpaperSheet(
                         }
                         if (pane == WorkshopPane.PREVIEW && preview != null) {
                             val item = preview
+                            TaskDownloadRouteControl(DownloadCategory.STEAM_WALLPAPERS,
+                                selected = nextTransferRoute, onSelect = { nextTransferRoute = it },
+                                enabled = display.transferId == null && !display.preparing,
+                                backdrop = backdrop)
                             MotionTextButton(onClick = { item?.let(::download) },
                                 enabled = display.transferId == null && !display.preparing,
                                 modifier = Modifier.fillMaxWidth()) {
@@ -980,6 +1006,11 @@ private fun SteamTransferTask(
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(state.transferName ?: "壁纸下载", style = MaterialTheme.typography.labelMedium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
+            state.transferRoute?.let { route ->
+                Text("线路 · " + downloadRouteLabel(route.mode),
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
             if (state.transferError != null) Text(state.transferError.orEmpty(), style = MaterialTheme.typography.labelSmall,
                 color = colors.error, maxLines = 3, overflow = TextOverflow.Ellipsis)
             else SteamWallpaperProgress(state.receivedBytes, state.totalBytes, when (state.transferPhase) {

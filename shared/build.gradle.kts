@@ -8,6 +8,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Ktor 3.6.1 uses OkHttp 5.5.1. Align the legacy JM cookie adapter with that core.
+val okHttpVersion = "5.5.1"
+
 // Keep Java/Kotlin APIs in the base APK; native engines are signed optional assets.
 val inferenceRuntimeAars = configurations.create("inferenceRuntimeAars") {
     isCanBeConsumed = false
@@ -152,6 +155,7 @@ kotlin {
             api("org.jetbrains.compose.material3:material3:1.9.0")
         }
         androidMain.dependencies {
+            implementation(project.dependencies.platform("com.squareup.okhttp3:okhttp-bom:$okHttpVersion"))
             implementation("androidx.core:core-ktx:1.16.0")
             implementation("androidx.activity:activity-compose:1.10.1")
             implementation("androidx.webkit:webkit:1.14.0")
@@ -160,7 +164,7 @@ kotlin {
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
             implementation("io.ktor:ktor-client-okhttp:3.6.1")
             implementation("io.coil-kt.coil3:coil-network-okhttp:3.2.0")
-            implementation("com.squareup.okhttp3:okhttp:4.12.0")
+            implementation("com.squareup.okhttp3:okhttp")
             implementation("org.jsoup:jsoup:1.18.3")
             // Native adult source adapters (MIT). Java API code is shared with Windows.
             implementation(files(prepareAndroidJmCore.flatMap { it.archiveFile }))
@@ -171,7 +175,7 @@ kotlin {
             // Non-desktop dependencies from core v1.1.12/5a7a4bb's POM.
             // OkHttp and Jsoup already use the app's compatible Android versions above.
             implementation("org.apache.commons:commons-lang3:3.18.0")
-            implementation("com.squareup.okhttp3:okhttp-urlconnection:4.12.0")
+            implementation("com.squareup.okhttp3:okhttp-urlconnection")
             implementation("com.google.code.gson:gson:2.13.2")
             implementation("org.slf4j:slf4j-api:2.0.12")
             implementation("me.saket.telephoto:zoomable-image-coil3:0.16.0")
@@ -181,9 +185,11 @@ kotlin {
             implementation("io.github.dokar3:quickjs-kt:1.0.18")
         }
         desktopMain.dependencies {
+            implementation(project.dependencies.platform("com.squareup.okhttp3:okhttp-bom:$okHttpVersion"))
             implementation(compose.desktop.currentOs)
             implementation("org.update4j:update4j:1.5.9")
             implementation("io.ktor:ktor-client-okhttp:3.6.1")
+            implementation("com.squareup.okhttp3:okhttp-urlconnection")
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
             implementation("com.ibm.icu:icu4j:77.1")
             implementation("io.github.darkxanter:webp-imageio:0.3.3")

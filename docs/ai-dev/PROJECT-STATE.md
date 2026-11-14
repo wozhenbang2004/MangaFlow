@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Three-thread takeover · 2026-11-14
+
+Publication state: main push was blocked by automatic approval review (large untested default-branch mutation; current authorization considered insufficient). Do not bypass that rejection. Preserve the complete change in an independent review branch/draft PR; merge to main and CI activation require explicit user approval. No new build was triggered.
+
+Active outcome and raw current instruction are recorded in DESIGN.md TAKEOVER-DOWNLOAD-145–149; this resumes the screenshot's three named threads with six isolated source owners and cross-domain review. Implemented: adaptive download task rows and real progress; per-task route selection with exact routed metadata/enqueue/reader-first transfers; retained same-process Steam downloads, current-choice manual retry and a stable scrolling preview footer; direct shared-profile switching with unsupported actions/comments removed and sign-in recovery; auxiliary reader IO separated from valid body rendering. Preserve the existing exact-history and newest-comment fixes.
+
+Integration includes main21c3b219b6504bb5ccb92a069bbfd1b0bcd79831: the prior account/collection redesign is preserved by three-way source integration, and the concurrent local update channel, lossless icon assets and their handoff are retained. Actual Windows229/run43568776327 failed ProGuard on mismatched OkHttp core/cookie adapter; the batch aligns official5.5.1 BOM and narrowly handles observed optional external providers. Native per-SHA non-cancellation and current-main/signing protections are retained.
+
+Final evidence: source/interface/cancellation/identity reviews plus clean diff whitespace check, no tests/local builds/service/device probes. Root submits this complete batch once and confirms ordinary Android/native CI activation; installed visual/functional acceptance is pending user feedback. Source availability is not claimed restored without runtime evidence; automatic adaptive tuning and durable process-death Steam recovery remain explicitly OPEN. Next exact action after CI-trigger handoff: inspect concrete user/artifact feedback for these IDs, without repeating completed source work or issuing a status-only push.
+
 ## Local Windows channel and lossless APK icon · 2026-11-14
 
 Latest user scope: “apk的能优化吗”; “同时给本机弄个exe的渠道吧现在下载都很久”; clarified “弄个cmd脚本拉取更新代码快速增量构建替换 我意思是线上的保留现在弄多一个渠道给我”. This explicitly authorizes the Windows local-build channel as an exception to the earlier general no-local-build rule. Preserve online release/signing/update behavior and every existing user working-tree change.

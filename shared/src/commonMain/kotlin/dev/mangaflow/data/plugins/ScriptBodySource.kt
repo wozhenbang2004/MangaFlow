@@ -37,6 +37,8 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
     private val chapterHeaders = LinkedHashMap<String, Map<String, String>>()
     @Volatile private var publicHeaders: Map<String, String> = manifestHeaders(bundle.metadata)
 
+    internal fun forDownload(): ScriptBodySource = ScriptBodySource(bundle, runtime)
+
     override suspend fun discover(page: Int): MangaPage = listing("getPopular", JSONArray().put(upstreamPage(page)))
 
     override suspend fun search(query: String, page: Int): MangaPage {

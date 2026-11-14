@@ -396,8 +396,7 @@ fun DownloadsScreen(
                                     }
                                     Text(availableBytes?.let { "${downloadBytes(it)} 可用" } ?: "正在读取可用空间…",
                                         fontSize = 11.sp, color = secondary)
-                                    DownloadRouteControl(DownloadCategory.CHAPTERS,
-                                        enabled = entries.none { it.status == DownloadStatus.RUNNING })
+                                    DownloadRouteControl(DownloadCategory.CHAPTERS)
                                 }
                                 HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                                     color = foreground.copy(alpha = .07f))
@@ -447,8 +446,10 @@ fun DownloadsScreen(
         val visibleBookIds = orderedBooks.getValue(filter).keys
         val inspectedBook = expandedBooks.lastOrNull { it in visibleBookIds } ?: visibleBookIds.firstOrNull()
         val inspectedChapters = inspectedBook?.let { orderedBooks.getValue(filter)[it]?.mapNotNull(entriesById::get) }.orEmpty()
-        val downloadChapterColumns = if (desktop) 1 else MangaLayout.columns(maxWidth, 4,
-            96.dp * LocalDensity.current.fontScale.coerceAtLeast(1f), 6.dp, contentInset + 4.dp)
+        // A transfer row needs room for its title, source and a separate action target.
+        // Reusing the four-column catalogue geometry clips that information on phones.
+        val downloadChapterColumns = if (desktop) 1 else MangaLayout.columns(maxWidth, 3,
+            220.dp * LocalDensity.current.fontScale.coerceAtLeast(1f), 8.dp, contentInset + 4.dp)
         // The captured scene contains the wallpaper and scrolling list, never the header itself.
         Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
             wallpaper()
@@ -518,6 +519,14 @@ fun DownloadsScreen(
                             }
                         }
                     } else {
+                        if (pageFilter != DownloadFilter.SAVED && !managing &&
+                            (activeEntries.isNotEmpty() || resumableEntries.isNotEmpty())) {
+                            item(key = "queue-summary", contentType = "download-summary") {
+                                DownloadQueueSummary(manageableEntries,
+                                    onPause = { activeEntries.forEach { store.pause(it.id) } },
+                                    onResume = { resumableEntries.forEach(onRetry) })
+                            }
+                        }
                         orderedBooks.getValue(pageFilter).forEach { (mangaId, chapterIds) ->
                             val chapters = chapterIds.mapNotNull(entriesById::get)
                             val expanded = if (desktopSplit) mangaId == inspectedBook
@@ -551,8 +560,8 @@ fun DownloadsScreen(
                             }
                             if (expanded && !desktopSplit) items(chapters.chunked(downloadChapterColumns),
                                 key = { "chapters:" + it.first().id }, contentType = { "download-chapter-grid" }) { row ->
-                                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 3.dp, bottom = 3.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     row.forEach { entry ->
                                         Box(Modifier.weight(1f)) {
                                             SwipeToRemove(enabled = !managing && !desktop, label = "删除 ${entry.chapter.title} 下载",
@@ -717,6 +726,37 @@ fun DownloadsScreen(
         onConfirm = { pending, mangaTitle, chapterTitle -> importLocal(pending, mangaTitle, chapterTitle) },
     )
 
+}
+
+@Composable
+private fun DownloadQueueSummary(
+    entries: List<DownloadEntry>,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val running = entries.count { it.status == DownloadStatus.RUNNING }
+    val queued = entries.count { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.WAITING }
+    val failed = entries.count { it.status == DownloadStatus.FAILED }
+    val paused = entries.count { it.status == DownloadStatus.PAUSED }
+    val working = running + queued > 0
+    val summary = buildList {
+        if (running > 0) add("$running 话下载中")
+        if (queued > 0) add("$queued 话等待")
+        if (failed > 0) add("$failed 话需重试")
+        if (paused > 0) add("$paused 话暂停")
+    }.joinToString(" · ")
+    Row(Modifier.fillMaxWidth().padding(bottom = 6.dp).heightIn(min = 44.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Icon(if (working) Icons.Outlined.Downloading else Icons.Outlined.Pause, null,
+            Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+        Text(mangaNumberText(summary), Modifier.weight(1f),
+            style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+        TextButton(onClick = if (working) onPause else onResume) {
+            Text(if (working) "全部暂停" else "继续下载", style = MaterialTheme.typography.labelMedium)
+        }
+    }
 }
 
 @Composable

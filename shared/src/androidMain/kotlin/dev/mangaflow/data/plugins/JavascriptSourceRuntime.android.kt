@@ -7,6 +7,10 @@ import com.dokar.quickjs.evaluate
 import com.dokar.quickjs.binding.AsyncFunctionBinding
 import com.dokar.quickjs.binding.FunctionBinding
 import dev.mangaflow.data.SourceException
+import dev.mangaflow.data.ChapterDownloadTransport
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.json.JSONArray as SharedJSONArray
 import dev.mangaflow.reader.panels.PanelRuntimeId
@@ -24,6 +28,8 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.Call
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.Callback
 import okhttp3.Dns
 import okhttp3.FormBody
@@ -41,6 +47,8 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.InetAddress
 import java.net.Proxy
+import java.net.ProxySelector
+import java.net.URI
 import java.net.UnknownHostException
 import java.security.MessageDigest
 import java.time.ZonedDateTime
@@ -98,12 +106,14 @@ actual class JavascriptSourceRuntime actual constructor(context: PlatformContext
                 val preferenceScope = MessageDigest.getInstance("SHA-256").digest(bundle.sourceId.toByteArray())
                     .joinToString("") { "%02x".format(it.toInt() and 255) }
                 val dom = JavascriptDomBridge(bundle.metadata.optString("baseUrl"))
-                val http = HttpSession(allowNetwork)
+                var http: HttpSession? = null
                 try {
+                    val requests = HttpSession(allowNetwork, currentCoroutineContext()[ChapterDownloadTransport]?.route)
+                    http = requests
                     js.memoryLimit = 48L * 1024 * 1024
                     js.maxStackSize = 256L * 1024
                     js.evaluationTimeoutMillis = 2_000L
-                    js.defineBinding("__mfHttp", AsyncFunctionBinding<String> { values -> http.request(argument(values)) })
+                    js.defineBinding("__mfHttp", AsyncFunctionBinding<String> { values -> requests.request(argument(values)) })
                     js.defineBinding("__mfDom", FunctionBinding<String> { values -> dom.call(argument(values)) })
                     js.defineBinding("__mfPrefs", FunctionBinding<String> { values ->
                         require(preferenceCalls.incrementAndGet() <= 128) { "漫画源偏好操作过多。" }
@@ -121,6 +131,8 @@ actual class JavascriptSourceRuntime actual constructor(context: PlatformContext
                     block(js)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
+                } catch (failure: DownloadRouteException) {
+                    throw failure
                 } catch (failure: Exception) {
                     throw SourceException("漫画源脚本执行失败：${failure.message?.take(240) ?: "宿主能力不兼容"}",
                         bundle.metadata.optString("baseUrl"), cause = failure)
@@ -128,7 +140,9 @@ actual class JavascriptSourceRuntime actual constructor(context: PlatformContext
                     // QuickJS 1.0.18 also interrupts evaluate and cancels its async bindings
                     // when the evaluating coroutine is cancelled. close releases native state.
                     runCatching { if (!js.isClosed) js.interruptEvaluation() }
-                    try { js.close() } finally { dom.close() }
+                    try { js.close() } finally {
+                        try { dom.close() } finally { http?.close() }
+                    }
                 }
             }
         }
@@ -193,7 +207,21 @@ actual class JavascriptSourceRuntime actual constructor(context: PlatformContext
             .put("hash", url.encodedFragment?.let { "#$it" }.orEmpty()).toString()
     }
 
-    private class HttpSession(private val enabled: Boolean) {
+    private class HttpSession(private val enabled: Boolean, private val route: DownloadRouteSnapshot?) {
+        private val owned = route != null
+        private val client = if (route == null) defaultClient else {
+            val sockets = publicSourceSocketFactory(route, ::isPublic)
+            // Preserve the checked public DNS/TLS host. SOCKS receives the verified numerical IP.
+            defaultClient.newBuilder().connectionPool(ConnectionPool()).dispatcher(Dispatcher())
+                .apply { if (sockets != null) socketFactory(sockets) }.build()
+        }
+
+        fun close() {
+            if (!owned) return
+            client.dispatcher.cancelAll()
+            client.connectionPool.evictAll()
+            client.dispatcher.executorService.shutdown()
+        }
         private val requests = AtomicInteger()
         private val slots = Semaphore(2)
 
@@ -211,6 +239,7 @@ actual class JavascriptSourceRuntime actual constructor(context: PlatformContext
             return slots.withPermit {
                 repeat(4) { redirect ->
                     currentCoroutineContext().ensureActive()
+                    checkSystemRoute(url)
                     reserveOrigin(url)
                     val builder = Request.Builder().url(url)
                     headers.forEach { (name, value) -> builder.header(name, value) }
@@ -235,6 +264,18 @@ actual class JavascriptSourceRuntime actual constructor(context: PlatformContext
                     }
                 }
                 throw SourceException("漫画源重定向次数过多。", url.toString())
+            }
+        }
+
+        private fun checkSystemRoute(url: HttpUrl) {
+            if (route?.mode != DownloadRouteMode.SYSTEM) return
+            val selected = try { ProxySelector.getDefault()?.select(URI(url.toString())).orEmpty() }
+            catch (_: Exception) {
+                throw DownloadRouteException("无法核对脚本来源的系统代理，请选择应用直连或指定 SOCKS5 代理。")
+            }
+            if (selected.any { it.type() != Proxy.Type.DIRECT }) {
+                // A system proxy must not resolve a different, unchecked destination behind our DNS gate.
+                throw DownloadRouteException("此脚本来源暂不支持系统代理，请选择应用直连或指定 SOCKS5 代理。")
             }
         }
 
@@ -300,7 +341,7 @@ actual class JavascriptSourceRuntime actual constructor(context: PlatformContext
         private val pauseLock = Any()
         // A direct, DNS-validated connection pins the checked public address. An HTTP proxy
         // could resolve the target independently and defeat the private-address restriction.
-        private val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).dns(PublicDns)
+        private val defaultClient = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).dns(PublicDns)
             .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false)
             .connectTimeout(10, TimeUnit.SECONDS).readTimeout(12, TimeUnit.SECONDS)
             .callTimeout(15, TimeUnit.SECONDS).build()
