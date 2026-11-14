@@ -180,7 +180,6 @@ import coil3.decode.BlackholeDecoder
 import coil3.SingletonImageLoader
 import coil3.request.CachePolicy
 import coil3.request.Disposable
-import coil3.request.ErrorResult
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import coil3.request.crossfade
@@ -232,6 +231,8 @@ import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTabContent
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import kotlin.math.roundToInt
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -1674,6 +1675,14 @@ private fun ChapterPages(
                                     (layout.viewportEndOffset - item.offset).coerceIn(0, item.size))
                             }
                         },
+                        isVisible = {
+                            active && list.layoutInfo.let { layout ->
+                                layout.visibleItemsInfo.any { item ->
+                                    item.index == index && item.offset < layout.viewportEndOffset &&
+                                        item.offset + item.size > layout.viewportStartOffset
+                                }
+                            }
+                        },
                         onLayoutReady = { pageLayoutReady[index] = it },
                     )
                 }
@@ -1810,6 +1819,7 @@ private fun ChapterPages(
                                 },
                                 onComposed = { present -> if (present) composedPages[imageIndex] = true else composedPages.remove(imageIndex) },
                                 prefetch = prefetchRequests[imageIndex],
+                                isVisible = { active && pager.currentPage == index },
                                 onChapterSwipeReadyChanged = { ready ->
                                     if (ready) swipeReadyPages[imageIndex] = true else swipeReadyPages.remove(imageIndex)
                                 },
@@ -2090,6 +2100,7 @@ private fun ReaderPage(
     onDimensionsKnown: (IntSize) -> Unit = {},
     deferResize: () -> Boolean = { false },
     visibleWindow: () -> VerticalPageWindow? = { null },
+    isVisible: () -> Boolean,
     onLayoutReady: (Boolean) -> Unit = {},
     onChapterSwipeReadyChanged: (Boolean) -> Unit = {},
 ) {
@@ -2106,6 +2117,8 @@ private fun ReaderPage(
     val resizeDeferred by rememberUpdatedState(deferResize)
     val layoutReady by rememberUpdatedState(onLayoutReady)
     val chapterSwipeReadyChanged by rememberUpdatedState(onChapterSwipeReadyChanged)
+    val visible by rememberUpdatedState(isVisible)
+    val pageVisible by remember { derivedStateOf { visible() } }
     // Lazy layout recycling must not collapse a measured page back to its placeholder height.
     val cachedDimensions = remember(page.url) { ReaderDimensionCache.get(page.url) }
     var aspect by rememberSaveable(page.url) { mutableFloatStateOf(
@@ -2123,13 +2136,17 @@ private fun ReaderPage(
     var error by remember(attempt) { mutableStateOf<String?>(null) }
     var loading by remember(attempt) { mutableStateOf(true) }
     var slowLoading by remember(attempt) { mutableStateOf(false) }
+    var waitClock by remember(attempt) { mutableStateOf<TimeMark?>(null) }
     DisposableEffect(attempt) { onDispose { attempt.active = false } }
-    LaunchedEffect(attempt, loading) {
-        if (loading && attempt.acceptsResult) {
+    LaunchedEffect(attempt, pageVisible, loading, error) {
+        slowLoading = false
+        // Composition can prepare an offscreen page; only a visible foreground wait owns this deadline.
+        if (pageVisible && loading && error == null && attempt.acceptsResult) {
+            waitClock = TimeSource.Monotonic.markNow()
             delay(READER_SLOW_LOAD_MILLIS)
             slowLoading = true
             delay(READER_PAGE_WAIT_MILLIS - READER_SLOW_LOAD_MILLIS)
-            if (loading && attempt.acceptsResult) {
+            if (pageVisible && loading && error == null && attempt.acceptsResult) {
                 attempt.stopped = true
                 error = "本页连接超时"
                 loading = false
@@ -2191,20 +2208,15 @@ private fun ReaderPage(
         hasDimensions = true
     }
     val delayedLoading = rememberDelayedBusy(loading)
-    var prefetchError by remember(attempt) { mutableStateOf<String?>(null) }
-    var waitingForPrefetch by remember(page.url, prefetch, reload) { mutableStateOf(prefetch != null && reload == 0) }
-    LaunchedEffect(page.url, prefetch, reload, attempt.stopped) {
+    var waitingForPrefetch by remember(attempt, prefetch) { mutableStateOf(prefetch != null && reload == 0) }
+    LaunchedEffect(attempt, prefetch, attempt.stopped) {
         if (!attempt.acceptsResult) return@LaunchedEffect
-        prefetchError = null
         if (prefetch != null && reload == 0) {
             try {
-                val result = prefetch.job.await()
+                prefetch.job.await()
                 currentCoroutineContext().ensureActive()
                 if (!attempt.acceptsResult) return@LaunchedEffect
-                if (result is ErrorResult && result.throwable !is PrefetchBudgetExceeded) {
-                    prefetchError = result.throwable.message ?: "图片暂时无法读取"
-                    loading = false
-                }
+                // Optional failure only releases the handoff. The foreground image request reports its own result.
             } catch (cancelled: CancellationException) {
                 // A superseded background prefetch may be cancelled while this page is still active.
                 currentCoroutineContext().ensureActive()
@@ -2271,7 +2283,7 @@ private fun ReaderPage(
                 }
             }
         }
-        val imageError = error ?: prefetchError.takeUnless { resource?.url?.startsWith("file:") == true }
+        val imageError = error
         // A saved/materialized image is ready to display; an old remote prefetch cannot hold it back.
         val awaitingPrefetch = waitingForPrefetch && resource?.url?.startsWith("file:") != true
         val pendingRecovery = loading && imageError == null
@@ -2374,7 +2386,7 @@ private fun ReaderPage(
                     onClickLabel = "显示或收起阅读工具", onClick = onTap,
                 ))
             }
-            if (imageError != null || delayedLoading && pendingRecovery) {
+            if (pageVisible && (imageError != null || delayedLoading && pendingRecovery)) {
                 var feedbackHeight by remember { mutableIntStateOf(0) }
                 val feedbackPosition = if (paged) Modifier.align(Alignment.Center)
                 else Modifier.align(Alignment.TopCenter).offset {
@@ -2392,7 +2404,7 @@ private fun ReaderPage(
                         resource.url.startsWith("file:") -> "解码本机图片"
                         else -> "请求图片"
                     },
-                    attempt = attempt, foreground = foreground,
+                    attempt = attempt, startedAt = waitClock ?: attempt.startedAt, foreground = foreground,
                     modifier = feedbackPosition.onSizeChanged { feedbackHeight = it.height },
                     alternatives = sourceAlternatives,
                     onRetry = { reload++ }, onSwitch = onQuickSwitch, onMore = onMoreSources,
