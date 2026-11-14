@@ -350,7 +350,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         else model.clearCopyProgress()
     }
     LaunchedEffect(detail?.detail, adoptedResumeTargets) { model.reconcileCopyProgress() }
-    val displayedAccount = if (account.profile != null && copyShelfSync.owner == account.profile?.username && copyShelfSync.checked)
+    val displayedAccount = if (account.profile != null && copyShelfSync.owner == account.profile?.username && copyShelfSync.favoritesReady)
         account.copy(favorites = copyShelfSync.cloudFavorites, favoritesHasMore = false,
             favoritesLoading = copyShelfSync.checking, favoritesRefreshing = copyShelfSync.checking)
     else account
@@ -552,8 +552,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     CopyShelfSyncSheet(
         visible = copySyncOpen && account.profile != null && copyShelfSync.owner == account.profile?.username && !restrictedMode,
-        state = copyShelfSync, backdrop = drawerBackdrop,
-        onCheck = model.copyShelfSync::check, onImport = model.copyShelfSync::importFavorites,
+        state = copyShelfSync, repository = model.repository, backdrop = drawerBackdrop,
+        onCheck = { model.copyShelfSync.check() }, onRetry = { model.copyShelfSync.check(it) },
+        onRetryWork = model.copyShelfSync::checkProgress, onCancel = model.copyShelfSync::cancel,
+        onImport = model.copyShelfSync::importFavorites,
         onApply = model.copyShelfSync::applyMerge, onDismiss = { copySyncOpen = false },
         focusMangaId = copySyncFocus,
     )

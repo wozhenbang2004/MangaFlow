@@ -218,7 +218,7 @@ fun LibraryScreen(
     val visibleFavorites = remember(scopedFavorites, pendingFavorites) { scopedFavorites.filterNot { it.id in pendingFavorites } }
     val visibleHistory = remember(scopedHistory, pendingHistory) { scopedHistory.filterNot { it.manga.id in pendingHistory } }
     val copyNotice = copySyncState?.takeIf {
-        it.owner != null && it.checked && it.error == null && it.differences.isNotEmpty()
+        it.owner != null && (it.differences.isNotEmpty() || it.favoritesError != null || it.progressError != null)
     }
     val importCopy = onImportCopy ?: onCopySync
     fun removeFavoriteWithUndo(manga: Manga) {
@@ -586,12 +586,12 @@ private fun CopyShelfImportHint(state: CopyShelfSyncState, active: Boolean, onIm
     val colors = MaterialTheme.colorScheme
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("拷贝有 ${state.differences.size} 项差异", Modifier.weight(1f),
+        Text(if (state.differences.isNotEmpty()) "拷贝有 " + state.differences.size + " 项待处理" else "拷贝检查未完成", Modifier.weight(1f),
             style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
             maxLines = 2, overflow = TextOverflow.Ellipsis)
         if (state.importing) dev.mangaflow.ui.motion.MotionBusyIndicator(Modifier.padding(horizontal = 14.dp).size(17.dp),
             strokeWidth = 1.6.dp)
-        else TextButton(onClick = onImport, enabled = active && !state.busy) { Text("查看") }
+        TextButton(onClick = onImport, enabled = active) { Text("查看") }
     }
 }
 

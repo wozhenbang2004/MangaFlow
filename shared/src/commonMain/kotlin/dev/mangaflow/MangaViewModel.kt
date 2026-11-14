@@ -2840,7 +2840,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             library.awaitReady()
             if (!isCurrentAccount(version)) return@launch
             val current = _account.value.favorites.firstOrNull { it.id == manga.id }
-                ?: copyShelfSync.state.value.takeIf { it.owner == _account.value.profile?.username && it.checked }
+                ?: copyShelfSync.state.value.takeIf { it.owner == _account.value.profile?.username && it.favoritesReady }
                     ?.cloudFavorites?.firstOrNull { it.id == manga.id }
                 ?: _account.value.history.firstOrNull { it.manga.id == manga.id }?.manga
                 ?: return@launch

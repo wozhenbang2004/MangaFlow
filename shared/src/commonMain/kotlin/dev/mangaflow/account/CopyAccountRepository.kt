@@ -35,7 +35,14 @@ import dev.mangaflow.json.JSONObject
 import dev.mangaflow.platform.ConcurrentMap as ConcurrentHashMap
 
 /** Complete read-only account evidence; absent chapter data is not an unread marker. */
-data class CopyAccountSyncSnapshot(val favorites: List<Manga>, val progress: Map<String, CloudHistoryEntry>)
+data class CopyAccountSyncSnapshot(
+    val favorites: List<Manga>,
+    val progress: Map<String, CloudHistoryEntry>,
+    val favoritesReady: Boolean = false,
+    val progressReady: Boolean = false,
+    val favoritesError: String? = null,
+    val progressError: String? = null,
+)
 
 /** Relay's owner-only routes. Public catalogs, pages and downloads never use this client. */
 class CopyAccountRepository(context: Context) {
@@ -242,48 +249,78 @@ class CopyAccountRepository(context: Context) {
         return second
     }
 
-    /** Reuse collection metadata, then read account history in bounded complete pages. */
-    suspend fun completeSyncSnapshot(): CopyAccountSyncSnapshot {
+    /** Each domain is complete or explicitly unavailable; a failed read is never empty membership. */
+    suspend fun completeSyncSnapshot(
+        includeFavorites: Boolean = true,
+        includeProgress: Boolean = true,
+    ): CopyAccountSyncSnapshot {
         val expected = sessionVersion
-        val collected = completeFavoriteRows()
-        ensureVersion(expected)
-        suspend fun scanHistory(): List<CloudHistoryEntry> {
-            val result = mutableListOf<CloudHistoryEntry>()
-            val seen = mutableSetOf<String>()
-            for (page in 0..500) {
+        var favoritesReady = false
+        var progressReady = false
+        var favoritesError: String? = null
+        var progressError: String? = null
+        var collected = emptyList<FavoriteRow>()
+        var progress = emptyMap<String, CloudHistoryEntry>()
+        if (includeFavorites) {
+            try {
+                collected = completeFavoriteRows()
                 ensureVersion(expected)
-                val next = historyPage(page, strict = true)
+                favoritesReady = true
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
                 ensureVersion(expected)
-                for (entry in next.items) {
-                    if (!seen.add(entry.manga.id)) throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
-                    result += entry
-                }
-                if (!next.hasMore) return result
-            }
-            throw SourceException("拷贝阅读记录尚未完整读取，请稍后重试。")
-        }
-        val first = scanHistory()
-        val history = scanHistory()
-        if (first.map { it.manga.id to it.chapterId } != history.map { it.manga.id to it.chapterId }) {
-            throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
-        }
-        val progress = mutableMapOf<String, CloudHistoryEntry>()
-        collected.forEach { row ->
-            val chapter = row.metadata.chapterId.takeIf { UUID_PATTERN.matches(it) && it.any { c -> c != '0' && c != '-' } }
-            if (chapter != null) progress[row.manga.id] = CloudHistoryEntry(row.manga, chapter, row.metadata.chapterTitle)
-        }
-        history.forEach { entry ->
-            if (UUID_PATTERN.matches(entry.chapterId) && entry.chapterId.any { it != '0' && it != '-' }) {
-                val previous = progress[entry.manga.id]
-                if (previous != null && previous.chapterId != entry.chapterId) {
-                    throw SourceException("拷贝进度在检查期间发生变化，请重新检查后合并。")
-                }
-                progress[entry.manga.id] = entry.copy(manga = previous?.manga ?: entry.manga,
-                    chapterTitle = entry.chapterTitle.ifBlank { previous?.chapterTitle.orEmpty() })
+                favoritesError = failure.message ?: "拷贝收藏暂时无法读取，请重试。"
             }
         }
+        if (includeProgress) {
+            try {
+                suspend fun scanHistory(): List<CloudHistoryEntry> {
+                    val result = mutableListOf<CloudHistoryEntry>()
+                    val seen = mutableSetOf<String>()
+                    for (page in 0..500) {
+                        ensureVersion(expected)
+                        val next = historyPage(page, strict = true)
+                        ensureVersion(expected)
+                        for (entry in next.items) {
+                            if (!seen.add(entry.manga.id)) throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
+                            result += entry
+                        }
+                        if (!next.hasMore) return result
+                    }
+                    throw SourceException("拷贝阅读记录尚未完整读取，请稍后重试。")
+                }
+                val first = scanHistory()
+                val history = scanHistory()
+                if (first.map { it.manga.id to it.chapterId } != history.map { it.manga.id to it.chapterId }) {
+                    throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
+                }
+                val values = mutableMapOf<String, CloudHistoryEntry>()
+                collected.forEach { row ->
+                    val chapter = row.metadata.chapterId.takeIf { UUID_PATTERN.matches(it) && it.any { c -> c != '0' && c != '-' } }
+                    if (chapter != null) values[row.manga.id] = CloudHistoryEntry(row.manga, chapter, row.metadata.chapterTitle)
+                }
+                history.forEach { entry ->
+                    if (UUID_PATTERN.matches(entry.chapterId) && entry.chapterId.any { it != '0' && it != '-' }) {
+                        val previous = values[entry.manga.id]
+                        if (previous != null && previous.chapterId != entry.chapterId) {
+                            throw SourceException("拷贝进度在检查期间发生变化，请重新检查后合并。")
+                        }
+                        values[entry.manga.id] = entry.copy(manga = previous?.manga ?: entry.manga,
+                            chapterTitle = entry.chapterTitle.ifBlank { previous?.chapterTitle.orEmpty() })
+                    }
+                }
+                ensureVersion(expected)
+                progress = values
+                progressReady = true
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                ensureVersion(expected)
+                progressError = failure.message ?: "拷贝阅读记录暂时无法读取，请重试。"
+            }
+        }
         ensureVersion(expected)
-        return CopyAccountSyncSnapshot(collected.map(FavoriteRow::manga), progress)
+        return CopyAccountSyncSnapshot(collected.map(FavoriteRow::manga), progress,
+            favoritesReady, progressReady, favoritesError, progressError)
     }
 
     /**

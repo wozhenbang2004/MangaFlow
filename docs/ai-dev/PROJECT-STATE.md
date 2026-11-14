@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Copy comparison screenshot redesign · 2026-11-14
+
+Current user: “这部分的 uiux 和逻辑要重新设计”, with uploaded1000121726/1727/1728 (installed version/exact message ID unknown). DESIGN COPY-DIFF-182–188 is the active requirement/design/checklist; COPY-DIFF-181's original Git/IDEA per-field review remains. Source proved the collection-failure/empty-membership/global-lock chain and the fixed-height repetitive UI. Root owns one integrated result; account implementation was isolated to one agent and actual source received a separate bounded read-only check.
+
+The existing sheet now groups by exact manga ID with cover/title, two selectable value/action sides, compact Ovio filters, scoped staged bulk selection, all-selected review, per-field choice preservation and a summary plus one apply. It uses a capped natural-height PANEL; domain errors, status and scope live inside the same lazy list. The coordinator/repository read favorite/history domains independently; unknown is never absence. Ready/error and per-work verification control capabilities. Apply only refreshes selected evidence, with selected-work queries when history cannot supply it, real verification/settled counts and immediate qualification rebuild after cancel. Account shelf/adoption consumers now require favoritesReady rather than overall checked; library's compact notice can open a running/partial check.
+
+Native/owner/session/generation, full local snapshots, full-import/restore/submit markers, actual persisted result and per-field guards remain. Owner/session-bound opaque diff keys reject old account actions. Chapter-title display repairs only reversible UTF-8/Latin-1 mojibake; stored text/IDs stay original. No cloud reading or fake progress/history is added. No tests, local builds, account/device/service probes or new gate; source/contract/whitespace review only. The three images are before-state evidence; installed visuals, touch/reversal/scroll and real account acceptance are unverified.
+
+Initial baselineab7f06b; publication integrates latest82d2cede unchanged, retaining the intervening script-source and settings/progress/iOS fixes. This entry accompanies one complete expected-head main batch. Next exact action is confirming normal CI activation once and handling concrete artifact/user feedback; if already published, do not replay this source or create a status-only push.
+
 ## Settings dialog stability and reading-dock density · 2026-11-14
 
 Current user raw feedback and screenshots 1000121729/1730 are recorded in DESIGN under SETTINGS-STABLE-20261114-01–02 / DOCK-MINIMAL-20261114-01–02. Scope is the shared Android dialog window policy and existing detail dock/Copy status presentation; no reading, network-route or account synchronization semantics change. Baseline 5263d66 retains the source protocol, reader recovery and iOS compiler-memory work already published.
