@@ -1,5 +1,14 @@
 # MangaFlow · current work
 
+## Steam component packaging repair · 2026-11-14
+
+User reports “失败了？” after the Steam/source-quality batch. Android203/run43538687962/job132274829923 completed APK assemble/R8 and all four Rust release targets successfully, then failed in dependency_notices: “Dependency package has no distributable license text: crc-catalog”. Cargo resolved crc-catalog2.5.0; the collector did not read nested SPDX license files. Concurrent source commitb006e099 already adds the actual LICENSES/licenses/LICENCES child-file collection; preserve that fix and every unrelated source/font change, rather than replace it with a stale helper. All existing missing-license, byte-size and complete-notice checks remain.
+
+The same Steam commit's Windows job132273960888 failed before Rust compilation: both pinned session/auth patch hunks did not apply. Linux applied the identical patch and built every ABI; the Windows failure is consistent with text/checkout line-ending differences. This bounded repair normalizes the already-verified clean pinned checkout with Git's LF settings, sends canonical LF patch bytes through binary stdin to apply--check and apply, captures command text explicitly as UTF-8, and hashes the same canonical patch bytes in provenance. Keep fixed dependency SHA, dirty-tree rejection and exact patch validation; no whitespace-ignore, source-guard bypass or auth/media limit change.
+
+Scope is scripts/build_steam.py plus this state record. Baseb006e0999c6dc1c054d971e6a8c2fdab20e5b071 preserves576a77c8's font UI and all later source/navigation additions. Root publishes one complete cloud/in-memory source batch with an expected-head lease and confirms normal Android/native CI identities. No local build, tests, device/account/service probe or new review gate. The observed four-ABI compilation is from203; it does not prove the corrected Windows build/package or real Steam authentication/Workshop import. Those still require the matching new artifact and user flow.
+
+
 ## Current UI batch: font picker · 2026-11-14
 
 FONT-PICKER-20261114 in DESIGN.md owns the latest user complaint and1000121663.jpg. FontSettings now presents one current role using the shared Ovio scene strip/keyed retained content, preview-first real candidates and one download/progress/More action slot. Repeated role headers/descriptions and permanent delete/info actions are removed from the main choice flow. Explicit management owns removal/affected roles and optional full licensing; background downloads retain a compact genuine role progress indicator. Saved fonts, modern optional assets, explicit inheritance and the font-store lifecycle are preserved.

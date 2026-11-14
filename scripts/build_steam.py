@@ -37,12 +37,13 @@ ANDROID_TARGETS = (
 )
 
 
-def run(arguments, *, cwd=ROOT, env=None, capture=False):
+def run(arguments, *, cwd=ROOT, env=None, capture=False, input_bytes=None):
     print("+ " + " ".join(str(value) for value in arguments), flush=True)
-    return subprocess.run(
+    result = subprocess.run(
         [str(value) for value in arguments], cwd=cwd, env=env,
-        check=True, text=True, stdout=subprocess.PIPE if capture else None,
-    ).stdout
+        check=True, input=input_bytes, stdout=subprocess.PIPE if capture else None,
+    )
+    return result.stdout.decode("utf-8") if capture else None
 
 
 def digest(data):
@@ -58,8 +59,12 @@ def prepare_source():
     changes = run(("git", "-C", TAPLINE, "status", "--porcelain", "--untracked-files=all"), capture=True)
     if changes.strip():
         raise RuntimeError("Steam dependency must be a clean pinned checkout before patching")
-    run(("git", "-C", TAPLINE, "apply", "--check", PATCH))
-    run(("git", "-C", TAPLINE, "apply", PATCH))
+    # The verified clean checkout must use the same LF bytes on Windows and Linux.
+    run(("git", "-C", TAPLINE, "-c", "core.autocrlf=false", "-c", "core.eol=lf",
+         "checkout-index", "--all", "--force"))
+    patch = PATCH.read_bytes().replace(b"\r\n", b"\n")
+    run(("git", "-C", TAPLINE, "apply", "--check", "-"), input_bytes=patch)
+    run(("git", "-C", TAPLINE, "apply", "-"), input_bytes=patch)
     BUILD.mkdir(parents=True, exist_ok=True)
     # Keep upstream dependency selections; Cargo only adds/adjusts bridge dependencies.
     # generate-lockfile would instead re-resolve every compatible upstream package.
@@ -217,7 +222,7 @@ def write_provenance(platform_name, target_names):
     value = {
         "schema": 1, "id": "STEAM", "version": VERSION, "platform": platform_name,
         "sourceCommit": os.environ.get("GITHUB_SHA", ""),
-        "tapline": TAPLINE_SHA, "patchSha256": digest(PATCH.read_bytes()),
+        "tapline": TAPLINE_SHA, "patchSha256": digest(PATCH.read_bytes().replace(b"\r\n", b"\n")),
         "cargoLockSha256": digest((CRATE / "Cargo.lock").read_bytes()),
         "rustc": run(("rustc", "+" + RUST, "--version"), capture=True).strip(),
         "targets": list(target_names),
