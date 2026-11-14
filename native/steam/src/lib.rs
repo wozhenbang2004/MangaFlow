@@ -1,6 +1,6 @@
 //! JNI media-only adapter around the pinned MPL-2.0 tapline core.
 //! Credentials stay in memory; platform code owns encrypted persistence.
-use jni_sys::{JNIEnv, jclass, jlong, jstring};
+use jni_sys::{JNIEnv, jboolean, jclass, jint, jlong, jstring};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -11,8 +11,10 @@ use std::time::Duration;
 use tapline::{
     AppId, BrowseQuery, BrowseSort, Event, FileModes, InstallError, InstallOptions,
     PublishedFileId, Session, Shared, StoredToken, WorkshopContent, WorkshopLayout,
+    GuardType, LoginError, PollOutcome,
 };
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinHandle};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -45,7 +47,10 @@ impl Drop for Queued {
     fn drop(&mut self) { self.text.zeroize(); }
 }
 
+type GuardInput = (Zeroizing<String>, GuardType);
+
 struct Job {
+    guard: Mutex<Option<mpsc::Sender<GuardInput>>>,
     events: Mutex<VecDeque<Queued>>,
     abort: Mutex<Option<AbortHandle>>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
@@ -56,6 +61,7 @@ struct Job {
 impl Job {
     fn new() -> Self {
         Self {
+            guard: Mutex::new(None),
             events: Mutex::new(VecDeque::new()),
             abort: Mutex::new(None),
             supervisor: Mutex::new(None),
@@ -80,6 +86,7 @@ impl Job {
     }
 
     fn finish(&self, result: Outcome) {
+        if let Ok(mut sender) = self.guard.lock() { sender.take(); }
         match result {
             Ok(value) => self.emit(value),
             Err(code) => self.emit(json!({"kind":"error","code":code})),
@@ -88,6 +95,7 @@ impl Job {
     }
 
     fn cancel(&self) {
+        if let Ok(mut sender) = self.guard.lock() { sender.take(); }
         if !self.finished.load(Ordering::Acquire) {
             self.cancelled.store(true, Ordering::Release);
             if let Ok(handle) = self.abort.lock() {
@@ -226,10 +234,85 @@ fn install_error(error: InstallError) -> &'static str {
     }
 }
 
+
+fn login_error(error: LoginError) -> &'static str {
+    match error {
+        LoginError::Refused { eresult: 5, .. } => "invalid_credentials",
+        LoginError::Refused { eresult: 65, .. } => "invalid_guard_code",
+        LoginError::Refused { eresult: 88, .. } => "expired_guard_code",
+        LoginError::Refused { eresult: 84, .. } => "login_rate_limited",
+        LoginError::Refused { eresult: 15, .. } => "login_refused",
+        LoginError::Session(_) => "steam_unavailable",
+        _ => "login_failed",
+    }
+}
+
+async fn password_login(request: &mut Value, job: &Arc<Job>) -> Result<StoredToken, &'static str> {
+    let account = Zeroizing::new(take_text(request, "account").ok_or("invalid_request")?);
+    let mut password = Zeroizing::new(take_text(request, "password").ok_or("invalid_request")?);
+    if account.is_empty() || account.len() > 128 || account.chars().any(char::is_control) ||
+        password.is_empty() || password.len() > 4096 {
+        return Err("invalid_request");
+    }
+    let mut session = Session::anonymous_shared(shared()).await.map_err(|_| "steam_unavailable")?;
+    let key = session.password_key(&account).await.map_err(login_error)?;
+    // The pinned implementation RSA-encrypts and zeroizes this transferred password.
+    let mut pending = session.begin_password_login(&account, std::mem::take(&mut *password), &key)
+        .await.map_err(login_error)?;
+    if pending.client_id == 0 || pending.request_id.is_empty() || pending.steam_id == 0 {
+        return Err("login_failed");
+    }
+    let methods: Vec<i32> = pending.confirmations.iter().map(|kind| kind.as_i32())
+        .filter(|kind| matches!(*kind, 2 | 3 | 4 | 5)).collect();
+    if methods.is_empty() && pending.confirmations.iter().any(|kind|
+        !matches!(kind, GuardType::None)) {
+        return Err("unsupported_guard");
+    }
+    let (sender, mut codes) = mpsc::channel::<GuardInput>(1);
+    if let Ok(mut slot) = job.guard.lock() { *slot = Some(sender); }
+    if !methods.is_empty() { job.emit(json!({"kind":"guard","methods":methods})); }
+    let interval = if pending.interval.is_finite() {
+        pending.interval.clamp(1.0, 10.0)
+    } else { 5.0 };
+    loop {
+        tokio::select! {
+            code = codes.recv() => {
+                let Some((code, kind)) = code else { return Err("cancelled"); };
+                if !pending.confirmations.contains(&kind) || !kind.needs_a_code() {
+                    job.emit(json!({"kind":"guardRejected","code":"invalid_guard_code"}));
+                    continue;
+                }
+                match session.submit_guard_code(&pending, &code, kind).await {
+                    Ok(()) => job.emit(json!({"kind":"guardAccepted"})),
+                    Err(error) => {
+                        let error = login_error(error);
+                        if matches!(error, "invalid_guard_code" | "expired_guard_code") {
+                            job.emit(json!({"kind":"guardRejected","code":error}));
+                        } else { return Err(error); }
+                    }
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs_f32(interval)) => {
+                match session.poll_login(&pending).await.map_err(login_error)? {
+                    PollOutcome::Pending { .. } => {}
+                    PollOutcome::Moved { client_id, .. } => pending.client_id = client_id,
+                    PollOutcome::Complete { account, refresh_token, mut access_token } => {
+                        access_token.zeroize();
+                        return Ok(StoredToken { account, refresh_token });
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
     let op = text(&request.0, "op").ok_or("invalid_request")?;
     match op.as_str() {
-        "login" => {
+        "login" | "passwordLogin" => {
+            let token = if op == "passwordLogin" {
+                password_login(&mut request.0, &job).await?
+            } else {
             let mut session = Session::anonymous_shared(shared()).await
                 .map_err(|_| "steam_unavailable")?;
             let codes = Arc::clone(&job);
@@ -237,7 +320,9 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
                 if url.len() <= 8192 && url.starts_with("https://") {
                     codes.emit(json!({"kind":"qr","url":url}));
                 }
-            }).await.map_err(|_| "login_failed")?;
+            }).await.map_err(login_error)?;
+            token
+            };
             let steam_id = token.steam_id().filter(|id| *id != 0).ok_or("login_failed")?;
             // Validate the content session before the caller commits a new credential.
             let verified = Session::with_token_shared(&token, shared()).await
@@ -385,7 +470,7 @@ fn start(request: Result<SecretValue, serde_json::Error>) -> i64 {
         return id;
     };
     let seconds = match request.0.get("op").and_then(Value::as_str) {
-        Some("login") => 360,
+        Some("login" | "passwordLogin") => 360,
         Some("download") => 1800,
         _ => 90,
     };
@@ -486,4 +571,28 @@ pub extern "system" fn Java_dev_mangaflow_storage_SteamNative_nativeFree(
     _env: *mut JNIEnv, _class: jclass, id: jlong,
 ) {
     let _ = catch_unwind(AssertUnwindSafe(|| free(id)));
+}
+
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_dev_mangaflow_storage_SteamNative_nativeSubmitGuard(
+    env: *mut JNIEnv, _class: jclass, id: jlong, input: jstring, kind: jint,
+) -> jboolean {
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(code) = (unsafe { read_string(env, input) }) else { return 0; };
+        let code = Zeroizing::new(code);
+        if !(4..=10).contains(&code.len()) || !code.bytes().all(|c| c.is_ascii_alphanumeric()) {
+            return 0;
+        }
+        let kind = match kind {
+            2 => GuardType::EmailCode,
+            3 => GuardType::DeviceCode,
+            _ => return 0,
+        };
+        let Some(job) = lookup(id) else { return 0; };
+        if job.finished.load(Ordering::Acquire) || job.cancelled.load(Ordering::Acquire) { return 0; }
+        let Ok(sender) = job.guard.lock() else { return 0; };
+        let Some(sender) = sender.as_ref() else { return 0; };
+        if sender.try_send((code, kind)).is_ok() { 1 } else { 0 }
+    })).unwrap_or(0)
 }

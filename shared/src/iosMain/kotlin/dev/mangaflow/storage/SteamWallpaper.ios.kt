@@ -8,6 +8,8 @@ actual fun createSteamWallpaperClient(context: PlatformContext): SteamWallpaperC
     override val state = MutableStateFlow(SteamWallpaperState(supported = false, restoring = false,
         message = "Steam 创意工坊暂支持安卓与 Windows，iOS 可继续添加本地图片或视频。")).asStateFlow()
     override fun login() = Unit
+    override fun loginWithPassword(accountName: String, password: CharArray) { password.fill('\u0000') }
+    override fun submitGuardCode(code: String, method: SteamGuardMethod) = Unit
     override fun search(query: String, kind: SteamWallpaperKind, page: Int) = Unit
     override fun download(item: SteamWallpaperItem) = Unit
     override fun cancel() = Unit

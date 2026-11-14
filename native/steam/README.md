@@ -1,6 +1,6 @@
 # Steam Workshop native component
 
-MangaFlow media adapter version 0.1.0; component identity 0.1.0-f541366.
+MangaFlow media adapter version 0.1.1; component identity 0.1.1-f541366.
 
 The module links the real tapline core pinned to
 https://github.com/UnhingedSoftware/tapline/tree/f54136611519bef50cf31336e0c28a78eb175657.
@@ -40,17 +40,28 @@ No assumed size, checksum or dependency license is substituted for build output.
 ## JNI contract
 
 Class dev.mangaflow.storage.SteamNative has static nativeStart(String):Long,
-nativePoll(Long):String?, nativeCancel(Long) and nativeFree(Long).
+nativePoll(Long):String?, nativeCancel(Long), nativeFree(Long) and
+nativeSubmitGuard(Long,String,Int):Boolean.
 nativePoll is nonblocking: null means pending. A complete or error event is
 terminal. Completed queues also return complete once drained. An invalid handle
 returns error code invalid_job; nativeStart returns0 when unavailable/busy.
 
-All requests are JSON, op is login/account/search/download. Credentials, where
+All requests are JSON, op is login/passwordLogin/account/search/download. Credentials, where
 needed, are flat account, steamId (decimal string) and refreshToken.
 The adapter never calls TokenStore, automatic login or local Steam discovery.
 
 - login emits qr/url updates, then loggedIn/account/steamId/refreshToken only
   after a refreshed Steam client session succeeds, followed by complete.
+- passwordLogin accepts an explicit account/password for this attempt only. It uses the
+  pinned core's RSA key / BeginAuthSessionViaCredentials flow and retains its pending
+  login through Steam Guard. It emits guard/methods (actual Steam confirmation types:
+  2 email code, 3 authenticator code, 4 mobile approval, 5 email-link approval), then
+  guardAccepted or guardRejected as applicable. nativeSubmitGuard enqueues one explicit
+  code/type on this same live login job; it never starts another login or resends the
+  password. Invalid/expired codes remain recoverable on that pending session.
+  Mobile/email approvals continue polling without a code; successful login uses the
+  same verified-client-session and platform-vault handoff as QR. Passwords and codes
+  are never persisted, logged, included in state or sent to MangaFlow servers.
 - account validates the passed session and emits account/account/steamId,
   followed by complete. Network/session_unavailable does not mean the token
   was revoked; the Kotlin caller must retain the saved credential.
@@ -77,8 +88,8 @@ are display-only and are never used as download payloads or main-media fallback.
 
 At most8 live jobs,4 shared chunk permits and2 runtime workers. Progress events
 coalesce in a32-entry queue. Login is capped360seconds including connection and
-verification, account/search90seconds, and download30minutes. No password form,
-publisher key, account probe or token file is introduced. Native credential
+verification, account/search90seconds, and download30minutes. Password login and guard submission are explicit user actions; no publisher key,
+account probe or token file is introduced. Native credential
 buffers and queued response strings are zeroized; the JVM still owns its strings
 and platform secret storage.
 
@@ -106,5 +117,6 @@ bounded chunk requests. No separate hand-written network stack is introduced.
 Error codes are fixed, sanitized identifiers: invalid_request, auth_required,
 session_unavailable, login_failed, steam_unavailable, not_owned,
 unsupported_media, size_limit, unsafe_path, download_failed, cancelled, timeout,
-native_failed and invalid_job. No remote error string, URL, token or filesystem
+native_failed, invalid_job, invalid_credentials, invalid_guard_code,
+expired_guard_code, login_rate_limited, login_refused and unsupported_guard. No remote error string, URL, token or filesystem
 path is logged or propagated as an error.

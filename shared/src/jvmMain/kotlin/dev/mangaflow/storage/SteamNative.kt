@@ -20,6 +20,7 @@ internal object SteamNative {
 
     @JvmStatic external fun nativeStart(requestJson: String): Long
     @JvmStatic external fun nativePoll(job: Long): String?
+    @JvmStatic external fun nativeSubmitGuard(job: Long, code: String, kind: Int): Boolean
     @JvmStatic external fun nativeCancel(job: Long)
     @JvmStatic external fun nativeFree(job: Long)
 }

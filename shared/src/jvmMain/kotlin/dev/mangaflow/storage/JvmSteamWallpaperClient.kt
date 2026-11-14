@@ -103,15 +103,97 @@ internal class JvmSteamWallpaperClient(
 
     override fun login() {
         if (closed || !_state.value.supported || _state.value.restoring) return
-        start({ it.copy(authenticating = true, qrUrl = null, error = null, message = null) }, 310_000L,
-            makeRequest = { request(if (session == null) "login" else "account") }) { token, event ->
-            when (event.text("kind")) {
-                "qr" -> {
-                    val url = steamQrUrl(event.text("url"))
-                    update(token) { it.copy(qrUrl = url, message = "请在 Steam 手机应用中确认登录。") }
+        start({ it.copy(authenticating = true, qrUrl = null, error = null, message = null) }, 350_000L,
+            makeRequest = { request(if (session == null) "login" else "account") },
+            onEvent = { token, event -> loginEvent(token, event) })
+    }
+
+    override fun loginWithPassword(accountName: String, password: CharArray) {
+        val account = accountName.trim()
+        if (closed || !_state.value.supported || _state.value.restoring ||
+            account.isEmpty() || account.length > 128 || account.any(Char::isISOControl) ||
+            password.isEmpty() || password.size > 4096) {
+            password.fill('\u0000')
+            if (!closed) _state.update { it.copy(error = "请输入有效的 Steam 账号和密码。") }
+            return
+        }
+        // Own a copy before returning; the UI clears its submitted array immediately.
+        val ownedPassword = password.copyOf()
+        password.fill('\u0000')
+        start({ it.copy(authenticating = true, error = null, message = null) }, 350_000L,
+            makeRequest = {
+                try {
+                    buildJsonObject {
+                        put("op", "passwordLogin"); put("account", account)
+                        put("password", ownedPassword.concatToString())
+                    }
+                } finally { ownedPassword.fill('\u0000') }
+            }, transientSecret = ownedPassword, onEvent = { token, event -> loginEvent(token, event) })
+    }
+
+    override fun submitGuardCode(code: String, method: SteamGuardMethod) {
+        val current = _state.value
+        val kind = when (method) {
+            SteamGuardMethod.EMAIL_CODE -> 2
+            SteamGuardMethod.AUTHENTICATOR_CODE -> 3
+            else -> return
+        }
+        if (closed || !current.authenticating || current.guardSubmitting || method !in current.guardMethods) return
+        val value = code.trim().uppercase()
+        if (value.length !in 4..10 || value.any { it !in 'A'..'Z' && it !in '0'..'9' }) {
+            _state.update { it.copy(guardError = "请输入有效的 Steam 验证码。") }
+            return
+        }
+        val token = generation.get()
+        val handle = nativeJob.get()
+        if (handle <= 0) return
+        update(token) { it.copy(guardSubmitting = true, guardError = null) }
+        scope.launch {
+            try {
+                requireCurrent(token)
+                if (nativeJob.get() != handle || !SteamNative.nativeSubmitGuard(handle, value, kind)) {
+                    update(token) { it.copy(guardSubmitting = false, guardError = "验证暂未提交，请稍后重试。") }
                 }
-                "loggedIn", "account" -> publishAccount(token, event, session)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: LinkageError) {
+                update(token) { it.copy(guardSubmitting = false,
+                    guardError = "Steam 组件需要更新，请重新打开创意工坊后重试。") }
+            } catch (_: Exception) {
+                update(token) { it.copy(guardSubmitting = false, guardError = "验证暂未提交，请稍后重试。") }
             }
+        }
+    }
+
+    private fun loginEvent(token: Long, event: JsonObject) {
+        when (event.text("kind")) {
+            "qr" -> {
+                val url = steamQrUrl(event.text("url"))
+                update(token) { it.copy(qrUrl = url, message = "请在 Steam 手机应用中确认登录。") }
+            }
+            "guard" -> {
+                val values = event["methods"] as? JsonArray ?: throw SteamFailure("invalid_response")
+                require(values.size <= 8)
+                val methods = values.mapNotNull { value ->
+                    when ((value as? JsonPrimitive)?.longOrNull) {
+                        2L -> SteamGuardMethod.EMAIL_CODE
+                        3L -> SteamGuardMethod.AUTHENTICATOR_CODE
+                        4L -> SteamGuardMethod.MOBILE_CONFIRMATION
+                        5L -> SteamGuardMethod.EMAIL_CONFIRMATION
+                        else -> null
+                    }
+                }.distinct()
+                if (methods.isEmpty()) throw SteamFailure("unsupported_guard")
+                update(token) { it.copy(guardMethods = methods, guardSubmitting = false,
+                    guardError = null, message = null) }
+            }
+            "guardAccepted" -> update(token) { it.copy(guardSubmitting = false, guardError = null,
+                message = "验证已提交，正在等待 Steam 确认。") }
+            "guardRejected" -> update(token) { it.copy(guardSubmitting = false,
+                guardError = if (event.text("code") == "expired_guard_code")
+                    "验证码已过期，请输入新的验证码。" else "验证码不正确，请重新输入。") }
+            "loggedIn" -> publishAccount(token, event, null)
+            "account" -> publishAccount(token, event, session)
         }
     }
 
@@ -176,6 +258,7 @@ internal class JvmSteamWallpaperClient(
         stop()
         _state.update { it.copy(restoring = false, preparing = false, componentBytes = 0,
             componentTotalBytes = 0, authenticating = false, qrUrl = null,
+            guardMethods = emptyList(), guardSubmitting = false, guardError = null,
             loading = false, transferId = null, transferName = null, receivedBytes = 0,
             totalBytes = 0, message = null) }
     }
@@ -189,6 +272,7 @@ internal class JvmSteamWallpaperClient(
         session = null
         _state.update { it.copy(restoring = true, preparing = false, componentBytes = 0,
             componentTotalBytes = 0, authenticating = false, qrUrl = null,
+            guardMethods = emptyList(), guardSubmitting = false, guardError = null,
             loading = false, account = null, transferId = null, transferName = null,
             receivedBytes = 0, totalBytes = 0, message = null, error = null) }
         operation = scope.launch {
@@ -221,27 +305,35 @@ internal class JvmSteamWallpaperClient(
         timeout: Long,
         makeRequest: () -> JsonObject,
         download: SteamWallpaperItem? = null,
+        transientSecret: CharArray? = null,
         onEvent: suspend (Long, JsonObject) -> Unit,
     ) {
         stop()
         val token = generation.get()
-        _state.update { state(it.copy(authenticating = false, qrUrl = null, loading = false,
+        _state.update { state(it.copy(authenticating = false, qrUrl = null,
+            guardMethods = emptyList(), guardSubmitting = false, guardError = null, loading = false,
             preparing = false, componentBytes = 0, componentTotalBytes = 0,
             transferId = null, transferName = null, receivedBytes = 0, totalBytes = 0)) }
         operation = scope.launch {
+            try {
             operationLock.withLock {
                 var directory: File? = null
                 var media: File? = null
                 var primaryFile: String? = null
                 try {
                     requireCurrent(token)
-                    update(token) { it.copy(preparing = true, componentBytes = 0, componentTotalBytes = 0) }
-                    val ready = prepareNative(true) { received, total ->
-                        update(token) { it.copy(componentBytes = received.coerceAtLeast(0),
-                            componentTotalBytes = total.coerceAtLeast(0)) }
-                    }
+                    // Installed/bundled components load locally without replacing the current pane.
+                    var ready = prepareNative(false) { _, _ -> }
                     requireCurrent(token)
-                    update(token) { it.copy(preparing = false) }
+                    if (!ready) {
+                        update(token) { it.copy(preparing = true, componentBytes = 0, componentTotalBytes = 0) }
+                        ready = prepareNative(true) { received, total ->
+                            update(token) { it.copy(componentBytes = received.coerceAtLeast(0),
+                                componentTotalBytes = total.coerceAtLeast(0)) }
+                        }
+                        requireCurrent(token)
+                        update(token) { it.copy(preparing = false) }
+                    }
                     if (!ready) throw SteamFailure("component_unavailable")
                     var request = makeRequest()
                     if (download != null) {
@@ -308,11 +400,15 @@ internal class JvmSteamWallpaperClient(
                     media?.delete()
                     directory?.let { removeDownloadDirectory(it) }
                     update(token) { it.copy(preparing = false, componentBytes = 0, componentTotalBytes = 0,
-                        authenticating = false, qrUrl = null, loading = false,
+                        authenticating = false, qrUrl = null,
+                        guardMethods = emptyList(), guardSubmitting = false, guardError = null, loading = false,
                         transferId = null, transferName = null, receivedBytes = 0, totalBytes = 0) }
                 }
             }
+            } finally { transientSecret?.fill('\u0000') }
         }
+        // Also clear when a cancelled scope prevents the launch body from starting.
+        operation?.invokeOnCompletion { transientSecret?.fill('\u0000') }
     }
 
     private suspend fun runNative(
@@ -324,7 +420,7 @@ internal class JvmSteamWallpaperClient(
         if (handle <= 0) throw SteamFailure("unavailable")
         nativeJob.set(handle)
         val expected = when (request.text("op")) {
-            "login" -> "loggedIn"
+            "login", "passwordLogin" -> "loggedIn"
             "account" -> "account"
             "search" -> "items"
             else -> "complete"
@@ -370,7 +466,8 @@ internal class JvmSteamWallpaperClient(
         requireCurrent(token)
         session = record
         update(token) { it.copy(account = SteamWallpaperAccount(record.text("account"), record.text("steamId")),
-            authenticating = false, qrUrl = null, message = "Steam 已登录", error = null) }
+            authenticating = false, qrUrl = null,
+            guardMethods = emptyList(), guardSubmitting = false, guardError = null, message = "Steam 已登录", error = null) }
     }
 
     private fun sessionRecord(value: JsonObject): JsonObject {
@@ -464,6 +561,12 @@ internal class JvmSteamWallpaperClient(
             "download_failed" -> "壁纸下载未完成，请检查网络后重试。"
             "unsafe_path" -> "这份壁纸的文件路径不安全，已停止导入。"
             "login_failed" -> "Steam 登录未完成，请重新确认。"
+            "invalid_credentials" -> "Steam 账号或密码不正确。"
+            "invalid_guard_code" -> "Steam 验证码不正确，请重新输入。"
+            "expired_guard_code" -> "Steam 验证码已过期，请输入新的验证码。"
+            "login_rate_limited" -> "Steam 登录尝试过多，请稍后重试或使用扫码登录。"
+            "login_refused" -> "Steam 暂未允许此账号登录，请到 Steam 查看账号状态。"
+            "unsupported_guard" -> "此账号需要其他 Steam 验证方式，请使用扫码登录。"
             "busy" -> "Steam 仍在结束上一次操作，请稍后重试。"
             "invalid_response" -> "Steam 返回的信息不完整，请重试。"
             else -> "Steam 暂时不可用，请稍后重试。"
@@ -484,6 +587,8 @@ internal class JvmSteamWallpaperClient(
         private val ERROR_CODES = SESSION_ERRORS + setOf("ownership_required", "cancelled", "timeout",
             "too_large", "unsupported_media", "not_found", "invalid_response", "unavailable", "invalid_job",
             "invalid_request", "auth_required", "session_unavailable", "login_failed", "login_timeout",
-            "steam_unavailable", "not_owned", "size_limit", "unsafe_path", "download_failed", "busy", "native_failed")
+            "steam_unavailable", "not_owned", "size_limit", "unsafe_path", "download_failed", "busy", "native_failed",
+            "invalid_credentials", "invalid_guard_code", "expired_guard_code", "login_rate_limited",
+            "login_refused", "unsupported_guard")
     }
 }

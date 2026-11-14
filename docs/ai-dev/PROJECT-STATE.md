@@ -1,5 +1,17 @@
 # MangaFlow · current work
 
+## Steam account login and wallpaper stability · 2026-11-14
+
+Active requirements and source/design evidence are DESIGN.md STEAM-UI-141 / ROUTING-DESIGN-142. User requests every download's direct/proxy choice with external-proxy behavior, redesigns Steam/Wallpaper Engine UI, then explicitly asks account/password login and reports continuing jitter. Raw quotes and the complete routing matrix are in that design entry.
+
+This finished source batch adds pinned tapline password/RSA authentication with server-selected Guard/email/mobile verification, the real job-bound JNI code submission and consistently versioned0.1.1-f541366 component. Password ownership is synchronous before launch; all owned buffers clear on cancellation/failure. New loggedIn fields cannot borrow a previous session. Existing QR, token vault, signer/component/media guards and cancellation survive. iOS remains unsupported. Android native loading and Windows bundled-library loading check locally first, preventing installed operations from flashing COMPONENT.
+
+Workshop now has a bounded persistent task header/content/status layout, enum-only page transitions, default account form/explicit QR, actual tile preview followed by original-file download/apply, stable QR allocation and a hoisted grid position. Append-only “加载更多” matches the existing backend; no ineffective previous-page button or append scroll-to-top. PC pairing uses a fixed header/footer with one scrolling device/form/transfer body, retained outgoing state and compact progressive manual-IP instructions; existing LAN/PIN/security/foreground boundaries remain.
+
+The download-route request is a concrete documented design, not implemented global proxy controls: task > category > application default, actual system/direct/specified proxy, and separate capability-dependent VPN bypass. Audit found shared Ktor, JM, Android components, Android/desktop incremental updaters, extensions/JS and native Steam each need their real adapter. Steam TcpStream is unaffected by Kotlin proxy configuration; do not claim those transports have been routed. Conditional recommended external setup is application exclusion + a local HTTP/SOCKS listener when the external client supports both.
+
+Root integrates12 source/build files plus existing AGENTS/DESIGN/PROJECT-STATE in one latest-main lease, preserving concurrent comment viewport work. Base c234a9a1 source files were unchanged on2eb1c6c; shared docs are prepended on the actual latest files. Source and interface review only; no local files/commands/builds, tests, service/device/account probes, additional gate or workflow guard changes. Confirm normal Android/native CI trigger and keep main stable. Actual Rust/Kotlin packaging, login/Guard, native-media import and installed jitter/UI remain pending the resulting artifact/user feedback. The next routing implementation must start from ROUTING-DESIGN-142's actual transport list, not a Ktor-only setting or a fake VPN toggle.
+
 ## Detail comments / content-mode direction · 2026-11-14
 
 Active user wording and the adopted decisions are DESIGN.md COMMENTS-OPEN-20261114, COMMENTS-SCROLL-20261114 and CONTENT-MODE-20261114. Latest user prefers one switch that keeps the ordinary app UI and changes content scope throughout; the separate AdultZoneScreen layout draft is withdrawn and must not be integrated. Shared-mode UX is a recorded design direction, not an implemented toggle; no new explicit-site anonymous/retrieval integration is provided.

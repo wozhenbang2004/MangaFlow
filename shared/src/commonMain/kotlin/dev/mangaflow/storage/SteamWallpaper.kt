@@ -5,6 +5,8 @@ import kotlinx.coroutines.flow.StateFlow
 
 enum class SteamWallpaperKind { IMAGE, VIDEO }
 
+enum class SteamGuardMethod { EMAIL_CODE, AUTHENTICATOR_CODE, MOBILE_CONFIRMATION, EMAIL_CONFIRMATION }
+
 data class SteamWallpaperAccount(val accountName: String, val steamId: String)
 
 data class SteamWallpaperItem(
@@ -24,6 +26,9 @@ data class SteamWallpaperState(
     val account: SteamWallpaperAccount? = null,
     val authenticating: Boolean = false,
     val qrUrl: String? = null,
+    val guardMethods: List<SteamGuardMethod> = emptyList(),
+    val guardSubmitting: Boolean = false,
+    val guardError: String? = null,
     val loading: Boolean = false,
     val query: String = "",
     val kind: SteamWallpaperKind = SteamWallpaperKind.VIDEO,
@@ -43,6 +48,9 @@ data class SteamWallpaperState(
 interface SteamWallpaperClient {
     val state: StateFlow<SteamWallpaperState>
     fun login()
+    /** Takes ownership of the transient password buffer; implementations must clear it. */
+    fun loginWithPassword(accountName: String, password: CharArray)
+    fun submitGuardCode(code: String, method: SteamGuardMethod)
     fun search(query: String, kind: SteamWallpaperKind, page: Int = 1)
     fun download(item: SteamWallpaperItem)
     fun cancel()
