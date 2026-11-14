@@ -210,10 +210,12 @@ data class AccountUiState(
     val canRetryConnection: Boolean = false,
     val favorites: List<Manga> = emptyList(),
     val favoritesLoading: Boolean = false,
+    val favoritesRefreshing: Boolean = false,
     val favoritesHasMore: Boolean = false,
     val favoritesError: String? = null,
     val history: List<CloudHistoryEntry> = emptyList(),
     val historyLoading: Boolean = false,
+    val historyRefreshing: Boolean = false,
     val historyHasMore: Boolean = false,
     val historyError: String? = null,
     val syncMessage: String? = null,
@@ -321,6 +323,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private var accountCleanupFailed = false
     private var cloudFavoritesJob: Job? = null
     private var cloudHistoryJob: Job? = null
+    private var cloudFavoritesRequestId = 0L
+    private var cloudHistoryRequestId = 0L
     private var chapterSyncJob: Job? = null
     private val favoriteSyncJobs = mutableMapOf<String, Job>()
     private val pendingFavoriteSync = mutableMapOf<String, Pair<Manga, Boolean>>()
@@ -2389,6 +2393,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }
     }
 
+    fun refreshCloudFavorites() = loadCloudFavorites(refresh = true)
+
     fun moreCloudFavorites() = loadCloudFavorites(refresh = false, retryPage = cloudFavoritesFailedPage)
 
     private fun loadCloudFavorites(refresh: Boolean, retryPage: Int? = null) {
@@ -2396,30 +2402,46 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (state.profile == null || state.busy || (!refresh && (state.favoritesLoading ||
             (retryPage == null && !state.favoritesHasMore && cloudFavoritesPage >= 0)))) return
         cloudFavoritesJob?.cancel()
+        val requestId = ++cloudFavoritesRequestId
         val version = accountRepository.sessionVersion
-        val page = retryPage ?: if (refresh) 0 else cloudFavoritesPage + 1
+        val replacing = refresh || retryPage == 0
+        val firstPage = if (replacing) 0 else retryPage ?: cloudFavoritesPage + 1
+        val retainedPage = if (replacing) cloudFavoritesPage.coerceAtLeast(0) else firstPage
         cloudFavoritesFailedPage = null
-        _account.update { it.copy(favoritesLoading = true, favoritesError = null) }
+        _account.update { it.copy(favoritesLoading = true, favoritesRefreshing = replacing, favoritesError = null) }
         cloudFavoritesJob = viewModelScope.launch {
             try {
-                val result = accountRepository.favorites(page)
-                if (!isCurrentAccount(version)) return@launch
+                // Refresh the loaded range atomically. Never truncate a scrolled collection to page zero.
+                val refreshed = mutableListOf<Manga>()
+                var page = firstPage
+                var hasMore: Boolean
+                do {
+                    val result = accountRepository.favorites(page)
+                    if (!isCurrentAccount(version) || requestId != cloudFavoritesRequestId) return@launch
+                    refreshed.addAll(result.items)
+                    hasMore = result.hasMore
+                    if (!hasMore || page >= retainedPage) break
+                    page++
+                } while (true)
                 cloudFavoritesPage = page
                 _account.update { it.copy(
-                    favorites = (if (page == 0) result.items else it.favorites + result.items).distinctBy(Manga::id),
-                    favoritesLoading = false, favoritesHasMore = result.hasMore, favoritesError = null,
+                    favorites = (if (replacing) refreshed else it.favorites + refreshed).distinctBy(Manga::id),
+                    favoritesLoading = false, favoritesRefreshing = false, favoritesHasMore = hasMore, favoritesError = null,
                 ) }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
-                if (isCurrentAccount(version)) {
-                    cloudFavoritesFailedPage = page
-                    _account.update { it.copy(favoritesLoading = false,
+                if (isCurrentAccount(version) && requestId == cloudFavoritesRequestId) {
+                    // A failed range refresh retries the entire range, leaving the old snapshot intact.
+                    cloudFavoritesFailedPage = if (replacing) 0 else firstPage
+                    _account.update { it.copy(favoritesLoading = false, favoritesRefreshing = false,
                         favoritesError = accountError(failure, "云端收藏暂时无法读取，请重试。")) }
                 }
             }
         }
     }
+
+    fun refreshCloudHistory() = loadCloudHistory(refresh = true)
 
     fun moreCloudHistory() = loadCloudHistory(refresh = false, retryPage = cloudHistoryFailedPage)
 
@@ -2428,27 +2450,57 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (state.profile == null || state.busy || (!refresh && (state.historyLoading ||
             (retryPage == null && !state.historyHasMore && cloudHistoryPage >= 0)))) return
         cloudHistoryJob?.cancel()
+        val requestId = ++cloudHistoryRequestId
         val version = accountRepository.sessionVersion
-        val page = retryPage ?: if (refresh) 0 else cloudHistoryPage + 1
+        val replacing = refresh || retryPage == 0
+        val firstPage = if (replacing) 0 else retryPage ?: cloudHistoryPage + 1
+        val retainedPage = if (replacing) cloudHistoryPage.coerceAtLeast(0) else firstPage
         cloudHistoryFailedPage = null
-        _account.update { it.copy(historyLoading = true, historyError = null) }
+        _account.update { it.copy(historyLoading = true, historyRefreshing = replacing, historyError = null) }
         cloudHistoryJob = viewModelScope.launch {
             try {
-                val result = accountRepository.history(page)
-                if (!isCurrentAccount(version)) return@launch
+                val refreshed = mutableListOf<CloudHistoryEntry>()
+                var page = firstPage
+                var hasMore: Boolean
+                do {
+                    val result = accountRepository.history(page)
+                    if (!isCurrentAccount(version) || requestId != cloudHistoryRequestId) return@launch
+                    refreshed.addAll(result.items)
+                    hasMore = result.hasMore
+                    if (!hasMore || page >= retainedPage) break
+                    page++
+                } while (true)
                 cloudHistoryPage = page
                 _account.update { it.copy(
-                    history = (if (page == 0) result.items else it.history + result.items).distinctBy { row -> row.manga.id },
-                    historyLoading = false, historyHasMore = result.hasMore, historyError = null,
+                    history = (if (replacing) refreshed else it.history + refreshed).distinctBy { row -> row.manga.id },
+                    historyLoading = false, historyRefreshing = false, historyHasMore = hasMore, historyError = null,
                 ) }
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (failure: Exception) {
-                if (isCurrentAccount(version)) {
-                    cloudHistoryFailedPage = page
-                    _account.update { it.copy(historyLoading = false,
+                if (isCurrentAccount(version) && requestId == cloudHistoryRequestId) {
+                    cloudHistoryFailedPage = if (replacing) 0 else firstPage
+                    _account.update { it.copy(historyLoading = false, historyRefreshing = false,
                         historyError = accountError(failure, "云端记录暂时无法读取，请重试。")) }
                 }
+            }
+        }
+    }
+
+    /** Explicit local adoption of a manga in this account's loaded collection; no redundant owner POST. */
+    fun addCloudMangaToLibrary(manga: Manga) {
+        if (manga.sourceId != "copy" || SourceKeys.isEncoded(manga.id)) return
+        val version = accountRepository.sessionVersion
+        if (!isCurrentAccount(version)) return
+        viewModelScope.launch {
+            library.awaitReady()
+            if (!isCurrentAccount(version)) return@launch
+            val current = _account.value.favorites.firstOrNull { it.id == manga.id }
+                ?: _account.value.history.firstOrNull { it.manga.id == manga.id }?.manga
+                ?: return@launch
+            if (!library.isFavorite(current.id)) {
+                library.toggleFavorite(current)
+                messages.send("已加入本机书架")
             }
         }
     }
@@ -2588,6 +2640,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private fun hasPendingSync() = pendingFavoriteSync.isNotEmpty() || pendingChapterSync != null
 
     private fun cancelAccountRequests() {
+        cloudFavoritesRequestId++
+        cloudHistoryRequestId++
         cloudFavoritesJob?.cancel()
         cloudHistoryJob?.cancel()
         chapterSyncJob?.cancel()

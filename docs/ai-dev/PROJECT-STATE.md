@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Copy account UX and shared library flows · 2026-11-14
+
+ACCOUNT-UX-20261114 in DESIGN owns the working-login screenshots and account redesign request, including current continuations through 2026-11-14T07:07:01.748Z. One compact identity/refresh/More header, native cover grid/list choice and flat cloud-history rows replace the detached identity area and oversized cards. Existing Ovio tabs, glass menus, metric fan, cover detail transition and exact cloud/local reading routes are reused.
+
+Explicit cloud-manga adoption updates only the local shelf after session/membership/readiness checks; remote removal preserves local records/downloads. Auth/repository and confirmed favorite/visible Copy chapter sync remain unchanged. Range refresh is atomic/session-and-feed guarded; only the visible feed auto-appends, with explicit error retry. Independent view positions and one-pass measured header prevent context/inset loss. Settings and other profile routes keep their existing chrome.
+
+Cloud-only source review, one complete latest-main expected-head update and normal CI trigger; no tests/local builds/probes/new gate or status-only push. Installed layout/fonts/motion/account sync and multi-source/offline use remain for user feedback after packaging. Preserve all concurrent Steam/routing/download/comment/profile/ranking work.
+
 ## Steam mail-code return and usable downloads · 2026-11-14
 
 Active requirements STEAM-GUARD-LIFETIME / STEAM-GUARD-INPUT / STEAM-NONBLOCKING / STEAM-ACCOUNT-LIBRARY / STEAM-TRANSFER-PROGRESS-20261114 are maintained in DESIGN.md's “Steam interruption, identity and live downloads”. Raw user/screenshot coverage is recorded there through the latest “继续” at 2026-11-14T06:53:41.252Z. This batch retains a same-process pending challenge, supplies five-cell explicit OTP entry, separates four client lanes/errors, removes unsolicited blank searches and preserves query/scroll/preview interaction during downloads. Actual profile metadata is optional; favorites/subscriptions use the pinned authenticated RPC rather than search approximations.

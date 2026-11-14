@@ -1001,7 +1001,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 actions()
                             }
                             }
-                            val rootCapturesBackground = current.section in setOf(Section.ACCOUNT, Section.SETTINGS)
+                            val rootCapturesBackground = current.section == Section.SETTINGS ||
+                                current.section == Section.ACCOUNT && restrictedMode
                             Box(Modifier.fillMaxSize().then(if (rootCapturesBackground)
                                 Modifier.mangaHazeSource(searchBackdrop)
                                 else Modifier)) {
@@ -1113,7 +1114,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onSessionChange = scopedBrowse::refresh, contentTopPadding = chromePadding,
                                     ) else AccountScreen(
                                         state = account, repository = model.repository,
-                                        active = rootActive, contentTopPadding = chromePadding,
+                                        active = rootActive && !searchVisible,
+                                        backdrop = searchBackdrop, navigation = navigation,
+                                        onSearch = if (desktop && !desktopNavigationVisible) openDesktopSearch else null,
+                                        localFavorites = ordinaryFavorites, localHistory = ordinaryHistory,
+                                        onAddToLibrary = model::addCloudMangaToLibrary, onContinueLocal = model::continueReading,
+                                        onRefreshFavorites = model::refreshCloudFavorites, onRefreshHistory = model::refreshCloudHistory,
                                         onLoginWithPassword = model::loginWithPassword,
                                         onLoginWithCookie = model::loginWithCookie,
                                         onLogout = model::logout,
@@ -1133,7 +1139,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 }
                                 }
                             }
-                            if (current.section in setOf(Section.ACCOUNT, Section.SETTINGS)) {
+                            if (current.section == Section.SETTINGS || current.section == Section.ACCOUNT && restrictedMode) {
                                 if (desktop) DesktopManagementToolbar(
                                     title = when (current.section) {
                                         Section.ACCOUNT -> "账号"; else -> "设置"

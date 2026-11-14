@@ -1,83 +1,29 @@
 package dev.mangaflow.ui
 
-import dev.mangaflow.typography.MangaFontScene
-
-import androidx.compose.ui.unit.Dp
-
-import androidx.compose.foundation.layout.asPaddingValues
-
-import dev.mangaflow.platform.LocalMangaContext as LocalContext
-
-import dev.mangaflow.ui.platform.*
-
-import dev.mangaflow.platform.*
-
-import androidx.compose.ui.platform.LocalDensity
-
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.PersonOutline
-import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
-import dev.mangaflow.ui.motion.MotionButton as Button
 import androidx.compose.material3.ButtonDefaults
-import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
 import androidx.compose.material3.Icon
-import dev.mangaflow.ui.motion.MotionIconButton as IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import dev.mangaflow.ui.motion.MotionTextButton as TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -86,16 +32,26 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.AccountUiState
 import dev.mangaflow.account.CloudHistoryEntry
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
-import dev.mangaflow.ui.motion.MotionTabContent
+import dev.mangaflow.platform.*
+import dev.mangaflow.platform.LocalMangaContext as LocalContext
+import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.typography.MangaFontScene
+import dev.mangaflow.ui.glass.mangaHazeSource
+import dev.mangaflow.ui.motion.MotionButton as Button
+import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
+import dev.mangaflow.ui.motion.MotionIconButton as IconButton
+import dev.mangaflow.ui.motion.MotionTextButton as TextButton
+import dev.mangaflow.ui.platform.*
 
 @Composable
 fun AccountScreen(
@@ -112,7 +68,15 @@ fun AccountScreen(
     onContinue: (CloudHistoryEntry) -> Unit,
     onSetFavorite: (Manga, Boolean) -> Unit,
     onRetrySync: () -> Unit,
-    contentTopPadding: Dp = 0.dp,
+    backdrop: HazeState,
+    navigation: @Composable () -> Unit,
+    localFavorites: List<Manga>,
+    localHistory: List<ReadingProgress>,
+    onAddToLibrary: (Manga) -> Unit,
+    onContinueLocal: (ReadingProgress) -> Unit,
+    onRefreshFavorites: () -> Unit,
+    onRefreshHistory: () -> Unit,
+    onSearch: (() -> Unit)? = null,
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val profile = state.profile
@@ -127,10 +91,8 @@ fun AccountScreen(
     var cookie by remember { mutableStateOf("") }
     var showSecret by remember { mutableStateOf(false) }
     var submitting by remember { mutableStateOf(false) }
-    var showHistory by remember(profile?.username) { mutableStateOf(false) }
+    var showHistory by rememberSaveable(profile?.username) { mutableStateOf(false) }
     var removeFavorite by remember(profile?.username) { mutableStateOf<Manga?>(null) }
-    var managedFavorite by remember(profile?.username) { mutableStateOf<Manga?>(null) }
-    val cloudFavorites = remember(state.favorites) { state.favorites.distinctBy(Manga::id) }
     val clearSecrets = {
         password = ""
         cookie = ""
@@ -142,7 +104,7 @@ fun AccountScreen(
         focus.clearFocus()
     }
     LaunchedEffect(state.busy) { if (!state.busy) submitting = false }
-    LaunchedEffect(active) { if (!active) { clearInputs(); managedFavorite = null; removeFavorite = null } }
+    LaunchedEffect(active) { if (!active) { clearInputs(); removeFavorite = null } }
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) clearSecrets()
@@ -169,8 +131,22 @@ fun AccountScreen(
         }
     }
 
+    val contentTopPadding = HeaderContentGap
+    // Measure the actual, font-aware header and collection in one pass, without a one-frame inset jump.
+    Layout(modifier = Modifier.fillMaxSize(), content = {
+    CloudAccountHeader(
+        state = state, backdrop = backdrop, navigation = navigation, active = active,
+        refreshing = if (showHistory) state.historyLoading else state.favoritesLoading,
+        refreshError = if (showHistory) state.historyError else state.favoritesError,
+        onSearch = onSearch,
+        onRefresh = if (profile == null) onRefresh else if (showHistory) onRefreshHistory else onRefreshFavorites,
+        onRetrySync = onRetrySync,
+        onLogout = { clearInputs(); removeFavorite = null; onLogout() },
+        modifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top)),
+    )
+    Box(Modifier.fillMaxSize()) {
     if (profile == null) {
-        BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
+        BoxWithConstraints(Modifier.fillMaxSize().mangaHazeSource(backdrop).imePadding()) {
         val accountHeight = maxHeight
         val loginScroll = rememberScrollState()
         Column(
@@ -247,156 +223,27 @@ fun AccountScreen(
         }
     } else {
         key(profile.username) {
-            val favoritesPosition = rememberLazyGridState()
-            val historyPosition = rememberLazyGridState()
-            BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
-                val splitAccount = desktop && maxWidth >= 1040.dp
-                val profileMaxHeight = if (splitAccount) (maxHeight - contentTopPadding - 24.dp).coerceAtLeast(1.dp)
-                    else (maxHeight - 48.dp).coerceAtLeast(0.dp) * .45f
-                val profileContent: @Composable (Modifier) -> Unit = { profileModifier ->
-                    Column(profileModifier.fillMaxWidth().heightIn(max = profileMaxHeight)
-                        .verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = if (splitAccount) 4.dp else contentTopPadding + 4.dp)) {
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(Modifier.size(42.dp).clip(CircleShape).background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Outlined.PersonOutline, null, Modifier.size(22.dp), tint = colors.onSurfaceVariant)
-                                }
-                                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                                    Text(profile.nickname.ifBlank { profile.username }, style = MaterialTheme.typography.titleMedium,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    if (profile.nickname.isNotBlank() && profile.nickname != profile.username) {
-                                        Text(profile.username, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    }
-                                }
-                                if (!splitAccount) IconButton(onClick = onRefresh, enabled = !state.busy) {
-                                    Icon(Icons.Outlined.Refresh, "刷新账号", Modifier.size(21.dp))
-                                }
-                                if (!splitAccount) TextButton(onClick = { clearInputs(); removeFavorite = null; onLogout() }) { Text("退出") }
-                            }
-                            if (splitAccount) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = onRefresh, enabled = !state.busy) {
-                                    Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("刷新")
-                                }
-                                TextButton(onClick = { clearInputs(); removeFavorite = null; onLogout() }) { Text("退出") }
-                            }
-                            if (state.busy) AccountBusyRow("正在刷新账号…") { clearInputs(); onLogout() }
-                            state.error?.let { AccountError(it, state.busy, onRefresh) }
-                            state.syncMessage?.takeIf(String::isNotBlank)?.let {
-                                Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                            }
-                            if (state.canRetrySync && !state.busy) {
-                                TextButton(onClick = onRetrySync, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
-                                    Text("重试同步", style = MaterialTheme.typography.bodySmall)
-                                }
-                            }
-                        }
-                    }
-
-                }
-                val collectionContent: @Composable (Modifier) -> Unit = { collectionModifier ->
-                    Column(collectionModifier) {
-                    BrowseTabs(
-                        selected = if (showHistory) 1 else 0,
-                        labels = listOf("云端收藏", "云端记录"),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                    ) { showHistory = it == 1 }
-                    MotionTabContent(if (showHistory) 1 else 0, Modifier.weight(1f).fillMaxWidth()) { tab ->
-                        val historyTab = tab == 1
-                        Box(Modifier.fillMaxSize()) {
-                        LazyVerticalGrid(
-                            columns = GridCells.Adaptive(144.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)),
-                            state = if (historyTab) historyPosition else favoritesPosition,
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 32.dp + bottomInset),
-                            horizontalArrangement = Arrangement.spacedBy(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(24.dp),
-                        ) {
-                            if (historyTab) {
-                                if (state.history.isEmpty()) {
-                                    item(span = { GridItemSpan(maxLineSpan) }, key = "history-status") {
-                                        when {
-                                            state.historyLoading -> QuietLoading("正在读取云端记录…")
-                                            state.historyError != null -> AccountError(state.historyError, false, onRefresh)
-                                            else -> EmptyMessage("还没有云端记录", "账号中的阅读章节会显示在这里。", "刷新", onRefresh)
-                                        }
-                                    }
-                                } else {
-                                    itemsIndexed(state.history, key = { index, entry -> "cloud-history-${entry.manga.id}-${entry.chapterId}-$index" },
-                                        span = { _, _ -> GridItemSpan(maxLineSpan) }) { _, entry ->
-                                        CloudContinueRow(entry, repository) { onContinue(entry) }
-                                    }
-                                    if (state.historyLoading || state.historyError != null || state.historyHasMore) {
-                                        item(span = { GridItemSpan(maxLineSpan) }, key = "history-more") {
-                                            AccountListFooter(state.historyLoading, state.historyError, onMoreHistory)
-                                        }
-                                    }
-                                }
-                            } else {
-                                if (state.favorites.isEmpty()) {
-                                    item(span = { GridItemSpan(maxLineSpan) }, key = "favorites-status") {
-                                        when {
-                                            state.favoritesLoading -> QuietLoading("正在读取云端收藏…")
-                                            state.favoritesError != null -> AccountError(state.favoritesError, false, onRefresh)
-                                            else -> EmptyMessage("云端书架还是空的", "账号收藏的漫画会显示在这里。", "刷新", onRefresh)
-                                        }
-                                    }
-                                } else {
-                                    items(cloudFavorites, key = { "cloud-favorite-${it.id}" }, contentType = { "cloud-book" }) { manga ->
-                                        val syncing = manga.id in state.syncingFavorites
-                                        val cloudActions = listOf(
-                                            DesktopMenuAction("详情与目录") { onOpen(manga) },
-                                            DesktopMenuAction("移除云端收藏", enabled = !syncing) { removeFavorite = manga })
-                                        DesktopContextMenuArea(cloudActions) {
-                                        Box {
-                                            CoverTile(manga, repository,
-                                                onLongClick = { managedFavorite = manga }) { onOpen(manga) }
-                                            if (syncing) Box(Modifier.align(if (desktop) Alignment.TopStart else Alignment.TopEnd).padding(6.dp).size(22.dp)
-                                                .background(colors.surface.copy(alpha = .94f), CircleShape),
-                                                contentAlignment = Alignment.Center) {
-                                                CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp,
-                                                    color = colors.onSurfaceVariant)
-                                            }
-                                            if (desktop) Box(Modifier.align(Alignment.TopEnd).padding(4.dp)) {
-                                                DesktopMoreButton(cloudActions, "云端收藏操作")
-                                            }
-                                            CloudFavoriteActionsMenu(managedFavorite?.id == manga.id,
-                                                onDismiss = { managedFavorite = null },
-                                                onDetails = { onOpen(manga) },
-                                                onRemove = { removeFavorite = manga },
-                                                removeEnabled = !syncing, removeLabel = "移除云端收藏")
-                                        }
-                                        }
-                                    }
-                                    if (state.favoritesLoading || state.favoritesError != null || state.favoritesHasMore) {
-                                        item(span = { GridItemSpan(maxLineSpan) }, key = "favorites-more") {
-                                            AccountListFooter(state.favoritesLoading, state.favoritesError, onMoreFavorites)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (desktop) DesktopVerticalScrollbar(
-                            if (historyTab) historyPosition else favoritesPosition,
-                            Modifier.align(Alignment.CenterEnd).padding(bottom = bottomInset))
-                        }
-                    }
-
-                    }
-                }
-                if (splitAccount) {
-                    Row(Modifier.fillMaxSize().padding(top = contentTopPadding + 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Box(Modifier.width(264.dp)) { profileContent(Modifier) }
-                        collectionContent(Modifier.weight(1f).fillMaxSize())
-                    }
-                } else Column(Modifier.fillMaxSize()) {
-                    profileContent(Modifier)
-                    collectionContent(Modifier.weight(1f).fillMaxWidth())
-                }
-            }
+            CloudAccountLibrary(
+                state = state, repository = repository, backdrop = backdrop, active = active,
+                showHistory = showHistory, onShowHistory = { showHistory = it },
+                localFavorites = localFavorites, localHistory = localHistory,
+                contentTopPadding = contentTopPadding,
+                onOpen = onOpen, onContinue = onContinue, onContinueLocal = onContinueLocal,
+                onAddToLibrary = onAddToLibrary, onRemoveFavorite = { removeFavorite = it },
+                onMoreFavorites = onMoreFavorites, onMoreHistory = onMoreHistory,
+                onRefreshFavorites = onRefreshFavorites, onRefreshHistory = onRefreshHistory,
+                onRefreshAccount = onRefresh,
+            )
+        }
+    }
+    }
+    }) { measurables, constraints ->
+        val header = measurables[0].measure(constraints.copy(minHeight = 0))
+        val contentHeight = (constraints.maxHeight - header.height).coerceAtLeast(0)
+        val content = measurables[1].measure(constraints.copy(minHeight = contentHeight, maxHeight = contentHeight))
+        layout(constraints.maxWidth, constraints.maxHeight) {
+            content.placeRelative(0, header.height)
+            header.placeRelative(0, 0)
         }
     }
 
@@ -405,7 +252,14 @@ fun AccountScreen(
             onDismissRequest = { removeFavorite = null },
             shape = RoundedCornerShape(24.dp), containerColor = colors.surface,
             title = { Text("移除云端收藏？", style = MaterialTheme.typography.titleLarge) },
-            text = { Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text("仅移除云端收藏。本机书架、下载和阅读进度会保留。",
+                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                }
+            },
             confirmButton = {
                 TextButton(enabled = manga.id !in state.syncingFavorites, onClick = {
                     removeFavorite = null
@@ -447,7 +301,7 @@ private fun AccountBusyRow(message: String, onCancel: () -> Unit) {
 }
 
 @Composable
-private fun AccountError(message: String, busy: Boolean, onRetry: (() -> Unit)? = null) {
+internal fun AccountError(message: String, busy: Boolean, onRetry: (() -> Unit)? = null) {
     val clipboard = LocalClipboardManager.current
     val versionName = platformVersion(LocalContext.current)
     var copied by remember(message) { mutableStateOf(false) }
@@ -465,31 +319,4 @@ private fun AccountError(message: String, busy: Boolean, onRetry: (() -> Unit)? 
         }
     }
 }
-
-@Composable
-private fun AccountListFooter(loading: Boolean, error: String?, onMore: () -> Unit) {
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        when {
-            loading -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-            error != null -> AccountError(error, false, onMore)
-            else -> TextButton(onClick = onMore) { Text("加载更多") }
-        }
-    }
-}
-
-@Composable
-private fun CloudContinueRow(entry: CloudHistoryEntry, repository: MangaRepository, onContinue: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
-        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)).clickable(onClick = onContinue).padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        MangaCover(entry.manga, repository, Modifier.width(45.dp).height(62.dp).mangaCoverCard(8.dp))
-        Column(Modifier.weight(1f).padding(horizontal = 14.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(entry.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (entry.chapterTitle.isNotBlank()) Text(entry.chapterTitle, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Icon(Icons.Outlined.PlayArrow, if (entry.chapterId.isBlank()) "查看漫画详情" else "继续阅读 ${entry.chapterTitle}", Modifier.size(23.dp))
-    }
-}
-
 
