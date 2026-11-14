@@ -89,6 +89,7 @@ internal class ScopedBrowseController(
     var sourceId: String = ""
         private set
     private var sources = emptyList<BodySourceInfo>()
+    private var unavailableReason: String? = null
     private var active = false
     private var disposed = false
     private var generation = 0L
@@ -120,10 +121,12 @@ internal class ScopedBrowseController(
         mutableState.value = restored
     }
 
-    fun updateSources(available: List<BodySourceInfo>) {
+    fun updateSources(available: List<BodySourceInfo>, unavailableReason: String? = null) {
         if (disposed) return
         val next = available.filter { it.id.isNotBlank() }.distinctBy { it.id }
-        if (next == sources) return
+        val reason = unavailableReason?.takeIf { it.isNotBlank() }
+        if (next == sources && this.unavailableReason == reason) return
+        this.unavailableReason = reason
         retainCurrent()
         cancelRequest()
         val old = sources.associateBy { it.id }
@@ -180,7 +183,7 @@ internal class ScopedBrowseController(
     override fun submitSearch() = refresh()
 
     override fun setSearchTarget(target: SearchTarget) {
-        if (disposed || target == state.value.searchTarget) return
+        if (disposed || target != SearchTarget.TITLE || target == state.value.searchTarget) return
         show(selection(state.value).copy(searchTarget = target))
     }
 
@@ -221,8 +224,11 @@ internal class ScopedBrowseController(
     ) {
         if (disposed) return
         val current = state.value
+        // This source contract exposes a catalogue, not ordinary-source rankings/updates.
+        // Old or delayed navigation requests return to that real catalogue operation.
         val next = (if (clearQuery) homeSelection(current) else selection(current)).copy(
-            mode = mode, period = period ?: current.period, audience = audience ?: current.audience)
+            mode = DiscoveryMode.RECOMMENDED, period = period ?: current.period,
+            audience = audience ?: current.audience)
         if (selection(current) != next) show(next)
     }
 
@@ -255,12 +261,12 @@ internal class ScopedBrowseController(
 
     private fun selection(value: BrowseState) = BrowseState(
         query = value.query, searchTarget = value.searchTarget, selectedTags = value.selectedTags,
-        mode = value.mode, period = value.period, audience = value.audience,
+        mode = DiscoveryMode.RECOMMENDED, period = value.period, audience = value.audience,
         availableTags = emptyList(), loading = false, sourceScope = scopeKey(),
     )
 
     private fun homeSelection(value: BrowseState) = BrowseState(
-        mode = value.mode, period = value.period, audience = value.audience,
+        mode = DiscoveryMode.RECOMMENDED, period = value.period, audience = value.audience,
         availableTags = emptyList(), loading = false, sourceScope = scopeKey(),
     )
 
@@ -269,7 +275,8 @@ internal class ScopedBrowseController(
         sources.firstOrNull { it.id == sourceId }?.revision.orEmpty(), value.cacheKey)
 
     private fun unsupported(value: BrowseState): String? = when {
-        sourceId.isEmpty() || sources.none { it.id == sourceId } -> "本分区暂无已启用的来源。"
+        sourceId.isEmpty() || sources.none { it.id == sourceId } ->
+            unavailableReason ?: "本分区暂无已启用的来源。"
         value.searchTarget == SearchTarget.TAG || value.selectedTags.isNotEmpty() -> "当前来源未提供标签检索。"
         value.searchTarget == SearchTarget.AUTHOR -> "当前来源未提供作者检索。"
         value.query.trim().length > 120 -> "请输入不超过 120 个字的标题。"
@@ -297,10 +304,13 @@ internal class ScopedBrowseController(
             loading = false, loadingMore = false, refreshing = false,
         ) ?: configured
         if (!active) return
-        val fresh = cached != null && cached.updatedAt > 0 &&
+        val fresh = cached != null && cached.error == null && cached.updatedAt > 0 &&
             (wallTimeMillis() - cached.updatedAt in 0L until 60_000L || cached.page > 0)
-        if (!force && (fresh || cached?.error != null)) return
-        startLoad(state.value, 0, forceRefresh = force, debounce = debounce)
+        // A previous failure is not a fresh result. Returning from source/account settings
+        // can retry once on activation, while the repository keeps real source cooldowns.
+        if (!force && fresh) return
+        val resumePage = if (force) 0 else cached?.failedPage?.takeIf { it > 0 } ?: 0
+        startLoad(state.value, resumePage, forceRefresh = force || cached?.error != null, debounce = debounce)
     }
 
     private fun startLoad(value: BrowseState, page: Int, forceRefresh: Boolean = false, debounce: Boolean = false) {
@@ -329,7 +339,7 @@ internal class ScopedBrowseController(
                 if (requested != generation || !active || sourceId != requestedSource) return@launch
                 val providedNext = result.nextPage
                 val next = providedNext?.takeIf { it > page } ?: (page + 1)
-                if (result.hasMore && (providedNext != null && providedNext <= page || result.items.isEmpty()))
+                if (result.hasMore && providedNext != null && providedNext <= page)
                     throw SourceException("来源返回的下一页无效，请重试或刷新。")
                 val items = (if (page == 0) result.items else value.items + result.items).distinctBy { it.id }
                 if (result.hasMore) nextPages[selectedKey] = next else nextPages.remove(selectedKey)

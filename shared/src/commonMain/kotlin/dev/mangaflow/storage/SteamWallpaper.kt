@@ -34,7 +34,7 @@ data class SteamWallpaperState(
     val componentBytes: Long = 0,
     val componentTotalBytes: Long = 0,
     val account: SteamWallpaperAccount? = null,
-    /** A vault credential is available locally; server validation is still pending. */
+    /** A saved login can be retried, including a temporarily unreadable vault. Not a verified session. */
     val canResumeSession: Boolean = false,
     val profileError: String? = null,
     val profileLoading: Boolean = false,

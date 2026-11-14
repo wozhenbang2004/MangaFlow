@@ -1,8 +1,18 @@
 # MangaFlow · current work
 
+## Current completed source batch · 2026-11-14
+
+User's current account/menu rejection and earlier upgrade-login/adaptive requests are DESIGN ACCOUNT-CLARITY-156 / LOGIN-KEEP-157 / EXPERIENCE-158; network/loading scope remains NETWORK-WORKSPACE-150–155. Account navigation is now拷贝书架 with书架/最近阅读, avatar identity/settings, compact management menus and an entire readable account content plane. Preserve exact cloud chapter/local-page lookup and explicit different-local continuation. Steam retains stored sessions through local/network recovery. Adaptive policy actuals and cache/reader/download/frame consumers are implemented, with unknown sensors and asynchronous startup limits explicit. Independent source reviews found no remaining definite blocker; no builds/tests/probes were run.
+
+Next exact action: save the whole source batch against actual latest main using expected-head protection and confirm ordinary CI trigger once, then leave installed appearance/session/resource behavior pending artifact/user feedback. Do not issue a status-only push or replay older completed changes; uncommitted historical worktrees are not the publishing source. Current batch has not yet been packaged at this checkpoint.
+
+## Active network/account/loading follow-up · 2026-11-14
+
+Current requirements and concrete design are DESIGN.md NETWORK-WORKSPACE-150–155. Six isolated domains continue: independent network dialog/proxy clarity; read-only default-network metadata; real chapter preparation visibility; remaining reader retry routes; account record exact cursor/clear actions; scoped capability/loading diagnosis. No new source or access-control bypass. User approved PR3; mainf533302 is published as Android232, and Windows70 packaging/publication succeeded. The earlier blocked-publication paragraph below is historical and was resolved by the explicit approval and merge. iOS70 remained in archive at last check. Root integrates this new completed source batch on the actual latest main, preserving all concurrent work; no tests/local builds/service/device probes or extra gates. New UI and upstream availability remain unverified until real artifact/use evidence.
+
 ## Three-thread takeover · 2026-11-14
 
-Publication state: main push was blocked by automatic approval review (large untested default-branch mutation; current authorization considered insufficient). Do not bypass that rejection. Preserve the complete change in an independent review branch/draft PR; merge to main and CI activation require explicit user approval. No new build was triggered.
+Historical publication state before user approval: main push was blocked by automatic approval review (large untested default-branch mutation; current authorization considered insufficient). Do not bypass that rejection. Preserve the complete change in an independent review branch/draft PR; merge to main and CI activation require explicit user approval. No new build was triggered.
 
 Active outcome and raw current instruction are recorded in DESIGN.md TAKEOVER-DOWNLOAD-145–149; this resumes the screenshot's three named threads with six isolated source owners and cross-domain review. Implemented: adaptive download task rows and real progress; per-task route selection with exact routed metadata/enqueue/reader-first transfers; retained same-process Steam downloads, current-choice manual retry and a stable scrolling preview footer; direct shared-profile switching with unsupported actions/comments removed and sign-in recovery; auxiliary reader IO separated from valid body rendering. Preserve the existing exact-history and newest-comment fixes.
 

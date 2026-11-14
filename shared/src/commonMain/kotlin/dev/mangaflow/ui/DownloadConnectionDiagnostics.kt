@@ -46,8 +46,7 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
     val latestSettings by rememberUpdatedState(settings)
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
-    var expanded by remember { mutableStateOf(false) }
-    val latestActive by rememberUpdatedState(active && expanded)
+    val latestActive by rememberUpdatedState(active)
     var target by remember { mutableStateOf(NetworkProbeTarget.CATALOG) }
     var diagnosis by remember { mutableStateOf<NetworkDiagnosis?>(null) }
     var diagnosedSettings by remember { mutableStateOf<DownloadRoutingSettings?>(null) }
@@ -64,99 +63,95 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
         if (clearNotice) notice = null
     }
     LaunchedEffect(settings) { invalidate(clearNotice = false) }
-    LaunchedEffect(active, expanded) { if (!active || !expanded) invalidate() }
+    LaunchedEffect(active) { if (!active) invalidate() }
     DisposableEffect(Unit) { onDispose { job?.cancel() } }
 
-    RouteDisclosure("检测连接", if (job != null) "正在检测…" else "比较并推荐", expanded) {
-        invalidate()
-        expanded = !expanded
-    }
-    if (expanded) {
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            MotionTabs(
-                selected = target.ordinal,
-                labels = listOf("漫画接口", "更新服务"),
-                onSelect = { index ->
-                    val next = NetworkProbeTarget.entries[index]
-                    if (next != target) { invalidate(); target = next }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 40.dp,
-                track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface,
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically) {
-                if (job != null) MotionTextButton(onClick = { invalidate() }) { Text("取消") }
-                MotionTextButton(enabled = active && job == null, onClick = {
-                    invalidate()
-                    val started = generation
-                    val saved = settings
-                    val selectedTarget = target
-                    job = scope.launch(start = CoroutineStart.LAZY) {
-                        try {
-                            val result = diagnoseNetwork(context, selectedTarget, saved.proxy)
-                            if (generation == started && latestSettings == saved && store.state.value == saved && latestActive) {
-                                diagnosedSettings = saved
-                                diagnosis = result
-                            }
-                        } catch (cancel: CancellationException) {
-                            throw cancel
-                        } catch (_: Exception) {
-                            if (generation == started && latestActive) notice = "检测未完成，可重试"
-                        } finally {
-                            if (generation == started) job = null
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("手动检查所选服务的连接，不会在打开窗口时发起请求。",
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        MotionTabs(
+            selected = target.ordinal,
+            labels = listOf("拷贝接口", "GitHub 更新"),
+            onSelect = { index ->
+                val next = NetworkProbeTarget.entries[index]
+                if (next != target) { invalidate(); target = next }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 40.dp,
+            track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface,
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically) {
+            if (job != null) MotionTextButton(onClick = { invalidate() }) { Text("取消") }
+            MotionTextButton(enabled = active && job == null, onClick = {
+                invalidate()
+                val started = generation
+                val saved = settings
+                val selectedTarget = target
+                job = scope.launch(start = CoroutineStart.LAZY) {
+                    try {
+                        val result = diagnoseNetwork(context, selectedTarget, saved.proxy)
+                        if (generation == started && latestSettings == saved && store.state.value == saved && latestActive) {
+                            diagnosedSettings = saved
+                            diagnosis = result
                         }
-                    }
-                    job?.start()
-                }) { Text(if (job != null) "正在检测…" else "检测并推荐") }
-            }
-            diagnosis?.let { result ->
-                result.results.forEach { row ->
-                    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(diagnosticRouteLabel(row.route), Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium)
-                        Text(if (row.usable && row.millis != null) row.millis.toString() + " ms" else row.message,
-                            Modifier.weight(1.5f), style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    } catch (cancel: CancellationException) {
+                        throw cancel
+                    } catch (_: Exception) {
+                        if (generation == started && latestActive) notice = "检测未完成，可重试"
+                    } finally {
+                        if (generation == started) job = null
                     }
                 }
-                result.recommended?.let { recommended ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("建议：" + diagnosticRouteLabel(recommended), Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                        MotionTextButton(enabled = active && job == null, onClick = {
-                            if (store.state.value != diagnosedSettings) {
-                                invalidate()
-                                notice = "线路设置已变化，请重新检测"
-                                return@MotionTextButton
-                            }
-                            try {
-                                store.setDefault(recommended.mode)
-                                diagnosis = null
-                                notice = "已设为后续下载的默认线路，分类设置保留"
-                            } catch (failure: Exception) {
-                                notice = failure.message ?: "暂时无法保存线路"
-                            }
-                        }) { Text("用于下载默认") }
-                    }
-                } ?: Text("当前目标未找到可用线路", style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant)
-                Text("两次接口响应的平均耗时，不代表下载带宽。此检测不验证 Steam 连接或是否已绕过 VPN。",
-                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                job?.start()
+            }) { Text(if (job != null) "正在检查…" else "开始检查") }
+        }
+        diagnosis?.let { result ->
+            result.results.forEach { row ->
+                Row(Modifier.fillMaxWidth().heightIn(min = 40.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(diagnosticRouteLabel(row.route), Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text(if (row.usable && row.millis != null) row.millis.toString() + " ms" else row.message,
+                        Modifier.weight(1.5f), style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
             }
-            notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
-            if (settings.proxy == null) {
-                Text("保存代理地址后，可一同比较指定代理。", style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant)
-            }
+            result.recommended?.let { recommended ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("建议：" + diagnosticRouteLabel(recommended), Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    MotionTextButton(enabled = active && job == null, onClick = {
+                        if (store.state.value != diagnosedSettings) {
+                            invalidate()
+                            notice = "线路设置已变化，请重新检测"
+                            return@MotionTextButton
+                        }
+                        try {
+                            store.setDefault(recommended.mode)
+                            diagnosis = null
+                            notice = "已设为后续下载的默认线路，分类设置保留"
+                        } catch (failure: Exception) {
+                            notice = failure.message ?: "暂时无法保存线路"
+                        }
+                    }) { Text("用于下载默认") }
+                }
+            } ?: Text("当前目标未找到可用线路", style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant)
+            Text("结果只代表所选拷贝 / GitHub 接口的两次响应平均耗时，不代表下载带宽，也不验证 Steam、其他来源或 VPN 绕行。",
+                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        }
+        notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
+        if (settings.proxy == null) {
+            Text("保存代理地址后，可一同比较指定代理。", style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant)
         }
     }
 }
 
 private fun diagnosticRouteLabel(route: DownloadRouteSnapshot): String = when (route.mode) {
-    DownloadRouteMode.SYSTEM -> "系统网络"
-    DownloadRouteMode.DIRECT -> "应用直连"
+    DownloadRouteMode.SYSTEM -> downloadRouteLabel(route.mode)
+    DownloadRouteMode.DIRECT -> downloadRouteLabel(route.mode)
     DownloadRouteMode.PROXY -> if (route.proxy?.type == DownloadProxyType.SOCKS) "SOCKS5 代理" else "HTTP 代理"
 }

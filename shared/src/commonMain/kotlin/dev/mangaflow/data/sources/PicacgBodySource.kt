@@ -64,7 +64,7 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource {
     override suspend fun discover(page: Int): MangaPage = withContext(Dispatchers.IO) {
         checkPage(page)
         val data = call("comics?page=${page + 1}&s=dd").getJSONObject("data").getJSONObject("comics")
-        listing(data)
+        listing(data, page + 1)
     }
 
     override suspend fun search(query: String, page: Int): MangaPage = withContext(Dispatchers.IO) {
@@ -73,7 +73,7 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource {
         val args = JSONObject().put("keyword", query.trim()).put("categories", dev.mangaflow.json.JSONArray()).put("s", "dd")
         val data = call("comics/advanced-search?page=${page + 1}", "POST", args)
             .getJSONObject("data").getJSONObject("comics")
-        listing(data)
+        listing(data, page + 1)
     }
 
     override suspend fun detail(mangaId: String): MangaDetail = withContext(Dispatchers.IO) {
@@ -133,14 +133,20 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource {
 
     private fun checkPage(page: Int) = require(page in 0..499) { "哔咔分页超出范围。" }
 
-    private fun listing(data: JSONObject): MangaPage {
+    private fun listing(data: JSONObject, expectedPage: Int): MangaPage {
         val docs = data.optJSONArray("docs") ?: throw SourceException("哔咔作品列表暂不兼容。")
         val works = (0 until minOf(docs.length(), 200)).mapNotNull { i ->
             docs.optJSONObject(i)?.let { row -> runCatching { toManga(row) }.getOrNull() }
         }.distinctBy(Manga::id)
-        val totalPages = data.optInt("pages", 1)
-        val current = data.optInt("page", 1)
-        val more = current < totalPages && works.isNotEmpty()
+        if (docs.length() > 0 && works.isEmpty())
+            throw SourceException("来源返回的作品列表无法识别，请更新来源后重试。")
+        val totalPages = data.optInt("pages", -1)
+        val current = data.optInt("page", -1)
+        if (current != expectedPage || current !in 1..500 || totalPages !in 0..100_000 ||
+            (totalPages > 0 && current > totalPages) || (totalPages == 0 && works.isNotEmpty()))
+            throw SourceException("来源返回的分页信息无效，请刷新后重试。")
+        // A valid empty page can precede later pages. Keep its real forward cursor.
+        val more = current < minOf(totalPages, 500)
         return MangaPage(works, more, if (more) current else null)
     }
 

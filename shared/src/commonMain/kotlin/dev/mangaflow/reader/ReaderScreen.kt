@@ -191,6 +191,7 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.PageCollection
@@ -276,6 +277,8 @@ fun ReaderScreen(
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     val adultImageContext = LocalContext.current
+    val experience = remember(adultImageContext) { ExperiencePolicyStore.get(adultImageContext) }
+    val experienceBudget by experience.state.collectAsStateWithLifecycle()
     if (!libraryReady) {
         BackHandler(enabled = active, onBack = onBack)
         LibraryRestoreStatus(libraryStore)
@@ -412,8 +415,12 @@ fun ReaderScreen(
     val chapterVisible by rememberUpdatedState(onChapterVisible)
     val nearChapterEnd by rememberUpdatedState(onNearChapterEnd)
     val scope = rememberCoroutineScope()
-    val headers = remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, repository, localImport) {
-        if (localImport) emptyMap() else repository.imageHeaders(chapterSourceMangaId(manga.id, chapter), chapterId)
+    val sourceIdentity = ReaderSourceIdentity(chapter.logicalId.ifBlank { chapter.id },
+        chapter.id, chapter.sourceId, chapter.sourceMangaId)
+    val latestReadingIdentity by rememberUpdatedState(manga.id to sourceIdentity)
+    var headers by remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, repository, localImport) {
+        mutableStateOf(if (localImport) emptyMap() else
+            repository.imageHeaders(chapterSourceMangaId(manga.id, chapter), chapterId).toMap())
     }
     val chapterDownload = remember(downloadStore, manga.id, chapterId) { downloadStore.observeChapter(manga.id, chapterId) }
     val initialDownload = remember(downloadStore, manga.id, chapterId) {
@@ -434,26 +441,32 @@ fun ReaderScreen(
                     readingChapterId, local) ?: local
         }
     }
-    val retryPage: suspend (Page) -> Page = remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, repository, downloadStore) {
+    val retryPage: suspend (Page) -> Page = remember(manga.id, chapterId, sourceIdentity, repository, downloadStore, adultImageContext) {
         { sourcePage ->
+            val requestedIdentity = manga.id to sourceIdentity
             if (localImport) throw IllegalStateException("本地文件已损坏，请删除后重新导入")
             val expectedEntry = downloadStore.entryFor(manga.id, readingChapterId)
             if (expectedEntry?.needsSourceRefresh == true) {
-                val refreshed = repository.pages(chapterSourceMangaId(manga.id, chapter), readingChapterId, forceRefresh = true)
-                val replacement = refreshed.firstOrNull { it.index == sourcePage.index }
+                val route = downloadStore.routeForReadingDownload(manga.id, readingChapterId, expectedEntry)
+                val prepared = dev.mangaflow.data.foregroundRequest("刷新下载图片地址") {
+                    repository.prepareDownload(adultImageContext, chapterSourceMangaId(manga.id, chapter),
+                        readingChapterId, route, forceRefresh = true)
+                }
+                val replacement = prepared.pages.firstOrNull { it.index == sourcePage.index }
                     ?: throw IllegalStateException("刷新后没有找到这一页，请重新打开章节")
-                downloadStore.refreshReadingDownload(manga, chapter, refreshed, headers, expectedEntry)
-                if (chapterId == readingChapterId) {
-                    pages = refreshed
-                    pageIndex = pageIndex.coerceIn(0, refreshed.lastIndex)
+                val saved = downloadStore.refreshReadingDownload(manga, chapter, prepared.pages,
+                    prepared.headers, expectedEntry, route = route)
+                if (!saved) throw CancellationException("下载任务已变化，请重新操作。")
+                if (chapterId == readingChapterId && latestReadingIdentity == requestedIdentity) {
+                    headers = prepared.headers.toMap()
+                    pages = prepared.pages
+                    pageIndex = pageIndex.coerceIn(0, prepared.pages.lastIndex)
                 }
                 downloadStore.resolveReaderPage(manga.id, readingChapterId, replacement)
             } else downloadStore.retryReaderPage(manga.id, readingChapterId, sourcePage)
         }
     }
     val motionEnabled = LocalMotionEnabled.current
-    val sourceIdentity = ReaderSourceIdentity(chapter.logicalId.ifBlank { chapter.id },
-        chapter.id, chapter.sourceId, chapter.sourceMangaId)
     val sourceArrival = remember(manga.id) { Animatable(1f) }
     var lastVisibleSource by remember(manga.id) { mutableStateOf<ReaderSourceIdentity?>(null) }
     var sourceArrivalPending by remember(manga.id) { mutableStateOf(false) }
@@ -799,7 +812,7 @@ fun ReaderScreen(
                         },
                         onNearEnd = {
                             val next = nextChapter
-                            if (readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
+                            if (experienceBudget.prefetchAhead > 0 && readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
                                 nextChapterPrefetched = true
                                 nearChapterEnd(manga, next)
                             }
@@ -853,7 +866,7 @@ fun ReaderScreen(
                         },
                         onNearEnd = {
                             val next = nextChapter
-                            if (readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
+                            if (experienceBudget.prefetchAhead > 0 && readerForeground && !leavingReader && !sourcePickerBlocking && chapterId == chapter.id && !nextChapterPrefetched && next != null) {
                                 nextChapterPrefetched = true
                                 nearChapterEnd(manga, next)
                             }
@@ -1095,15 +1108,21 @@ fun ReaderScreen(
                                     savingChapter = true
                                     val expectedEntry = activeDownload
                                     val chapterToSave = chapter
-                                    val pagesToSave = pages
                                     onRequestNotificationPermission()
                                     scope.launch {
                                         try {
-                                            val sourcePages = if (expectedEntry?.needsSourceRefresh == true)
-                                                repository.pages(chapterSourceMangaId(manga.id, chapterToSave), chapterToSave.id, forceRefresh = true) else pagesToSave
+                                            val route = downloadStore.routeForReadingDownload(manga.id, chapterToSave.id,
+                                                expectedEntry, useLatestDefaults = expectedEntry?.status != DownloadStatus.PAUSED)
+                                            val prepared = dev.mangaflow.data.foregroundRequest("下载章节图片") {
+                                                repository.prepareDownload(adultImageContext,
+                                                    chapterSourceMangaId(manga.id, chapterToSave), chapterToSave.id,
+                                                    route, forceRefresh = expectedEntry?.needsSourceRefresh == true)
+                                            }
                                             val saved = if (expectedEntry != null)
-                                                downloadStore.refreshReadingDownload(manga, chapterToSave, sourcePages, headers, expectedEntry)
-                                            else { downloadStore.enqueue(manga, chapterToSave, sourcePages, headers); true }
+                                                downloadStore.refreshReadingDownload(manga, chapterToSave, prepared.pages,
+                                                    prepared.headers, expectedEntry, route = route)
+                                            else { downloadStore.enqueue(manga, chapterToSave, prepared.pages,
+                                                prepared.headers, route = route); true }
                                             if (saved) downloadMessage = "正在保存本章，可继续阅读"
                                         } catch (cancelled: CancellationException) { throw cancelled }
                                         catch (failure: Exception) { downloadMessage = failure.message ?: "无法保存本章" }
@@ -1727,7 +1746,7 @@ private class ReaderCursor(var scrollOffset: Int = 0, var panelIndex: Int = 0)
 
 private data class PrefetchWindow(
     val first: Int, val last: Int, val composed: Set<Int>, val inFlight: Set<Int>, val enabled: Boolean,
-    val visibleReady: Boolean,
+    val visibleReady: Boolean, val ahead: Int, val behind: Int,
 )
 
 private data class LoadedReaderImage(val diskCacheKey: String?, val previewSize: IntSize)
@@ -1751,6 +1770,9 @@ private fun AdjacentPagePrefetch(
 ) {
     val context = LocalContext.current
     val imageLoader = SingletonImageLoader.get(imagePlatformContext(context))
+    val experience = remember(context) { ExperiencePolicyStore.get(context) }
+    val budget by experience.state.collectAsStateWithLifecycle()
+    val currentBudget by rememberUpdatedState(budget)
     val visible by rememberUpdatedState(visibleRange)
     val dimensionsKnown by rememberUpdatedState(onPageDimensions)
     val prefetchEnabled by rememberUpdatedState(enabled)
@@ -1762,7 +1784,8 @@ private fun AdjacentPagePrefetch(
             snapshotFlow {
                 val (first, last) = visible()
                 PrefetchWindow(first, last, composedPages.keys.toSet(), requests.keys.toSet(), prefetchEnabled,
-                    (first..last).all { it !in pages.indices || loadedPages[it] == pages[it].url })
+                    (first..last).all { it !in pages.indices || loadedPages[it] == pages[it].url },
+                    currentBudget.prefetchAhead, currentBudget.prefetchBehind)
             }.distinctUntilChanged().collectLatest { window ->
                 val active = window.composed + (window.first..window.last)
                 val nextDirection = when {
@@ -1778,18 +1801,20 @@ private fun AdjacentPagePrefetch(
                 }
                 direction = nextDirection
                 previousFirst = window.first
-                val candidates = if (direction > 0) listOf(window.last + 1, window.last + 2, window.last + 3, window.first - 1)
-                    else listOf(window.first - 1, window.first - 2, window.first - 3, window.last + 1)
+                val candidates = if (direction > 0)
+                    (1..window.ahead).map { window.last + it } + (1..window.behind).map { window.first - it }
+                    else (1..window.ahead).map { window.first - it } + (1..window.behind).map { window.last + it }
                 val desired = candidates.filter { index ->
                     // Visible pages own the connection first; speculative bytes begin after they are displayed.
-                    window.enabled && window.visibleReady && index in pages.indices &&
+                    window.enabled && imageLoader.diskCache != null && window.visibleReady && index in pages.indices &&
                         index !in window.composed && pages[index].url.startsWith("https:")
                 }.toSet()
                 val retained = desired + active
                 requests.keys.filter { it !in retained }.forEach { index -> requests.remove(index)?.dispose() }
                 finished.retainAll(retained)
                 for (index in desired) {
-                    if (index !in requests && index !in finished && requests.size < 4) {
+                    if (index !in requests && index !in finished &&
+                        requests.keys.count { it !in active } < window.ahead + window.behind) {
                         val resource = try { resolvePage(pages[index]) }
                         catch (cancelled: CancellationException) { throw cancelled }
                         catch (_: Exception) { finished += index; continue }

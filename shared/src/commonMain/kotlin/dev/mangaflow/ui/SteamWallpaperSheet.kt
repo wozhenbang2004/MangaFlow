@@ -463,7 +463,8 @@ internal fun SteamWallpaperSheet(
                         }
                         if (pane == WorkshopPane.BROWSE || pane == WorkshopPane.PREVIEW) {
                             MotionTextButton(onClick = {
-                                if (display.account == null) openLogin()
+                                if (display.account == null && display.canResumeSession) client.login()
+                                else if (display.account == null) openLogin()
                                 else { showAccount = true; clearFocus() }
                             }, enabled = display.supported && !display.restoring) {
                                 val account = display.account
@@ -472,7 +473,7 @@ internal fun SteamWallpaperSheet(
                                     Spacer(Modifier.width(6.dp))
                                 }
                                 Text(if (account == null) {
-                                    if (display.restoring) "恢复中" else "登录"
+                                    if (display.restoring) "恢复中" else if (display.canResumeSession) "恢复登录" else "登录"
                                 } else account.personaName?.takeIf { it.isNotBlank() } ?: "账号",
                                     modifier = Modifier.widthIn(max = 112.dp), maxLines = 1,
                                     overflow = TextOverflow.Ellipsis)
@@ -536,10 +537,18 @@ internal fun SteamWallpaperSheet(
                                             })
                                     } else if (display.authenticating) SteamWallpaperWaiting("正在建立验证会话…")
                                     else {
+                                        if (display.canResumeSession) Row(Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically) {
+                                            Text("可恢复已保存的 Steam 登录", Modifier.weight(1f),
+                                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                            MotionTextButton(onClick = client::login,
+                                                enabled = !display.preparing && !display.restoring) { Text("恢复登录") }
+                                        }
                                         SteamLoginField(accountName, { accountName = it }, "Steam 账号名称",
-                                            enabled = !display.preparing)
+                                            enabled = !display.preparing && !display.restoring)
                                         SteamLoginField(password, { password = it }, "密码",
-                                            password = !passwordVisible, secret = true, enabled = !display.preparing,
+                                            password = !passwordVisible, secret = true,
+                                            enabled = !display.preparing && !display.restoring,
                                             imeAction = ImeAction.Go, onDone = ::passwordLogin,
                                             trailing = {
                                                 MotionIconButton(onClick = { passwordVisible = !passwordVisible },
@@ -628,7 +637,7 @@ internal fun SteamWallpaperSheet(
                                 onRetry = { retryItem?.let(::download) }, canRetry = retryItem != null)
                         }
                         val problem = notice ?: when (pane) {
-                            WorkshopPane.BROWSE -> display.browseError
+                            WorkshopPane.BROWSE -> display.browseError ?: display.authError
                             WorkshopPane.LOGIN -> display.authError.takeUnless {
                                 display.authenticating && display.guardMethods.isNotEmpty()
                             }
@@ -646,6 +655,15 @@ internal fun SteamWallpaperSheet(
                                 if (display.canResumeSession) client.login()
                                 else loadLibrary(display.library, display.kind, retryPage)
                             }) { Text(if (display.canResumeSession) "恢复登录" else "重试") }
+                        }
+                        if (pane == WorkshopPane.BROWSE && display.canResumeSession && !display.restoring) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(if (problem == null) display.message ?: "Steam 登录信息已保留，可恢复连接。"
+                                    else "已保存的登录信息未删除。", Modifier.weight(1f),
+                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                MotionTextButton(onClick = ::openLogin) { Text("账号登录") }
+                            }
                         }
                         // The legacy general error is reserved for shared component/setup failures.
                         display.error?.takeUnless { error ->

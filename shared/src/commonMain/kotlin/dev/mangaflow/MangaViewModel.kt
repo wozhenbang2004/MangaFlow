@@ -31,6 +31,7 @@ import dev.mangaflow.data.foregroundRequest
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.SourceKeys
@@ -60,6 +61,8 @@ import dev.mangaflow.storage.UnifiedChapterStore
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.storage.ChapterPreparationPhase
+import dev.mangaflow.storage.ChapterPreparationState
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.PageCollection
@@ -71,6 +74,7 @@ import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.update.UpdateManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -295,6 +299,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     val libraryOpening = _libraryOpening.asStateFlow()
     private val _refreshingDownloads = MutableStateFlow<Set<String>>(emptySet())
     val refreshingDownloads = _refreshingDownloads.asStateFlow()
+    private val _chapterPreparations = MutableStateFlow<List<ChapterPreparationState>>(emptyList())
+    val chapterPreparations = _chapterPreparations.asStateFlow()
     private val messages = Channel<String>(Channel.BUFFERED)
     val events = messages.receiveAsFlow()
     private var browseJob: Job? = null
@@ -318,7 +324,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     @Volatile private var browseRequestId = 0L
     private val reviewPageJobs = mutableMapOf<String, Job>()
     private val reviewOverrides = ConcurrentSet<String>()
-    private val preparingDownloads = mutableSetOf<String>()
+    private data class PreparationJob(val generation: Long, val job: Job)
+    private val preparationJobs = mutableMapOf<String, PreparationJob>()
+    private var preparationGeneration = 0L
     private val downloadPreparationSlots = Semaphore(2)
     private var accountJob: Job? = null
     private var accountRequestId = 0L
@@ -2256,28 +2264,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             downloads.retry(expected.id)
             return
         }
-        val key = "${entry.manga.id}/${entry.chapter.id}"
-        if (!preparingDownloads.add(key)) return
-        _refreshingDownloads.update { it + entry.id }
-        viewModelScope.launch {
-            try {
-                val route = DownloadRoutingStore.get(application).snapshot(DownloadCategory.CHAPTERS)
-                val prepared = dev.mangaflow.data.foregroundRequest("刷新下载图片地址") {
-                    repository.prepareDownload(application, chapterSourceMangaId(entry.manga.id, entry.chapter),
-                        entry.chapter.id, route, forceRefresh = true)
-                }
-                val refreshed = downloads.refreshReadingDownload(entry.manga, entry.chapter, prepared.pages,
-                    prepared.headers, expectedEntry = expected, route = route)
-                if (refreshed) messages.send("图片地址已刷新，继续下载")
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (failure: Exception) {
-                messages.send(failure.message ?: "暂时无法刷新章节图片，请稍后重试")
-            } finally {
-                preparingDownloads.remove(key)
-                _refreshingDownloads.update { it - entry.id }
-            }
-        }
+        enqueueChapterDownload(expected.manga, expected.chapter, refreshingEntry = expected)
     }
 
     /** Leave reading at this work, retaining an already-open directory and its UI state. */
@@ -2519,8 +2506,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     fun continueCloudHistory(entry: CloudHistoryEntry) {
-        if (entry.chapterId.isBlank()) openManga(entry.manga)
-        else openSavedChapter(entry.manga, entry.chapterId, entry.chapterTitle)
+        val state = _account.value
+        if (state.profile == null || state.busy) return
+        val current = state.history.firstOrNull {
+            it.manga.id == entry.manga.id && it.chapterId == entry.chapterId
+        } ?: return
+        if (current.chapterId.isBlank()) openManga(current.manga)
+        else openSavedChapter(current.manga, current.chapterId, current.chapterTitle)
     }
 
     fun toggleFavorite(manga: Manga) {
@@ -2678,29 +2670,126 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         enqueueChapterDownload(manga, resolveChapter(chapter, variant), route)
     }
 
-    private fun enqueueChapterDownload(manga: Manga, chapter: Chapter, routeMode: DownloadRouteMode? = null) {
-        val key = "${manga.id}/${chapter.id}"
-        if (!preparingDownloads.add(key)) return
-        viewModelScope.launch {
+    fun cancelChapterPreparation(id: String, generation: Long) {
+        val current = _chapterPreparations.value.firstOrNull { it.id == id } ?: return
+        if (current.generation != generation) return
+        // Store's handoff is a non-cancellable file transaction. Once entered, its
+        // real download row owns pause/removal instead of pretending preparation can undo it.
+        if (current.phase == ChapterPreparationPhase.COMMITTING) return
+        val owned = preparationJobs[id]?.takeIf { it.generation == current.generation }
+        if (owned != null) preparationJobs.remove(id)
+        _chapterPreparations.update { tasks -> tasks.filterNot { it.id == id && it.generation == current.generation } }
+        current.refreshingEntryId?.let { entryId -> _refreshingDownloads.update { it - entryId } }
+        owned?.job?.cancel()
+    }
+
+    fun retryChapterPreparation(id: String, generation: Long) {
+        val current = _chapterPreparations.value.firstOrNull { it.id == id } ?: return
+        if (current.generation != generation) return
+        if (current.phase != ChapterPreparationPhase.FAILED) return
+        val expected = if (current.refreshingEntryId != null)
+            downloads.entryFor(current.manga.id, current.chapter.id) else null
+        if (current.refreshingEntryId != null && expected?.id != current.refreshingEntryId) {
+            cancelChapterPreparation(id, generation)
+            return
+        }
+        if (expected?.status in setOf(DownloadStatus.COMPLETED, DownloadStatus.QUEUED,
+                DownloadStatus.RUNNING, DownloadStatus.WAITING)) {
+            cancelChapterPreparation(id, generation)
+            return
+        }
+        enqueueChapterDownload(current.manga, current.chapter, current.routeMode, expected)
+    }
+
+    private fun enqueueChapterDownload(
+        manga: Manga,
+        chapter: Chapter,
+        routeMode: DownloadRouteMode? = null,
+        refreshingEntry: DownloadEntry? = null,
+    ) {
+        val key = ChapterPreparationState.key(manga.id, chapter.id)
+        val previous = _chapterPreparations.value.firstOrNull { it.id == key }
+        if (previous != null && previous.phase != ChapterPreparationPhase.FAILED) return
+        val expectedEntry = refreshingEntry ?: downloads.entryFor(manga.id, chapter.id)
+        if (expectedEntry?.status in
+            setOf(DownloadStatus.COMPLETED, DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)) {
+            if (previous != null) cancelChapterPreparation(key, previous.generation)
+            messages.trySend("本章已在下载列表中")
+            return
+        }
+        val generation = ++preparationGeneration
+        // Freeze before waiting for preparation capacity. Later settings edits apply
+        // only to another explicit attempt, never to this attempt's metadata or bytes.
+        val route = try { DownloadRoutingStore.get(application).snapshot(DownloadCategory.CHAPTERS, routeMode) }
+        catch (failure: Exception) {
+            val failed = ChapterPreparationState(key, generation, manga, chapter, routeMode, null,
+                ChapterPreparationPhase.FAILED, preparationError(failure), expectedEntry?.id)
+            _chapterPreparations.update { tasks -> tasks.filterNot { it.id == key } + failed }
+            messages.trySend("章节准备失败，可在下载页重试")
+            return
+        }
+        val task = ChapterPreparationState(key, generation, manga, chapter, routeMode, route,
+            ChapterPreparationPhase.WAITING, refreshingEntryId = expectedEntry?.id)
+        _chapterPreparations.update { tasks -> tasks.filterNot { it.id == key } + task }
+        messages.trySend("正在准备章节，可在下载页查看或取消")
+        expectedEntry?.let { entry -> _refreshingDownloads.update { it + entry.id } }
+        fun ownsAttempt() = _chapterPreparations.value.any { it.id == key && it.generation == generation }
+        fun phase(next: ChapterPreparationPhase) {
+            _chapterPreparations.update { tasks -> tasks.map {
+                if (it.id == key && it.generation == generation) it.copy(phase = next) else it
+            } }
+        }
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
-                val route = DownloadRoutingStore.get(application).snapshot(DownloadCategory.CHAPTERS, routeMode)
-                // A bulk selection still uses the ordinary queue, with bounded source preparation.
                 downloadPreparationSlots.withPermit {
-                    messages.send("正在准备 ${chapter.title}")
+                    currentCoroutineContext().ensureActive()
+                    if (!ownsAttempt()) return@withPermit
+                    phase(ChapterPreparationPhase.PREPARING)
                     val prepared = dev.mangaflow.data.foregroundRequest("下载章节图片") {
-                        repository.prepareDownload(application, chapterSourceMangaId(manga.id, chapter), chapter.id, route)
+                        repository.prepareDownload(application, chapterSourceMangaId(manga.id, chapter), chapter.id,
+                            route, forceRefresh = expectedEntry != null)
                     }
-                    downloads.enqueue(manga, chapter, prepared.pages, prepared.headers, route = route)
-                    messages.send("已加入下载，可在下载页查看进度")
+                    currentCoroutineContext().ensureActive()
+                    if (!ownsAttempt()) return@withPermit
+                    phase(ChapterPreparationPhase.COMMITTING)
+                    val accepted = if (expectedEntry == null) {
+                        downloads.enqueue(manga, chapter, prepared.pages, prepared.headers, route = route)
+                        true
+                    } else downloads.refreshReadingDownload(manga, chapter, prepared.pages, prepared.headers,
+                        expectedEntry = expectedEntry, route = route)
+                    _chapterPreparations.update { tasks -> tasks.filterNot { it.id == key && it.generation == generation } }
+                    if (!accepted) messages.trySend("下载任务已变化，已保留当前状态")
                 }
             } catch (cancel: CancellationException) {
+                _chapterPreparations.update { tasks -> tasks.filterNot { it.id == key && it.generation == generation } }
                 throw cancel
             } catch (failure: Exception) {
-                messages.send(failure.message ?: "未能加入下载，请重试")
+                val currentAttempt = ownsAttempt()
+                _chapterPreparations.update { tasks -> tasks.map {
+                    if (it.id == key && it.generation == generation)
+                        it.copy(phase = ChapterPreparationPhase.FAILED, error = preparationError(failure)) else it
+                } }
+                if (currentAttempt) messages.trySend("章节准备失败，可在下载页重试")
             } finally {
-                preparingDownloads.remove(key)
+                if (preparationJobs[key]?.generation == generation) {
+                    preparationJobs.remove(key)
+                    expectedEntry?.let { entry -> _refreshingDownloads.update { it - entry.id } }
+                }
             }
         }
+        preparationJobs[key] = PreparationJob(generation, job)
+        job.start()
+    }
+
+    private fun preparationError(failure: Exception): String = when {
+        failure is DownloadRouteException -> failure.message ?: "下载线路不可用，请检查设置后重试。"
+        failure is SourceException && failure.retryAfterSeconds > 0 ->
+            "来源暂时限流，请在 ${failure.retryAfterSeconds} 秒后重试。"
+        failure is SourceException && failure.httpStatus in listOf(401, 403) ->
+            "来源拒绝获取章节信息，请检查来源账号或下载线路。"
+        failure is SourceException && failure.httpStatus != null ->
+            "来源未能返回章节信息（HTTP ${failure.httpStatus}），请稍后重试。"
+        else -> "未能准备本章下载，请检查下载线路或稍后重试。"
     }
 
     private fun downloadedChapters(mangaId: String): List<Chapter> = downloads.entries.value

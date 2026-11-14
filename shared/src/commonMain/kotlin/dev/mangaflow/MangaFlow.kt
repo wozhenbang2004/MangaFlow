@@ -18,6 +18,7 @@ import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
 import coil3.network.ktor3.KtorNetworkFetcherFactory
 import coil3.request.crossfade
+import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.storage.StorageFile
@@ -35,16 +36,20 @@ import dev.mangaflow.update.UpdateManager
 /** Every native entry initializes the same actual application services, then mounts the same UI. */
 fun initializeMangaFlow(context: PlatformContext) {
     MangaHazeRuntime.initialize(context)
+    val experience = ExperiencePolicyStore.get(context)
     SingletonImageLoader.setSafe { imageContext ->
         ImageLoader.Builder(imageContext)
             .components { add(KtorNetworkFetcherFactory()) }
-            .memoryCache { MemoryCache.Builder().maxSizePercent(imageContext, .18).build() }
+            .memoryCache { MemoryCache.Builder().maxSizePercent(imageContext, experience.initialMemoryCacheFraction()).build() }
             .diskCache {
-                DiskCache.Builder().directory(StorageFile(cacheDirectory(context), "image-cache").nativePath)
-                    .maxSizeBytes(256L * 1024 * 1024).build()
+                val bytes = experience.initialDiskCacheBytes()
+                if (bytes <= 0L) null else
+                    DiskCache.Builder().directory(StorageFile(cacheDirectory(context), "image-cache").nativePath)
+                        .maxSizeBytes(bytes).build()
             }
             .crossfade(160)
             .build()
+            .also(experience::attachImageLoader)
     }
     UpdateManager.get(context).start()
 }

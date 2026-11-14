@@ -197,6 +197,7 @@ fun DiscoverScreen(
     onOpen: (Manga) -> Unit,
     isFavorite: (Manga) -> Boolean,
     onToggleFavorite: (Manga) -> Unit,
+    onManageSources: (() -> Unit)? = null,
     active: Boolean = true,
 ) {
     val browse = if (!state.isSearch) state else backgroundState
@@ -250,6 +251,7 @@ fun DiscoverScreen(
                     active = unobscured && selectedPane,
                     canAutoAdvance = canAutoAdvance,
                     onRefresh = onRefresh, onRetry = onRetry, onMore = onMore, onOpen = onOpen,
+                    onManageSources = onManageSources,
                     onManage = { actionsManga = it }, onRatings = { ratingsManga = it },
                     desktopActions = desktopActions,
                     topPadding = if (selectedPane) contentTopPadding else exitTopPadding)
@@ -621,6 +623,7 @@ private fun DiscoveryPane(
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onMore: () -> Unit,
+    onManageSources: (() -> Unit)?,
     onOpen: (Manga) -> Unit,
     onManage: (Manga) -> Unit,
     onRatings: (Manga) -> Unit,
@@ -721,11 +724,19 @@ private fun DiscoveryPane(
                 item(span = { GridItemSpan(maxLineSpan) }, key = "loading") { QuietLoading("正在翻开书页…") }
         } else if (state.items.isEmpty() && state.error != null) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "error") {
-                EmptyMessage("暂时没能加载", state.error, "重试", onRetry)
+                if (state.sourceScope.startsWith("scoped:") && state.failedPage == null) {
+                    EmptyMessage("来源尚未就绪", state.error,
+                        action = onManageSources?.let { "选择来源" },
+                        onAction = { onManageSources?.invoke() })
+                } else EmptyMessage("暂时没能加载", state.error, "重试", onRetry)
             }
         } else if (state.items.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
-                EmptyMessage("暂时没有漫画", "来源暂时没有返回内容，可以稍后刷新。", "刷新", onRefresh)
+                when {
+                    state.loadingMore -> QuietLoading("正在继续加载…")
+                    state.hasMore -> EmptyMessage("这一页暂无内容", "来源仍有后续页面，可以继续加载。", "继续加载", onMore)
+                    else -> EmptyMessage("暂时没有漫画", "来源暂时没有返回内容，可以稍后刷新。", "刷新", onRefresh)
+                }
             }
         } else {
             if (!ranking)

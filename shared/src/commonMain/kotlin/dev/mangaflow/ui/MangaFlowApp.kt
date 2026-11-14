@@ -139,6 +139,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import dev.mangaflow.experience.ExperiencePolicyStore
+import kotlinx.coroutines.awaitCancellation
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.mangaflow.storage.WallpaperStore
 import dev.mangaflow.DetailState
@@ -161,6 +166,9 @@ import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.withContext
 
 private enum class Section(val title: String, val icon: ImageVector) {
     DISCOVER("发现", Icons.Outlined.Explore), BOARDS("各站榜单", Icons.Outlined.Leaderboard),
@@ -168,6 +176,8 @@ private enum class Section(val title: String, val icon: ImageVector) {
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
 }
+private fun Section.navigationTitle(restricted: Boolean): String =
+    if (this == Section.ACCOUNT && !restricted) "拷贝书架" else title
 /** A new reference owns the motion; cancellation cannot replay a stale destination. */
 private class DrawerAction(val target: DrawerValue, val destination: Section? = null,
     val restricted: Boolean? = null) {
@@ -252,6 +262,15 @@ private fun <T> StateFlow<T>.collectVisibleAsState(visible: Boolean): State<T> {
 fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNotifications: () -> Unit, model: MangaViewModel = rememberMangaViewModel()) {
     val windowSize = LocalMangaWindow.current
     val wallpaperContext = LocalContext.current.applicationContext
+    val experience = remember(wallpaperContext) { ExperiencePolicyStore.get(wallpaperContext) }
+    val experienceBudget by experience.state.collectAsStateWithLifecycle()
+    val experienceLifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(experience, experienceLifecycle) {
+        experienceLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            val release = experience.startObserving()
+            try { awaitCancellation() } finally { release() }
+        }
+    }
     val wallpaperStore = remember(wallpaperContext) { WallpaperStore.get(wallpaperContext) }
     val wallpaper by wallpaperStore.state.collectAsStateWithLifecycle()
     val metricState = remember(model) { MangaMetricState(model.metrics, model::retainMetrics, model::releaseMetrics) }
@@ -266,6 +285,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val sourceDiscovery by model.repository.sourceDiscovery.collectAsStateWithLifecycle()
     val libraryOpening by model.libraryOpening.collectAsStateWithLifecycle()
     val refreshingDownloads by model.refreshingDownloads.collectAsStateWithLifecycle()
+    val chapterPreparations by model.chapterPreparations.collectAsStateWithLifecycle()
     val account by model.account.collectAsStateWithLifecycle()
     val update by model.updates.state.collectAsStateWithLifecycle()
     var restrictedMode by remember { mutableStateOf(false) }
@@ -322,6 +342,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             searchExpanded && platformKind != PlatformKind.DESKTOP)
     val favorites by model.library.favorites.collectVisibleAsState(reading == null)
     val history by model.library.history.collectVisibleAsState(reading == null || recentReadingOpen)
+    val accountChapterHistoryRevision by model.library.chapterHistoryRevision.collectVisibleAsState(
+        reading == null && detail == null && section == Section.ACCOUNT && !restrictedMode)
     val preferences by model.library.preferences.collectVisibleAsState(reading == null)
     val sourceEntries by model.bodySources.entries.collectAsStateWithLifecycle()
     val privateSourceIds = remember(sourceEntries) { sourceEntries.filter { it.adult }.map { it.source.id }.toSet() }
@@ -341,9 +363,23 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         sourceEntries.filter { it.adult && it.enabled && it.isInstalled && !it.removed &&
             (it.source.id != "picacg" || sourceSignedIn) }.map { it.source }
     }
+    val scopedUnavailableReason = remember(sourceEntries, sourceSignedIn, usableScopedSources) {
+        val registered = sourceEntries.filter { it.adult && !it.removed }
+        val enabled = registered.filter { it.enabled }
+        val installed = enabled.filter { it.isInstalled }
+        when {
+            usableScopedSources.isNotEmpty() -> null
+            registered.isEmpty() -> "此分区还没有来源，请先添加来源。"
+            enabled.isEmpty() -> "此分区的来源尚未启用，请在来源设置中开启。"
+            installed.isEmpty() -> "此分区的来源尚未安装，请先完成安装。"
+            installed.any { it.source.id == "picacg" } && !sourceSignedIn ->
+                "当前来源需要登录，请先到账号页登录后重试。"
+            else -> "此分区暂时没有已就绪的来源，请查看来源状态。"
+        }
+    }
     SideEffect {
         ordinaryBrowse.setActive(!restrictedMode)
-        scopedBrowse.updateSources(usableScopedSources)
+        scopedBrowse.updateSources(usableScopedSources, unavailableReason = scopedUnavailableReason)
         scopedBrowse.setActive(restrictedMode && (section == Section.DISCOVER || tagSearchVisible) &&
             reading == null && (detail == null || tagSearchVisible))
     }
@@ -446,8 +482,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val profileSections = remember(restrictedMode) {
         Section.entries.filter { !restrictedMode || it != Section.BOARDS }
     }
-    val desktopDestinations = remember(profileSections) {
-        profileSections.map { DesktopDestination(it.title, it.icon) }
+    val desktopDestinations = remember(profileSections, restrictedMode) {
+        profileSections.map { DesktopDestination(it.navigationTitle(restrictedMode), it.icon) }
     }
     sourceManagement?.let { state ->
         UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
@@ -606,7 +642,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             ContentProfileSwitch(restrictedMode, requestProfile, manageProfileSources,
                 compact = compact, enabled = !rootHandoff)
         },
-        modifier = Modifier.then(if (desktop) Modifier else
+        modifier = Modifier.then(if (desktop || !experienceBudget.preferHighRefresh) Modifier else
             Modifier.preferredFrameRate(FrameRateCategory.High)).onPreviewKeyEvent { event ->
             if (desktop && event.isCtrlPressed && !event.isAltPressed &&
                 (event.key == Key.K || event.key == Key.F)) {
@@ -684,7 +720,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     Icon(destination.icon, null, Modifier.size(21.dp),
                                         tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (selected) 1f else .82f))
                                     Spacer(Modifier.width(12.dp))
-                                    Text(destination.title, fontWeight = FontWeight.Medium)
+                                    Text(destination.navigationTitle(restrictedMode), fontWeight = FontWeight.Medium)
                                 }
                             },
                             selected = selected,
@@ -852,6 +888,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                 progress = history.firstOrNull { it.manga.id == current.state.manga.id },
                                 chapterPositions = chapterPositions,
                                 downloadEntries = downloads,
+                                downloadPreparations = chapterPreparations,
                                 loadVolumeCover = { chapter, refresh -> model.volumeCover(current.state.manga.id, chapter, refresh) },
                                 volumeImageHeaders = { chapter -> model.repository.imageHeaders(chapterSourceMangaId(current.state.manga.id, chapter), chapter.id) },
                                 onBack = model::closeDetail, onRetry = model::retryDetail,
@@ -1040,6 +1077,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 canAutoAdvance = rootActive && !searchVisible,
                                                 onRefresh = browseActions::refresh,
                                                 onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
+                                                onManageSources = if (restrictedMode) manageProfileSources else null,
                                                 onOpen = { model.openManga(it) },
                                                 isFavorite = { manga -> favorites.any { it.id == manga.id } },
                                                 onToggleFavorite = model::toggleFavorite,
@@ -1105,7 +1143,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         backgroundInParent = true,
                                         active = rootActive && !searchVisible, refreshingIds = refreshingDownloads,
                                         history = ordinaryHistory, excludedSourceIds = profileExcludes,
-                                        includedSourceIds = profileIncludes)
+                                        includedSourceIds = profileIncludes,
+                                        preparations = chapterPreparations,
+                                        onCancelPreparation = model::cancelChapterPreparation,
+                                        onRetryPreparation = model::retryChapterPreparation)
                                     Section.ACCOUNT -> if (restrictedMode) ContentProfileAccountScreen(
                                         picacg = model.picacgSource,
                                         hasAccountSource = profileEntries.any { it.source.id == "picacg" &&
@@ -1118,6 +1159,13 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         backdrop = searchBackdrop, navigation = navigation,
                                         onSearch = if (desktop && !desktopNavigationVisible) openDesktopSearch else null,
                                         localFavorites = ordinaryFavorites, localHistory = ordinaryHistory,
+                                        chapterHistoryRevision = accountChapterHistoryRevision,
+                                        readChapterProgress = { mangaId, chapterId ->
+                                            withContext(Dispatchers.IO) {
+                                                model.library.awaitReady()
+                                                model.library.progressFor(mangaId, chapterId)
+                                            }
+                                        },
                                         onAddToLibrary = model::addCloudMangaToLibrary, onContinueLocal = model::continueReading,
                                         onRefreshFavorites = model::refreshCloudFavorites, onRefreshHistory = model::refreshCloudHistory,
                                         onLoginWithPassword = model::loginWithPassword,

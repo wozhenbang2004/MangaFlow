@@ -22,6 +22,7 @@ import okio.use as useOkio
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
+import dev.mangaflow.experience.maximumBackgroundPageParallelism
 import dev.mangaflow.data.sources.JmDownloadSession
 import dev.mangaflow.data.sources.createJmDownloadSession
 import dev.mangaflow.net.DownloadCategory
@@ -109,7 +110,7 @@ class DownloadStore private constructor(context: Context) {
     private val pageWriteVersions = mutableMapOf<String, MutableMap<Int, Long>>()
     private var entryOrder = emptyList<String>()
     // Background workers leave one transfer slot available for the current reader.
-    private val transferSlots = Semaphore(backgroundDownloadParallelism + 1)
+    private val transferSlots = Semaphore(maximumBackgroundPageParallelism + 1)
     private val _entries = MutableStateFlow<List<DownloadEntry>>(emptyList())
     val entries: StateFlow<List<DownloadEntry>> = _entries.asStateFlow()
     private val initialized = CompletableDeferred<Unit>()
@@ -462,12 +463,14 @@ class DownloadStore private constructor(context: Context) {
         }
     }
 
-    private suspend fun resumeDownload(id: String, includePaused: Boolean) = withContext(Dispatchers.IO) {
+    private suspend fun resumeDownload(
+        id: String, includePaused: Boolean, useLatestRoute: Boolean = true,
+    ) = withContext(Dispatchers.IO) {
         awaitReady()
         changeChapter(id) {
             var generation: String? = null
             try {
-                val change = synchronized(lock) {
+                val (change, capturedRoute) = synchronized(lock) {
                     val record = records[id] ?: return@changeChapter
                     if (record.entry.manga.sourceUrl == LOCAL_SOURCE_URL) {
                         if (record.entry.status == DownloadStatus.COMPLETED) return@changeChapter
@@ -476,13 +479,17 @@ class DownloadStore private constructor(context: Context) {
                     if (record.entry.needsSourceRefresh || record.entry.status in setOf(DownloadStatus.COMPLETED, DownloadStatus.RUNNING, DownloadStatus.QUEUED) ||
                         (!includePaused && record.entry.status == DownloadStatus.PAUSED)) return@changeChapter
                     generation = record.generation
-                    detachWriter(record)
+                    // A reader image retry continues its task. Explicit download retry adopts
+                    // the latest defaults, frozen before the old writer is detached.
+                    val route = if (useLatestRoute) DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
+                        else record.route?.checked() ?: DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
+                    detachWriter(record) to route
                 }
                 generation = change.detached.generation
                 stopWriter(change)
                 synchronized(lock) {
                     if (records[id] !== change.detached) return@changeChapter
-                    save(change.detached.copy(route = null, entry = change.detached.entry.copy(status = DownloadStatus.QUEUED, error = "", routingError = false)))
+                    save(change.detached.copy(route = capturedRoute, entry = change.detached.entry.copy(status = DownloadStatus.QUEUED, error = "", routingError = false)))
                     schedule(id)
                 }
             } catch (cancelled: CancellationException) {
@@ -596,8 +603,27 @@ class DownloadStore private constructor(context: Context) {
         }
     }
 
+    /** Validate the same entry before preparing metadata, without altering its writer or route. */
+    suspend fun routeForReadingDownload(
+        mangaId: String, chapterId: String, expectedEntry: DownloadEntry? = null,
+        useLatestDefaults: Boolean = false,
+    ): DownloadRouteSnapshot = withContext(Dispatchers.IO) {
+        awaitReady()
+        val id = chapterKey(mangaId, chapterId)
+        restoreChapter(id)
+        chapterChanges.getOrPut(id) { Mutex() }.withLock {
+            synchronized(lock) {
+                val record = records[id]
+                if (expectedEntry != null && record?.entry !== expectedEntry)
+                    throw CancellationException("下载任务已变化，请重新操作。")
+                if (useLatestDefaults) DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
+                else record?.route?.checked() ?: DownloadRoutingStore.get(context).snapshot(DownloadCategory.CHAPTERS)
+            }
+        }
+    }
+
     suspend fun retryReaderPage(mangaId: String, chapterId: String, page: Page): Page {
-        resumeDownload(chapterKey(mangaId, chapterId), includePaused = false)
+        resumeDownload(chapterKey(mangaId, chapterId), includePaused = false, useLatestRoute = false)
         return resolveReaderPage(mangaId, chapterId, page)
     }
 

@@ -1,5 +1,6 @@
 package dev.mangaflow.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,6 +46,7 @@ import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.platform.*
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.storage.ReadingProgress
+import dev.mangaflow.storage.ChapterProgress
 import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.glass.mangaHazeSource
 import dev.mangaflow.ui.motion.MotionButton as Button
@@ -72,6 +74,8 @@ fun AccountScreen(
     navigation: @Composable () -> Unit,
     localFavorites: List<Manga>,
     localHistory: List<ReadingProgress>,
+    chapterHistoryRevision: Long,
+    readChapterProgress: suspend (String, String) -> ChapterProgress?,
     onAddToLibrary: (Manga) -> Unit,
     onContinueLocal: (ReadingProgress) -> Unit,
     onRefreshFavorites: () -> Unit,
@@ -133,7 +137,7 @@ fun AccountScreen(
 
     val contentTopPadding = HeaderContentGap
     // Measure the actual, font-aware header and collection in one pass, without a one-frame inset jump.
-    Layout(modifier = Modifier.fillMaxSize(), content = {
+    Layout(modifier = Modifier.fillMaxSize().background(colors.background.copy(alpha = .98f)), content = {
     CloudAccountHeader(
         state = state, backdrop = backdrop, navigation = navigation, active = active,
         refreshing = if (showHistory) state.historyLoading else state.favoritesLoading,
@@ -227,6 +231,7 @@ fun AccountScreen(
                 state = state, repository = repository, backdrop = backdrop, active = active,
                 showHistory = showHistory, onShowHistory = { showHistory = it },
                 localFavorites = localFavorites, localHistory = localHistory,
+                chapterHistoryRevision = chapterHistoryRevision, readChapterProgress = readChapterProgress,
                 contentTopPadding = contentTopPadding,
                 onOpen = onOpen, onContinue = onContinue, onContinueLocal = onContinueLocal,
                 onAddToLibrary = onAddToLibrary, onRemoveFavorite = { removeFavorite = it },
@@ -251,12 +256,12 @@ fun AccountScreen(
         AlertDialog(
             onDismissRequest = { removeFavorite = null },
             shape = RoundedCornerShape(24.dp), containerColor = colors.surface,
-            title = { Text("移除云端收藏？", style = MaterialTheme.typography.titleLarge) },
+            title = { Text("移出拷贝书架？", style = MaterialTheme.typography.titleLarge) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
                         style = MaterialTheme.typography.bodyMedium)
-                    Text("仅移除云端收藏。本机书架、下载和阅读进度会保留。",
+                    Text("会同步到拷贝账号。本机书架、下载和阅读进度会保留。",
                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                 }
             },

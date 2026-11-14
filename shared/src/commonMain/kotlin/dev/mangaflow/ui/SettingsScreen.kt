@@ -58,6 +58,7 @@ import androidx.compose.material.icons.outlined.UploadFile
 import androidx.compose.material.icons.outlined.ViewDay
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.SwapVert
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
@@ -116,6 +117,7 @@ import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.ReadingMode
@@ -171,6 +173,8 @@ fun SettingsScreen(
     var expandedNotes by remember(update.release?.versionCode) { mutableStateOf(false) }
     val routeStore = remember(context) { DownloadRoutingStore.get(context) }
     val routes by routeStore.state.collectAsStateWithLifecycle()
+    val experienceStore = remember(context) { ExperiencePolicyStore.get(context) }
+    val experienceBudget by experienceStore.state.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -197,6 +201,7 @@ fun SettingsScreen(
     var webDavNotice by remember { mutableStateOf<String?>(null) }
     var expandedSetting by rememberSaveable { mutableStateOf<String?>(null) }
     var showBodySources by remember { mutableStateOf(false) }
+    var showNetworkDownloads by remember { mutableStateOf(false) }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
 
     val backupWriter = rememberTextDocumentSaver { result ->
@@ -467,7 +472,7 @@ fun SettingsScreen(
                                 }
                             }
                         }
-                        Text("图片缓存最多 256 MB。书架、阅读记录与下载章节独立保存。",
+                        Text("图片缓存目标预算 ${experienceCacheSize(experienceBudget.diskCacheBytes)}，容量在启动时应用。书架、阅读记录与下载章节独立保存。",
                             style = MaterialTheme.typography.bodySmall, color = secondary)
                         cacheNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
                     }
@@ -480,11 +485,12 @@ fun SettingsScreen(
                 RetainedSettingsCategory(!desktop || settingsCategory == 3) {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SettingsSection("应用", sourceBackdrop) {
-                        SettingsDisclosure("网络与下载", downloadRouteLabel(routes.defaultMode), Icons.Outlined.SwapVert,
-                            expanded = expandedSetting == "network", onToggle = { toggleSetting("network") }) {
-                            NetworkDownloadSettings(sourceBackdrop,
-                                active = expandedSetting == "network" && (!desktop || settingsCategory == 3))
+                        SettingsDisclosure("体验策略", experienceModeLabel(experienceBudget.mode), Icons.Outlined.Tune,
+                            expanded = expandedSetting == "experience", onToggle = { toggleSetting("experience") }) {
+                            ExperienceSettings(active = expandedSetting == "experience" && (!desktop || settingsCategory == 3))
                         }
+                        SettingsLinkRow("网络与下载", downloadRouteLabel(routes.defaultMode), Icons.Outlined.SwapVert,
+                            inlineDetail = true) { showNetworkDownloads = true }
                         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
                             .animateContentSize(if (LocalMotionEnabled.current) tween(MangaMotion.Content) else snap()),
                             verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -617,6 +623,8 @@ fun SettingsScreen(
         BodySourceSettingsSheet(sourceRegistry, sourceBackdrop, plugins = sourcePlugins,
             onDismiss = { showBodySources = false })
     }
+
+    NetworkDownloadDialog(showNetworkDownloads, sourceBackdrop, onDismiss = { showNetworkDownloads = false })
 
     BackupRestoreDialog(
         pending = pendingRestore,

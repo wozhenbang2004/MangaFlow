@@ -21,6 +21,8 @@ import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
+import dev.mangaflow.storage.ChapterPreparationPhase
+import dev.mangaflow.storage.ChapterPreparationState
 
 /** The exact available variants fan out at the chapter, with one-tap queue semantics. */
 @Composable
@@ -33,6 +35,7 @@ internal fun ChapterDownloadSourceSheet(
     onDismiss: () -> Unit,
     anchor: Rect? = null,
     repository: MangaRepository? = null,
+    preparations: Map<String, ChapterPreparationState> = emptyMap(),
 ) {
     val variants = remember(manga.id, manga.sourceName, chapter) { downloadSourceVariants(manga, chapter) }
     var submitted by remember(manga.id, chapter.logicalId, chapter.id) { mutableStateOf(false) }
@@ -51,6 +54,8 @@ internal fun ChapterDownloadSourceSheet(
         }) { index, modifier, dismiss, reveal, sourceActive ->
         val variant = variants[index]
         val entry = entries[variant.storageId]
+        val preparation = preparations[variant.storageId]
+        val preparing = preparation != null && preparation.phase != ChapterPreparationPhase.FAILED
         val sourceMangaId = remember(variant.sourceId, variant.mangaId) {
             runCatching { SourceKeys.manga(variant.sourceId, variant.mangaId) }.getOrNull()
         }
@@ -61,17 +66,23 @@ internal fun ChapterDownloadSourceSheet(
             autoMeasure = true, active = sourceActive)
         val canStart = entry?.status !in setOf(DownloadStatus.COMPLETED,
             DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)
-        val enabled = canStart && !submitted
+        val enabled = canStart && !submitted && !preparing
         val name = variant.sourceName.ifBlank { sourceDisplayName(variant.sourceId) }
-        val status = when (entry?.status) {
-            DownloadStatus.COMPLETED -> "已下载"
-            DownloadStatus.QUEUED -> "已排队"
-            DownloadStatus.RUNNING -> entry?.takeIf { it.totalPages > 0 }
-                ?.let { "${it.completedPages}/${it.totalPages}" } ?: "下载中"
-            DownloadStatus.WAITING -> "等待中"
-            DownloadStatus.PAUSED -> "继续"
-            DownloadStatus.FAILED -> "重试"
-            null -> ""
+        val status = when (preparation?.phase) {
+            ChapterPreparationPhase.WAITING -> "等待准备"
+            ChapterPreparationPhase.PREPARING -> "准备中"
+            ChapterPreparationPhase.COMMITTING -> "加入下载中"
+            ChapterPreparationPhase.FAILED -> "准备失败 · 重试"
+            null -> when (entry?.status) {
+                DownloadStatus.COMPLETED -> "已下载"
+                DownloadStatus.QUEUED -> "已排队"
+                DownloadStatus.RUNNING -> entry?.takeIf { it.totalPages > 0 }
+                    ?.let { "${it.completedPages}/${it.totalPages}" } ?: "下载中"
+                DownloadStatus.WAITING -> "等待中"
+                DownloadStatus.PAUSED -> "继续"
+                DownloadStatus.FAILED -> "重试"
+                null -> ""
+            }
         }
         val peers = variants.filter { it.sourceId == variant.sourceId }
         val sameSource = peers.size > 1
@@ -94,7 +105,7 @@ internal fun ChapterDownloadSourceSheet(
             actionLabel = "从${name}下载${chapter.title}",
             onInspect = { inspected = "$name · $details" },
             onClick = {
-                if (!submitted) {
+                if (!submitted && !preparing) {
                     submitted = true
                     onSelect(variant, route)
                     dismiss()

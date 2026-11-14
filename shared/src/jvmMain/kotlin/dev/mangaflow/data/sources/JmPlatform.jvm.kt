@@ -170,10 +170,20 @@ internal class JvmJmBodySource(context: PlatformContext) : BodySource {
     }
 
     private fun toPage(page: io.github.jukomu.jmcomic.api.model.JmSearchPage, requestPage: Int): MangaPage {
-        val rows = page.content()?.take(200).orEmpty().mapNotNull { item ->
+        val current = page.currentPage()
+        val total = page.totalPages()
+        if (current != requestPage + 1 || current !in 1..500 || total !in 0..100_000 ||
+            (total > 0 && current > total))
+            throw SourceException("来源返回的分页信息无效，请刷新后重试。")
+        val content = page.content()?.take(200)
+        if (content == null && total > 0) throw SourceException("来源没有返回作品列表。")
+        val rows = content.orEmpty().mapNotNull { item ->
             runCatching { manga(item) }.getOrNull()
         }.distinctBy(Manga::id)
-        val more = page.currentPage() < page.totalPages() && page.totalPages() > 0 && rows.isNotEmpty()
+        if ((!content.isNullOrEmpty() && rows.isEmpty()) || (total == 0 && rows.isNotEmpty()))
+            throw SourceException("来源返回的作品列表无法识别，请更新来源后重试。")
+        // Empty pages do not erase the source's validated remaining page count.
+        val more = current < minOf(total, 500)
         return MangaPage(rows, more, if (more) requestPage + 1 else null)
     }
 

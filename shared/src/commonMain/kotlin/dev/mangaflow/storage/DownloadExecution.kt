@@ -5,8 +5,8 @@ import dev.mangaflow.data.sources.JmDownloadSession
 import dev.mangaflow.data.sources.createJmDownloadSession
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.NetworkClient
-import dev.mangaflow.platform.PlatformKind
-import dev.mangaflow.platform.platformKind
+import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.experience.maximumBackgroundPageParallelism
 import dev.mangaflow.platform.storage.StorageLock
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
@@ -15,8 +15,6 @@ import kotlinx.coroutines.sync.withLock
 import okio.IOException
 
 internal enum class DownloadOutcome { SUCCESS, RETRY, FAILURE }
-
-internal val backgroundDownloadParallelism = if (platformKind == PlatformKind.DESKTOP) 4 else 2
 
 /** WorkManager and native app sessions execute this exact same persisted chapter protocol. */
 internal suspend fun runChapterDownload(context: PlatformContext, id: String, workId: String, attempt: Int,
@@ -29,6 +27,8 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
         runCatching { store.update(id, workId) { it.copy(status = DownloadStatus.FAILED, error = "图片地址需要刷新，请刷新并重试") } }
         return@withContext DownloadOutcome.FAILURE
     }
+    val experience = ExperiencePolicyStore.get(context)
+    val releaseExperience = experience.startObserving()
     try {
         DownloadStore.transferGate.withLock {
             currentCoroutineContext().ensureActive()
@@ -54,18 +54,25 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
                 store.update(id, workId) { it.copy(status = DownloadStatus.RUNNING, error = "") }
                 val visited = mutableSetOf<Int>()
                 coroutineScope {
-                    repeat(backgroundDownloadParallelism) {
+                    repeat(maximumBackgroundPageParallelism) {
                         launch {
                             while (true) {
                                 currentCoroutineContext().ensureActive()
-                                val index = selection.withLock {
-                                    val current = store.record(id)
-                                    if (current == null || current.workId != workId ||
-                                        current.entry.status in setOf(DownloadStatus.PAUSED, DownloadStatus.COMPLETED, DownloadStatus.FAILED)) null
-                                    else store.nextPageIndex(id, workId, visited)?.also { visited += it }
-                                } ?: break
-                                store.downloadPage(id, workId, index, client, jm) ?: break
-                                publishProgress()
+                                // Only optional worker work takes this budget. A visible reader
+                                // can start or join its actual transfer without waiting for it.
+                                val downloaded = experience.withBackgroundPageAdmission {
+                                    val index = selection.withLock {
+                                        val current = store.record(id)
+                                        if (current == null || current.workId != workId ||
+                                            current.entry.status in setOf(DownloadStatus.PAUSED, DownloadStatus.COMPLETED, DownloadStatus.FAILED)) null
+                                        else store.nextPageIndex(id, workId, visited)?.also { visited += it }
+                                    } ?: return@withBackgroundPageAdmission false
+                                    store.downloadPage(id, workId, index, client, jm)
+                                        ?: return@withBackgroundPageAdmission false
+                                    publishProgress()
+                                    true
+                                }
+                                if (!downloaded) break
                             }
                         }
                     }
@@ -93,7 +100,7 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
             error = failure.message ?: "下载未完成", needsSourceRefresh = (failure as? PermanentDownloadException)?.needsSourceRefresh == true,
             routingError = failure is DownloadRouteException) } }
         if (retryable) DownloadOutcome.RETRY else DownloadOutcome.FAILURE
-    }
+    } finally { releaseExperience() }
 }
 
 /** Native app sessions resume their durable manifests on every application start. */

@@ -60,6 +60,8 @@ import androidx.compose.material.icons.outlined.CheckCircleOutline
 import androidx.compose.material.icons.outlined.Downloading
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
@@ -121,6 +123,8 @@ import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.storage.ChapterPreparationPhase
+import dev.mangaflow.storage.ChapterPreparationState
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -183,6 +187,9 @@ fun DownloadsScreen(
     excludedSourceIds: Set<String> = emptySet(),
     onDetails: ((Manga) -> Unit)? = null,
     includedSourceIds: Set<String>? = null,
+    preparations: List<ChapterPreparationState> = emptyList(),
+    onCancelPreparation: (String, Long) -> Unit = { _, _ -> },
+    onRetryPreparation: (String, Long) -> Unit = { _, _ -> },
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -223,6 +230,9 @@ fun DownloadsScreen(
     val secondary = colors.onSurfaceVariant
     val visibleEntries = remember(entries, includedSourceIds, excludedSourceIds) {
         entries.filter { sourceIncluded(it.manga.sourceId) }
+    }
+    val visiblePreparations = remember(preparations, includedSourceIds, excludedSourceIds) {
+        preparations.filter { sourceIncluded(it.manga.sourceId) }
     }
     val manageableEntries = remember(visibleEntries, removingIds) { visibleEntries.filterNot { it.id in removingIds } }
     val selectedEntries = remember(manageableEntries, selectedIds) { manageableEntries.filter { it.id in selectedIds } }
@@ -475,6 +485,12 @@ fun DownloadsScreen(
                     modifier = Modifier.fillMaxSize(), state = scroll,
                     contentPadding = PaddingValues(start = contentInset, end = contentInset, top = contentTopPadding, bottom = 32.dp + bottomInset),
                 ) {
+                    if (pageFilter != DownloadFilter.SAVED) items(visiblePreparations,
+                        key = { "preparation:" + it.id }, contentType = { "chapter-preparation" }) { preparation ->
+                        ChapterPreparationRow(preparation,
+                            onCancel = { onCancelPreparation(preparation.id, preparation.generation) },
+                            onRetry = { onRetryPreparation(preparation.id, preparation.generation) })
+                    }
                     if (loading) {
                         item {
                             Row(Modifier.fillMaxWidth().padding(vertical = 48.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
@@ -485,7 +501,8 @@ fun DownloadsScreen(
                                 Text("正在恢复下载", style = MaterialTheme.typography.bodyMedium, color = secondary)
                             }
                         }
-                    } else if (visible.isEmpty()) {
+                    } else if (visible.isEmpty() &&
+                        (pageFilter == DownloadFilter.SAVED || visiblePreparations.isEmpty())) {
                         item {
                             Column(Modifier.fillMaxWidth().padding(top = 72.dp, bottom = 64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                                 Box(Modifier.size(64.dp).clip(RoundedCornerShape(22.dp)).background(colors.surfaceVariant), contentAlignment = Alignment.Center) {
@@ -504,11 +521,13 @@ fun DownloadsScreen(
                                 Text(when (pageFilter) {
                                     DownloadFilter.ALL -> "从漫画目录下载章节，或添加本地漫画。"
                                     DownloadFilter.ACTIVE -> if (completedEntries.isNotEmpty()) "已完成的章节保存在“已下载”中。" else "从漫画目录选择章节，即可开始下载。"
-                                    DownloadFilter.SAVED -> if (manageableEntries.isNotEmpty()) "任务尚未完成，可在“进行中”查看。" else "下载完成后，就能在这里离线阅读。"
+                                    DownloadFilter.SAVED -> if (manageableEntries.isNotEmpty() || visiblePreparations.isNotEmpty())
+                                        "任务尚未完成，可在“进行中”查看。" else "下载完成后，就能在这里离线阅读。"
                                 }, style = MaterialTheme.typography.bodySmall, color = secondary)
                                 if (pageFilter == DownloadFilter.ACTIVE && completedEntries.isNotEmpty()) {
                                     TextButton(onClick = { filter = DownloadFilter.SAVED }) { Text("查看已下载") }
-                                } else if (pageFilter == DownloadFilter.SAVED && manageableEntries.isNotEmpty()) {
+                                } else if (pageFilter == DownloadFilter.SAVED &&
+                                    (manageableEntries.isNotEmpty() || visiblePreparations.isNotEmpty())) {
                                     TextButton(onClick = { filter = DownloadFilter.ACTIVE }) { Text("查看进行中") }
                                 } else if (pageFilter == DownloadFilter.ALL) {
                                     TextButton(enabled = localImportAllowed,
@@ -726,6 +745,63 @@ fun DownloadsScreen(
         onConfirm = { pending, mangaTitle, chapterTitle -> importLocal(pending, mangaTitle, chapterTitle) },
     )
 
+}
+
+@Composable
+private fun ChapterPreparationRow(
+    state: ChapterPreparationState,
+    onCancel: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val failed = state.phase == ChapterPreparationPhase.FAILED
+    val committing = state.phase == ChapterPreparationPhase.COMMITTING
+    val sourceId = remember(state.manga.id, state.chapter) {
+        runCatching { dev.mangaflow.data.SourceKeys.decodeChapter(
+            dev.mangaflow.data.chapterSourceMangaId(state.manga.id, state.chapter), state.chapter.id).sourceId
+        }.getOrDefault(state.chapter.sourceId)
+    }
+    val source = dev.mangaflow.data.sourceDisplayName(sourceId)
+    val status = when (state.phase) {
+        ChapterPreparationPhase.WAITING -> "等待准备"
+        ChapterPreparationPhase.PREPARING -> "正在获取章节信息"
+        ChapterPreparationPhase.COMMITTING -> "正在加入下载"
+        ChapterPreparationPhase.FAILED -> "准备失败"
+    }
+    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+            when (state.phase) {
+                ChapterPreparationPhase.WAITING -> Icon(Icons.Outlined.Schedule, null, Modifier.size(18.dp),
+                    tint = colors.onSurfaceVariant)
+                ChapterPreparationPhase.FAILED -> Icon(Icons.Outlined.Info, null, Modifier.size(18.dp),
+                    tint = colors.error)
+                else -> CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp,
+                    color = colors.onSurfaceVariant)
+            }
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(state.manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE),
+                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(state.chapter.title + " · " + source, style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(status + (state.route?.let { " · " + downloadRouteLabel(it.mode) } ?: ""),
+                style = MaterialTheme.typography.labelSmall,
+                color = if (failed) colors.error else colors.onSurfaceVariant)
+            if (failed && state.error.isNotBlank()) Text(state.error, style = MaterialTheme.typography.bodySmall,
+                color = colors.error)
+        }
+        if (failed) MotionIconButton(onClick = onRetry, modifier = Modifier.size(44.dp), tooltip = "重试准备") {
+            Icon(Icons.Outlined.Refresh, "重试准备 ${state.chapter.title}", Modifier.size(20.dp), tint = colors.error)
+        }
+        MotionIconButton(onClick = onCancel, enabled = !committing, modifier = Modifier.size(44.dp),
+            tooltip = if (committing) "加入下载后可暂停" else if (failed) "移除准备记录" else "取消准备") {
+            Icon(Icons.Outlined.Close,
+                if (committing) "正在加入下载" else if (failed) "移除准备记录" else "取消准备 ${state.chapter.title}",
+                Modifier.size(18.dp), tint = colors.onSurfaceVariant.copy(alpha = if (committing) .35f else 1f))
+        }
+    }
 }
 
 @Composable

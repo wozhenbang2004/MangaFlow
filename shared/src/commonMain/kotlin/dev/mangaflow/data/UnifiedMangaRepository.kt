@@ -820,12 +820,12 @@ class UnifiedMangaRepository(
     }
 
     /** One task owns metadata, redirects and page bytes on the same frozen route. */
-    suspend fun prepareDownload(
+    override suspend fun prepareDownload(
         context: PlatformContext,
         mangaId: String,
         chapterId: String,
         route: DownloadRouteSnapshot,
-        forceRefresh: Boolean = false,
+        forceRefresh: Boolean,
     ): PreparedChapterDownload {
         val selected = route.checked()
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)

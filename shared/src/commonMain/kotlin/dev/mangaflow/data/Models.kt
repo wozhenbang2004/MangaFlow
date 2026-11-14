@@ -51,6 +51,14 @@ interface MangaRepository {
     suspend fun search(query: String, page: Int = 0): MangaPage
     suspend fun detail(mangaId: String): MangaDetail
     suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean = false): List<Page>
+    /** Download preparation must own its route; unsupported repositories never fall back to reading. */
+    suspend fun prepareDownload(
+        context: dev.mangaflow.platform.PlatformContext,
+        mangaId: String,
+        chapterId: String,
+        route: dev.mangaflow.net.DownloadRouteSnapshot,
+        forceRefresh: Boolean = false,
+    ): PreparedChapterDownload = throw dev.mangaflow.net.DownloadRouteException("当前来源不支持指定线路的下载准备。")
     /** Only retained source metadata; this never performs IO or starts a request. */
     fun cachedPages(mangaId: String, chapterId: String): List<Page>? = null
     fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> = emptyMap()

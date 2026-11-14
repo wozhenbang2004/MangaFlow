@@ -88,18 +88,30 @@ internal class JvmSteamWallpaperClient(
     @Volatile private var foreground = true
     @Volatile private var session: JsonObject? = null
     @Volatile private var savedSession: JsonObject? = null
+    @Volatile private var savedSessionReadPending = false
 
-    init {
+    init { restoreSavedSession(allowInstall = false) }
+
+    private fun restoreSavedSession(allowInstall: Boolean) {
         var restoredRecord: JsonObject? = null
-        start(auth, { it.copy(restoring = true, authError = null) }, 60_000L, allowInstall = false, restoring = true, invalidateSessionErrors = true,
+        start(auth, { it.copy(restoring = true, authenticating = false, authError = null,
+            qrUrl = null, guardMethods = emptyList(), guardSubmitting = false, guardError = null,
+            message = null) }, 60_000L, allowInstall = allowInstall, restoring = true, invalidateSessionErrors = true,
             makeRequest = {
-                val stored = vaultLock.withLock { readSecret(app, SECRET_KEY) }
-                if (stored == null) null else {
-                    require(stored.length in 1..MAX_EVENT)
-                    val saved = sessionRecord(Json.parseToJsonElement(stored) as? JsonObject
-                        ?: throw SteamFailure("invalid_response"))
-                    restoredRecord = saved
-                    request("account", saved)
+                try {
+                    val stored = vaultLock.withLock { readSecret(app, SECRET_KEY) }
+                    if (stored == null) null else {
+                        require(stored.length in 1..MAX_EVENT)
+                        val saved = sessionRecord(Json.parseToJsonElement(stored) as? JsonObject
+                            ?: throw SteamFailure("invalid_response"))
+                        restoredRecord = saved
+                        request("account", saved)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // Do not rewrite or delete an unreadable encrypted record on an upgrade.
+                    throw SavedSessionReadFailure()
                 }
             }, onEvent = { token, event ->
                 if (event.text("kind") == "account") publishAccount(token, event, restoredRecord)
@@ -109,6 +121,10 @@ internal class JvmSteamWallpaperClient(
     override fun login() {
         if (closed || !_state.value.supported) return
         val saved = session ?: savedSession
+        if (saved != null || savedSessionReadPending) {
+            restoreSavedSession(allowInstall = true)
+            return
+        }
         start(auth, { it.copy(restoring = false, authenticating = true, canResumeSession = false, qrUrl = null,
             guardMethods = emptyList(), guardSubmitting = false, guardError = null,
             authError = null, message = null) }, 350_000L,
@@ -377,7 +393,7 @@ internal class JvmSteamWallpaperClient(
     override fun cancelAuthentication() {
         stop(auth)
         if (!closed) _state.update { it.copy(restoring = false, authenticating = false,
-            canResumeSession = session == null && savedSession != null, qrUrl = null,
+            canResumeSession = canResumeSavedSession(), qrUrl = null,
             guardMethods = emptyList(), guardSubmitting = false, guardError = null, authError = null) }
     }
 
@@ -397,7 +413,7 @@ internal class JvmSteamWallpaperClient(
     override fun cancel() {
         lanes.forEach(::stop)
         if (!closed) _state.update { it.copy(restoring = false, preparing = false,
-            canResumeSession = session == null && savedSession != null, componentBytes = 0,
+            canResumeSession = canResumeSavedSession(), componentBytes = 0,
             componentTotalBytes = 0, authenticating = false, qrUrl = null,
             guardMethods = emptyList(), guardSubmitting = false, guardError = null,
             loading = false, transferId = null, transferName = null, receivedBytes = 0,
@@ -414,9 +430,11 @@ internal class JvmSteamWallpaperClient(
         val previous = _state.value.account
         val previousSession = session
         val previousSavedSession = savedSession
+        val previousReadPending = savedSessionReadPending
         val epoch = sessionEpoch.incrementAndGet()
         session = null
         savedSession = null
+        savedSessionReadPending = false
         clearPersonalData()
         _state.update { it.copy(restoring = true, preparing = false, componentBytes = 0,
             componentTotalBytes = 0, authenticating = false, qrUrl = null,
@@ -442,9 +460,10 @@ internal class JvmSteamWallpaperClient(
                 if (isCurrent(auth, token) && sessionEpoch.get() == epoch) {
                     session = previousSession
                     savedSession = previousSavedSession
+                    savedSessionReadPending = previousReadPending
                 }
                 update(auth, token) { it.copy(restoring = false, account = previous,
-                    canResumeSession = previousSession == null && previousSavedSession != null,
+                    canResumeSession = previousSession == null && (previousSavedSession != null || previousReadPending),
                     authError = "未能移除安全登录凭据，请重试退出。") }
             }
         }
@@ -457,6 +476,7 @@ internal class JvmSteamWallpaperClient(
         sessionEpoch.incrementAndGet()
         session = null
         savedSession = null
+        savedSessionReadPending = false
         synchronized(snapshots) { snapshots.clear() }
         synchronized(knownItems) { knownItems.clear() }
         scope.cancel()
@@ -496,25 +516,29 @@ internal class JvmSteamWallpaperClient(
             var primaryFile: String? = null
             try {
                 requireCurrent(lane, token, lease)
+                // Read the version-independent vault before checking the optional native
+                // component. A component upgrade must not hide a still-saved login.
+                val restoredRequest = if (restoring) {
+                    val loaded = makeRequest()
+                    vaultLock.withLock {
+                        requireCurrent(lane, token, lease)
+                        savedSession = loaded?.let(::sessionRecord)
+                        savedSessionReadPending = false
+                        update(lane, token) { it.copy(canResumeSession = canResumeSavedSession()) }
+                    }
+                    loaded ?: return@launch
+                } else null
                 val ready = ensureNative(lane, token, lease, allowInstall)
                 if (!ready) {
                     if (restoring) {
-                        update(lane, token) { it.copy(message = "首次使用时下载 Steam 组件，普通阅读不受影响。") }
+                        update(lane, token) { it.copy(message = "Steam 登录信息已保留，恢复登录时会准备更新后的连接组件。") }
                         return@launch
                     }
                     throw SteamFailure("component_unavailable")
                 }
                 requireCurrent(lane, token, lease)
-                val unrouted = makeRequest() ?: return@launch
+                val unrouted = restoredRequest ?: makeRequest() ?: return@launch
                 requireCurrent(lane, token, lease)
-                if (restoring) {
-                    val candidate = sessionRecord(unrouted)
-                    vaultLock.withLock {
-                        requireCurrent(lane, token, lease)
-                        savedSession = candidate
-                        update(lane, token) { it.copy(canResumeSession = true) }
-                    }
-                }
                 var request = routedRequest(unrouted, route ?: steamRoute())
                 if (download != null) {
                     val root = File(cacheDirectory(app).path, "steam-wallpapers")
@@ -578,6 +602,9 @@ internal class JvmSteamWallpaperClient(
                 throw cancelled
             } catch (failure: DownloadRouteException) {
                 fail(lane, token, failure.message ?: "Steam 连接线路暂不可用，请检查下载线路设置。")
+            } catch (_: SavedSessionReadFailure) {
+                if (isCurrent(lane, token)) savedSessionReadPending = true
+                fail(lane, token, "安全登录存储暂时无法读取，原有信息未删除，请重试恢复登录。")
             } catch (failure: SteamFailure) {
                 val removed = if (lane.kind != LaneKind.PROFILE && invalidateSessionErrors &&
                     failure.code in SESSION_ERRORS) invalidateSession(lane, token, lease) else true
@@ -605,7 +632,7 @@ internal class JvmSteamWallpaperClient(
                 directory?.let(::removeDownloadDirectory)
                 update(lane, token) { current -> when (lane.kind) {
                     LaneKind.AUTH -> current.copy(restoring = false, authenticating = false,
-                        canResumeSession = session == null && savedSession != null, qrUrl = null,
+                        canResumeSession = canResumeSavedSession(), qrUrl = null,
                         guardMethods = emptyList(), guardSubmitting = false, guardError = null)
                     LaneKind.BROWSE -> current.copy(loading = false)
                     LaneKind.PROFILE -> current.copy(profileLoading = false)
@@ -757,6 +784,7 @@ internal class JvmSteamWallpaperClient(
             requireCurrent(auth, token)
             session = record
             savedSession = null
+            savedSessionReadPending = false
             sessionEpoch.incrementAndGet()
             // A verified credential replaces the account context, never an anonymous browse.
             if (_state.value.library != SteamWallpaperLibrary.SEARCH) cancelBrowse()
@@ -784,6 +812,7 @@ internal class JvmSteamWallpaperClient(
             requireCurrent(lane, token, lease)
             session = null
             savedSession = null
+            savedSessionReadPending = false
             sessionEpoch.incrementAndGet()
             removed = runCatching { deleteSecret(app, SECRET_KEY) }.isSuccess
             if (lane !== browse && _state.value.library != SteamWallpaperLibrary.SEARCH) stop(browse)
@@ -812,6 +841,9 @@ internal class JvmSteamWallpaperClient(
         if (sessionEpoch.get() != epoch || session !== record) return null
         return SessionLease(record, epoch)
     }
+
+    private fun canResumeSavedSession(): Boolean =
+        session == null && (savedSession != null || savedSessionReadPending)
 
     private fun stop(lane: Lane) {
         lane.generation.incrementAndGet()
@@ -964,9 +996,13 @@ internal class JvmSteamWallpaperClient(
         }
     }
 
+    private class SavedSessionReadFailure : Exception()
+
     private class SteamFailure(val code: String) : Exception() {
         fun userMessage(): String = when (code) {
-            "session_expired", "invalid_token", "not_logged_in", "auth_required" -> "Steam 登录已失效，请重新登录。"
+            "session_expired", "invalid_token" -> "Steam 已确认登录凭据失效，请重新登录。"
+            "not_logged_in", "auth_required" -> "Steam 会话暂未就绪，已保存的登录信息保留，请恢复连接后重试。"
+            "session_unavailable" -> "暂时无法验证 Steam 登录，登录信息已保留，请检查线路后恢复。"
             "ownership_required", "not_owned" -> "请使用拥有 Wallpaper Engine 的 Steam 账号。"
             "cancelled" -> "操作已取消"
             "timeout", "login_timeout", "auth_session_expired" -> "本次 Steam 验证已超时，请重新登录。"
@@ -1007,10 +1043,11 @@ internal class JvmSteamWallpaperClient(
         private const val SECRET_KEY = "wallpaper.steam.session.v1"
         private const val MAX_MEDIA = 512L * 1024 * 1024
         private const val MAX_EVENT = 1024 * 1024
-        private val SESSION_ERRORS = setOf("session_expired", "invalid_token", "not_logged_in", "auth_required")
+        // Local request/CM session errors do not prove that Steam revoked the refresh token.
+        private val SESSION_ERRORS = setOf("session_expired", "invalid_token")
         private val ERROR_CODES = SESSION_ERRORS + setOf("ownership_required", "cancelled", "timeout",
             "too_large", "unsupported_media", "not_found", "invalid_response", "unavailable", "invalid_job",
-            "invalid_request", "auth_required", "session_unavailable", "login_failed", "login_timeout",
+            "invalid_request", "auth_required", "not_logged_in", "session_unavailable", "login_failed", "login_timeout",
             "steam_unavailable", "not_owned", "size_limit", "unsafe_path", "download_failed", "busy", "native_failed",
             "invalid_credentials", "invalid_guard_code", "expired_guard_code", "login_rate_limited",
             "login_refused", "unsupported_guard", "network_configuration",

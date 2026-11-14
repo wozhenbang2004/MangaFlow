@@ -157,6 +157,7 @@ import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DetailAppearanceStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.storage.DownloadStatus
+import dev.mangaflow.storage.ChapterPreparationState
 import dev.mangaflow.storage.ReadingProgress
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.motionInputGate
@@ -227,11 +228,15 @@ fun DetailScreen(
     pendingSourceCount: Int = 0,
     repository: MangaRepository? = null,
     commentsAvailable: Boolean = true,
+    downloadPreparations: List<ChapterPreparationState> = emptyList(),
 ) {
     val current = detail?.manga ?: manga
     var pendingDownload by remember(current.id) { mutableStateOf<Chapter?>(null) }
     var pendingDownloadAnchor by remember(current.id) { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
     val downloadSourceEntries = remember(downloadEntries) { downloadEntries.associateBy { it.chapter.id } }
+    val preparingSources = remember(downloadPreparations, current.id) {
+        downloadPreparations.filter { it.manga.id == current.id }.associateBy { it.chapter.id }
+    }
     LaunchedEffect(active, current.id) { if (!active) pendingDownload = null }
     val feedback = dev.mangaflow.ui.motion.rememberFeelFeedback()
     val downloaded = remember(downloadEntries, manga.id) {
@@ -743,6 +748,7 @@ fun DetailScreen(
     pendingDownload?.takeIf { active }?.let { pending ->
         key(current.id, pending.logicalId, pending.id) {
             ChapterDownloadSourceSheet(current, pending, downloadSourceEntries, readingBackdrop,
+                preparations = preparingSources,
                 onSelect = { variant, route ->
                     if (active && pendingDownload == pending) {
                         if (pending.variants.isEmpty()) onDownload(pending, route)
