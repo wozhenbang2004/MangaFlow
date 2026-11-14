@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## High-refresh and frame-work reduction · 2026-11-14
+
+Current user request and adopted bounded changes are DESIGN.md HIGH-REFRESH-137–140. Mobile: maximum same-resolution Android window refresh hint scoped to resumed activity plus actual Compose high-category drawing votes; generated iPhone Info gains the ProMotion opt-in. Shared detail collapse reads move to the dock; reader tile state updates draw through a stable Painter. Desktop ordinary8bit sRGB region conversion uses the current official Compose converter instead of PNG encoding/decoding, retaining the old path elsewhere and native VSync.
+
+Base d15e0fc includes READER-RETURN-136 and the two toolbar-scope repairs. Its Android209/run43543068605/job132287843036 passed Kotlin compilation and failed at R8; concurrent a30525a repairs the inherited JM desktop-AWT packaging path. Preserve that entire commit and its records rather than duplicate or overwrite it. Three source domains returned four isolated blobs; root alone integrates the complete batch on latest main. No tests/local builds/probes/benchmarks were run, no runtime/visual/FPS figure is verified, and no workflow or release guard is weakened. Normal build identities and user-installed high-refresh/scroll/zoom feedback are the remaining acceptance evidence; do not create a status-only follow-up.
+
 ## Current CI repair: common toolbar scope and Android image backend · 2026-11-14
 
 User reports “好像有失败了”. Decoded actual logs: Android206/job132282087355 had createJmBodySource expect/actual nullable return mismatch, already repaired by8ae85fac; do not reapply. Android207/job132283034186 reached R8 and failed on java.awt Graphics2D/Image/BufferedImage/ImageObserver/RenderedImage and javax.imageio.ImageIO, all referenced by the upstream desktop AwtImageProcessor. Android208/job132284827902 and native208 jobs132283309829/132283309984 failed earlier on DownloadsScreen571/LibraryScreen433: implicit BoxWithConstraints.maxWidth inside the nested toolbar RowScope. Concurrentd15e0fc already moves those exact calculations outside the nested receiver; preserve that fix and reader-return work, dropping the root's equivalent draft UI blobs.

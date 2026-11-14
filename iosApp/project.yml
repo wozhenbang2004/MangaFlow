@@ -33,6 +33,7 @@ targets:
         CFBundleVersion: '$(CURRENT_PROJECT_VERSION)'
         MangaFlowDistributionURL: '$(MANGAFLOW_IOS_DISTRIBUTION_URL)'
         LSRequiresIPhoneOS: true
+        CADisableMinimumFrameDurationOnPhone: true
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

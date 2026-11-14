@@ -7,6 +7,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -78,7 +79,7 @@ internal fun PortableReaderZoomableImage(
     var path by remember(model) { mutableStateOf<String?>(null) }
     var original by remember(model) { mutableStateOf<IntSize?>(null) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
-    var tiles by remember(model) { mutableStateOf<List<DecodedReaderTile>>(emptyList()) }
+    val tileState = remember(model) { mutableStateOf<List<DecodedReaderTile>>(emptyList()) }
     val zoom = state.zoomableState
     LaunchedEffect(model) { state.detailError = null; state.detailNotice = null }
     LaunchedEffect(result) { state.isImageDisplayed = success != null }
@@ -99,7 +100,8 @@ internal fun PortableReaderZoomableImage(
         finally { withContext(NonCancellable + Dispatchers.IO) { snapshot?.close() } }
     }
     val size = original ?: success?.image?.let { IntSize(it.width, it.height) }
-    val painter = remember(preview, size, tiles) { OriginalTilePainter(preview, size, tiles) }
+    // Tile arrivals invalidate drawing only; the zoom content keeps one stable painter.
+    val painter = remember(preview, size, tileState) { OriginalTilePainter(preview, size, tileState) }
     zoom.contentScale = contentScale
     zoom.contentAlignment = alignment
     zoom.setContentLocation(ZoomableContentLocation.scaledInsideAndCenterAligned(painter.intrinsicSize))
@@ -131,14 +133,14 @@ internal fun PortableReaderZoomableImage(
             }.getOrDefault(emptyList())
         }.distinctUntilChanged().collectLatest { requested ->
             retained.keys.retainAll(requested.toSet())
-            tiles = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
+            tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
             coroutineScope {
                 requested.filterNot { it in retained }.map { tile -> async {
                     decoderGate.withPermit {
                         try {
                             val region = withContext(Dispatchers.IO) { decodeNativeReaderRegion(file, tile.source, tile.sample) }
                             retained[tile] = region
-                            tiles = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
+                            tileState.value = retained.map { DecodedReaderTile(it.key, it.value.bitmap, it.value.notice) }
                             state.detailNotice = retained.values.firstNotNullOfOrNull { it.notice }
                         } catch (cancelled: CancellationException) { throw cancelled }
                         catch (failure: Exception) {
@@ -188,14 +190,14 @@ private fun originalTiles(size: IntSize, left: Float, top: Float, right: Float, 
 }
 
 private class OriginalTilePainter(
-    private val preview: Painter, private val original: IntSize?, private val tiles: List<DecodedReaderTile>,
+    private val preview: Painter, private val original: IntSize?, private val tiles: State<List<DecodedReaderTile>>,
 ) : Painter() {
     override val intrinsicSize: Size get() = original?.let { Size(it.width.toFloat(), it.height.toFloat()) } ?: preview.intrinsicSize
     override fun DrawScope.onDraw() {
         with(preview) { draw(size = size) }
         val full = original ?: return
         if (full.width <= 0 || full.height <= 0) return
-        for (tile in tiles) {
+        for (tile in tiles.value) {
             val rect = tile.spec.source
             val left = (rect.left.toFloat() / full.width * size.width).roundToInt()
             val top = (rect.top.toFloat() / full.height * size.height).roundToInt()

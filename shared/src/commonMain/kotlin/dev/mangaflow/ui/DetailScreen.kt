@@ -653,7 +653,7 @@ fun DetailScreen(
         }
         if (!desktopDetail) DetailReadingDock(mangaId = current.id, backdrop = readingBackdrop,
             resume = resume, firstChapter = chapters.firstOrNull(), loading = loading,
-            hidden = dockHidden, collapseProgress = dockCollapse, active = active,
+            hidden = dockHidden, collapseProgress = { dockCollapse }, active = active,
             modifier = Modifier.align(Alignment.BottomCenter)
                 .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Bottom))
                 .padding(horizontal = 16.dp, vertical = 8.dp),

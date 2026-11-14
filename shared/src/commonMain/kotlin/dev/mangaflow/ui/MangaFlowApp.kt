@@ -115,6 +115,8 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.FrameRateCategory
+import androidx.compose.ui.preferredFrameRate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -497,7 +499,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             changeSection(destination)
         },
         onSearch = openDesktopSearch,
-        modifier = Modifier.onPreviewKeyEvent { event ->
+        modifier = Modifier.then(if (desktop) Modifier else
+            Modifier.preferredFrameRate(FrameRateCategory.High)).onPreviewKeyEvent { event ->
             if (desktop && event.isCtrlPressed && !event.isAltPressed &&
                 (event.key == Key.K || event.key == Key.F)) {
                 if (event.type == KeyEventType.KeyDown) openDesktopSearch()

@@ -73,7 +73,7 @@ internal fun DetailReadingDock(
     firstChapter: Chapter?,
     loading: Boolean,
     hidden: Boolean,
-    collapseProgress: Float = 0f,
+    collapseProgress: () -> Float = { 0f },
     active: Boolean,
     persistent: Boolean = false,
     modifier: Modifier = Modifier,
@@ -94,9 +94,10 @@ internal fun DetailReadingDock(
     }
     val density = LocalDensity.current
     val fontScale = density.fontScale.coerceAtLeast(1f)
-    // The same reversible scroll progress owns size, position, content and material shape.
-    val collapse = if (desktop || persistent) 0f else if (motion) collapseProgress.coerceIn(0f, 1f)
-        else if (collapseProgress < .5f) 0f else 1f
+    // Read continuous scroll progress here so only this dock recomposes, not the detail scene.
+    // The same reversible progress still owns size, position, content and material shape.
+    val collapse = if (desktop || persistent) 0f else if (motion) collapseProgress().coerceIn(0f, 1f)
+        else if (collapseProgress() < .5f) 0f else 1f
     val minimumHeight = lerp(56.dp, 36.dp, collapse)
     val visibility by animateFloatAsState(if (!desktop && !persistent && hidden && !actions) 0f else 1f,
         tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing),

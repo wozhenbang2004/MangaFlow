@@ -121,6 +121,11 @@ internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRe
 }
 
 private fun BufferedImage.composeBitmap(): ImageBitmap {
+    // The official Compose converter copies ordinary sRGB pixels without a PNG encode/decode.
+    // Keep the existing codec path for higher bit depth and other color spaces.
+    if (colorModel.colorSpace.isCS_sRGB && colorModel.componentSize.all { it <= 8 }) {
+        return toComposeImageBitmap()
+    }
     val output = ByteArrayOutputStream()
     check(ImageIO.write(this, "png", output)) { "原图区域无法转换" }
     return org.jetbrains.skia.Image.makeFromEncoded(output.toByteArray()).toComposeImageBitmap()
