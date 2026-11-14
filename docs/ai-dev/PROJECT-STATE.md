@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Desktop navigation overlap · 2026-11-14
+
+User rejected the delivered local window with “这他妈能用？？？” and screenshot codex-clipboard-5d47381f-2424-496b-bee3-30b624b7c3e2.png. Local evidence copy: D:/Kayokoi/MangaFlowWork/layout-feedback/user-nav-overlap.png. Root's earlier startup screenshot already contained the defect; build/window existence was wrongly treated as usability acceptance. Do not call the desktop layout usable until actual post-fix window inspection closes this feedback.
+
+Root cause in current fd7b4ba source: DesktopNavigationWorkspace adds the permanent rail, but its nested ModalNavigationDrawer still paints the closed phone menu at a negative horizontal offset. The content Box does not clip, so that off-screen menu paints back over the desktop rail (the MANGAFLOW branding and second version label identify it). New bounded fix keeps the transparent ModalDrawerSheet measured so shared drawer.close navigation transitions retain valid anchors, omits its phone-menu children whenever persistent desktop navigation is visible, gates visible/exposed state accordingly and snaps closed on that mode. Clip the desktop content region and use an ellipsis for the rail's long version label. Mobile/narrow desktop keep their real drawer. Preserve existing route/search/profile/data actions and materials.
+
+Acceptance pending: build this exact new source through the D-only local CMD, inspect the real expanded/collapsed rail, navigate and restore discovery, and compare with the user image. No generated fixture or compile-only visual PASS. Other update/download feature stages remain OPEN and frozen in D:/Kayokoi/MangaFlowWork for integration after this delivered-layout defect is corrected.
+
+The local channel itself did complete source compilation/deployment and real startup; a later unchanged build took1s Gradle/5.5s full helper and gracefully replaced the windowless-parent/GUI-child jpackage pair. Direct D startup bypasses Git/build. These functional facts do not waive the visual defect above. Restored the pre-task global Rust1.97.1 after login-shell auto-update interruption using same-version official-checksum-verified D recovery material; original stable default/config and extra targets preserved, physical Rustup and Mise execution verified. Future host calls use login:false/physical executables; new local-channel files/caches/data stay D.
+
 ## Current Copy collection and progress batch · 2026-11-14
 
 Active user scope and latest raw correction are DESIGN COPY-SYNC-159–165: one Copy shelf, actual recent/heat/local-added/title sorting, explicit collection import/upload preview with full-import eligibility and per-account native identity, read-only detail progress adoption and effective-reading-only chapter reporting. Source implementation and independent reviews are complete; installed/compiled acceptance remains pending. Preserve the concurrent main6535b7b local channel and ranking compile corrections already applied to this worktree. No tests/local builds/service/device probes were run.

@@ -617,16 +617,19 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         .coerceAtMost((windowSize.width - 24.dp).coerceAtLeast(1.dp))
     var measuredDrawerWidth by remember { mutableFloatStateOf(0f) }
     val drawerWidthPx = measuredDrawerWidth.takeIf { it > 0f } ?: with(density) { drawerWidth.toPx() }
-    val drawerVisible by remember(drawer, drawerWidthPx) {
+    LaunchedEffect(desktopNavigationVisible) {
+        if (desktopNavigationVisible) drawer.snapTo(DrawerValue.Closed)
+    }
+    val drawerVisible by remember(drawer, drawerWidthPx, desktopNavigationVisible) {
         derivedStateOf {
             val offset = drawer.currentOffset
-            drawer.isOpen || drawer.targetValue == DrawerValue.Open ||
-                (offset.isFinite() && offset > -drawerWidthPx + .5f)
+            !desktopNavigationVisible && (drawer.isOpen || drawer.targetValue == DrawerValue.Open ||
+                (offset.isFinite() && offset > -drawerWidthPx + .5f))
         }
     }
-    val drawerExposed by remember(drawer, drawerWidthPx) {
+    val drawerExposed by remember(drawer, drawerWidthPx, desktopNavigationVisible) {
         derivedStateOf {
-            drawer.currentOffset.let { it.isFinite() && it > -drawerWidthPx + .5f }
+            !desktopNavigationVisible && drawer.currentOffset.let { it.isFinite() && it > -drawerWidthPx + .5f }
         }
     }
     val drawerCanSelect = frame is Frame.Root && drawerExposed
@@ -708,6 +711,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 drawerTonalElevation = 0.dp,
                 windowInsets = WindowInsets(0, 0, 0, 0),
             ) {
+                // Preserve the measured drawer anchors for shared navigation transitions,
+                // but never draw the off-screen phone menu over persistent desktop navigation.
+                if (!desktopNavigationVisible) {
                 Box(Modifier.fillMaxSize()) {
                 if (drawerVisible && frame is Frame.Root) LiquidGlassSurface(
                     state = drawerBackdrop,
@@ -771,6 +777,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     }
                     Text("MangaFlow ${platformVersion(LocalContext.current)}", modifier = Modifier.padding(12.dp),
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 }
                 }
             }
