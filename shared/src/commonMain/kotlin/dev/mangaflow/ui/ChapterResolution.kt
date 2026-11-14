@@ -4,8 +4,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -31,7 +31,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -50,8 +49,8 @@ internal data class ChapterResolutionState(
 private val resolutionSamples = Semaphore(2)
 
 /**
- * Source-qualified metadata and original-byte headers only. Opening a source chooser
- * never fetches a page; an explicit measurement shares Coil's normal original cache.
+ * Source-qualified metadata and original-byte headers only. Visible source rows may
+ * read one original page after their disclosure settles, sharing Coil's normal cache.
  */
 @OptIn(ExperimentalCoilApi::class)
 @Composable
@@ -61,11 +60,12 @@ internal fun rememberChapterResolution(
     chapterId: String,
     entry: DownloadEntry? = null,
     declaredPages: Int? = null,
+    autoMeasure: Boolean = false,
+    active: Boolean = true,
 ): ChapterResolutionState {
     val context = LocalMangaContext.current
     val downloads = remember(context) { DownloadStore.get(context) }
     val loader = remember(context) { SingletonImageLoader.get(imagePlatformContext(context)) }
-    val scope = rememberCoroutineScope()
     val revision by ReaderDimensionCache.revision.collectAsStateWithLifecycle()
     val exactEntry = entry?.takeIf { it.chapter.id == chapterId }
     val retained = remember(repository, mangaId, chapterId, exactEntry?.id,
@@ -77,8 +77,13 @@ internal fun rememberChapterResolution(
     var pages by remember(repository, mangaId, chapterId) { mutableStateOf(retained.orEmpty()) }
     var busy by remember(repository, mangaId, chapterId) { mutableStateOf(false) }
     var error by remember(repository, mangaId, chapterId) { mutableStateOf<String?>(null) }
+    var automaticAttempted by remember(repository, mangaId, chapterId) { mutableStateOf(false) }
+    var measurementRequest by remember(repository, mangaId, chapterId) { mutableIntStateOf(0) }
+    var handledRequest by remember(repository, mangaId, chapterId) { mutableIntStateOf(0) }
+    var measurementGeneration by remember(repository, mangaId, chapterId) { mutableIntStateOf(0) }
 
-    LaunchedEffect(repository, mangaId, chapterId, retained, exactEntry?.completedPages) {
+    LaunchedEffect(repository, mangaId, chapterId, retained, exactEntry?.completedPages, active) {
+        if (!active) return@LaunchedEffect
         try {
             if (!retained.isNullOrEmpty()) pages = retained
             else if (exactEntry != null) {
@@ -117,7 +122,7 @@ internal fun rememberChapterResolution(
         else "已知" + inspected.size + "页，整章页数未知"
     val detail = if (primary == null) {
         listOfNotNull(count?.let { "本章" + it + "页" },
-            "尺寸未读取；读取尺寸仅采样一页原图，不代表整章画质。").joinToString(" · ")
+            "尺寸未获取；仅读取一页原图尺寸，不代表整章画质。").joinToString(" · ")
     } else {
         val examples = inspected.take(3).joinToString("；") {
             "第" + (it.index + 1) + "页 " + resolutionPair(it.size) + " px" +
@@ -125,62 +130,91 @@ internal fun rememberChapterResolution(
         }
         examples + " · " + coverage + " · 仅代表已读取页面的像素尺寸"
     }
+    // Closing or changing the visible source cancels this effect and its queued/network work.
+    // A cache revision never restarts a failed request; retry remains an explicit action.
+    LaunchedEffect(repository, mangaId, chapterId, active, autoMeasure, measurementRequest) {
+        val generation = measurementGeneration + 1
+        measurementGeneration = generation
+        if (!active || repository == null) {
+            busy = false
+            return@LaunchedEffect
+        }
+        val requested = measurementRequest
+        val manual = requested > handledRequest
+        if (!manual && (!autoMeasure || automaticAttempted || primary != null)) return@LaunchedEffect
+        busy = true
+        error = null
+        try {
+            withTimeout(30_000L) {
+                resolutionSamples.withPermit {
+                    val loaded = pages.takeIf { it.isNotEmpty() }
+                        ?: repository.pages(mangaId, chapterId)
+                    if (loaded.isEmpty()) throw IllegalStateException()
+                    pages = loaded
+                    // Recheck after queuing: another consumer may have filled this exact cache.
+                    if (!manual && loaded.asSequence().take(CHAPTER_DIMENSION_SAMPLE_LIMIT)
+                        .filter { it.index >= 0 }.any {
+                            ReaderDimensionCache.get(it.url) != null || it.width > 0 && it.height > 0
+                        }) return@withPermit
+                    val page = loaded.asSequence().take(CHAPTER_DIMENSION_SAMPLE_LIMIT)
+                        .firstOrNull { ReaderDimensionCache.get(it.url) == null }
+                        ?: loaded.first()
+                    var size = readerImageDimensions(loader, page)
+                    if (size == null && exactEntry != null && page.index == loaded.first().index) {
+                        val local = downloads.coverPage(exactEntry.manga.id, chapterId)
+                        if (local != null && local.index == page.index && readerFilePath(local.url) != null)
+                            size = readerImageDimensions(loader, local, originalPage = page)
+                    }
+                    if (size == null) {
+                        val headers = repository.imageHeaders(mangaId, chapterId)
+                        val result = withContext(Dispatchers.IO) {
+                            loader.execute(ImageRequest.Builder(imagePlatformContext(context))
+                                .data(page.url)
+                                .httpHeaders(NetworkHeaders.Builder().apply {
+                                    headers.forEach { (name, value) -> set(name, value) }
+                                }.build())
+                                .size(1)
+                                .memoryCachePolicy(CachePolicy.DISABLED)
+                                .diskCachePolicy(CachePolicy.ENABLED)
+                                .decoderFactory(BlackholeDecoder.Factory())
+                                .build())
+                        }
+                        if (result !is SuccessResult) throw IllegalStateException()
+                        size = readerImageDimensions(loader, page, result.diskCacheKey)
+                    }
+                    if (size == null) throw IllegalStateException()
+                }
+            }
+        } catch (_: TimeoutCancellationException) {
+            if (measurementGeneration == generation)
+                error = "读取尺寸超时，请重试；阅读与下载不受影响。"
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            if (measurementGeneration == generation)
+                error = "原图尺寸暂不可用，请重试；阅读与下载不受影响。"
+        } finally {
+            if (measurementGeneration == generation) busy = false
+        }
+        // Cancellation does not consume an attempt; reversing a close may resume it.
+        if (measurementGeneration == generation) {
+            if (manual) handledRequest = requested else automaticAttempted = true
+        }
+    }
     val measure: () -> Unit = {
-        if (!busy && repository != null) {
+        if (active && !busy && repository != null) {
             busy = true
             error = null
-            scope.launch {
-                try {
-                    withTimeout(30_000L) {
-                        resolutionSamples.withPermit {
-                            val loaded = pages.takeIf { it.isNotEmpty() }
-                                ?: repository.pages(mangaId, chapterId)
-                            if (loaded.isEmpty()) throw IllegalStateException()
-                            pages = loaded
-                            val page = loaded.asSequence().take(CHAPTER_DIMENSION_SAMPLE_LIMIT)
-                                .firstOrNull { ReaderDimensionCache.get(it.url) == null }
-                                ?: loaded.first()
-                            var size = readerImageDimensions(loader, page)
-                            if (size == null && exactEntry != null && page.index == loaded.first().index) {
-                                val local = downloads.coverPage(exactEntry.manga.id, chapterId)
-                                if (local != null && local.index == page.index && readerFilePath(local.url) != null)
-                                    size = readerImageDimensions(loader, local, originalPage = page)
-                            }
-                            if (size == null) {
-                                val headers = repository.imageHeaders(mangaId, chapterId)
-                                val result = withContext(Dispatchers.IO) {
-                                    loader.execute(ImageRequest.Builder(imagePlatformContext(context))
-                                        .data(page.url)
-                                        .httpHeaders(NetworkHeaders.Builder().apply {
-                                            headers.forEach { (name, value) -> set(name, value) }
-                                        }.build())
-                                        .size(1)
-                                        .memoryCachePolicy(CachePolicy.DISABLED)
-                                        .diskCachePolicy(CachePolicy.ENABLED)
-                                        .decoderFactory(BlackholeDecoder.Factory())
-                                        .build())
-                                }
-                                if (result !is SuccessResult) throw IllegalStateException()
-                                size = readerImageDimensions(loader, page, result.diskCacheKey)
-                            }
-                            if (size == null) throw IllegalStateException()
-                        }
-                    }
-                } catch (_: TimeoutCancellationException) {
-                    error = "读取尺寸超时，请重试；阅读与下载不受影响。"
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    error = "原图尺寸暂不可用，请重试；阅读与下载不受影响。"
-                } finally { busy = false }
-            }
+            measurementRequest += 1
         }
     }
     return ChapterResolutionState(
         compactLabel = primary?.let { resolutionPair(it.size) } ?: "尺寸未知",
         detail = listOfNotNull(detail, error).joinToString(" · "),
-        known = primary != null, busy = busy, error = error,
-        canMeasure = repository != null && !busy, measure = measure,
+        known = primary != null,
+        busy = busy || autoMeasure && !automaticAttempted && primary == null && repository != null,
+        error = error,
+        canMeasure = active && repository != null && !busy, measure = measure,
     )
 }
 

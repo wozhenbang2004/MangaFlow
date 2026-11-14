@@ -1,5 +1,15 @@
 # MangaFlow detail · 2026-11-12
 
+## Automatic chapter-source dimensions · 2026-11-14 (SOURCE-AUTO-SIZE-20261114)
+
+Current raw user: “点击某个章节的来源自动读取来源的分辨率啊而且注意信息视觉层级” (exact message ID unavailable). This explicitly replaces RESOLUTION-118's no-automatic-page-request rule for the currently displayed chapter-source disclosure only.
+
+Read and download source rows opt into automatic measurement once the existing source-disclosure input-readiness threshold is reached. Existing exact-source cache/metadata dimensions appear immediately; otherwise reuse the current owning manifest and read at most one original image per visible variant through the existing Coil disk-cache/blackhole-decoder/native-header path. Keep the shared two-operation semaphore,30s timeout and original source/work/chapter identity. Only current-page source rows run; closing, paging or disposal cancels their pending work. Cache-revision updates do not retry failed requests. Cancellation does not consume an attempt, so reversing a close can resume; a completed failure waits for the existing independent retry action. No whole-chapter scan, bitmap decode, quality switching, chapter navigation or enqueue action is introduced by dimension reading.
+
+Visual acceptance: source name is the primary13sp/16sp line, native dimensions remain secondary12sp/14sp and optional version/status text is supporting10sp/12sp. Loading uses the existing tiny inline indicator; failure uses“读取失败”with a small retry mark, with full actual error and page/provenance detail retained in inspection/accessibility. Unknown no longer instructs the user to click“读取尺寸”before automatic reading can start. Normal source rows stay44dp; their height and dimension line grow with system font scale so the hierarchy does not clip. Preserve the last batch's trigger-return, label fade, blur, pagination, actual source selection and distinct measurement touch target.
+
+Finished source scope: ChapterResolution, ChapterSourceOrbit, ChapterSourcePicker and ChapterDownloadSourceSheet. This is one latest-main cloud commit with a lease and normal CI-trigger-only delivery; no tests/local builds/browser/device/source-service probes or added review gate. Parent200 Android43536577395 was observed successful and native43536577360 still in progress at this checkpoint; neither proves this new batch. Actual automatic-reading latency, source availability and phone hierarchy remain pending current-artifact feedback.
+
 ## Source return and detail arrival · 2026-11-14 (SOURCE-RETURN-20261114 / DETAIL-ARRIVAL-20261114)
 
 Current raw user requests (exact message IDs unavailable): “去把来源图标的点击收起后的动画做好啊现在收起的动画很差”; follow-up: “点进漫画详情页的动画做的也不好不够流畅以及会有跳动”. The follow-up adds detail arrival to this same finished batch.

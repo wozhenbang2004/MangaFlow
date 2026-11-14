@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -115,7 +116,7 @@ internal fun ChapterSourceOrbit(
     onPresenceChange: (Boolean) -> Unit = {},
     hasStatus: Boolean = false,
     status: @Composable () -> Unit = {},
-    item: @Composable (index: Int, modifier: Modifier, dismiss: () -> Unit, reveal: () -> Float) -> Unit,
+    item: @Composable (index: Int, modifier: Modifier, dismiss: () -> Unit, reveal: () -> Float, active: Boolean) -> Unit,
 ) {
     val sourceAnchor = remember(identity) { anchor }
     val motion = LocalMotionEnabled.current
@@ -181,7 +182,7 @@ internal fun ChapterSourceOrbit(
                 val height = with(density) { maxHeight.toPx() }
                 val edge = with(density) { 8.dp.toPx() }
                 val availableHeight = (maxHeight - 16.dp).coerceAtLeast(1.dp)
-                val rowHeight = (44f + 28f * (density.fontScale - 1f).coerceAtLeast(0f)).dp
+                val rowHeight = 44.dp * density.fontScale.coerceAtLeast(1f)
                 val railWidth = minOf(152.dp * density.fontScale.coerceIn(1f, 1.3f),
                     (maxWidth - 16.dp).coerceAtLeast(1.dp))
                 val railWidthPx = with(density) { railWidth.toPx() }
@@ -246,7 +247,7 @@ internal fun ChapterSourceOrbit(
                                 translationX = (if (placeLeft) -edge else edge) *
                                     sin(p * PI).toFloat() * (slot - (slots - 1) / 2f) / slots.coerceAtLeast(1)
                             }
-                        if (slot < visibleCount) item(first + slot, modifier, close, reveal)
+                        if (slot < visibleCount) item(first + slot, modifier, close, reveal, canInteract)
                         else {
                             val interaction = remember { MutableInteractionSource() }
                             Row(modifier.clip(RoundedCornerShape(10.dp))
@@ -321,6 +322,7 @@ internal fun ChapterSourceDisc(
 ) {
     val interaction = remember(variant.storageId) { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
     Row(modifier.clip(RoundedCornerShape(10.dp))
         .combinedClickable(enabled = enabled || onInspect != null,
             interactionSource = interaction, indication = null, role = Role.Button,
@@ -349,11 +351,11 @@ internal fun ChapterSourceDisc(
         }
         Column(Modifier.weight(1f).padding(start = 6.dp)
             .graphicsLayer { alpha = ((revealProgress() - .3f) / .7f).coerceIn(0f, 1f) }) {
-            Text(variant.sourceName, color = colors.onSurface, fontSize = 11.sp, lineHeight = 14.sp,
+            Text(variant.sourceName, color = colors.onSurface, fontSize = 13.sp, lineHeight = 16.sp,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (secondary.isNotBlank()) Text(secondary, color = colors.onSurfaceVariant,
-                fontSize = 9.sp, lineHeight = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                fontSize = 10.sp, lineHeight = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             resolution?.let { sample ->
                 val resolutionInteraction = remember(variant.storageId) { MutableInteractionSource() }
                 val configuration = LocalViewConfiguration.current
@@ -367,7 +369,7 @@ internal fun ChapterSourceDisc(
                 CompositionLocalProvider(LocalViewConfiguration provides inlineTargets) {
                     // Always consume its own tap, including while busy/unavailable;
                     // this never delegates to source selection.
-                    Row(Modifier.fillMaxWidth().height(14.dp)
+                    Row(Modifier.fillMaxWidth().height(14.dp * fontScale)
                         .clickable(interactionSource = resolutionInteraction, indication = null,
                             role = Role.Button,
                             onClickLabel = if (sample.known) "重新读取原图尺寸" else "读取原图尺寸",
@@ -387,14 +389,15 @@ internal fun ChapterSourceDisc(
                         horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                         if (sample.busy) MotionBusyIndicator(Modifier.size(9.dp),
                             color = colors.onSurfaceVariant, strokeWidth = 1.dp)
+                        else if (sample.error != null && sample.canMeasure)
+                            Icon(Icons.Outlined.Refresh, null, Modifier.size(10.dp), tint = colors.onSurfaceVariant)
                         if (sample.known) {
                             Text(sample.compactLabel, color = colors.onSurfaceVariant,
                                 style = mangaMetricValueStyle(12.sp, 14.sp),
                                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                         } else Text(when {
                             sample.busy -> "读取中"
-                            sample.error != null && sample.canMeasure -> "重试尺寸"
-                            sample.canMeasure -> "读取尺寸"
+                            sample.error != null -> "读取失败"
                             else -> "尺寸未知"
                         }, color = colors.onSurfaceVariant, fontSize = 12.sp, lineHeight = 14.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)

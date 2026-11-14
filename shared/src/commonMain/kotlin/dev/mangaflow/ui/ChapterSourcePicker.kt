@@ -215,7 +215,7 @@ internal fun ChapterSourcePicker(
             if (!error.isNullOrBlank()) Text(error, color = MaterialTheme.colorScheme.error,
                 fontSize = 12.sp, lineHeight = 18.sp)
             inspected?.let { Text(it, color = DetailSecondary, fontSize = 11.sp, lineHeight = 17.sp) }
-        }) { index, modifier, _, reveal ->
+        }) { index, modifier, _, reveal, sourceActive ->
         val variant = variants[index]
         val peers = variants.filter { it.sourceId == variant.sourceId }
         val selected = variant.storageId == frozen.id
@@ -227,7 +227,8 @@ internal fun ChapterSourcePicker(
         val resolution = rememberChapterResolution(
             repository = repository.takeIf { sourceMangaId != null },
             mangaId = sourceMangaId.orEmpty(), chapterId = variant.storageId,
-            entry = entry, declaredPages = variant.pageCount)
+            entry = entry, declaredPages = variant.pageCount,
+            autoMeasure = true, active = sourceActive)
         val details = listOfNotNull(
             variant.language.takeIf(String::isNotBlank),
             variant.edition.takeIf(String::isNotBlank),

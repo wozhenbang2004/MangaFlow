@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Current batch: automatic source dimensions · 2026-11-14
+
+SOURCE-AUTO-SIZE-20261114 in DESIGN.md records the raw request, explicit replacement of the previous manual-only rule, hierarchy and evidence limits. Both read/download source disclosures automatically reuse exact-source dimensions or read one original page per visible variant after readiness. Keep two concurrent operations, cancellation through exit/pagination, one completed automatic attempt and separate explicit retry. Title13sp/dimensions12sp/supporting10sp retain44dp normal rows and scale safely with large type; no additional panel or visible“样本”.
+
+Scope is the four named source UI files plus these existing records. The prior source-return/detail-arrival batch315e7c26 is already on main: preserve it and do not resubmit it. Parent200 Android43536577395 is successful; native43536577360 was in progress. Root integrates this new complete batch once with an expected-head lease, confirms normal CI trigger and leaves actual device/source acceptance to user feedback. No tests/local builds/service/device/browser probes or extra review gate.
+
 ## Current batch: source return / detail arrival · 2026-11-14
 
 User's two active animation complaints and implementation/acceptance live in DESIGN.md SOURCE-RETURN-20261114 / DETAIL-ARRIVAL-20261114. Source/read/download/rating exits now retain their flight, return to the trigger, separate label/glyph finishing and share the reverseable spring/blur. Detail arrival uses a stable navigation target/live payload, matched-cover timing without a competing route slide, same-frame natural-height measurement and a stable entry frame that settles to the true poster ratio after arrival.
