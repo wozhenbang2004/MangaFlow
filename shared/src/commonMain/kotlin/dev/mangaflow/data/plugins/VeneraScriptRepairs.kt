@@ -56,6 +56,12 @@ internal fun repairVeneraScript(code: String, metadata: JSONObject): Pair<String
         }
     }
     if (metadata.optString("key") == "wnacg" && metadata.optString("version") == "1.0.6") {
+        val refresh = "if (this.loadSetting('refreshDomainsOnStart')) await this.refreshDomains(false)"
+        if (result.split(refresh).size == 2) {
+            result = result.replace(refresh, "if (this.loadSetting('refreshDomainsOnStart') && String(this.loadSetting('domainSelection') ?? '0') !== '0') await this.refreshDomains(false)")
+            repairs.put(JSONObject().put("id", "wnacg-1.0.6-custom-domain-startup")
+                .put("reason", "The selected custom domain does not use the remote domain list; avoid fetching it for every isolated script operation."))
+        }
         val original = "cover = 'https:' + cover\n            cover = cover.substring(0, 6) + cover.substring(8)"
         if (result.split(original).size == 2) {
             result = result.replace(original, "cover = new URL(cover, this.baseUrl).href")

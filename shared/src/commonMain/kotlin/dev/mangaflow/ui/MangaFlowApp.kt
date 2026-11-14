@@ -313,6 +313,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     LaunchedEffect(account.profile?.username) { copySyncOpen = false; copySyncFocus = null }
     val update by model.updates.state.collectAsStateWithLifecycle()
     var restrictedMode by remember { mutableStateOf(false) }
+    LaunchedEffect(restrictedMode) { if (restrictedMode) model.starterSources.start() }
     var profileSourcesOpen by remember { mutableStateOf(false) }
     var sourceDetailsId by remember { mutableStateOf<String?>(null) }
     var sourceDetailsManga by remember { mutableStateOf<Manga?>(null) }
@@ -602,6 +603,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         model.bodySources, drawerBackdrop, model.sourcePlugins,
         onDismiss = { sourceSettingsOpen = false }, importAsAdult = restrictedMode,
         repository = model.repository,
+        starters = model.starterSources,
     )
     sourceDetailsId?.let { id -> sourceEntries.firstOrNull { it.source.id == id && it.isInstalled && !it.removed }?.let { entry ->
         SourceCapabilityDetailsSheet(entry.source, model.repository, model.sourcePlugins, drawerBackdrop,
@@ -649,7 +651,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 }
                 DiscoverySearchResults(browse, expanded = true, active = true,
                     sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
-                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }) } } else null,
+                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
                     maxHeight = panelHeight, repository = model.repository,
                     onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
                     onOpen = { manga -> selectedCover = null; dismiss(); model.openManga(manga) },
@@ -1191,7 +1193,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
                                                 onManageSources = if (restrictedMode) manageProfileSources else null,
                                                 sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
-                                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }) } } else null,
+                                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
                                                 onOpen = { model.openManga(it) },
                                                 isFavorite = { manga -> favorites.any { it.id == manga.id } },
                                                 onToggleFavorite = model::toggleFavorite,
@@ -1203,7 +1205,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                                 DiscoverySearchResults(
                                                     state = browse, expanded = true, active = rootActive,
                                                     sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
-                                                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }) } } else null,
+                                                        model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
                                                     maxHeight = maxHeight, repository = model.repository,
                                                     backdrop = searchBackdrop, scopeInToolbar = true,
                                                     desktopMainContent = true,
@@ -1463,7 +1465,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         ) { maxHeight, searchActive ->
                             DiscoverySearchResults(
                                 sourceControls = if (restrictedMode) { { SourceCapabilityBrowseControls(scopedBrowse,
-                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }) } } else null,
+                                    model.repository, manageProfileSources, { id -> sourceDetailsManga = null; sourceDetailsId = id }, model.starterSources) } } else null,
                                 state = browse, expanded = searchExpanded, active = searchActive,
                                 scopeInToolbar = true,
                                 maxHeight = maxHeight, repository = model.repository,

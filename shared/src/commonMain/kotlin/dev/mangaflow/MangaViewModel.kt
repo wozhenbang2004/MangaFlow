@@ -273,6 +273,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         catalogStore = ReaderCatalogStore(application))
     val bodySources = BodySourceRegistry(application, repository.sources)
     val sourcePlugins = SourcePluginStore.get(application)
+    internal val starterSources = dev.mangaflow.data.plugins.StarterSourceInstaller(application, sourcePlugins, viewModelScope)
     private val pluginSourceSync = Mutex()
     val library = LibraryStore(application)
     val downloads = DownloadStore.get(application)

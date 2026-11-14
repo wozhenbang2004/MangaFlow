@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.plugins.SourcePluginStore
+import dev.mangaflow.data.plugins.StarterSourceInstaller
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.storage.BodySourceRegistryEntry
 import dev.mangaflow.ui.motion.LocalMotionEnabled
@@ -83,6 +84,7 @@ internal fun BodySourceSettingsSheet(
     onDismiss: () -> Unit,
     importAsAdult: Boolean = false,
     repository: UnifiedMangaRepository? = null,
+    starters: StarterSourceInstaller? = null,
 ) {
     val scriptImportSupported = true
     val entries by registry.entries.collectAsStateWithLifecycle()
@@ -162,6 +164,9 @@ internal fun BodySourceSettingsSheet(
                 MotionIconButton(onClick = dismiss) {
                     Icon(Icons.Outlined.Close, "关闭漫画源设置", Modifier.size(20.dp))
                 }
+            }
+            if (importAsAdult) starters?.let { installer ->
+                Box(Modifier.padding(horizontal = 20.dp)) { StarterSourcePreparation(installer) }
             }
             AnimatedVisibility(showHelp,
                 enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) +

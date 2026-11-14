@@ -5,6 +5,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.Job
 import androidx.compose.foundation.background
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.selection.toggleable
@@ -39,6 +45,7 @@ import dev.mangaflow.data.Manga
 import dev.mangaflow.data.SourceHealth
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.plugins.SourcePluginStore
+import dev.mangaflow.data.plugins.StarterSourceInstaller
 import dev.mangaflow.data.sources.*
 import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.ui.motion.*
@@ -52,6 +59,7 @@ internal fun SourceCapabilityBrowseControls(
     repository: UnifiedMangaRepository,
     onSources: () -> Unit,
     onInspect: (String) -> Unit,
+    starters: StarterSourceInstaller? = null,
 ) {
     val current by controller.controls.collectAsStateWithLifecycle()
     val browse by controller.state.collectAsStateWithLifecycle()
@@ -65,6 +73,7 @@ internal fun SourceCapabilityBrowseControls(
     val filters = if (browse.isSearch) current.searchFilters else current.feeds.firstOrNull { it.id == current.feedId }?.filters.orEmpty()
     val sourceName = current.sources.firstOrNull { it.id == current.selectedSource }?.name ?: "全部来源"
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        starters?.let { StarterSourcePreparation(it) }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             MotionTextButton(onClick = onSources, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
                 Text(sourceName, style = MaterialTheme.typography.labelLarge)
@@ -198,6 +207,26 @@ internal fun SourceCapabilityBrowseControls(
             }
         }
     } }
+}
+
+@Composable
+internal fun StarterSourcePreparation(installer: StarterSourceInstaller) {
+    val state by installer.state.collectAsStateWithLifecycle()
+    val delayed = rememberDelayedBusy(state.running)
+    val motion = LocalMotionEnabled.current
+    AnimatedVisibility(delayed || state.error != null,
+        enter = fadeIn(tween(if (motion) MangaMotion.Quick else 0)) + expandVertically(tween(if (motion) MangaMotion.Content else 0)),
+        exit = fadeOut(tween(if (motion) MangaMotion.Quick else 0)) + shrinkVertically(tween(if (motion) MangaMotion.Content else 0))) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (state.running) MotionBusyIndicator(Modifier.size(13.dp), strokeWidth = 1.5.dp)
+        Text(state.error ?: (state.phase + (state.progress?.let { " · $it%" } ?: " · ${state.completed}/${state.total}")),
+            Modifier.weight(1f), fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (state.running) MotionTextButton(onClick = installer::cancel) { Text("暂停", fontSize = 11.sp) }
+        else if (state.error != null) MotionTextButton(onClick = { installer.start(retry = true) }) { Text("重试", fontSize = 11.sp) }
+    }
+    }
 }
 
 @Composable

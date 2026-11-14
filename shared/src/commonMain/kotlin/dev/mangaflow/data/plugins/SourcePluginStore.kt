@@ -292,6 +292,31 @@ class SourcePluginStore constructor(context: PlatformContext, val runtime: Javas
         } }
     }
 
+    /** Installation history includes explicit removal; provisioning never reverses that choice. */
+    internal suspend fun hasSourceHistory(sourceId: String): Boolean = withContext(Dispatchers.IO) {
+        ready.await()
+        mutex.withLock {
+            check(mutableLoadError.value == null) { "请先恢复来源存储，再准备精选来源。" }
+            descriptors.has(sourceId) || mutableInstalled.value.any { it.sourceId == sourceId }
+        }
+    }
+
+    internal suspend fun installIfUnseen(bundle: ScriptSourcePackage): Boolean {
+        if (hasSourceHistory(bundle.sourceId)) return false
+        val checked = withContext(Dispatchers.IO) { copyPackage(bundle).also(::validatePackage) }
+        runtime.validate(checked)
+        return withContext(Dispatchers.IO) { mutex.withLock {
+            currentCoroutineContext().ensureActive()
+            check(mutableLoadError.value == null) { "请先恢复来源存储，再准备精选来源。" }
+            if (descriptors.has(checked.sourceId) || mutableInstalled.value.any { it.sourceId == checked.sourceId })
+                return@withLock false
+            val next = mutableInstalled.value + checked
+            validatePackages(next)
+            commit(next, JSONObject(descriptors.toString()).put(checked.sourceId, descriptor(checked)))
+            true
+        } }
+    }
+
     suspend fun remove(sourceId: String) {
         ready.await()
         withContext(Dispatchers.IO) { mutex.withLock {

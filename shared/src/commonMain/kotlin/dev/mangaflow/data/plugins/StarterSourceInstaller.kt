@@ -1,0 +1,147 @@
+package dev.mangaflow.data.plugins
+
+import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.PlatformKind
+import dev.mangaflow.platform.platformKind
+import dev.mangaflow.platform.sha256
+import dev.mangaflow.data.SourceException
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.reader.panels.PanelRuntimeId
+import dev.mangaflow.reader.panels.PanelRuntimeStore
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+
+internal data class StarterSourceState(val running: Boolean = false, val phase: String = "",
+    val completed: Int = 0, val total: Int = 2, val progress: Int? = null,
+    val preparingEngine: Boolean = false, val error: String? = null)
+
+/** Tiny pinned references, not redistributed source code, covers, manga or native libraries. */
+internal class StarterSourceInstaller(private val context: PlatformContext,
+    private val store: SourcePluginStore, private val scope: CoroutineScope) {
+    private val control = SynchronizedObject()
+    private var attempted = false
+    private var job: Job? = null
+    private val mutableState = MutableStateFlow(StarterSourceState())
+    val state = mutableState.asStateFlow()
+
+    fun start(retry: Boolean = false): Unit = synchronized(control) {
+        if (job?.isCompleted == false || attempted && !retry) return@synchronized
+        attempted = true
+        val next = scope.launch(start = CoroutineStart.LAZY) { install() }
+        job = next
+        next.start()
+        Unit
+    }
+
+    fun cancel() {
+        synchronized(control) { job?.cancel() }
+        if (mutableState.value.preparingEngine && platformKind == PlatformKind.ANDROID)
+            PanelRuntimeStore.get(context).cancel(PanelRuntimeId.QUICKJS)
+    }
+
+    private suspend fun install() {
+        mutableState.value = StarterSourceState(running = true, phase = "正在准备精选来源")
+        try {
+            store.ready.await()
+            val pending = STARTERS.filterNot { store.hasSourceHistory(it.sourceId) }
+            mutableState.value = mutableState.value.copy(completed = STARTERS.size - pending.size)
+            if (pending.isEmpty()) return
+            prepareEngine()
+            val failed = mutableListOf<String>()
+            for (source in pending) {
+                currentCoroutineContext().ensureActive()
+                // A manual import/removal while another source downloaded takes precedence.
+                if (!store.hasSourceHistory(source.sourceId)) {
+                    mutableState.value = mutableState.value.copy(phase = "正在安装 ${source.title}",
+                        progress = null, preparingEngine = false)
+                    try {
+                        withTimeout(30_000L) { withContext(Dispatchers.IO) {
+                            val pinnedUrl = "$PINNED_BASE/${source.file}"
+                            val code = fetchPluginText(context, pinnedUrl)
+                            val bytes = code.encodeToByteArray()
+                            require(bytes.size == source.bytes && digest(bytes) == source.sha256) { "精选源脚本校验失败。" }
+                            val liveUrl = "$UPDATE_BASE/${source.file}"
+                            val candidate = store.preview(code, pinnedUrl).single { it.metadata.optString("key") == source.key }
+                                .copy(codeUrl = liveUrl)
+                            val prepared = store.prepare(candidate)
+                            require(prepared.sourceId == source.sourceId && prepared.metadata.optBoolean("isAdult", false)) {
+                                "精选源身份或分区不一致。"
+                            }
+                            store.installIfUnseen(prepared)
+                        } }
+                    } catch (_: TimeoutCancellationException) { failed += source.title + " · 下载或校验超时" }
+                    catch (cancel: CancellationException) { throw cancel }
+                    catch (failure: Exception) { failed += source.title + " · " + failureReason(failure) }
+                }
+                mutableState.value = mutableState.value.copy(completed = mutableState.value.completed + 1)
+            }
+            mutableState.value = mutableState.value.copy(phase = "精选来源准备完成",
+                error = failed.takeIf { it.isNotEmpty() }?.joinToString("；"))
+        } catch (_: TimeoutCancellationException) {
+            mutableState.value = mutableState.value.copy(error = "脚本组件准备超时，可重试或在来源管理中查看。")
+        } catch (cancel: CancellationException) {
+            mutableState.value = mutableState.value.copy(error = "精选来源安装已暂停，已装来源保留。")
+            throw cancel
+        } catch (_: Exception) {
+            mutableState.value = mutableState.value.copy(error = "精选来源暂未准备完成，请检查来源存储与脚本组件后重试。")
+        } finally {
+            mutableState.value = mutableState.value.copy(running = false, preparingEngine = false, progress = null)
+        }
+    }
+
+    private suspend fun prepareEngine() {
+        if (platformKind != PlatformKind.ANDROID) return
+        val runtimes = PanelRuntimeStore.get(context)
+        val id = PanelRuntimeId.QUICKJS
+        if (runtimes.states.value[id]?.installed == true) return
+        mutableState.value = mutableState.value.copy(phase = "正在准备漫画源脚本组件", preparingEngine = true)
+        runtimes.download(id)
+        val ready = withTimeout(120_000L) {
+            runtimes.states.first { states ->
+                val status = states[id]
+                mutableState.value = mutableState.value.copy(progress = status?.progress?.let { (it * 100).toInt().coerceIn(0, 100) })
+                status != null && !status.downloading
+            }.getValue(id)
+        }
+        check(ready.installed && !ready.pendingRemoval) { "漫画源脚本组件尚未就绪。" }
+        mutableState.value = mutableState.value.copy(preparingEngine = false, progress = null)
+    }
+
+    private data class Starter(val key: String, val title: String, val file: String,
+        val sourceId: String, val bytes: Int, val sha256: String)
+
+    private companion object {
+        const val PINNED_BASE = "https://raw.githubusercontent.com/venera-app/venera-configs/a04e05591f7832f7166d6660546613c114d6738a"
+        const val UPDATE_BASE = "https://raw.githubusercontent.com/venera-app/venera-configs/main"
+        val STARTERS = listOf(
+            Starter("nhentai", "nhentai", "nhentai.js", "js_4121890e56c894baf221b16aaf5ec8adb85c", 58_970,
+                "0f68757f89d493926cbf4c039c256d34365d0639aaa6996acbcde7c162257982"),
+            Starter("wnacg", "WNACG", "wnacg.js", "js_ac54e53a451f4f84f635c7c6cfac9ecd2cdb", 32_774,
+                "545a6d818d012c1e5799d6aaf7ecd09798969acb840166ee7c56de6d02201df0"),
+        )
+        fun digest(bytes: ByteArray): String = sha256(bytes).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
+        fun failureReason(failure: Exception): String = when {
+            failure is DownloadRouteException -> "下载路由不可用"
+            failure is SourceException && failure.httpStatus != null -> "HTTP ${failure.httpStatus}"
+            failure.message.orEmpty().contains("校验") -> "文件校验失败"
+            Regex("网络|连接|下载|DNS", RegexOption.IGNORE_CASE).containsMatchIn(failure.message.orEmpty()) -> "下载失败"
+            Regex("脚本|声明|宿主|不兼容").containsMatchIn(failure.message.orEmpty()) -> "脚本不兼容"
+            else -> "安装未完成"
+        }
+    }
+}

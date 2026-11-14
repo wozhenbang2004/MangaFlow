@@ -1,5 +1,9 @@
 # MangaFlow · current work
 
+## Selected source provisioning · 2026-11-14
+
+User now explicitly requests a few quality sources installed by default without APK bloat. DESIGN SOURCE-STARTER-176 owns the raw request, pinned selection, byte/digest evidence, existing-component UX and limits. First adult entry prepares nhentai and WNACG automatically through the normal protected importer; scripts total91744 original bytes and are fetched into app data, while the APK includes only references and installer/UI code. Signed Android runtime remains optional/downloaded. Existing packages and descriptor tombstones win over defaults, including concurrent manual choices and damaged-store refusal. EH loadNext compatibility remains open, and no source/site/device runtime verification is claimed. Root submits one complete latest-main lease and confirms existing CI trigger; no tests/local builds/probes.
+
 ## Fractional chapter alignment and source badges · 2026-11-14
 
 Active feedback and source contract are DESIGN SOURCE-ALIGN-20261114-01–04 (uploaded1000121724/1725; exact message/build IDs unavailable). Visible889 chapters equals the five linked source counts summed; source inspection found the integer-only chapter-system gate despite exact-decimal parser/keys. Root's bounded correction allows shared full fractional numbers as evidence across three distinct integer portions, preserves actual complete keys and the existing work/native/edition/ambiguity/split rules, and uses normal cached reprojection to recover previous unverified links. The44dp source overview distinguishes actual aligned chapter cells from a work association, without adding a row or changing marks independently of variants.
