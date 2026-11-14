@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -136,12 +135,6 @@ internal fun DetailReadingDock(
                 cornerRadius = lerp(28.dp, 18.dp, collapse), role = GlassSurfaceRole.READING_DOCK,
                 interactionSource = interaction, trackPointer = true,
                 softCard = true) {
-                Column(Modifier.fillMaxWidth()) {
-                cloudProgress?.let { hint ->
-                    CopyProgressHint(hint, hasLocalProgress = resume != null, active = active,
-                        revealFraction = (1f - collapse * 2f).coerceIn(0f, 1f),
-                        onAdopt = onAdoptCloudProgress, onRetry = onRetryCloudProgress)
-                }
                 DesktopContextMenuArea(desktopActions) {
                 Row(Modifier.fillMaxWidth()
                     .combinedClickable(interactionSource = interaction, indication = null, role = Role.Button,
@@ -162,7 +155,7 @@ internal fun DetailReadingDock(
                         }
                     }).motionPress(interaction, enabled = canRead, pressedScale = .985f)
                     .heightIn(min = minimumHeight)
-                    .padding(horizontal = lerp(20.dp, 10.dp, collapse), vertical = 4.dp)
+                    .padding(horizontal = lerp(16.dp, 10.dp, collapse), vertical = 4.dp)
                     .semantics(mergeDescendants = true) {
                         contentDescription = listOf(actionTitle, chapterTitle, subtitle)
                             .filter(String::isNotBlank).joinToString("，")
@@ -178,23 +171,11 @@ internal fun DetailReadingDock(
                         Icon(Icons.Filled.PlayArrow, null, tint = progressColor,
                             modifier = Modifier.size(lerp(22.dp, 16.dp, collapse)))
                     }
-                    Spacer(Modifier.width(lerp(14.dp, 6.dp, collapse)))
-                    Column(Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp * (1f - collapse))) {
-                        Text(chapterTitle.ifBlank { if (loading) "正在读取章节" else "暂无可读章节" },
-                            color = DetailForeground, fontSize = (15f - 3f * collapse).sp,
-                            lineHeight = (22f - 4f * collapse).sp, fontWeight = FontWeight.Medium,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (canRead && collapse < 1f) {
-                            val lineHeight = with(density) { 16.sp.toDp() }
-                            Box(Modifier.height(lineHeight * (1f - collapse)).clipToBounds()
-                                .graphicsLayer { alpha = (1f - collapse * 2f).coerceIn(0f, 1f) }) {
-                                Text(actionTitle,
-                                    color = DetailSecondary, fontSize = 11.sp, lineHeight = 16.sp,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                    }
+                    Spacer(Modifier.width(lerp(10.dp, 6.dp, collapse)))
+                    Text(chapterTitle.ifBlank { if (loading) "正在读取章节" else "暂无可读章节" },
+                        Modifier.weight(1f), color = DetailForeground, fontSize = (15f - 3f * collapse).sp,
+                        lineHeight = (22f - 4f * collapse).sp, fontWeight = FontWeight.Medium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (percent != null && collapse < 1f) {
                         Spacer(Modifier.width(12.dp * (1f - collapse)))
                         Box(Modifier.width(42.dp * fontScale * (1f - collapse)).clipToBounds()
@@ -204,11 +185,15 @@ internal fun DetailReadingDock(
                                 fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
                         }
                     }
+                    cloudProgress?.let { hint ->
+                        CopyProgressHint(hint, active = active,
+                            revealFraction = (1f - collapse * 2f).coerceIn(0f, 1f),
+                            onAdopt = onAdoptCloudProgress, onRetry = onRetryCloudProgress)
+                    }
                     if (desktop) Box(Modifier.size(32.dp)) {
                         DesktopMoreButton(desktopActions, label = "阅读选项")
                     }
                 }
-            }
             }
             }
         }

@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Settings dialog stability and reading-dock density · 2026-11-14
+
+Current user raw feedback and screenshots 1000121729/1730 are recorded in DESIGN under SETTINGS-STABLE-20261114-01–02 / DOCK-MINIMAL-20261114-01–02. Scope is the shared Android dialog window policy and existing detail dock/Copy status presentation; no reading, network-route or account synchronization semantics change. Baseline 5263d66 retains the source protocol, reader recovery and iOS compiler-memory work already published.
+
+The shared policy removes the wrap-content native height feedback while retaining natural panel size, current width, outside/Back/IME behavior and existing Compose motion. Redundant window-attribute writes are guarded. The dock becomes one row with compact source/status/compare glyphs and a single chapter label; repeated progress/action sentences leave the visible surface while full semantics and the explicit reviewed comparison remain. Root is sole writer. Independent read-only review of the host/disclosure chain and integrated diff found no confirmed blocker after correcting the action semantics/imports and checking the single call site. Source and upstream API review only, no tests/local builds/device or service probes. Submit one complete latest-main expected-head batch, confirm ordinary CI activation and leave installed animation/density acceptance pending actual feedback. Do not replay older published feature batches or add a status-only push.
+
 ## E-Hentai and missing ComicSource interfaces · 2026-11-14
 
 User: “不接通的接口那我们就改造它啊或者改造我们适配层啊”. DESIGN SOURCE-COMPAT-177–180 extends SOURCE-STARTER-176 and the existing source-host batch. Baseline b3957fe, integrated on ab7f06b, retains all concurrent source-choice/reader recovery and iOS compiler-memory work. The shared bridge now recognizes loadNext discovery/search/category/ranking/site-favorites, while ScriptBodySource owns bounded logical-page continuations by request and source session. Existing numeric loaders remain. Multi-select filters preserve actual upstream defaults, canonical selection arrays and one confirmed sheet submission. Unchanged source adapters retain their live cursors when another package is installed.

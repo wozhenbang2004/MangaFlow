@@ -1,5 +1,18 @@
 # MangaFlow detail · 2026-11-12
 
+## Stable settings dialogs and minimal reading dock · 2026-11-14
+
+User: “图二反正设置里的这些弹窗都有问题总是疯狂抖动收缩或是动画很烂图一那个不要这么多文字啊，以及那个拷贝读到哪和比较进度，直接图标，微型元素和最小信息表达就行了啊”. Evidence: screenshots 1000121729.jpg (Monster reading dock) and 1000121730.jpg (network settings panel with header/tabs/footer but almost no body); installed version shown is 0.1.253. Exact message ID unavailable. This supersedes the dock's persistent cloud-progress sentence/action row and duplicate start/continue caption; existing reading and reviewed-merge behavior remain.
+
+| ID | Adopted correction and observable acceptance |
+| --- | --- |
+| SETTINGS-STABLE-20261114-01 | Android's shared dialog policy uses a full available-height native window while the actual Compose panel remains naturally sized and centered. Preserve the requested width, native outside/Back handling, IME/insets, current retained presence/reversal, and immediate focus/touch release on closing. Child panels must not feed a shrinking wrap-content host back through their viewport percentages. Change native window attributes only when their values differ. No fixed full-height surface, second backdrop, new style or blanket animation removal. |
+| SETTINGS-STABLE-20261114-02 | Keep the existing single network scene size owner and disclosure motion. Inspect network tabs, proxy editor, experience disclosures, font/wallpaper panels, rapid reversal, outside/Back and keyboard resize on the resulting artifact. The screenshot and source chain support a shared Android host correction; source review does not establish every panel's measured smoothness. |
+| DOCK-MINIMAL-20261114-01 | One reading row: existing play/progress glyph, actual chapter title, actual saved percentage where available, and a compact Copy mark/action. Remove the separate cloud-progress text row and visible start/continue caption; retain their complete chapter/action/status descriptions for accessibility and existing desktop tooltips. Copy busy/retry/compare/adopted states use existing micro glyphs and a 44dp target; compare still opens the same explicit diff, never silently adopts or uploads progress. Preserve eligibility and independent local/cloud cursors. |
+| DOCK-MINIMAL-20261114-02 | Reuse the current glass dock, BodySourceMark, MotionIconButton, state-swap and collapse/input gates. Glyphs are 13–18dp while controls retain their hit area. Copy controls collapse horizontally with the dock and cannot claim a second text line or retain focus when hidden. Long press/upward drag reading options and desktop actions remain. Narrow/large-text titles ellipsize with complete accessible descriptions; no new widget library or replacement navigation. |
+
+Diagnosis used the actual shared/native source and AndroidX DialogLayout/Scroll at 6b370d7ad9fdb8e380eacab2d3f178b9f263eec4: wrap-content host constraints can feed the percentage-capped pane; native MATCH_PARENT height leaves natural-child centering/outside bounds intact. The inspected upstream source is not a claim about an independently inspected resolved sources.jar or a device run. No independent Disclosure loop was found in its vertically scrolling path. One complete latest-main source batch and normal CI activation only; no tests/local builds/device or service probes. Installed height stability, transition feel and final density remain pending actual user evidence.
+
 ## Source protocol continuation · 2026-11-14 (SOURCE-COMPAT-177–180)
 
 User correction: “不接通的接口那我们就改造它啊或者改造我们适配层啊”. Exact message ID unavailable. This supersedes excluding E-Hentai merely because its current script uses an unimplemented interface. Keep SOURCE-STARTER-176 and SOURCE-HOST-166–175; extend the shared host rather than introduce another reader or adult navigation.

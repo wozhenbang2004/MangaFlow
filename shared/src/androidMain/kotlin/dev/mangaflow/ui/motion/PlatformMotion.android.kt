@@ -91,8 +91,19 @@ internal actual fun rememberNativeFeelFeedback(): (FeelEvent) -> Boolean {
 internal actual fun MotionDialogWindowPolicy(visible: Boolean) {
     val window = (LocalView.current.parent as? DialogWindowProvider)?.window
     SideEffect {
-        window?.setWindowAnimations(0)
-        val flags = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        if (visible) window?.clearFlags(flags) else window?.addFlags(flags)
+        window?.let { target ->
+            val attributes = target.attributes
+            if (attributes.windowAnimations != 0) target.setWindowAnimations(0)
+            // A wrap-content window feeds the panel's measured height back into its
+            // percentage viewport limit. Keep the host stable; its child still wraps
+            // naturally, and DialogLayout retains its centering/outside-hit bounds.
+            if (attributes.height != WindowManager.LayoutParams.MATCH_PARENT) {
+                target.setLayout(attributes.width, WindowManager.LayoutParams.MATCH_PARENT)
+            }
+            val mask = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            val flags = target.attributes.flags and mask
+            if (visible && flags != 0) target.clearFlags(mask)
+            else if (!visible && flags != mask) target.addFlags(mask)
+        }
     }
 }
