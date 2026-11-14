@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
@@ -16,6 +18,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
@@ -33,6 +37,8 @@ import dev.mangaflow.account.CopySyncDifferenceKind
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.ui.motion.*
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 private data class CopyReviewChoice(val evidence: String, val choice: CopyMergeChoice)
 
@@ -52,7 +58,7 @@ private fun copyProgressDisplay(value: String): String {
     return decoded + if (split < 0) "" else value.substring(split)
 }
 
-/** Adapt the existing Copy/Ovio workspace: one work, two sides, explicit staged changes. */
+/** Existing Ovio/beUI workspace, with inline tools and explicit per-field staged changes. */
 @Composable
 internal fun CopyShelfSyncSheet(
     visible: Boolean,
@@ -71,10 +77,13 @@ internal fun CopyShelfSyncSheet(
     val colors = MaterialTheme.colorScheme
     val motion = LocalMotionEnabled.current
     var choices by remember(state.owner) { mutableStateOf<Map<String, CopyReviewChoice>>(emptyMap()) }
+    var expandedWorks by remember(state.owner) { mutableStateOf<Set<String>>(emptySet()) }
     var filter by remember(state.owner) { mutableIntStateOf(0) }
     var onlySelected by remember(state.owner) { mutableStateOf(false) }
     var showScope by remember(state.owner) { mutableStateOf(false) }
     var bulkOpen by remember(state.owner) { mutableStateOf(false) }
+    val toolScope = rememberCoroutineScope()
+    var toolScroll by remember(state.owner) { mutableStateOf<Job?>(null) }
     val allList = key(state.owner) { rememberLazyListState() }
     val favoriteList = key(state.owner) { rememberLazyListState() }
     val progressList = key(state.owner) { rememberLazyListState() }
@@ -84,12 +93,13 @@ internal fun CopyShelfSyncSheet(
         choices[difference.key]?.let { it.evidence == difference.reviewKey && difference.allows(it.choice) } == true
     }
     val selectedKeys = selected.mapTo(mutableSetOf()) { it.key }
-    // A refresh can temporarily withhold evidence. Reconcile after it settles, per field.
+    // A read-only refresh can temporarily withhold evidence. Reconcile only after it settles.
     LaunchedEffect(state.owner, state.differences, state.busy) {
         if (!state.busy) {
             choices = choices.filter { (key, staged) ->
                 rowsByKey[key]?.let { it.reviewKey == staged.evidence && it.allows(staged.choice) } == true
             }
+            expandedWorks = expandedWorks.intersect(state.differences.mapTo(mutableSetOf()) { it.manga.id })
             if (choices.isEmpty()) onlySelected = false
         }
     }
@@ -97,26 +107,32 @@ internal fun CopyShelfSyncSheet(
         if (visible && focusMangaId != null) {
             filter = 2
             onlySelected = false
+            expandedWorks = expandedWorks + focusMangaId
             progressList.scrollToItem(0)
         }
-        if (!visible) bulkOpen = false
+        if (!visible) { bulkOpen = false; toolScroll?.cancel() }
     }
-    val canChoose = visible && state.owner != null && state.checked && !state.busy
+    // Staging valid evidence is harmless during a read; apply must wait for the coordinator.
+    val canChoose = visible && state.owner != null && state.checked && !state.importing && !state.uploading
+    val canApply = canChoose && !state.checking
     val scoped = state.differences.filter {
         filter == 0 || filter == 1 && it.kind == CopySyncDifferenceKind.FAVORITE ||
             filter == 2 && it.kind == CopySyncDifferenceKind.PROGRESS
     }
     val bulkRows = if (onlySelected) scoped.filter { it.key in selectedKeys } else scoped
+    val activeList = if (onlySelected) selectedList else when (filter) {
+        1 -> favoriteList; 2 -> progressList; else -> allList
+    }
     val favorites = state.differences.count { it.kind == CopySyncDifferenceKind.FAVORITE }
     val progress = state.differences.count { it.kind == CopySyncDifferenceKind.PROGRESS }
     val summary = selected.groupingBy { difference ->
         if (choices[difference.key]?.choice == CopyMergeChoice.USE_LOCAL) difference.localActionLabel else difference.cloudActionLabel
-    }.eachCount().entries.joinToString(" · ") { it.key + " " + it.value + " 项" }
+    }.eachCount().entries.joinToString(" · ") { it.key + " " + it.value }
     val workingLabel = when {
-        state.importing -> "正在导入收藏…"
-        state.uploading && state.mergeTotal > 0 -> "已处理 " + state.mergeCompleted + " / " + state.mergeTotal + " 项"
-        state.uploading -> "正在核对所选项目…"
-        state.checking -> "正在读取拷贝…"
+        state.importing -> "正在导入收藏"
+        state.uploading && state.mergeTotal > 0 -> "已处理 " + state.mergeCompleted + " / " + state.mergeTotal
+        state.uploading -> "正在核对所选项"
+        state.checking -> "正在核对拷贝"
         else -> null
     }
 
@@ -129,28 +145,41 @@ internal fun CopyShelfSyncSheet(
         if (!canChoose) return
         choices = choices + bulkRows.filter { it.allows(choice) }
             .associate { it.key to CopyReviewChoice(it.reviewKey, choice) }
-        bulkOpen = false
     }
+    fun revealTools(opening: Boolean) {
+        toolScroll?.cancel()
+        if (opening) toolScroll = toolScope.launch {
+            if (motion) activeList.animateScrollToItem(0) else activeList.scrollToItem(0)
+        }
+    }
+    DisposableEffect(state.owner) { onDispose { toolScroll?.cancel() } }
 
     key(state.owner) {
         MotionDialog(visible, onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false),
             maximumWidth = 640.dp) {
             BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
-                val height = minOf(maxHeight, LocalMangaWindow.current.height * .88f, 680.dp)
+                val height = minOf(maxHeight, LocalMangaWindow.current.height * .88f, 720.dp)
+                val stackedSides = maxWidth - 32.dp < 260.dp * LocalDensity.current.fontScale
                 LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
                     role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
-                    // Natural height for a short comparison; only the list scrolls at the cap.
                     Column(Modifier.fillMaxWidth().heightIn(max = height)
                         .padding(horizontal = 16.dp, vertical = 8.dp)) {
                         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Sync, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
+                            Spacer(Modifier.width(8.dp))
                             Text("拷贝同步", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (state.busy) MotionIconButton(onClick = onCancel, enabled = visible,
-                                modifier = Modifier.size(44.dp), tooltip = "停止本次处理") {
-                                Icon(Icons.Outlined.Stop, "停止本次处理", Modifier.size(18.dp))
-                            } else MotionIconButton(onClick = onCheck, enabled = visible && state.owner != null,
-                                modifier = Modifier.size(44.dp), tooltip = "重新检查差异") {
-                                Icon(Icons.Outlined.Refresh, "重新检查差异", Modifier.size(18.dp))
+                            MotionIconButton(onClick = { showScope = !showScope; revealTools(showScope) }, enabled = visible,
+                                modifier = Modifier.size(44.dp), tooltip = "同步范围与说明") {
+                                Icon(Icons.Outlined.Info, "同步范围与说明", Modifier.size(18.dp))
+                            }
+                            MotionSwap(state.busy, Modifier.size(44.dp)) { busy ->
+                                MotionIconButton(onClick = if (busy) onCancel else onCheck,
+                                    enabled = visible && state.owner != null && busy == state.busy,
+                                    modifier = Modifier.size(44.dp), tooltip = if (busy) "停止本次处理" else "重新检查差异") {
+                                    Icon(if (busy) Icons.Outlined.Stop else Icons.Outlined.Refresh,
+                                        if (busy) "停止本次处理" else "重新检查差异", Modifier.size(18.dp))
+                                }
                             }
                             MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭对照") {
                                 Icon(Icons.Outlined.Close, "关闭对照", Modifier.size(20.dp))
@@ -159,53 +188,35 @@ internal fun CopyShelfSyncSheet(
                         MotionTabs(filter, listOf("全部 " + state.differences.size,
                             if (state.favoritesReady) "收藏 " + favorites else "收藏 —",
                             if (state.progressReady || progress > 0) "进度 " + progress else "进度 —"),
-                            onSelect = { if (visible) { filter = it; onlySelected = false; bulkOpen = false } },
-                            modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Underline,
-                            controlHeight = 40.dp, fontSize = 12.sp)
+                            onSelect = { if (visible) { toolScroll?.cancel(); filter = it; onlySelected = false; bulkOpen = false } },
+                            modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
+                            controlHeight = 44.dp, fontSize = 12.sp)
                         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (selected.isNotEmpty() || onlySelected) MotionTextButton(
-                                onClick = { if (visible) { if (!onlySelected) filter = 0; onlySelected = !onlySelected } }, enabled = visible,
-                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
-                            ) {
-                                Icon(if (onlySelected) Icons.Outlined.CheckCircle else Icons.Outlined.Checklist,
-                                    null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(5.dp))
-                                Text("已选 " + selected.size, fontSize = 12.sp)
-                            } else Text(scoped.map { it.manga.id }.distinct().size.toString() + " 部作品",
-                                style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                            Spacer(Modifier.weight(1f))
-                            Box {
-                                MotionTextButton(onClick = { if (visible) bulkOpen = !bulkOpen }, enabled = visible,
-                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
-                                    Text("批量", fontSize = 12.sp)
-                                    Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
-                                }
-                                CompactGlassPopover(bulkOpen && visible, backdrop, onDismiss = { bulkOpen = false },
-                                    maximumWidth = 256.dp) {
-                                    CompactMenuAction(Icons.Outlined.DoneAll, "当前列表均选本机",
-                                        enabled = canChoose && bulkRows.any { it.allows(CopyMergeChoice.USE_LOCAL) }) {
-                                        chooseShown(CopyMergeChoice.USE_LOCAL)
-                                    }
-                                    CompactMenuAction(Icons.Outlined.CloudDone, "当前列表均选拷贝",
-                                        enabled = canChoose && bulkRows.any { it.allows(CopyMergeChoice.USE_COPY) }) {
-                                        chooseShown(CopyMergeChoice.USE_COPY)
-                                    }
-                                    CompactMenuAction(Icons.Outlined.ClearAll, "清空选择", enabled = choices.isNotEmpty() && !state.busy) {
-                                        choices = emptyMap(); bulkOpen = false
-                                    }
-                                    CompactMenuAction(Icons.Outlined.Info, "同步范围与说明") {
-                                        showScope = !showScope; bulkOpen = false
-                                    }
-                                }
+                            MotionSwap(onlySelected, Modifier.weight(1f)) { reviewing ->
+                                Text(if (reviewing) "所选改动" else scoped.map { it.manga.id }.distinct().size.toString() + " 部 · " + scoped.size + " 项", Modifier.fillMaxWidth(),
+                                    style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            CopyShelfTool(selected.isNotEmpty() || onlySelected) {
+                            MotionTextButton(onClick = { if (visible) { toolScroll?.cancel(); if (!onlySelected) filter = 0; onlySelected = !onlySelected; bulkOpen = false } },
+                                enabled = visible && selected.isNotEmpty(),
+                                modifier = Modifier.semantics { contentDescription = "查看全部已选的 " + selected.size + " 项实际改动"; this.selected = onlySelected },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
+                                Icon(if (onlySelected) Icons.Outlined.CheckCircle else Icons.Outlined.Checklist, null, Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                MotionSwap(selected.size) { count -> Text(count.toString(), fontSize = 12.sp) }
+                            }
+                            }
+                            MotionIconButton(onClick = { if (visible) { bulkOpen = !bulkOpen; revealTools(bulkOpen) } }, enabled = visible,
+                                modifier = Modifier.size(44.dp).semantics { this.selected = bulkOpen }, tooltip = "批量选择当前列表") {
+                                Icon(Icons.Outlined.DoneAll, "批量选择当前列表", Modifier.size(19.dp))
                             }
                         }
-                        if (scoped.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 4.dp),
+                        if (bulkRows.isNotEmpty() && !stackedSides) Row(
+                            Modifier.fillMaxWidth().padding(start = 26.dp, top = 2.dp, bottom = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Spacer(Modifier.width(32.dp))
-                            Text("本机", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant)
-                            Text("拷贝", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant)
+                            CopySyncSideHeading("本机", Modifier.weight(1f), cloud = false)
+                            CopySyncSideHeading("拷贝", Modifier.weight(1f), cloud = true)
                         }
                         val scene = if (onlySelected) filter + 3 else filter
                         MotionTabContent(selected = scene, modifier = Modifier.weight(1f, fill = false).fillMaxWidth(),
@@ -222,22 +233,73 @@ internal fun CopyShelfSyncSheet(
                             val list = if (selectedOnly) selectedList else when (kindFilter) {
                                 1 -> favoriteList; 2 -> progressList; else -> allList
                             }
-                            LazyColumn(Modifier.fillMaxWidth().motionInputGate(visible && target == scene), state = list,
+                            val active = visible && target == scene
+                            LazyColumn(Modifier.fillMaxWidth().motionInputGate(active), state = list,
                                 contentPadding = PaddingValues(bottom = 8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                item(key = "inline-tools") {
+                                    Column {
+                                        CopyShelfReveal(bulkOpen && active) {
+                                            Column(Modifier.padding(bottom = 6.dp)) {
+                                                Text("选择当前列表要采用的一侧", style = MaterialTheme.typography.labelSmall,
+                                                    color = colors.onSurfaceVariant)
+                                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                    MotionTextButton(onClick = { chooseShown(CopyMergeChoice.USE_LOCAL) },
+                                                        enabled = canChoose && active && bulkRows.any { it.allows(CopyMergeChoice.USE_LOCAL) },
+                                                        modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                                        Icon(Icons.Outlined.PhoneAndroid, null, Modifier.size(16.dp))
+                                                        Spacer(Modifier.width(5.dp)); Text("本机", fontSize = 12.sp)
+                                                        Spacer(Modifier.width(4.dp))
+                                                        Text(bulkRows.count { it.allows(CopyMergeChoice.USE_LOCAL) }.toString(),
+                                                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                                    }
+                                                    MotionTextButton(onClick = { chooseShown(CopyMergeChoice.USE_COPY) },
+                                                        enabled = canChoose && active && bulkRows.any { it.allows(CopyMergeChoice.USE_COPY) },
+                                                        modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 6.dp)) {
+                                                        Icon(Icons.Outlined.CloudQueue, null, Modifier.size(16.dp))
+                                                        Spacer(Modifier.width(5.dp)); Text("拷贝", fontSize = 12.sp)
+                                                        Spacer(Modifier.width(4.dp))
+                                                        Text(bulkRows.count { it.allows(CopyMergeChoice.USE_COPY) }.toString(),
+                                                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                                    }
+                                                    MotionIconButton(onClick = { choices = choices - bulkRows.map { it.key }.toSet() },
+                                                        enabled = active && !state.importing && !state.uploading && bulkRows.any { it.key in selectedKeys },
+                                                        modifier = Modifier.size(44.dp), tooltip = "清除当前列表的选择") {
+                                                        Icon(Icons.Outlined.ClearAll, "清除当前列表的选择", Modifier.size(18.dp))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        CopyShelfReveal(showScope) {
+                                            Column(Modifier.padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                                Text("收藏按所选一侧调整。进度只决定本机从哪章继续，不回写拷贝。",
+                                                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                                Text("本机页内位置、历史与下载保留。只有实际阅读才向拷贝报告章节。",
+                                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                                if (state.progressUnavailableCount > 0) Text(
+                                                    state.progressUnavailableCount.toString() + " 部尚无可比较进度，不表示未读。",
+                                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                                if (state.localOnlyCount > 0) Text(
+                                                    "仅本机的 " + state.localOnlyCount + " 部作品不参与拷贝同步。",
+                                                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                            }
+                                        }
+                                    }
+                                }
                                 if (workingLabel != null || state.error != null || state.message != null ||
-                                    showScope || state.progressUnavailableCount > 0 && kindFilter != 1 ||
+                                    state.progressUnavailableCount > 0 && kindFilter != 1 ||
                                     !state.hasFullImport && favorites > 0 && kindFilter != 2 ||
                                     state.favoritesError != null && kindFilter != 2 || state.progressError != null && kindFilter != 1)
                                     item(key = "read-state") {
                                         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                            if (kindFilter != 2) CopySyncReadIssue("收藏", state.favoritesError, visible && !state.busy) {
+                                            if (kindFilter != 2) CopySyncReadIssue("收藏", state.favoritesError, active && !state.busy) {
                                                 onRetry(CopySyncDifferenceKind.FAVORITE)
                                             }
-                                            if (kindFilter != 1) CopySyncReadIssue("进度", state.progressError, visible && !state.busy) {
+                                            if (kindFilter != 1) CopySyncReadIssue("进度", state.progressError, active && !state.busy) {
                                                 onRetry(CopySyncDifferenceKind.PROGRESS)
                                             }
-                                            workingLabel?.let { label ->
+                                            CopyShelfValue(workingLabel) { label ->
                                                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
                                                     horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                                                     MotionBusyIndicator(Modifier.size(13.dp), strokeWidth = 1.4.dp)
@@ -247,98 +309,101 @@ internal fun CopyShelfSyncSheet(
                                             if (state.error != null) Text(state.error, Modifier.fillMaxWidth().padding(vertical = 4.dp),
                                                 style = MaterialTheme.typography.bodySmall, color = colors.error, maxLines = 3,
                                                 overflow = TextOverflow.Ellipsis)
-                                            if (state.message != null) Text(state.message, Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 3,
-                                                overflow = TextOverflow.Ellipsis)
+                                            CopyShelfValue(state.message) { message ->
+                                                Text(message, Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 3,
+                                                    overflow = TextOverflow.Ellipsis)
+                                            }
                                             if (!state.hasFullImport && favorites > 0 && kindFilter != 2) Row(
                                                 Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                                Text("修改拷贝收藏前，先导入现有收藏", Modifier.weight(1f),
+                                                Text("首次回写需先导入收藏", Modifier.weight(1f),
                                                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                                                MotionTextButton(onClick = onImport, enabled = canChoose && state.favoritesReady,
-                                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
-                                                    Text("导入", fontSize = 12.sp)
-                                                }
-                                            }
-                                            CopyShelfReveal(showScope) {
-                                                Column(Modifier.padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                    Text("收藏按所选一侧调整。进度只决定本机从哪章继续，不回写拷贝；本机页内位置、历史与下载保留。",
-                                                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                                                    if (state.progressUnavailableCount > 0) Text(
-                                                        "另有 " + state.progressUnavailableCount + " 部未取得可比较进度，不视为未读。",
-                                                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                                                    if (state.localOnlyCount > 0) Text(
-                                                        "仅本机的 " + state.localOnlyCount + " 部作品不参与拷贝同步。",
-                                                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                                MotionIconButton(onClick = onImport, enabled = active && canApply && state.favoritesReady,
+                                                    modifier = Modifier.size(44.dp), tooltip = "完整导入拷贝收藏，保留本机原有作品") {
+                                                    Icon(Icons.Outlined.CloudDownload, "完整导入拷贝收藏，保留本机原有作品", Modifier.size(18.dp))
                                                 }
                                             }
                                             if (!showScope && state.progressUnavailableCount > 0 && kindFilter != 1) MotionTextButton(
-                                                onClick = { showScope = true }, enabled = visible,
+                                                onClick = { showScope = true; revealTools(true) }, enabled = active,
                                                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 3.dp)) {
+                                                Icon(Icons.Outlined.Info, null, Modifier.size(14.dp))
+                                                Spacer(Modifier.width(5.dp))
                                                 Text(state.progressUnavailableCount.toString() + " 部进度未取得", fontSize = 11.sp,
                                                     color = colors.onSurfaceVariant)
-                                                Icon(Icons.Outlined.ChevronRight, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
                                             }
-
                                         }
                                     }
                                 items(groups, key = { it.key }, contentType = { "copy-work-diff" }) { group ->
-                                    CopyWorkDifference(group.value, choices, canChoose && target == scene, repository,
-                                        Modifier.animateItem(
+                                    CopyWorkDifference(group.value, choices, canChoose && active, active && !state.busy, repository,
+                                        expanded = selectedOnly || group.key in expandedWorks,
+                                        disclosable = !selectedOnly,
+                                        modifier = Modifier.animateItem(
                                             fadeInSpec = if (motion) tween(MangaMotion.ListEnter) else null,
                                             placementSpec = if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else null,
                                             fadeOutSpec = if (motion) tween(MangaMotion.ListExit) else null),
-                                        onChoose = ::choose,
-                                        onRetry = onRetry, onRetryWork = onRetryWork)
+                                        onExpand = { if (active) expandedWorks = if (group.key in expandedWorks) expandedWorks - group.key else expandedWorks + group.key },
+                                        onChoose = ::choose, onRetry = onRetry, onRetryWork = onRetryWork)
                                 }
                                 if (groups.isEmpty()) item(key = "empty") {
                                     Column(Modifier.fillMaxWidth().padding(vertical = 20.dp),
-                                        verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                        verticalArrangement = Arrangement.spacedBy(6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Icon(if (state.busy) Icons.Outlined.Sync else if (state.error != null || state.favoritesError != null || state.progressError != null)
+                                            Icons.Outlined.CloudOff else Icons.Outlined.CheckCircle,
+                                            null, Modifier.size(24.dp), tint = colors.onSurfaceVariant)
                                         Text(when {
-                                            state.owner == null -> "请先连接拷贝账号"
-                                            state.busy -> "已有内容会在读取后显示"
-                                            selectedOnly -> "当前筛选中还没有选择"
-                                            !state.favoritesReady && !state.progressReady -> "暂未取得可比较的数据"
-                                            state.differences.isNotEmpty() -> "这一类暂无待处理项"
-                                            state.favoritesReady && state.progressReady -> "当前可比较的项目已处理"
-                                            else -> "已读取的部分暂无差异"
-                                        }, style = MaterialTheme.typography.bodyMedium)
-                                        if (!state.busy && (!state.favoritesReady || !state.progressReady))
-                                            Text("未读取的内容不会当作未收藏或未读。可在上方重试。",
-                                                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                            state.busy -> "核对后会显示差异"
+                                            selectedOnly -> "还没有选择改动"
+                                            state.owner == null -> "连接账号后再检查"
+                                            state.error != null || state.favoritesError != null || state.progressError != null -> "部分内容尚未读到"
+                                            !state.checked -> "检查本机与拷贝的差异"
+                                            state.progressUnavailableCount > 0 && kindFilter != 1 -> "已取得的进度没有差异"
+                                            else -> "没有待处理差异"
+                                        }, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                     }
                                 }
                             }
                         }
-                        val hint = workingLabel ?: summary.ifBlank {
+                        val hint = if (state.uploading) workingLabel.orEmpty() else summary.ifBlank {
                             if (state.owner == null) "连接账号后再检查" else "点选要采用的一侧"
                         }
                         val applyButton: @Composable (Modifier) -> Unit = { modifier ->
                             MotionButton(onClick = {
-                                if (canChoose && selected.isNotEmpty()) onApply(state.revision,
+                                if (canApply && selected.isNotEmpty()) onApply(state.revision,
                                     selected.associate { it.key to requireNotNull(choices[it.key]).choice })
-                            }, enabled = canChoose && selected.isNotEmpty(), modifier = modifier.heightIn(min = 44.dp),
+                            }, enabled = canApply && selected.isNotEmpty(), modifier = modifier.heightIn(min = 44.dp),
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp)) {
-                                Text(if (state.uploading && state.mergeTotal > 0)
-                                    state.mergeCompleted.toString() + " / " + state.mergeTotal
-                                else "应用" + if (selected.isEmpty()) "" else " " + selected.size + " 项",
-                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(when {
+                                    state.uploading && state.mergeTotal > 0 -> state.mergeCompleted.toString() + " / " + state.mergeTotal
+                                    state.uploading -> "核对中"
+                                    else -> "应用 " + selected.size
+                                }, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
                         }
                         if (LocalDensity.current.fontScale > 1.35f) Column(
-                            Modifier.fillMaxWidth().padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Modifier.fillMaxWidth().padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(hint, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                                maxLines = 4, overflow = TextOverflow.Ellipsis)
-                            applyButton(Modifier.fillMaxWidth())
-                        } else Row(Modifier.fillMaxWidth().padding(top = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                maxLines = 3, overflow = TextOverflow.Ellipsis)
+                            CopyShelfReveal(selected.isNotEmpty() || state.uploading) { applyButton(Modifier.fillMaxWidth()) }
+                        } else Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Text(hint, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
                                 color = colors.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                            applyButton(Modifier.widthIn(min = 100.dp))
+                            CopyShelfTool(selected.isNotEmpty() || state.uploading) { applyButton(Modifier.widthIn(min = 92.dp)) }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CopySyncSideHeading(label: String, modifier: Modifier, cloud: Boolean) {
+    Row(modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Icon(if (cloud) Icons.Outlined.CloudQueue else Icons.Outlined.PhoneAndroid,
+            null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -354,8 +419,9 @@ private fun CopySyncReadIssue(label: String, error: String?, enabled: Boolean, o
                 Text(message, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                     maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            MotionTextButton(onClick = onRetry, enabled = enabled,
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) { Text("重试", fontSize = 12.sp) }
+            MotionIconButton(onClick = onRetry, enabled = enabled, modifier = Modifier.size(44.dp), tooltip = "重新读取" + label) {
+                Icon(Icons.Outlined.Refresh, "重新读取" + label, Modifier.size(17.dp))
+            }
         }
     }
 }
@@ -365,49 +431,75 @@ private fun CopyWorkDifference(
     fields: List<CopySyncDifference>,
     choices: Map<String, CopyReviewChoice>,
     enabled: Boolean,
+    canRetry: Boolean,
     repository: MangaRepository,
+    expanded: Boolean,
+    disclosable: Boolean,
     modifier: Modifier = Modifier,
+    onExpand: () -> Unit,
     onChoose: (CopySyncDifference, CopyMergeChoice) -> Unit,
     onRetry: (CopySyncDifferenceKind) -> Unit,
     onRetryWork: (Manga) -> Unit,
 ) {
     val manga = fields.first().manga
     val colors = MaterialTheme.colorScheme
-    Column(modifier.fillMaxWidth().padding(vertical = 3.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    val motion = LocalMotionEnabled.current
+    val angle by animateFloatAsState(if (expanded) 180f else 0f,
+        tween(if (motion) MangaMotion.Content else 0, easing = MangaMotion.EnterEasing), label = "sync-work-disclosure")
+    val count = fields.count { field -> choices[field.key]?.let { it.evidence == field.reviewKey && field.allows(it.choice) } == true }
+    Column(modifier.fillMaxWidth().padding(vertical = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            MangaCover(manga, repository, Modifier.size(width = 24.dp, height = 34.dp).mangaCoverCard(5.dp))
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MangaCover(manga, repository, Modifier.size(width = 28.dp, height = 40.dp).mangaCoverCard(5.dp))
             Text(manga.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (count > 0) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                Icon(Icons.Outlined.Check, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
+                Text(count.toString(), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
+            if (disclosable) MotionIconButton(onClick = onExpand, modifier = Modifier.size(44.dp),
+                tooltip = if (expanded) "收起合并动作" else "查看合并动作") {
+                Icon(Icons.Outlined.ExpandMore, if (expanded) "收起合并动作" else "查看合并动作",
+                    Modifier.size(17.dp).graphicsLayer { rotationZ = angle })
+            }
         }
         for (field in fields) {
-            val staged = choices[field.key]?.takeIf { it.evidence == field.reviewKey }?.choice
+            val staged = choices[field.key]?.takeIf { it.evidence == field.reviewKey && field.allows(it.choice) }?.choice
             val localValue = if (field.kind == CopySyncDifferenceKind.PROGRESS) copyProgressDisplay(field.localValue) else field.localValue
             val cloudValue = if (field.kind == CopySyncDifferenceKind.PROGRESS) copyProgressDisplay(field.cloudValue) else field.cloudValue
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(if (field.kind == CopySyncDifferenceKind.FAVORITE) "收藏" else "进度", Modifier.width(32.dp),
-                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                CopyMergeSide(localValue, field.localActionLabel,
-                    staged == CopyMergeChoice.USE_LOCAL, enabled && field.allows(CopyMergeChoice.USE_LOCAL),
-                    manga.title + "，本机，" + localValue + "，" + field.localActionLabel, Modifier.weight(1f)) {
-                    onChoose(field, CopyMergeChoice.USE_LOCAL)
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val stacked = maxWidth < 260.dp * LocalDensity.current.fontScale
+                val local: @Composable (Modifier) -> Unit = { sideModifier ->
+                    CopyMergeSide(localValue, field.localActionLabel, expanded || staged == CopyMergeChoice.USE_LOCAL,
+                        staged == CopyMergeChoice.USE_LOCAL, enabled && field.allows(CopyMergeChoice.USE_LOCAL),
+                        manga.title + "，本机，" + localValue + "，" + field.localActionLabel,
+                        sideModifier, if (stacked) "本机" else null) { onChoose(field, CopyMergeChoice.USE_LOCAL) }
                 }
-                CopyMergeSide(cloudValue, field.cloudActionLabel,
-                    staged == CopyMergeChoice.USE_COPY, enabled && field.allows(CopyMergeChoice.USE_COPY),
-                    manga.title + "，拷贝，" + cloudValue + "，" + field.cloudActionLabel, Modifier.weight(1f)) {
-                    onChoose(field, CopyMergeChoice.USE_COPY)
+                val cloud: @Composable (Modifier) -> Unit = { sideModifier ->
+                    CopyMergeSide(cloudValue, field.cloudActionLabel, expanded || staged == CopyMergeChoice.USE_COPY,
+                        staged == CopyMergeChoice.USE_COPY, enabled && field.allows(CopyMergeChoice.USE_COPY),
+                        manga.title + "，拷贝，" + cloudValue + "，" + field.cloudActionLabel,
+                        sideModifier, if (stacked) "拷贝" else null) { onChoose(field, CopyMergeChoice.USE_COPY) }
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(if (field.kind == CopySyncDifferenceKind.FAVORITE) Icons.Outlined.BookmarkBorder else Icons.Outlined.History,
+                        if (field.kind == CopySyncDifferenceKind.FAVORITE) "收藏差异" else "进度差异",
+                        Modifier.width(22.dp).size(15.dp), tint = colors.onSurfaceVariant)
+                    if (stacked) Column(Modifier.weight(1f)) { local(Modifier.fillMaxWidth()); cloud(Modifier.fillMaxWidth()) }
+                    else { local(Modifier.weight(1f)); cloud(Modifier.weight(1f)) }
                 }
             }
-            if (!field.canUseLocal && !field.canUseCopy) Row(
-                Modifier.fillMaxWidth().padding(start = 38.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(field.detail ?: "这一项需重新读取后再选择", Modifier.weight(1f),
-                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, maxLines = 2,
-                    overflow = TextOverflow.Ellipsis)
-                MotionTextButton(onClick = {
-                    if (field.kind == CopySyncDifferenceKind.PROGRESS) onRetryWork(field.manga) else onRetry(field.kind)
-                }, enabled = enabled, contentPadding = PaddingValues(horizontal = 5.dp, vertical = 3.dp)) {
-                    Text("重查本书", fontSize = 11.sp)
+            CopyShelfReveal(expanded && !field.canUseLocal && !field.canUseCopy) {
+                Row(Modifier.fillMaxWidth().padding(start = 26.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(field.detail ?: "需重新读取后再选择", Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, maxLines = 2,
+                        overflow = TextOverflow.Ellipsis)
+                    MotionIconButton(onClick = {
+                        if (field.kind == CopySyncDifferenceKind.PROGRESS) onRetryWork(field.manga) else onRetry(field.kind)
+                    }, enabled = canRetry, modifier = Modifier.size(44.dp), tooltip = "重查本书") {
+                        Icon(Icons.Outlined.Refresh, "重查本书", Modifier.size(17.dp))
+                    }
                 }
             }
         }
@@ -416,29 +508,32 @@ private fun CopyWorkDifference(
 
 @Composable
 private fun CopyMergeSide(
-    value: String, action: String, chosen: Boolean, enabled: Boolean, description: String,
-    modifier: Modifier, onChoose: () -> Unit,
+    value: String, action: String, showAction: Boolean, chosen: Boolean, enabled: Boolean, description: String,
+    modifier: Modifier, sideLabel: String?, onChoose: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    val motion = LocalMotionEnabled.current
+    val background by animateColorAsState(
+        if (chosen) lerp(colors.surface, colors.onSurface, .085f) else colors.surface.copy(alpha = 0f),
+        tween(if (motion) MangaMotion.Quick else 0), label = "sync-choice-surface")
     MotionTextButton(onClick = onChoose, enabled = enabled,
-        modifier = modifier.heightIn(min = 48.dp).semantics {
-            selected = chosen
-            contentDescription = description
-        }, shape = RoundedCornerShape(10.dp),
-        colors = ButtonDefaults.textButtonColors(
-            containerColor = if (chosen) colors.onSurface.copy(alpha = .075f) else colors.onSurface.copy(alpha = .025f),
-            contentColor = colors.onSurface, disabledContentColor = colors.onSurfaceVariant.copy(alpha = .55f),
-            disabledContainerColor = colors.onSurface.copy(alpha = .02f),
-        ), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)) {
+        modifier = modifier.heightIn(min = 44.dp).semantics { selected = chosen; contentDescription = description },
+        shape = RoundedCornerShape(10.dp),
+        colors = ButtonDefaults.textButtonColors(containerColor = background, contentColor = colors.onSurface,
+            disabledContentColor = colors.onSurfaceVariant, disabledContainerColor = background),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 5.dp)) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (sideLabel != null) Text(sideLabel, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             Text(value, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(action, style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant.copy(alpha = if (enabled) .8f else .55f),
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
+            CopyShelfReveal(showAction) {
+                Text(action, style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
-        if (chosen) {
-            Spacer(Modifier.width(3.dp))
-            Icon(Icons.Outlined.Check, "已选择", Modifier.size(14.dp))
+        Box(Modifier.padding(start = 3.dp).size(14.dp), contentAlignment = Alignment.Center) {
+            MotionSwap(chosen, Modifier.size(14.dp)) { checked ->
+                if (checked) Icon(Icons.Outlined.Check, null, Modifier.size(14.dp)) else Spacer(Modifier.size(14.dp))
+            }
         }
     }
 }

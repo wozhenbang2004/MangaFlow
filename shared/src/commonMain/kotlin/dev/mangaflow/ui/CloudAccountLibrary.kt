@@ -37,6 +37,9 @@ import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.ViewModule
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Logout
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -90,6 +93,7 @@ internal fun CloudAccountHeader(
     val profile = state.profile
     val colors = MaterialTheme.colorScheme
     var info by remember(profile?.username) { mutableStateOf(false) }
+    var scopeOpen by remember(profile?.username) { mutableStateOf(false) }
     var confirmLogout by remember(profile?.username) { mutableStateOf(false) }
     var pendingAction by remember(profile?.username) { mutableStateOf<PendingCopyAccountAction?>(null) }
     LaunchedEffect(active) { if (!active) { pendingAction = null; info = false; confirmLogout = false } }
@@ -153,19 +157,23 @@ internal fun CloudAccountHeader(
             }
         }) {
         LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 24.dp,
-            role = GlassSurfaceRole.POPOVER, softCard = true) {
-            Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp),
+            role = GlassSurfaceRole.PANEL, softCard = true) {
+            Column(Modifier.heightIn(max = LocalMangaWindow.current.height * .8f)
+                .verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                Text(accountName, Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.titleMedium)
-                profile?.let {
-                    Text(it.username, Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodyMedium)
+                Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(accountName, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        profile?.username?.takeIf { it != accountName }?.let {
+                            Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    MotionIconButton(onClick = { pendingAction = null; info = false },
+                        modifier = Modifier.size(44.dp), tooltip = "关闭账号") {
+                        Icon(Icons.Outlined.Close, "关闭账号", Modifier.size(19.dp))
+                    }
                 }
-                Text("此页展示拷贝收藏与拷贝阅读章节。导入只处理收藏；阅读进度在详情中单独采用。",
-                    modifier = Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
-                Text("本机收藏的增删可主动同步到拷贝。退出账号会保留本机书架、下载和阅读进度。",
-                    modifier = Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                Text("其他来源的阅读进度单独保存。", Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant)
                 CopyShelfValue(refreshError) { message ->
                     Column(Modifier.padding(bottom = 12.dp)) { Text("当前列表", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                         AccountError(message, state.busy || refreshing, onRefresh) }
@@ -177,19 +185,40 @@ internal fun CloudAccountHeader(
                 if (onOpenSync != null) MotionTextButton(onClick = {
                     profile?.username?.let { pendingAction = PendingCopyAccountAction(CopyAccountAction.SYNC, it) }
                     info = false
-                }, enabled = active, modifier = Modifier.padding(bottom = 12.dp)) {
-                    Icon(Icons.Outlined.Sync, null, Modifier.size(18.dp))
-                    Text("收藏同步", Modifier.padding(start = 6.dp))
+                }, enabled = active, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)) {
+                    Icon(Icons.Outlined.SwapHoriz, null, Modifier.size(18.dp))
+                    Text("查看同步差异", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodyMedium)
+                    Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(16.dp).graphicsLayer { rotationZ = -90f })
                 }
                 CopyShelfReveal(state.canRetrySync) {
-                    MotionTextButton(onClick = onRetrySync, enabled = active && state.canRetrySync && !state.busy, modifier = Modifier.padding(bottom = 12.dp)) { Text("重试同步") }
-                }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    MotionTextButton(onClick = requestLogout, enabled = active) {
-                        Text("退出账号", color = colors.error)
+                    MotionTextButton(onClick = onRetrySync, enabled = active && state.canRetrySync && !state.busy,
+                        modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
+                        Icon(Icons.Outlined.Refresh, null, Modifier.size(17.dp))
+                        Text("重试未完成项", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall)
                     }
-                    Spacer(Modifier.weight(1f))
-                    MotionTextButton(onClick = { info = false }) { Text("完成") }
+                }
+                MotionTextButton(onClick = { scopeOpen = !scopeOpen }, enabled = active,
+                    modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
+                    Icon(Icons.Outlined.Info, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+                    Text("同步范围", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant)
+                    MotionSwap(scopeOpen, Modifier.size(16.dp)) { expanded ->
+                        Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(16.dp).graphicsLayer { rotationZ = if (expanded) 180f else 0f })
+                    }
+                }
+                CopyShelfReveal(scopeOpen) {
+                    Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text("此页展示拷贝的收藏和阅读章节。收藏逐项合并；进度只选择本机从哪章继续，实际阅读后才向拷贝报告。",
+                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        Text("本机页内位置、其他来源进度与下载单独保留。",
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    }
+                }
+                MotionTextButton(onClick = requestLogout, enabled = active,
+                    modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)) {
+                    Icon(Icons.Outlined.Logout, null, Modifier.size(17.dp), tint = colors.error)
+                    Text("退出账号", Modifier.weight(1f).padding(start = 10.dp), style = MaterialTheme.typography.bodySmall, color = colors.error)
                 }
             }
         }

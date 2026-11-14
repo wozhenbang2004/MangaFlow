@@ -66,6 +66,7 @@ import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -584,14 +585,30 @@ fun LibraryScreen(
 @Composable
 private fun CopyShelfImportHint(state: CopyShelfSyncState, active: Boolean, onImport: () -> Unit) {
     val colors = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(if (state.differences.isNotEmpty()) "拷贝有 " + state.differences.size + " 项待处理" else "拷贝检查未完成", Modifier.weight(1f),
-            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-            maxLines = 2, overflow = TextOverflow.Ellipsis)
-        if (state.importing) dev.mangaflow.ui.motion.MotionBusyIndicator(Modifier.padding(horizontal = 14.dp).size(17.dp),
-            strokeWidth = 1.6.dp)
-        TextButton(onClick = onImport, enabled = active) { Text("查看") }
+    val favorites = state.differences.count { it.kind == dev.mangaflow.account.CopySyncDifferenceKind.FAVORITE }
+    val progress = state.differences.size - favorites
+    val description = "查看拷贝同步差异，收藏 " + favorites + " 项，进度 " + progress + " 项" +
+        if (state.favoritesError != null || state.progressError != null) "，部分检查未完成" else ""
+    TextButton(onClick = onImport, enabled = active,
+        modifier = Modifier.fillMaxWidth().semantics { contentDescription = description },
+        shape = RoundedCornerShape(10.dp), contentPadding = PaddingValues(horizontal = 4.dp, vertical = 3.dp)) {
+        Icon(Icons.Outlined.Sync, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+        Text(if (state.differences.isNotEmpty()) "拷贝差异" else "检查未完成", Modifier.weight(1f).padding(horizontal = 8.dp),
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (favorites > 0) Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Outlined.Bookmarks, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
+            Text(favorites.toString(), Modifier.padding(start = 3.dp, end = 8.dp),
+                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        }
+        if (progress > 0) Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Outlined.History, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
+            Text(progress.toString(), Modifier.padding(start = 3.dp, end = 8.dp),
+                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        }
+        dev.mangaflow.ui.motion.MotionSwap(state.busy, Modifier.size(18.dp)) { busy ->
+            if (busy) dev.mangaflow.ui.motion.MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
+            else Icon(Icons.Outlined.ChevronRight, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+        }
     }
 }
 

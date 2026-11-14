@@ -20,6 +20,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -44,6 +45,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.CloudSync
+import androidx.compose.material.icons.outlined.CloudDownload
+import androidx.compose.material.icons.outlined.CloudUpload
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Explore
@@ -66,7 +71,6 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.Refresh
 import dev.mangaflow.ui.motion.MotionButton as Button
 import dev.mangaflow.ui.motion.MotionBusyIndicator as CircularProgressIndicator
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -194,6 +198,7 @@ fun SettingsScreen(
     var backupBusy by remember { mutableStateOf<String?>(null) }
     var backupNotice by remember { mutableStateOf<String?>(null) }
     var pendingRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
+    var pendingWebDavRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
     val webDavStore = remember(context.applicationContext) { WebDavBackupStore(context.applicationContext) }
     val webDavConfig by webDavStore.config.collectAsStateWithLifecycle()
     val wallpaperStore = remember(context.applicationContext) { WallpaperStore.get(context.applicationContext) }
@@ -310,19 +315,17 @@ fun SettingsScreen(
                 )
                 when (action) {
                     "save" -> {
-                        showWebDav = false
                         webDavNotice = "WebDAV 配置已安全保存"
                     }
                     "upload" -> {
                         val payload = libraryStore.exportBackup()
                         webDavStore.upload(payload)
-                        showWebDav = false
                         webDavNotice = "阅读备份已上传并覆盖远端文件"
                     }
                     "download" -> {
                         val payload = webDavStore.download()
                         val info = libraryStore.inspectBackup(payload)
-                        pendingRestore = PendingLibraryRestore(payload, info)
+                        pendingWebDavRestore = PendingLibraryRestore(payload, info)
                         showWebDav = false
                         webDavNotice = "已读取远端备份，确认后才会恢复"
                     }
@@ -631,7 +634,9 @@ fun SettingsScreen(
 
     BackupRestoreDialog(
         pending = pendingRestore,
+        backdrop = sourceBackdrop,
         busy = backupBusy == "restore",
+        error = backupNotice?.takeIf { pendingRestore != null },
         onDismiss = { if (backupBusy == null) pendingRestore = null },
         onConfirm = {
             val pending = pendingRestore ?: return@BackupRestoreDialog
@@ -654,10 +659,16 @@ fun SettingsScreen(
     )
     WebDavBackupDialog(
         visible = showWebDav,
+        backdrop = sourceBackdrop,
         config = webDavConfig,
         busy = backupBusy?.takeIf { it.startsWith("webdav-") },
         notice = webDavNotice,
         onDismiss = { if (backupBusy == null) showWebDav = false },
+        onClosed = {
+            // Present the inspected restore only after the connection workspace has left.
+            pendingWebDavRestore?.let { backupNotice = null; pendingRestore = it }
+            pendingWebDavRestore = null
+        },
         onSave = { runWebDav("save", it) },
         onUpload = { runWebDav("upload", it) },
         onDownload = { runWebDav("download", it) },
@@ -680,10 +691,12 @@ private data class WebDavBackupDraft(
 @Composable
 private fun WebDavBackupDialog(
     visible: Boolean,
+    backdrop: HazeState,
     config: WebDavBackupConfig,
     busy: String?,
     notice: String?,
     onDismiss: () -> Unit,
+    onClosed: () -> Unit,
     onSave: (WebDavBackupDraft) -> Unit,
     onUpload: (WebDavBackupDraft) -> Unit,
     onDownload: (WebDavBackupDraft) -> Unit,
@@ -695,206 +708,199 @@ private fun WebDavBackupDialog(
     var remotePath by remember(visible, config.remotePath) { mutableStateOf(config.remotePath) }
     var editing by remember { mutableStateOf(!config.configured) }
     var advanced by remember { mutableStateOf(false) }
+    var savingRequested by remember { mutableStateOf(false) }
+    val active = visible && busy == null
+    val enabled = active && endpoint.isNotBlank() && remotePath.isNotBlank()
     LaunchedEffect(visible) {
         if (visible) { editing = !config.configured; advanced = false }
+        else { password = ""; savingRequested = false }
     }
-    val enabled = busy == null && endpoint.isNotBlank() && remotePath.isNotBlank()
-    val draft = {
-        WebDavBackupDraft(
-            endpoint = endpoint,
-            username = username,
-            password = password,
-            remotePath = remotePath,
-        )
+    LaunchedEffect(busy, notice, savingRequested) {
+        if (savingRequested && busy == null && notice != null) {
+            if (notice == "WebDAV 配置已安全保存") { password = ""; editing = false }
+            savingRequested = false
+        }
     }
-
-    MotionDialog(visible = visible, onDismissRequest = onDismiss) {
-        val colors = MaterialTheme.colorScheme
-        Surface(
-            modifier = Modifier.padding(20.dp).fillMaxWidth().imePadding(),
-            shape = RoundedCornerShape(24.dp),
-            color = colors.surface,
-        ) {
-            Column(
-                Modifier.padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 16.dp)
-                    .heightIn(max = 680.dp)
-                    .verticalScroll(rememberScrollState())
-                    .animateContentSize(tween(if (LocalMotionEnabled.current) MangaMotion.Content else 0,
-                        easing = MangaMotion.EnterEasing)),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text("WebDAV 阅读备份", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    if (editing) "使用可信 HTTPS 服务器。密码仅加密保存在本机。" else "备份书架、阅读位置、画面收藏与阅读偏好。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant,
-                )
-                if (!editing) {
-                    SettingsLinkRow("连接设置", config.endpoint, Icons.Outlined.CloudSync,
-                        inlineDetail = false) { if (busy == null) editing = true }
-                    Text(config.remotePath, style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                } else {
-                    OutlinedTextField(
-                        value = endpoint,
-                        onValueChange = { endpoint = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = busy == null,
-                        singleLine = true,
-                        label = { Text("WebDAV HTTPS 地址") },
-                        placeholder = { Text("https://cloud.example.com/dav/") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
-                        shape = RoundedCornerShape(17.dp),
-                        colors = settingsInputColors(),
-                    )
-                    OutlinedTextField(
-                        value = username,
-                        onValueChange = { username = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = busy == null,
-                        singleLine = true,
-                        label = { Text("用户名") },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                        shape = RoundedCornerShape(17.dp),
-                        colors = settingsInputColors(),
-                    )
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = busy == null,
-                        singleLine = true,
-                        label = { Text("密码") },
-                        placeholder = {
-                            Text(if (config.hasPassword) "留空保留已保存密码" else "可留空")
-                        },
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Next),
-                        shape = RoundedCornerShape(17.dp),
-                        colors = settingsInputColors(),
-                    )
-
-                    TextButton(onClick = { advanced = !advanced }, enabled = busy == null,
-                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
-                        Text(if (advanced) "收起高级设置" else "高级设置", style = MaterialTheme.typography.bodySmall)
+    val draft = { WebDavBackupDraft(endpoint, username, password, remotePath) }
+    val resetDraft = {
+        endpoint = config.endpoint; username = config.username; password = ""
+        remotePath = config.remotePath; editing = false; advanced = false
+    }
+    val colors = MaterialTheme.colorScheme
+    MotionDialog(visible = visible, onDismissRequest = onDismiss, onClosed = onClosed, maximumWidth = 520.dp) {
+        BoxWithConstraints(Modifier.padding(horizontal = 12.dp).imePadding()) {
+            val height = minOf(maxHeight, LocalMangaWindow.current.height * .88f, 680.dp)
+            LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
+                role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
+                Column(Modifier.fillMaxWidth().heightIn(max = height).padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.CloudSync, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
+                        Text("WebDAV 备份", Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.titleMedium,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        MotionIconButton(onClick = onDismiss, enabled = active, modifier = Modifier.size(44.dp), tooltip = "关闭备份") {
+                            Icon(Icons.Outlined.Close, "关闭备份", Modifier.size(19.dp))
+                        }
                     }
-                    if (advanced) {
-                        OutlinedTextField(
-                            value = remotePath,
-                            onValueChange = { remotePath = it },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = busy == null,
-                            singleLine = true,
-                            label = { Text("远端备份文件") },
-                            placeholder = { Text(WebDavBackupConfig.DEFAULT_REMOTE_PATH) },
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                            shape = RoundedCornerShape(17.dp),
-                            colors = settingsInputColors(),
-                        )
-
+                    Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CopyShelfReveal(!editing && config.configured) {
+                            Column {
+                                WebDavTransferAction(Icons.Outlined.Tune, "连接设置", config.endpoint, active) {
+                                    editing = true
+                                }
+                                Text(webDavStatusDetail(config, busy), style = MaterialTheme.typography.labelSmall,
+                                    color = colors.onSurfaceVariant)
+                            }
+                        }
+                        CopyShelfReveal(editing) {
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text("HTTPS 连接 · 密码加密保存在本机", style = MaterialTheme.typography.labelSmall,
+                                    color = colors.onSurfaceVariant)
+                                OutlinedTextField(
+                                    value = endpoint, onValueChange = { endpoint = it }, modifier = Modifier.fillMaxWidth(),
+                                    enabled = active, singleLine = true, label = { Text("服务器") },
+                                    placeholder = { Text("https://cloud.example.com/dav/") },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+                                    shape = RoundedCornerShape(14.dp), colors = settingsInputColors(),
+                                )
+                                OutlinedTextField(
+                                    value = username, onValueChange = { username = it }, modifier = Modifier.fillMaxWidth(),
+                                    enabled = active, singleLine = true, label = { Text("用户名") },
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                                    shape = RoundedCornerShape(14.dp), colors = settingsInputColors(),
+                                )
+                                OutlinedTextField(
+                                    value = password, onValueChange = { password = it }, modifier = Modifier.fillMaxWidth(),
+                                    enabled = active, singleLine = true, label = { Text("密码") },
+                                    placeholder = { Text(if (config.hasPassword) "留空保留；更换服务器或用户名需重输" else "可留空") },
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                                    shape = RoundedCornerShape(14.dp), colors = settingsInputColors(),
+                                )
+                            }
+                        }
+                        SettingsDisclosure("文件与路由", remotePath, Icons.Outlined.FolderOpen, advanced,
+                            { if (active) advanced = !advanced }) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = remotePath, onValueChange = { remotePath = it }, modifier = Modifier.fillMaxWidth(),
+                                    enabled = active, singleLine = true, label = { Text("远端文件") },
+                                    placeholder = { Text(WebDavBackupConfig.DEFAULT_REMOTE_PATH) },
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    shape = RoundedCornerShape(14.dp), colors = settingsInputColors(),
+                                )
+                                DownloadRouteControl(DownloadCategory.WEBDAV, enabled = active)
+                            }
+                        }
+                        CopyShelfReveal(!editing && config.configured) {
+                            Column {
+                                WebDavTransferAction(Icons.Outlined.CloudDownload, "读取备份", "先查看，再确认恢复", enabled) {
+                                    onDownload(draft())
+                                }
+                                WebDavTransferAction(Icons.Outlined.CloudUpload, "上传备份", "覆盖远端文件", enabled) {
+                                    onUpload(draft())
+                                }
+                            }
+                        }
+                        CopyShelfValue(notice) { message ->
+                            Text(message, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        }
+                        CopyShelfValue(busy) { operation ->
+                            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.5.dp)
+                                Text(when (operation) {
+                                    "webdav-save" -> "正在保存连接"
+                                    "webdav-upload" -> "正在上传备份"
+                                    "webdav-download" -> "正在读取备份"
+                                    else -> "正在处理配置"
+                                }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                            }
+                        }
+                        Text("书架、阅读位置与偏好；不含账号、缓存和漫画文件。手动备份，不自动双向同步。",
+                            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     }
-                }
-                DownloadRouteControl(DownloadCategory.WEBDAV, enabled = busy == null)
-                Text(
-                    "上传会覆盖这个远端文件；下载只读取并展示恢复确认。暂不后台自动同步，也不会上传漫画图片。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant,
-                )
-                notice?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                }
-                busy?.let { operation ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            when (operation) {
-                                "webdav-save" -> "正在安全保存配置…"
-                                "webdav-upload" -> "正在上传阅读备份…"
-                                "webdav-download" -> "正在读取远端备份…"
-                                else -> "正在处理 WebDAV 配置…"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
-                        )
+                    CopyShelfReveal(editing) {
+                        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (config.configured) MotionIconButton(onClick = onClear, enabled = active,
+                                modifier = Modifier.size(44.dp), tooltip = "清除本机连接配置，保留远端备份") {
+                                Icon(Icons.Outlined.DeleteOutline, "清除本机连接配置，保留远端备份", Modifier.size(18.dp), tint = colors.error)
+                            }
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { if (config.configured) resetDraft() else onDismiss() }, enabled = active) { Text("取消") }
+                            Button(onClick = { savingRequested = true; onSave(draft()) }, enabled = enabled,
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp)) { Text("保存连接") }
+                        }
                     }
-                }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    if (editing && config.configured) {
-                        TextButton(onClick = onClear, enabled = busy == null) { Text("清除本机配置") }
-                    }
-                    Spacer(Modifier.weight(1f))
-                    if (editing && config.configured) {
-                        TextButton(onClick = {
-                            endpoint = config.endpoint; username = config.username; password = ""
-                            remotePath = config.remotePath; editing = false; advanced = false
-                        }, enabled = busy == null) { Text("取消编辑") }
-                    } else TextButton(onClick = onDismiss, enabled = busy == null) { Text(if (editing) "取消" else "关闭") }
-                    if (editing) TextButton(onClick = { onSave(draft()) }, enabled = enabled) { Text("保存") }
-                }
-                FilledTonalButton(
-                    onClick = { onDownload(draft()) },
-                    enabled = enabled,
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(15.dp),
-                ) {
-                    Text("下载并检查远端备份")
-                }
-                Button(
-                    onClick = { onUpload(draft()) },
-                    enabled = enabled,
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(15.dp),
-                    
-                ) {
-                    Text("上传当前阅读备份")
                 }
             }
         }
     }
 }
 
+/** Existing settings-row and beUI press primitives, bound to real backup operations. */
+@Composable
+private fun WebDavTransferAction(icon: ImageVector, title: String, detail: String, enabled: Boolean, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    TextButton(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp), contentPadding = PaddingValues(horizontal = 6.dp, vertical = 10.dp)) {
+        Icon(icon, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
+        Column(Modifier.weight(1f).padding(start = 10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(detail, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        }
+        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+    }
+}
+
 @Composable
 private fun BackupRestoreDialog(
     pending: PendingLibraryRestore?,
+    backdrop: HazeState,
     busy: Boolean,
+    error: String?,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
-    MotionDialog(visible = pending != null, onDismissRequest = onDismiss) {
-        pending?.let { restore ->
+    var retained by remember { mutableStateOf(pending) }
+    androidx.compose.runtime.SideEffect { if (pending != null) retained = pending }
+    MotionDialog(visible = pending != null, onDismissRequest = onDismiss,
+        onClosed = { if (pending == null) retained = null }, maximumWidth = 520.dp) {
+        (pending ?: retained)?.let { restore ->
             val colors = MaterialTheme.colorScheme
-            Surface(
-                modifier = Modifier.padding(24.dp).fillMaxWidth(),
-                shape = RoundedCornerShape(22.dp),
-                color = colors.surface,
-            ) {
-                Column(Modifier.padding(start = 22.dp, end = 16.dp, top = 22.dp, bottom = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("恢复阅读备份？", style = MaterialTheme.typography.titleMedium)
-                    val date = restore.info.createdAt.takeIf { it > 0 }?.let {
-                        formatInstantMillis(it, "yyyy-MM-dd HH:mm")
-                    } ?: "未知时间"
-                    Text("备份时间 $date", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "${restore.info.favorites} 本收藏 · ${restore.info.history} 条阅读记录 · ${restore.info.bookmarks} 项画面收藏",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant,
-                    )
-                    Text(
-                        "这会覆盖本机书架、阅读位置、画面收藏、时长和阅读偏好。下载文件与登录状态保持不变。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant,
-                    )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+            LiquidGlassSurface(backdrop, Modifier.padding(horizontal = 12.dp).fillMaxWidth(),
+                cornerRadius = 22.dp, role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
+                Column(Modifier.heightIn(max = LocalMangaWindow.current.height * .84f)
+                    .padding(horizontal = 18.dp, vertical = 12.dp)) {
+                    Text("恢复阅读备份", Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.titleMedium)
+                    Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        val date = restore.info.createdAt.takeIf { it > 0 }?.let {
+                            formatInstantMillis(it, "yyyy-MM-dd HH:mm")
+                        } ?: "未知时间"
+                        Text(date, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        Text(
+                            "${restore.info.favorites} 本收藏 · ${restore.info.history} 条阅读记录 · ${restore.info.bookmarks} 项画面收藏",
+                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            "这会覆盖本机书架、阅读位置、画面收藏、时长和阅读偏好。下载文件与登录状态保持不变。",
+                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                        )
+                        CopyShelfValue(error) { message ->
+                            Text(message, style = MaterialTheme.typography.bodySmall, color = colors.error)
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") }
-                        TextButton(onClick = onConfirm, enabled = !busy) {
+                        TextButton(onClick = onDismiss, enabled = pending != null && !busy) { Text("取消") }
+                        Button(onClick = onConfirm, enabled = pending != null && !busy,
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp)) {
                             if (busy) {
                                 CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
                                 Spacer(Modifier.width(6.dp))
                             }
-                            Text("恢复")
+                            Text("覆盖并恢复")
                         }
                     }
                 }
