@@ -150,6 +150,26 @@ def stage() -> None:
     stage_incremental(root / "app" / "MangaFlow", destination, version)
 
 
+def release_handoff_blocker(sha: str, number: str) -> str | None:
+    """A successful EXE build is not a failure when its Android release is superseded.
+
+    Keep published-release integrity strict; only skip an unpublishable attachment.
+    Workflow artifacts retain the exact Windows installers for that source SHA.
+    """
+    main = request_json(f"{API}/git/ref/heads/main")
+    if main["object"]["sha"] != sha:
+        return "newer main commit owns the next Android release"
+
+    runs = request_json(
+        f"{API}/actions/workflows/android-release.yml/runs?head_sha={sha}&branch=main&per_page=20"
+    )
+    matching = [run for run in runs["workflow_runs"]
+                if run["head_sha"] == sha and str(run["run_number"]) == number]
+    if matching and matching[0]["status"] == "completed" and matching[0]["conclusion"] != "success":
+        return f"matching Android release finished as {matching[0]['conclusion']}"
+    return None
+
+
 def publish() -> None:
     tag = os.environ["MANGA_TAG"]
     sha = os.environ["GITHUB_SHA"]
@@ -159,10 +179,18 @@ def publish() -> None:
         release = request_json(f"{API}/releases/tags/{quote(tag, safe='')}", missing=True)
         if release is not None and not release.get("draft"):
             break
+        # A new push must not turn an already built EXE into a failed workflow.
+        # It cannot be published to another SHA's signed Android release either.
+        blocker = release_handoff_blocker(sha, os.environ["MANGA_BUILD_NUMBER"])
+        if blocker is not None:
+            print(f"::notice::Windows installers built and retained as workflow artifacts. "
+                  f"Skipping release attachment: {blocker}.")
+            return
         if attempt != 79:
             time.sleep(15)
     if release is None or release.get("draft"):
-        raise RuntimeError("The matching signed Android release has not been published")
+        raise RuntimeError("The matching signed Android release was not published within "
+                           "the wait window; the Windows installers remain in workflow artifacts")
     reference = request_json(f"{API}/git/ref/tags/{quote(tag, safe='')}")["object"]
     while reference["type"] == "tag":
         reference = request_json(f"{API}/git/tags/{reference['sha']}")["object"]

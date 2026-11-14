@@ -23,9 +23,11 @@ permissions:
   contents: read
   actions: read
 
+# Windows and iOS builds are expensive: new pushes must not cancel older SHAs.
+# Keep each commit's run isolated; immutable publication is checked by native_release.py.
 concurrency:
-  group: mangaflow-applications-${{ github.ref }}
-  cancel-in-progress: true
+  group: mangaflow-applications-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   desktop:

@@ -41,7 +41,7 @@ internal expect fun panelModelDirectory(context: PlatformContext): StorageFile
 
 /** Optional weights retain their exact bytes, source revision and digest on every platform. */
 class PanelModelStore private constructor(context: PlatformContext) {
-    private val application = context.applicationContext
+    private val application = applicationContext(context)
     private val directory = panelModelDirectory(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val control = SynchronizedObject()
