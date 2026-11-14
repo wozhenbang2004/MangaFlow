@@ -2076,7 +2076,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     fun retryDetail() {
-        _detail.value?.rankedWork?.let { searchRankedSources(it.manga.title.take(120)); return }
+        _detail.value?.rankedWork?.let { searchRankedSources(it.key, it.manga.title.take(120)); return }
         val work = _detail.value?.manga ?: return
         openManga(work, forceRefresh = true)
         viewModelScope.launch {

@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Root = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'MangaFlowLocal'),
+    [string]$Root = 'D:\Kayokoi\MangaFlowLocal',
     [switch]$NoLaunch,
     [switch]$BuildOnly,
     [switch]$Rebuild
@@ -119,6 +119,23 @@ function Close-LocalApplication([string]$Versions) {
     }
 }
 
+function Start-LocalApplication([string]$Executable, [string]$Directory) {
+    $applicationData = Assert-OwnedPath (Join-Path $rootPath 'userdata')
+    $mangaData = Assert-OwnedPath (Join-Path $applicationData 'MangaFlow')
+    if (-not (Test-Path -LiteralPath $mangaData)) {
+        $null = New-Item -ItemType Directory -Path $applicationData -Force
+        $oldData = Join-Path $env:LOCALAPPDATA 'MangaFlow'
+        if (Test-Path -LiteralPath $oldData -PathType Container) {
+            Copy-Item -LiteralPath $oldData -Destination $mangaData -Recurse
+        }
+    }
+    $previousData = $env:LOCALAPPDATA
+    try {
+        $env:LOCALAPPDATA = $applicationData
+        Start-Process -FilePath $Executable -WorkingDirectory $Directory
+    } finally { $env:LOCALAPPDATA = $previousData }
+}
+
 function Assert-NoOtherChannel([string]$Versions) {
     foreach ($process in @(Get-Process -Name 'MangaFlow' -ErrorAction SilentlyContinue)) {
         $processPath = $null
@@ -148,10 +165,33 @@ try {
     Write-Message 'MangaFlow 本机渠道：拉取代码 → 增量构建 → 替换 → 启动'
     Write-Message "本机构建目录：$rootPath"
     Write-Message '首次需要下载依赖；之后保留源码、Gradle 与 Rust 缓存。'
-    # Java's selector socket must stay outside MSIX-virtualized user directories.
-    # This option is inherited only by this channel's Java child processes.
+    # Resolve installed tools before isolating Rust caches; mise shims otherwise
+    # try to install the global Rust selection into this new local cache.
+    $javaCommand = if ($env:JAVA_HOME -and (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin\java.exe'))) {
+        Join-Path $env:JAVA_HOME 'bin\java.exe'
+    } else { (Get-Command java -ErrorAction Stop).Source }
+    $pythonCommand = (Get-Command python -ErrorAction Stop).Source
+    if ($pythonCommand -match '[\\/]mise[\\/]shims[\\/]') {
+        $miseCommand = (Get-Command mise -ErrorAction Stop).Source
+        $pythonCommand = (& $miseCommand which python | Select-Object -Last 1).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pythonCommand -PathType Leaf)) { throw '无法定位现有 Python。' }
+    }
+    $rustupCommand = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.cargo\bin\rustup.exe'
+    if (-not (Test-Path -LiteralPath $rustupCommand -PathType Leaf)) { $rustupCommand = (Get-Command rustup -ErrorAction Stop).Source }
+    $env:Path = ([IO.Path]::GetDirectoryName($javaCommand) + ';' + [IO.Path]::GetDirectoryName($pythonCommand) + ';' + [IO.Path]::GetDirectoryName($rustupCommand) + ';' + $env:Path)
+    $cacheRoot = Assert-OwnedPath (Join-Path $rootPath 'caches')
+    $temporary = Assert-OwnedPath (Join-Path $rootPath 'temp')
+    foreach ($directory in @($cacheRoot, $temporary)) { $null = New-Item -ItemType Directory -Path $directory -Force }
+    $env:GRADLE_USER_HOME = Join-Path $cacheRoot 'gradle'
+    $env:CARGO_HOME = Join-Path $cacheRoot 'cargo'
+    $env:RUSTUP_HOME = Join-Path $cacheRoot 'rustup'
+    $env:ANDROID_USER_HOME = Join-Path $cacheRoot 'android-user'
+    $env:TEMP = $temporary
+    $env:TMP = $temporary
+    # Keep Java's selector socket outside MSIX-virtualized user directories too.
     if ($env:JAVA_TOOL_OPTIONS -notmatch 'jdk\.net\.unixdomain\.tmpdir=') {
-        $socketDirectory = Join-Path $env:SystemRoot 'Temp'
+        $socketDirectory = Assert-OwnedPath (Join-Path $temporary 'sockets')
+        $null = New-Item -ItemType Directory -Path $socketDirectory -Force
         $env:JAVA_TOOL_OPTIONS = ($env:JAVA_TOOL_OPTIONS + ' -Djdk.net.unixdomain.tmpdir="' + $socketDirectory + '"').Trim()
     }
     $script:git = (Get-Command git -ErrorAction Stop).Source
@@ -181,14 +221,20 @@ try {
             if (-not $NoLaunch) {
                 Assert-NoOtherChannel $versions
                 $running = @(Get-Process -Name MangaFlow -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -eq $existingExe } catch { $false } })
-                if ($running.Count -eq 0) { Start-Process -FilePath $existingExe -WorkingDirectory $existingImage }
+                if ($running.Count -eq 0) { Start-LocalApplication $existingExe $existingImage }
             }
             Write-Message "程序：$existingExe"
             exit 0
         }
     }
-    $java = (Get-Command java -ErrorAction Stop).Source
+    $java = $javaCommand
     Invoke-Checked $java @('-version') $source
+    $localSdk = Assert-OwnedPath (Join-Path $rootPath 'android-sdk')
+    $sdkProperties = Assert-OwnedPath (Join-Path $source 'local.properties')
+    if (-not $env:ANDROID_HOME -and -not $env:ANDROID_SDK_ROOT -and
+        -not (Test-Path -LiteralPath $sdkProperties) -and (Test-Path -LiteralPath (Join-Path $localSdk 'platforms'))) {
+        [IO.File]::WriteAllText($sdkProperties, ('sdk.dir=' + $localSdk.Replace('\', '/') + [Environment]::NewLine), (New-Object Text.UTF8Encoding($false)))
+    }
     if (-not $env:ANDROID_HOME -and -not $env:ANDROID_SDK_ROOT -and -not (Test-Path -LiteralPath (Join-Path $source 'local.properties'))) {
         Write-Message '未设置 Android SDK 路径；先由桌面构建判断是否需要，缺件会保留在日志里。'
     }
@@ -256,7 +302,7 @@ try {
     Close-LocalApplication $versions
     if ($current) { Save-Json (Join-Path $rootPath 'previous.json') $current }
     Save-Json $currentPath @{ commit = $commit; directory = $directoryName; version = $version; updatedAt = [DateTime]::UtcNow.ToString('o') }
-    if (-not $NoLaunch) { Start-Process -FilePath $executable -WorkingDirectory $destination }
+    if (-not $NoLaunch) { Start-LocalApplication $executable $destination }
     Write-Message "本机更新完成：$version"
     Write-Message "程序：$executable"
     Write-Message "日志：$script:logPath"

@@ -130,11 +130,12 @@ internal fun SiteRankingsScreen(
                 if (kinds.size > 1) BoxWithConstraints(Modifier.weight(1f)) {
                     val scale = LocalDensity.current.fontScale.coerceAtLeast(1f)
                     val minimum = 48.dp * scale * kinds.size
+                    val tabsWidth = maxWidth.coerceAtLeast(minimum)
                     Box(Modifier.horizontalScroll(rememberScrollState())) {
                         MotionTabs(kinds.indexOf(state.selection.kind).coerceAtLeast(0), kinds.map { it.label },
                             onSelect = { if (ready) controller.selectKind(kinds[it]) },
                             treatment = MotionTabTreatment.Underline, fontSize = 12.sp, controlHeight = 44.dp,
-                            modifier = Modifier.width(maxWidth.coerceAtLeast(minimum)).motionInputGate(ready))
+                            modifier = Modifier.width(tabsWidth).motionInputGate(ready))
                     }
                 } else Text("评分", Modifier.weight(1f).padding(horizontal = 12.dp, vertical = 12.dp),
                     style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
