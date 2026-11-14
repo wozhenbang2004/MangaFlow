@@ -159,6 +159,12 @@ def dependency_notices():
         for pattern in ("LICENSE*", "LICENCE*", "COPYING*", "NOTICE*", "COPYRIGHT*",
                         "license*", "licence*", "copying*", "notice*", "copyright*"):
             candidates.extend(directory.glob(pattern))
+        # Some Rust crates, including crc-catalog, ship MIT/Apache texts
+        # inside a LICENSES directory rather than a root LICENSE file.
+        for folder_name in ("LICENSES", "licenses", "LICENCES"):
+            folder = directory / folder_name
+            if folder.is_dir() and not folder.is_symlink():
+                candidates.extend(path for path in folder.iterdir() if path.is_file() and not path.is_symlink())
         if directory.is_relative_to(TAPLINE):
             candidates.append(TAPLINE / "LICENSE")
         if directory == CRATE:

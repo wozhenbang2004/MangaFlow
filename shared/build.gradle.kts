@@ -122,6 +122,9 @@ kotlin {
             implementation("io.coil-kt.coil3:coil-network-okhttp:3.2.0")
             implementation("com.squareup.okhttp3:okhttp:4.12.0")
             implementation("org.jsoup:jsoup:1.18.3")
+            // Native adult source adapters (MIT). Java API code is shared with Windows.
+            implementation("io.github.jukomu:jmcomic-core:v1.1.12")
+            implementation("io.github.jukomu:jmcomic-android-support:v1.1.12")
             implementation("me.saket.telephoto:zoomable-image-coil3:0.16.0")
             implementation("me.saket.telephoto:sub-sampling-image:0.16.0")
             implementation("com.google.ai.edge.litert:litert:1.4.2")
@@ -135,6 +138,7 @@ kotlin {
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.11.0")
             implementation("com.ibm.icu:icu4j:77.1")
             implementation("io.github.darkxanter:webp-imageio:0.3.3")
+            implementation("io.github.jukomu:jmcomic-core:v1.1.12")
             // JavaFX's native classifiers follow the host used by jpackage.
             val osName = System.getProperty("os.name").lowercase()
             val arm = System.getProperty("os.arch") in setOf("aarch64", "arm64")

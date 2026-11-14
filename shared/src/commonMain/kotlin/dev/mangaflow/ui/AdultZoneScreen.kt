@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
@@ -40,11 +41,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.UnifiedMangaRepository
+import dev.mangaflow.data.sources.PicacgBodySource
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.storage.DownloadStore
+import dev.mangaflow.storage.DownloadEntry
+import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionTextButton
@@ -60,9 +64,10 @@ private enum class AdultPage(val label: String) { DISCOVER("发现"), FAVORITES(
 @Composable
 internal fun AdultZoneScreen(
     confirmed: Boolean, onConfirm: () -> Unit, onExit: () -> Unit,
-    registry: BodySourceRegistry, plugins: SourcePluginStore,
+    registry: BodySourceRegistry, plugins: SourcePluginStore, picacg: PicacgBodySource,
     repository: UnifiedMangaRepository, downloads: DownloadStore,
-    favorites: List<Manga>, onOpen: (Manga) -> Unit, onToggleFavorite: (Manga) -> Unit,
+    favorites: List<Manga>, onOpen: (Manga) -> Unit, onOpenOffline: (DownloadEntry) -> Unit,
+    onToggleFavorite: (Manga) -> Unit,
     backdrop: HazeState, contentTopPadding: Dp,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -84,6 +89,7 @@ internal fun AdultZoneScreen(
 
     val entries by registry.entries.collectAsStateWithLifecycle()
     val installed by plugins.installed.collectAsStateWithLifecycle()
+    val signedIn by picacg.signedIn.collectAsStateWithLifecycle()
     val storedDownloads by downloads.entries.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val sources = entries.filter { it.adult && it.isInstalled && !it.removed }
@@ -95,6 +101,10 @@ internal fun AdultZoneScreen(
     var assignExisting by remember { mutableStateOf(false) }
     var operation by remember { mutableStateOf<String?>(null) }
     var operationError by remember { mutableStateOf<String?>(null) }
+    var loginUser by remember { mutableStateOf("") }
+    var loginPass by remember { mutableStateOf("") }
+    var loggingIn by remember { mutableStateOf(false) }
+    var loginError by remember { mutableStateOf<String?>(null) }
     var pageName by rememberSaveable { mutableStateOf(AdultPage.DISCOVER.name) }
     val pageKind = AdultPage.valueOf(pageName)
     var preferred by rememberSaveable { mutableStateOf("") }
@@ -113,9 +123,13 @@ internal fun AdultZoneScreen(
         if (term != appliedQuery) { appliedQuery = term; index = 0; items = emptyList() }
         else revision++
     }
-    LaunchedEffect(selected?.source?.id, appliedQuery, index, revision) {
+    LaunchedEffect(selected?.source?.id, appliedQuery, index, revision, signedIn) {
         val sourceId = selected?.source?.id ?: run {
             items = emptyList(); hasNext = false; loading = false; return@LaunchedEffect
+        }
+        if (sourceId == "picacg" && !signedIn) {
+            items = emptyList(); hasNext = false; loading = false; error = null
+            return@LaunchedEffect
         }
         loading = true
         error = null
@@ -239,6 +253,62 @@ internal fun AdultZoneScreen(
                 MotionTextButton(onClick = { search() }) { Text("搜索", fontSize = 12.sp) }
             }
         }
+
+        if (pageKind == AdultPage.DISCOVER && selected?.source?.id == "picacg") {
+            if (signedIn) Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("哔咔账号已登录", Modifier.weight(1f), fontSize = 11.sp, color = colors.onSurfaceVariant)
+                MotionTextButton(onClick = { scope.launch { picacg.logout(); items = emptyList() } }) {
+                    Text("退出", fontSize = 11.sp)
+                }
+            } else Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 7.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("使用哔咔账号登录后浏览，密码只用于登录请求，不保存在本机。",
+                    fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant)
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp))
+                    .background(colors.onSurface.copy(alpha = .045f)).heightIn(min = 44.dp)
+                    .padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    BasicTextField(loginUser, { if (it.length <= 160) loginUser = it },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        textStyle = MaterialTheme.typography.bodySmall.copy(color = colors.onSurface),
+                        cursorBrush = SolidColor(colors.onSurface),
+                        decorationBox = { inner -> Box {
+                            if (loginUser.isBlank()) Text("账号", fontSize = 12.sp, color = colors.onSurfaceVariant)
+                            inner()
+                        } })
+                }
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(11.dp))
+                    .background(colors.onSurface.copy(alpha = .045f)).heightIn(min = 44.dp)
+                    .padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    BasicTextField(loginPass, { if (it.length <= 512) loginPass = it },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(color = colors.onSurface),
+                        cursorBrush = SolidColor(colors.onSurface),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        decorationBox = { inner -> Box {
+                            if (loginPass.isBlank()) Text("密码", fontSize = 12.sp, color = colors.onSurfaceVariant)
+                            inner()
+                        } })
+                }
+                loginError?.let { Text(it, fontSize = 11.sp, color = colors.error) }
+                MotionButton(enabled = !loggingIn && loginUser.isNotBlank() && loginPass.isNotBlank(),
+                    onClick = {
+                        loggingIn = true; loginError = null
+                        scope.launch {
+                            try {
+                                picacg.login(loginUser, loginPass)
+                                loginPass = ""; index = 0; revision++
+                            } catch (cancel: CancellationException) { throw cancel }
+                            catch (failure: Exception) {
+                                loginError = failure.message ?: "登录失败，请检查账号与网络。"
+                            } finally { loggingIn = false }
+                        }
+                    }) {
+                    Text(if (loggingIn) "登录中…" else "登录", fontSize = 12.sp)
+                }
+            }
+        }
         operationError?.let { Text(it, Modifier.padding(horizontal = 20.dp),
             fontSize = 11.sp, color = colors.error) }
         if (pageKind == AdultPage.DISCOVER && sources.isEmpty()) {
@@ -259,7 +329,12 @@ internal fun AdultZoneScreen(
                 verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 items(visible, key = { it.id }) { manga ->
                     AdultWorkTile(manga, repository, saved.any { it.id == manga.id },
-                        onClick = { onOpen(manga) }, onFavorite = { onToggleFavorite(manga) })
+                        onClick = {
+                            if (pageKind == AdultPage.DOWNLOADS) {
+                                storedDownloads.firstOrNull { it.manga.id == manga.id && it.status == DownloadStatus.COMPLETED }
+                                    ?.let(onOpenOffline) ?: onOpen(manga)
+                            } else onOpen(manga)
+                        }, onFavorite = { onToggleFavorite(manga) })
                 }
                 if (pageKind == AdultPage.DISCOVER && loading)
                     item(span = { GridItemSpan(maxLineSpan) }) {
@@ -281,7 +356,8 @@ internal fun AdultZoneScreen(
                         }
                     }
                 if (visible.isEmpty() && !loading && error == null &&
-                    (pageKind != AdultPage.DISCOVER || selected != null))
+                    (pageKind != AdultPage.DISCOVER || selected != null &&
+                        (selected.source.id != "picacg" || signedIn)))
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         EmptyMessage(when (pageKind) {
                             AdultPage.DISCOVER -> "暂时没有作品"

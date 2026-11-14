@@ -22,6 +22,7 @@ import okio.use as useOkio
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.Page
+import dev.mangaflow.data.sources.decryptedJmPageBytes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
@@ -685,7 +686,18 @@ class DownloadStore private constructor(context: Context) {
             }
             if (!canWrite) return null
             destination.parentFile?.mkdirs()
-            val bounds = downloadPageFile(page.url, snapshot.headers, partial)
+            // The JM CDN returns scrambled JPEG bytes. Materialize the decoded page before
+            // validating or publishing it; background workers use the native source bridge.
+            val decoded = decryptedJmPageBytes(context, snapshot.entry.manga.id,
+                snapshot.entry.chapter.id, page)
+            val bounds = if (decoded != null) {
+                if (decoded.size.toLong() !in 128L..(96L * 1024L * 1024L))
+                    throw PermanentDownloadException("图片解码后大小无效")
+                partial.writeBytes(decoded)
+                syncStorageFile(partial)
+                storageImageBounds(partial)
+                    ?: throw PermanentDownloadException("解码后的图片不完整")
+            } else downloadPageFile(page.url, snapshot.headers, partial)
             val savedBytes = partial.length()
             currentCoroutineContext().ensureActive()
             return synchronized(lock) {

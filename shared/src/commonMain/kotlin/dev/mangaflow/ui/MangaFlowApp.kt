@@ -848,8 +848,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         confirmed = adultConfirmed, onConfirm = { adultConfirmed = true },
                                         onExit = { changeSection(Section.DISCOVER) },
                                         registry = model.bodySources, plugins = model.sourcePlugins,
+                                        picacg = model.picacgSource,
                                         repository = model.repository, downloads = model.downloads,
                                         favorites = favorites, onOpen = model::openManga,
+                                        onOpenOffline = model::openDownload,
                                         onToggleFavorite = model::toggleFavorite,
                                         backdrop = searchBackdrop, contentTopPadding = chromePadding,
                                     )

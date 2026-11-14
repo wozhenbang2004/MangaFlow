@@ -1,5 +1,26 @@
 # Third-party notices
 
+## Optional built-in adult manga sources
+
+MangaFlow's two opt-in adult catalogue adapters are compiled into the reader,
+but do not participate in ordinary discovery or automatic cross-source matching.
+The PicACG HTTP/response contract was independently adapted from publicly
+documented protocol shapes in l2studio/picacomic-api (Apache-2.0;
+https://github.com/l2studio/picacomic-api) and niuhuan/pica-rust (MIT;
+https://github.com/niuhuan/pica-rust). No image files, catalogue snapshots,
+website accounts or proprietary artwork are distributed with the application.
+
+JMComic on Android and Windows uses the Java library
+io.github.jukomu:jmcomic-core:v1.1.12 (MIT;
+https://github.com/JUKOMU/JMComic-Api-Java) and, on Android,
+io.github.jukomu:jmcomic-android-support:v1.1.12 (MIT). Its image processor
+restores provider-scrambled segments before files are handed to MangaFlow's
+existing reader and download store. The external libraries are used without
+bundling another client UI. No adult catalogue is represented as authorized
+or legally cleared merely by being an open-source API wrapper. Actual server
+access, authentication, image support and jurisdiction-specific legality
+remain subject to verification and applicable service rights.
+
 ## Optional Steam Workshop connection and QR rendering
 
 The Steam connection component adapts the MPL-2.0 tapline library at

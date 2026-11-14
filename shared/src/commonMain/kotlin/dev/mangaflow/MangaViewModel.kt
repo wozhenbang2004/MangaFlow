@@ -46,6 +46,8 @@ import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.data.sources.BaoziBodySource
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
+import dev.mangaflow.data.sources.PicacgBodySource
+import dev.mangaflow.data.sources.createJmBodySource
 import dev.mangaflow.data.sources.ManhuaguiBodySource
 import dev.mangaflow.data.sources.MangaBzBodySource
 import dev.mangaflow.storage.UnifiedChapterStore
@@ -215,9 +217,12 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         sourcePreferences.getString("body_source_komiic_domain", KomiicBodySource.BASE_URLS.first())
             ?.takeIf { it in KomiicBodySource.BASE_URLS } ?: KomiicBodySource.BASE_URLS.first()
     }
+    val picacgSource = PicacgBodySource(application)
+    private val jmSource = createJmBodySource(application)
     val unifiedChapters = UnifiedChapterStore(application)
     val repository = UnifiedMangaRepository(copyRepository, unifiedChapters,
-        bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(), komiicSource, MangaDexBodySource()),
+        bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(), komiicSource,
+            MangaDexBodySource(), picacgSource) + listOfNotNull(jmSource),
         catalogStore = ReaderCatalogStore(application))
     val bodySources = BodySourceRegistry(application, repository.sources)
     val sourcePlugins = SourcePluginStore.get(application)

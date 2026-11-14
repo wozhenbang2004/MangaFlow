@@ -6,6 +6,7 @@ import dev.mangaflow.ui.chapterGroupLabel
 import dev.mangaflow.ui.mangaNumberText
 
 import dev.mangaflow.data.chapterSourceMangaId
+import dev.mangaflow.data.sources.materializeJmPage
 
 import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.MangaLayout
@@ -260,6 +261,7 @@ fun ReaderScreen(
     onSourceResumePolicy: (String) -> Unit = {},
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
+    val adultImageContext = LocalContext.current
     if (!libraryReady) {
         BackHandler(enabled = active, onBack = onBack)
         LibraryRestoreStatus(libraryStore)
@@ -386,8 +388,14 @@ fun ReaderScreen(
     val lightChrome = colors.surface.luminance() > .5f
     val readerBackdrop = rememberHazeState()
     val readingChapterId = chapterId
-    val resolvePage: suspend (Page) -> Page = remember(manga.id, chapterId, downloadStore) {
-        { page -> downloadStore.resolveReaderPage(manga.id, readingChapterId, page) }
+    val resolvePage: suspend (Page) -> Page = remember(manga.id, chapterId, chapter.sourceId,
+        chapter.sourceMangaId, downloadStore, adultImageContext) {
+        { page ->
+            val local = downloadStore.resolveReaderPage(manga.id, readingChapterId, page)
+            if (local.url.startsWith("file://")) local else
+                materializeJmPage(adultImageContext, chapterSourceMangaId(manga.id, chapter),
+                    readingChapterId, local) ?: local
+        }
     }
     val retryPage: suspend (Page) -> Page = remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, repository, downloadStore) {
         { sourcePage ->
