@@ -199,7 +199,7 @@ private object JmNativeSourceProvider {
         instance ?: JvmJmBodySource(context).also { instance = it }
 }
 
-actual fun createJmBodySource(context: PlatformContext): BodySource = JmNativeSourceProvider.get(context)
+actual fun createJmBodySource(context: PlatformContext): BodySource? = JmNativeSourceProvider.get(context)
 
 actual suspend fun materializeJmPage(
     context: PlatformContext, mangaId: String, chapterId: String, page: Page,
