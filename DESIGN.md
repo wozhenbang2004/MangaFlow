@@ -1,5 +1,16 @@
 # MangaFlow detail · 2026-11-12
 
+## Copy shelf interruption and return · 2026-11-14 (COPY-MOTION-177–180)
+
+User continued the existing motion request with “继续” twice; exact message IDs unavailable. Preserve COPY-MOTION-171–176 and all cloud-owned ordering, account isolation, sync eligibility/actions and real book identities. This batch addresses source-confirmed interruption/return gaps rather than adding a new visual style.
+
+| ID | Current continuation and observable acceptance |
+| --- | --- |
+| COPY-MOTION-177 | The content arrival is created once per account identity. Losing foreground cancels it at its current pose; returning continues toward rest instead of snapping the leaving content or replaying a completed arrival. Root navigation keeps ownership of ordinary page re-entry. Reduced motion settles immediately. |
+| COPY-MOTION-178 | Each grid/list feed records its own completed sort request. Only an uncomposed feed may reset offscreen; a feed still retained by the tab exit keeps its painted position. Active scroll completion is recorded after the native scroll completes, or after the user deliberately takes over. Navigation/key cancellation leaves the request pending for a subsequent return. Initial restored positions remain intact. |
+| COPY-MOTION-179 | Local nullable messages/captions retain the last snapshot only through the actual visibility exit, then release it. A rapid reversal checks the current value/target before clearing, so an old exit cannot remove new content. Account keys remain the hard boundary; no guessed completion delay or permanent message retention. |
+| COPY-MOTION-180 | Android0.1.243/run43588393943 at9c3b048 succeeded; that is evidence for the preceding build, not this continuation's installed motion. The two adapter changes received bounded independent source review with no definite blocker. Root publishes one finished latest-main lease/normal CI trigger without tests, local builds or device/service probes; installed continuity remains unverified. |
+
 ## Copy shelf motion continuity · 2026-11-14 (COPY-MOTION-171–176)
 
 User feedback: “拷贝书架这里的动画做的不好每个地方都要有动画动效”. Exact message ID unavailable. Scope is every existing Copy shelf interaction: entry, header/refresh, sorting/direction, grid/list, loaded/error/empty states, book actions, cloud chapter captions, account menus/confirmation and collection-sync groups/selection/footer. Keep the single cloud-owned shelf, actual Copy ordering/chapter metadata, local-only adoption, explicit sync preview/eligibility and all owner/session/route identities.

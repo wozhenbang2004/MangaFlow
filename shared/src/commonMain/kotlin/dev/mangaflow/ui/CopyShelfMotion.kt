@@ -2,6 +2,7 @@ package dev.mangaflow.ui
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
@@ -15,10 +16,18 @@ import dev.mangaflow.ui.motion.*
 /** Local adapters of the existing settings disclosure and beUI/Ovio motion roles. */
 @Composable
 internal fun CopyShelfReveal(
-    visible: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit,
+    visible: Boolean, modifier: Modifier = Modifier, onHidden: (() -> Unit)? = null,
+    content: @Composable () -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
-    AnimatedVisibility(visible, modifier,
+    // Known content participates in the initial layout without an artificial collapsed pass.
+    val presence = remember { MutableTransitionState(visible) }
+    presence.targetState = visible
+    val hidden = rememberUpdatedState(onHidden)
+    if (onHidden != null) LaunchedEffect(presence.currentState, presence.targetState, presence.isIdle) {
+        if (presence.isIdle && !presence.currentState && !presence.targetState) hidden.value?.invoke()
+    }
+    AnimatedVisibility(presence, modifier,
         enter = if (motion) fadeIn(tween(MangaMotion.ListEnter, easing = MangaMotion.ListFadeEasing)) +
             expandVertically(spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness), expandFrom = Alignment.Top) else EnterTransition.None,
         exit = if (motion) fadeOut(tween(MangaMotion.Quick)) +
@@ -44,7 +53,9 @@ internal fun CopyShelfTool(visible: Boolean, content: @Composable () -> Unit) {
 internal fun <T : Any> CopyShelfValue(value: T?, modifier: Modifier = Modifier, content: @Composable (T) -> Unit) {
     var retained by remember { mutableStateOf(value) }
     SideEffect { if (value != null) retained = value }
-    CopyShelfReveal(value != null, modifier) {
+    CopyShelfReveal(value != null, modifier, onHidden = {
+        if (value == null) retained = null
+    }) {
         val shown = value ?: retained
         if (shown != null) MotionTabContent(shown, contentKey = { it }, order = { 0 },
             fillContent = false, soft = true, content = content)
@@ -56,9 +67,8 @@ internal fun CopyShelfArrival(identity: String?, active: Boolean, content: @Comp
     val motion = LocalMotionEnabled.current
     val progress = remember(identity) { Animatable(if (motion) 0f else 1f) }
     LaunchedEffect(identity, active, motion) {
-        if (!motion || !active) progress.snapTo(1f)
-        else {
-            progress.snapTo(0f)
+        if (!motion) progress.snapTo(1f)
+        else if (active) {
             progress.animateTo(1f, tween(MangaMotion.ListEnter, easing = MangaMotion.EnterEasing))
         }
     }

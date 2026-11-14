@@ -6,6 +6,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.snap
 import androidx.compose.ui.graphics.graphicsLayer
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -264,18 +267,38 @@ internal fun CloudAccountLibrary(
     var managedId by remember { mutableStateOf<String?>(null) }
     var ratings by remember { mutableStateOf<Manga?>(null) }
     val sourceFan = remember { MetricSourceFanState() }
+    val composedFeeds = remember { mutableStateMapOf<Int, Unit>() }
     LaunchedEffect(active, selected, sort, joinedAscending) {
         sortMenu = false; managedId = null; ratings = null; sourceFan.clear()
     }
     val sortKey = sort.name + ":" + joinedAscending
-    var appliedSort by rememberSaveable { mutableStateOf(sortKey) }
-    LaunchedEffect(sortKey, selected, active) {
-        if (appliedSort == sortKey) return@LaunchedEffect
-        appliedSort = sortKey
+    var gallerySort by rememberSaveable { mutableStateOf(sortKey) }
+    var listSort by rememberSaveable { mutableStateOf(sortKey) }
+    LaunchedEffect(sortKey, selected, active, motion) {
+        if (!active || (if (selected == 0) gallerySort else listSort) == sortKey) return@LaunchedEffect
         val foreground = if (selected == 0) galleryPosition else listPosition
-        val background = if (selected == 0) listPosition else galleryPosition
-        background.scrollToItem(0)
-        if (motion && active) foreground.animateScrollToItem(0) else foreground.scrollToItem(0)
+        try {
+            if (motion) foreground.animateScrollToItem(0) else foreground.scrollToItem(0)
+        } catch (cancelled: CancellationException) {
+            // A gesture can replace the scroll's child mutation while this effect stays active.
+            // A cancelled navigation/sort effect must not mark its unfinished request complete.
+            currentCoroutineContext().ensureActive()
+        }
+        currentCoroutineContext().ensureActive()
+        if (selected == 0) gallerySort = sortKey else listSort = sortKey
+    }
+    LaunchedEffect(sortKey, selected, active, composedFeeds.keys.toSet()) {
+        if (!active) return@LaunchedEffect
+        if (selected != 0 && 0 !in composedFeeds && gallerySort != sortKey) {
+            galleryPosition.scrollToItem(0)
+            currentCoroutineContext().ensureActive()
+            gallerySort = sortKey
+        }
+        if (selected != 1 && 1 !in composedFeeds && listSort != sortKey) {
+            listPosition.scrollToItem(0)
+            currentCoroutineContext().ensureActive()
+            listSort = sortKey
+        }
     }
     val sortRotation by animateFloatAsState(if (sortMenu) 180f else 0f,
         if (motion) spring(MangaMotion.NavigationDamping, MangaMotion.NavigationStiffness) else snap(), label = "copy-sort-menu")
@@ -364,6 +387,10 @@ internal fun CloudAccountLibrary(
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             }
             MotionTabContent(selected, Modifier.weight(1f).fillMaxWidth(), soft = true) { mode ->
+                DisposableEffect(mode) {
+                    composedFeeds[mode] = Unit
+                    onDispose { composedFeeds.remove(mode) }
+                }
                 val grid = mode == 0
                 val feedPosition = if (grid) galleryPosition else listPosition
                 BoxWithConstraints(Modifier.fillMaxSize()) {

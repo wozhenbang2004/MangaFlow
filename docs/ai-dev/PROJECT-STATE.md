@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Copy shelf interruption and return · 2026-11-14
+
+The user's two further “继续” messages continue the existing motion request; exact message IDs unavailable. DESIGN COPY-MOTION-177–180 records this bounded follow-up. Source now pauses the account arrival at its current pose and resumes without replaying it; retains each outgoing list's painted scroll until actual disposal; and records completed sort requests per layout, leaving navigation-cancelled work pending. A gesture can take over the active scroll without a later forced retry. Nullable captions release their retained snapshot only after actual visibility completion, guarded against reversal. Preserve existing cloud/local identities, account isolation, sort data and motion references.
+
+Root implemented the two local adapters on main9c3b048; independent source review found no definite blocker in cancellation, return, visibility completion or API usage. Prior Android0.1.243/run43588393943 succeeded at9c3b048; that is preceding-build evidence only. No tests, local build, runtime/device/service probes or new gate were run or added. Next exact action: recheck actual main, publish this finished batch once with the expected-head lease and confirm normal CI activation without waiting. This entry accompanies that source batch, without a status-only push. Installed animation continuity, rapid reversal, restored positions and large-type behavior remain pending artifact/user feedback; no measured smoothness claim.
+
 ## Copy shelf motion continuity · 2026-11-14
 
 User feedback “拷贝书架这里的动画做的不好每个地方都要有动画动效” is mapped to DESIGN COPY-MOTION-171–176; exact message ID unavailable. Current source adds local state/width/height reveals, icon/label/caption swaps, keyed lazy book placement/append/removal and smooth explicit-sort return. Grid/list and login-mode scenes reuse Ovio/beUI transitions, with existing independent scroll positions and actual cloud sorting preserved. Adoption feedback follows the real local favorite state; remote syncing remains independent. No full-list replay on every data update or unbounded stagger is introduced.
