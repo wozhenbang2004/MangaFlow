@@ -10,6 +10,7 @@ internal fun encodeExperienceOverrides(o: ExperienceOverrides) = buildJsonObject
     o.prefetchRequests?.let { put("requests", it) }; o.prefetchMiB?.let { put("bytesMiB", it) }
     put("cross", o.crossChapter); put("metered", o.allowMeteredPrefetch)
     o.readerRequests?.let { put("reader", it) }; o.downloadPages?.let { put("pages", it) }
+    o.resolveRequests?.let { put("resolve", it) }; o.decodeRequests?.let { put("decode", it) }
     o.sourcePages?.let { put("source", it) }; o.chapters?.let { put("chapters", it) }
     put("yield", o.yieldToReading)
     o.memoryMiB?.let { put("memoryMiB", it) }; o.diskMiB?.let { put("diskMiB", it) }
@@ -26,14 +27,15 @@ internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = ru
     fun bool(key: String, default: Boolean) = json[key]?.jsonPrimitive?.booleanOrNull ?: default
     ExperienceOverrides(
         prefetchMode = PrefetchMode.entries.firstOrNull { it.name == json["prefetch"]?.jsonPrimitive?.content } ?: PrefetchMode.SMART,
-        ahead = int("ahead", 0, 12), behind = int("behind", 0, 4), prefetchRequests = int("requests", 1, 3),
-        prefetchMiB = int("bytesMiB", 4, 96), crossChapter = bool("cross", true), allowMeteredPrefetch = bool("metered", false),
-        readerRequests = int("reader", 1, 4), downloadPages = int("pages", 1, maximumBackgroundPageParallelism),
-        sourcePages = int("source", 1, 4), chapters = int("chapters", 1, 4), yieldToReading = bool("yield", true),
+        ahead = int("ahead", 0, 40), behind = int("behind", 0, 8), prefetchRequests = int("requests", 1, 12),
+        prefetchMiB = int("bytesMiB", 4, 512), crossChapter = bool("cross", true), allowMeteredPrefetch = bool("metered", false),
+        readerRequests = int("reader", 1, 4), resolveRequests = int("resolve", 1, 8), decodeRequests = int("decode", 1, 4),
+        downloadPages = int("pages", 1, maximumBackgroundPageParallelism),
+        sourcePages = int("source", 1, 8), chapters = int("chapters", 1, 4), yieldToReading = bool("yield", true),
         memoryMiB = int("memoryMiB", 16, 512), diskMiB = int("diskMiB", 32, 8192),
         refresh = RefreshPreference.entries.firstOrNull { it.name == json["refresh"]?.jsonPrimitive?.content },
         refreshHz = int("hz", 30, 360), batteryProtection = bool("battery", true), allowBackgroundDownloads = bool("background", true),
-        decodedPrefetchPages = int("decodedPages", 0, 2),
+        decodedPrefetchPages = int("decodedPages", 0, 8),
         sourceRecovery = SourceRecoveryMode.entries.firstOrNull { it.name == json["sourceRecovery"]?.jsonPrimitive?.content },
         browseWarmup = bool("browseWarmup", true),
     )
@@ -46,6 +48,11 @@ internal fun experienceRetryDelay(header: String?): Long = (retryAfterMillis(hea
 internal class ExperienceMeasurements {
     private val requests = ArrayDeque<Long>()
     private val frames = ArrayDeque<Long>()
+    private val decodeDurations = ArrayDeque<Long>()
+    private val decodeQueues = ArrayDeque<Long>()
+    private val decodedSizes = ArrayDeque<Long>()
+    private var decodedBytes = 0L
+    private var optionalDecodes = 0L
     private val sizes = linkedMapOf<String, Long>()
     private val prefetched = linkedSetOf<String>()
     private var imageRequests = 0L
@@ -80,6 +87,24 @@ internal class ExperienceMeasurements {
     fun estimate(key: String) = sizes[key] ?: if (sizes.isEmpty()) 3L * EXPERIENCE_MIB
         else (sizes.values.sum() / sizes.size).coerceIn(EXPERIENCE_MIB, 24L * EXPERIENCE_MIB)
 
+    fun recordDecodeQueue(elapsedMillis: Long) {
+        decodeQueues.addLast(elapsedMillis.coerceAtLeast(0L))
+        if (decodeQueues.size > 180) decodeQueues.removeFirst()
+    }
+    fun recordDecode(elapsedMillis: Long, bytes: Long, optional: Boolean) {
+        decodeDurations.addLast(elapsedMillis.coerceAtLeast(0L))
+        if (decodeDurations.size > 180) decodeDurations.removeFirst()
+        if (bytes > 0L) {
+            decodedBytes += bytes
+            decodedSizes.addLast(bytes)
+            if (decodedSizes.size > 32) decodedSizes.removeFirst()
+        }
+        if (optional) optionalDecodes++
+    }
+    /** A conservative recent output estimate; not a claimed page allocation or cache hit. */
+    fun estimatedDecodedPageBytes(): Long =
+        maxOf(4L * EXPERIENCE_MIB, percentile(decodedSizes, .9) ?: 4L * EXPERIENCE_MIB)
+
     fun recordTransfer(bytes: Long, elapsed: Long) {
         transferBytes += bytes.coerceAtLeast(0L)
         transferMillis += elapsed.coerceAtLeast(0L)
@@ -97,6 +122,8 @@ internal class ExperienceMeasurements {
         imageRequests = imageRequests, memoryHits = memoryHits, diskHits = diskHits,
         prefetchedPages = prefetchedPages, prefetchHits = prefetchHits,
         requestP95Millis = request95, transferredBytes = transferBytes, transferMillis = transferMillis,
+        decodeP95Millis = percentile(decodeDurations, .95), decodeQueueP95Millis = percentile(decodeQueues, .95),
+        decodedBytes = decodedBytes, optionalDecodes = optionalDecodes,
         frameP95Millis = frame95, frameP99Millis = frame99,
     )
     private fun percentile(values: Collection<Long>, fraction: Double): Long? =

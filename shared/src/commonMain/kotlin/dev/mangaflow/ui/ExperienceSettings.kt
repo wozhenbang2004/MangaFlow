@@ -154,7 +154,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
 
         SettingsDisclosure("阅读与预取",
             if (custom.prefetchMode == PrefetchMode.OFF) "已关闭"
-            else "前 " + budget.prefetchAhead + " · 后 " + budget.prefetchBehind,
+            else budget.prefetchAhead.toString() + " 待读 · " + budget.prefetchBehind + " 回看",
             Icons.Outlined.AutoStories, expanded == "reading", { toggle("reading") },
             compact = true, modified = experienceReadingCustom(custom)) {
             SettingsChoices(PrefetchMode.entries.map { it to when (it) {
@@ -164,13 +164,13 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 change(custom.copy(prefetchMode = it))
             }
             ExperienceReveal(custom.prefetchMode == PrefetchMode.MANUAL) {
-                ExperienceNumber("前方页数", custom.ahead, budget.goal.prefetchAhead, 0..12, "页",
+                ExperienceNumber("待读窗口", custom.ahead, budget.goal.prefetchAhead, 0..40, "页",
                     editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = budget.prefetchAhead) { change(custom.copy(ahead = it)) }
-                ExperienceNumber("后方页数", custom.behind, budget.goal.prefetchBehind, 0..4, "页",
+                ExperienceNumber("回看窗口", custom.behind, budget.goal.prefetchBehind, 0..8, "页",
                     editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = budget.prefetchBehind) { change(custom.copy(behind = it)) }
             }
             ExperienceReveal(custom.prefetchMode == PrefetchMode.SMART) {
-                ExperienceBudgetRow("模式目标", "前 " + budget.goal.prefetchAhead + " · 后 " + budget.goal.prefetchBehind + " 页")
+                ExperienceBudgetRow("模式目标", budget.goal.prefetchAhead.toString() + " 待读 · " + budget.goal.prefetchBehind + " 回看")
             }
             ExperienceReveal(custom.prefetchMode != PrefetchMode.OFF) {
                 SettingsToggle("提前准备下一章", custom.crossChapter, Icons.Outlined.SkipNext) { change(custom.copy(crossChapter = it)) }
@@ -181,44 +181,51 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             SettingsDisclosure("更多参数", "", Icons.Outlined.Tune, detail == "reading-advanced",
                 { toggleDetail("reading-advanced") }, compact = true) {
                 ExperienceReveal(custom.prefetchMode != PrefetchMode.OFF) {
-                    ExperienceNumber("预取请求", custom.prefetchRequests, budget.goal.prefetchRequests, 1..3, "个",
+                    ExperienceNumber("传输并发", custom.prefetchRequests, budget.goal.prefetchRequests, 1..12, "个",
                         editor, active && expanded == "reading" && detail == "reading-advanced" && custom.prefetchMode != PrefetchMode.OFF,
                         effective = budget.prefetchRequests) { change(custom.copy(prefetchRequests = it)) }
-                    ExperienceNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 4..96, "MB",
+                    ExperienceNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 4..512, "MB",
                         editor, active && expanded == "reading" && detail == "reading-advanced" && custom.prefetchMode != PrefetchMode.OFF,
                         effective = (budget.prefetchBytes / EXPERIENCE_MIB).toInt()) { change(custom.copy(prefetchMiB = it)) }
                     ExperienceBudgetRow("邻页 / 跨章", experienceCacheSize(budget.adjacentPrefetchBytes) + " / " +
                         experienceCacheSize(budget.nextChapterPrefetchBytes))
                 }
+                ExperienceNumber("解析并发", custom.resolveRequests, budget.goal.resolveRequests, 1..8, "个",
+                    editor, active && expanded == "reading" && detail == "reading-advanced",
+                    effective = budget.resolveRequests) { change(custom.copy(resolveRequests = it)) }
                 ExperienceNumber("当前页请求", custom.readerRequests, budget.goal.readerRequests, 1..4, "个",
                     editor, active && expanded == "reading" && detail == "reading-advanced",
                     effective = budget.readerRequests) { change(custom.copy(readerRequests = it)) }
             }
             ExperienceHelp("reading-help", detail, { toggleDetail("reading-help") }) {
-                ExperienceHint("按方向、翻页速度和完整双页预取。原图存磁盘，临近页少量预解码进内存；邻页、跨章和备用来源共用一个字节窗口。")
+                ExperienceHint("待读和回看跟随实际翻页方向，不固定为屏幕左右。窗口是候选页数，解析、传输、解码各有并发上限；原图存磁盘，临近预览进内存。")
                 ExperienceHint("模式目标是期望值；手动值是用户上限。实际上限还会受设备和网络条件约束。")
             }
             ExperienceRestore(experienceReadingCustom(custom), active) {
                 closeEditor()
                 change(custom.copy(prefetchMode = PrefetchMode.SMART, ahead = null, behind = null,
-                    prefetchRequests = null, prefetchMiB = null, crossChapter = true, readerRequests = null, browseWarmup = true))
+                    prefetchRequests = null, prefetchMiB = null, resolveRequests = null, crossChapter = true, readerRequests = null, browseWarmup = true))
             }
         }
 
         SettingsDisclosure("图像质量与渲染", "预解码 " + budget.decodedPrefetchPages + " 页",
             Icons.Outlined.Image, expanded == "rendering", { toggle("rendering") },
-            compact = true, modified = custom.decodedPrefetchPages != null) {
+            compact = true, modified = custom.decodedPrefetchPages != null || custom.decodeRequests != null) {
             ExperienceHint("保留原图 · 细节按需加载")
-            ExperienceNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..2, "页",
+            ExperienceNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
                 editor, active && expanded == "rendering", effective = budget.decodedPrefetchPages) {
                 change(custom.copy(decodedPrefetchPages = it))
+            }
+            ExperienceNumber("解码并发", custom.decodeRequests, budget.goal.decodeRequests, 1..4, "个",
+                editor, active && expanded == "rendering", effective = budget.decodeRequests) {
+                change(custom.copy(decodeRequests = it))
             }
             ExperienceHelp("rendering-help", detail, { toggleDetail("rendering-help") }) {
                 ExperienceHint("预解码只准备显示尺寸，不压缩或替换来源原图。超大图与放大细节仍受解码内存保护；关闭预解码也可正常阅读。")
                 ExperienceHint("双页、阅读方向和阅读模式在阅读控制台调整。")
             }
-            ExperienceRestore(custom.decodedPrefetchPages != null, active) {
-                closeEditor(); change(custom.copy(decodedPrefetchPages = null))
+            ExperienceRestore(custom.decodedPrefetchPages != null || custom.decodeRequests != null, active) {
+                closeEditor(); change(custom.copy(decodedPrefetchPages = null, decodeRequests = null))
             }
         }
 
@@ -253,7 +260,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             compact = true, modified = experienceDownloadCustom(custom)) {
             ExperienceNumber("总页面请求", custom.downloadPages, budget.goal.backgroundPages, 1..maximumBackgroundPageParallelism, "个",
                 editor, active && expanded == "downloads", effective = budget.backgroundPages) { change(custom.copy(downloadPages = it)) }
-            ExperienceNumber("每个来源", custom.sourcePages, budget.goal.sourceParallelism, 1..4, "个",
+            ExperienceNumber("每个来源", custom.sourcePages, budget.goal.sourceParallelism, 1..8, "个",
                 editor, active && expanded == "downloads", effective = budget.sourceParallelism) { change(custom.copy(sourcePages = it)) }
             ExperienceNumber("同时下载章节", custom.chapters, budget.goal.chapterParallelism, 1..4, "章",
                 editor, active && expanded == "downloads", effective = budget.chapterParallelism) { change(custom.copy(chapters = it)) }
@@ -355,6 +362,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 }
                 ExperienceBudgetRow("执行", usage.activeChapters.toString() + " 章 · " + usage.activeBackgroundPages + " 下载 · " + usage.activePrefetch + " 预取")
                 ExperienceBudgetRow("当前页 / 排队", usage.activeReaderImages.toString() + " / " + usage.queuedTasks)
+                ExperienceBudgetRow("解析 / 解码执行", usage.activeResolves.toString() + " / " + usage.activeDecodes)
+                ExperienceBudgetRow("页面解码 P95", usage.decodeP95Millis?.let { it.toString() + " ms" } ?: "—")
+                ExperienceBudgetRow("解码排队 P95", usage.decodeQueueP95Millis?.let { it.toString() + " ms" } ?: "—")
+                ExperienceBudgetRow("解码累计输出", experienceCacheSize(usage.decodedBytes))
                 ExperienceBudgetRow("限流来源", usage.throttledSources.toString())
                 ExperienceBudgetRow("内存 / 磁盘命中", usage.memoryHits.toString() + " / " + usage.diskHits)
                 ExperienceBudgetRow("预取复用 / 新取", usage.prefetchHits.toString() + " 次 / " + usage.prefetchedPages + " 页")
@@ -363,14 +374,16 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                     frameMillis(usage.frameP95Millis!!) + " / " + frameMillis(usage.frameP99Millis!!)
                     else if (platformKind == PlatformKind.ANDROID) "尚无样本" else "平台未提供")
                 ExperienceBudgetRow("实际传输", experienceCacheSize(usage.transferredBytes))
+                ExperienceBudgetRow("脚本缓冲上限", experienceCacheSize(budget.materializationBytes))
                 ExperienceBudgetRow("应用堆内存", cacheUsage(usage.resources.processHeapBytes, usage.resources.processHeapLimitBytes))
+                ExperienceBudgetRow("物理内存 / 核心", (usage.resources.totalMemoryBytes?.let(::experienceCacheSize) ?: "—") + " / " + (usage.resources.processorCount?.toString() ?: "—"))
                 ExperienceBudgetRow("可用系统内存", usage.resources.availableMemoryBytes?.let(::experienceCacheSize) ?: "—")
                 ExperienceBudgetRow("可用磁盘", usage.resources.freeDiskBytes?.let(::experienceCacheSize) ?: "—")
                 ExperienceBudgetRow("处理器负载", usage.resources.cpuLoad?.let { (it * 100).roundToInt().toString() + "%" } ?: "—")
                 ExperienceBudgetRow("网络计费", when (usage.resources.metered) { true -> "计费"; false -> "非计费"; null -> "未知" })
                 ExperienceBudgetRow("电量 / 温度", (usage.resources.batteryPercent?.let { it.toString() + "%" } ?: "未知") + " / " +
                     when (usage.resources.thermalPressure) { 0 -> "正常"; 1 -> "升高"; 2 -> "较高"; 3 -> "严重"; else -> "未知" })
-                ExperienceHint("请求耗时包含排队与解码；帧工作耗时不等于屏幕 FPS。未知不代表正常。")
+                ExperienceHint("请求耗时包含排队与解码。解码累计输出不是驻留内存；分块有独立开销。帧工作耗时不等于屏幕 FPS，未知不代表正常。")
             }
             ExperienceHelp("resources-help", detail, { toggleDetail("resources-help") }) {
                 ExperienceHint("系统省电、严重温度与内存保护始终生效，恢复保留缓冲时间。计费网络及计费未知时，额外预热按当前预算收敛。")
@@ -547,7 +560,7 @@ private fun ExperienceRestore(visible: Boolean, active: Boolean, onRestore: () -
 private fun experienceReadingCustom(value: ExperienceOverrides) =
     value.prefetchMode != PrefetchMode.SMART || value.ahead != null || value.behind != null ||
         value.prefetchRequests != null || value.prefetchMiB != null || !value.crossChapter ||
-        value.readerRequests != null || !value.browseWarmup
+        value.readerRequests != null || value.resolveRequests != null || !value.browseWarmup
 
 private fun experienceDownloadCustom(value: ExperienceOverrides) =
     value.downloadPages != null || value.sourcePages != null || value.chapters != null ||

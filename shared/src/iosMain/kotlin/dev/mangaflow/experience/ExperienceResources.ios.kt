@@ -14,6 +14,9 @@ import io.ktor.client.plugins.HttpTimeout
 internal actual fun readExperienceResources(context: PlatformContext): ExperienceResources {
     val process = NSProcessInfo.processInfo
     return ExperienceResources(
+        totalMemoryBytes = process.physicalMemory.toLong().takeIf { it > 0L },
+        processorCount = process.activeProcessorCount.toInt().takeIf { it > 0 },
+        // Process heap allowance, free physical RAM and CPU load remain genuinely unknown.
         lowPower = process.lowPowerModeEnabled,
         thermalPressure = when (process.thermalState) {
             NSProcessInfoThermalState.NSProcessInfoThermalStateNominal -> 0

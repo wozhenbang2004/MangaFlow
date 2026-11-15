@@ -59,6 +59,9 @@ import dev.mangaflow.data.ReaderSourceStandby
 import dev.mangaflow.reader.ReaderImageRecovery
 import dev.mangaflow.reader.ReaderLoadAttempt
 import dev.mangaflow.reader.ReaderPageResolver
+import dev.mangaflow.reader.ReaderPagePrefetch
+import dev.mangaflow.reader.AdjacentPagePrefetch
+import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.reader.isReaderPrefetchFailure
 import dev.mangaflow.reader.rememberReaderPageTransfer
 import dev.mangaflow.reader.ReaderSurface
@@ -123,11 +126,9 @@ internal fun GuidedPanelReader(
     bottomClearancePx: Int,
 ) {
     val context = LocalContext.current
-    val experience = remember(context) { ExperiencePolicyStore.get(context) }
-    val experienceBudget by experience.state.collectAsStateWithLifecycle()
     val pageFailed by rememberUpdatedState(onPrefetchFailure)
     val prefetchFailures = remember(pages, headers, sourceId) { mutableStateMapOf<Int, String>() }
-    val inspectedPages = remember(pages, headers, sourceId) { mutableMapOf<Int, Boolean>() }
+    val prefetchRequests = remember(pages, headers, sourceId) { mutableStateMapOf<Int, ReaderPagePrefetch>() }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     val repository = remember(context) { PanelRepository(context) }
     val models = remember(context) { PanelModelStore.get(context) }
@@ -137,12 +138,6 @@ internal fun GuidedPanelReader(
     val installedModels = modelStates.mapValues { it.value.installed }
     val installedRuntimes = runtimeStates.mapValues { it.value.installed }
     var pageIndex by rememberSaveable { mutableIntStateOf(initialPage.coerceIn(pages.indices)) }
-    var previousPage by remember(pages) { mutableIntStateOf(pageIndex) }
-    var prefetchDirection by remember(pages) { mutableIntStateOf(1) }
-    LaunchedEffect(pageIndex) {
-        if (pageIndex != previousPage) prefetchDirection = if (pageIndex > previousPage) 1 else -1
-        previousPage = pageIndex
-    }
     var panelIndex by rememberSaveable { mutableIntStateOf(initialPanel.coerceAtLeast(0)) }
     var overview by rememberSaveable { mutableStateOf(false) }
     var reload by remember { mutableIntStateOf(0) }
@@ -151,6 +146,9 @@ internal fun GuidedPanelReader(
     var imageRetry by remember(pageIndex, currentPage.index, currentPage.url, headers, sourceId) { mutableIntStateOf(0) }
     val attempt = remember(pageIndex, currentPage.index, currentPage.url, headers, sourceId, imageRetry) { ReaderLoadAttempt() }
     val transferObserver = remember(attempt) { ReaderTransferObserver() }
+    val attemptPrefetch = remember(attempt) { prefetchRequests[pageIndex].takeIf { imageRetry == 0 } }
+    var waitingForPrefetch by remember(attempt) { mutableStateOf(attemptPrefetch != null) }
+    var handedOffPrefetchProgress by remember(attempt) { mutableStateOf<ReaderTransferSnapshot?>(null) }
     var transportProgress by remember(attempt) { mutableStateOf(transferObserver.snapshot()) }
     var resource by remember(attempt) { mutableStateOf<Page?>(null) }
     var detection by remember(attempt) { mutableStateOf<PanelDetection?>(null) }
@@ -195,10 +193,26 @@ internal fun GuidedPanelReader(
     }
     LaunchedEffect(attempt, active, imageReady, waitClock, error) {
         slowLoading = false
+        val visibleAt = monotonicTimeMillis()
+        val initialPrefetch = attemptPrefetch?.transfer?.snapshot()
+        var observedPrefetchBytes = initialPrefetch?.receivedBytes ?: 0L
+        var observedPrefetchAt = initialPrefetch?.lastProgressAt
+        var inheritedProgressAt: Long? = null
         while (active && !imageReady && attempt.acceptsResult && error == null) {
             val transport = transferObserver.snapshot()
-            transportProgress = transport
-            val idle = attempt.idleMillis(waitClock, transport.lastProgressAt)
+            val inherited = if (waitingForPrefetch) attemptPrefetch?.transfer?.snapshot() else handedOffPrefetchProgress
+            if (inherited != null) {
+                val latest = inherited.lastProgressAt
+                // Only this exact request's positive body writes after visibility renew the clock.
+                if (latest != null && latest >= visibleAt &&
+                    (inherited.receivedBytes > observedPrefetchBytes || latest != observedPrefetchAt))
+                    inheritedProgressAt = maxOf(inheritedProgressAt ?: latest, latest)
+                observedPrefetchBytes = inherited.receivedBytes
+                observedPrefetchAt = inherited.lastProgressAt
+            }
+            transportProgress = if (transport.receivedBytes > 0L || inherited == null) transport else inherited
+            val latestByte = listOfNotNull(transport.lastProgressAt, inheritedProgressAt).maxOrNull()
+            val idle = attempt.idleMillis(waitClock, latestByte)
             slowLoading = idle >= READER_SLOW_LOAD_MILLIS
             if (idle >= READER_PAGE_WAIT_MILLIS) {
                 attempt.stopped = true
@@ -258,6 +272,22 @@ internal fun GuidedPanelReader(
         error = null
         try {
             val page = pages[pageIndex]
+            val pendingPrefetch = attemptPrefetch ?: prefetchRequests[pageIndex].takeIf { imageRetry > 0 }
+            if (resource == null && pendingPrefetch != null) {
+                // Reuse the exact original transfer, or finish cancelling it before an explicit retry.
+                if (imageRetry > 0) pendingPrefetch.request.dispose() else pendingPrefetch.work.promote()
+                waitingForPrefetch = true
+                try {
+                    pendingPrefetch.request.job.await()
+                    currentCoroutineContext().ensureActive()
+                } catch (cancelled: CancellationException) {
+                    // Cancelling optional work releases the handoff, not this owning reader.
+                    currentCoroutineContext().ensureActive()
+                }
+                if (!attempt.acceptsResult || !requestedRun.acceptsResult || latestDetectionRun !== requestedRun) return@LaunchedEffect
+                handedOffPrefetchProgress = attemptPrefetch?.transfer?.snapshot()
+                waitingForPrefetch = false
+            }
             val receiveBytes: (Long) -> Unit = { count -> if (attempt.acceptsResult) transferObserver.onBytes(count) }
             val resolved = resource ?: if (imageRetry > 0) retry(page, receiveBytes) else resolve(page, receiveBytes)
             currentCoroutineContext().ensureActive()
@@ -290,57 +320,24 @@ internal fun GuidedPanelReader(
             if (attempt.acceptsResult && requestedRun.acceptsResult && latestDetectionRun === requestedRun) loading = false
         }
     }
-    LaunchedEffect(attempt, pageIndex, detection, imageReady, error, active, prefetchPage, scriptPrefetch,
-        prefetchDirection, viewport, experienceBudget.prefetchAhead, experienceBudget.decodedPrefetchPages,
-        experienceBudget.adjacentPrefetchBytes) {
-        if (!active || !imageReady || error != null || !attempt.acceptsResult || detection == null ||
-            experienceBudget.prefetchAhead == 0 || experienceBudget.adjacentPrefetchBytes == 0L) return@LaunchedEffect
-        // Prepare readable source images only; panel recognition belongs to the displayed page.
-        delay(400)
-        val bytes = PrefetchByteBudget(experienceBudget.adjacentPrefetchBytes)
-        for (offset in 1..minOf(2, experienceBudget.prefetchAhead)) {
-            val index = pageIndex + offset * prefetchDirection
-            if (index !in pages.indices) break
-            val warmMemory = offset <= experienceBudget.decodedPrefetchPages && viewport.width > 0
-            if (inspectedPages[index] == true || inspectedPages[index] == warmMemory) continue
-            try {
-                withTimeoutOrNull(15_000) {
-                    val work = PrefetchWork(experience::wakeAdmissions)
-                    val resource = if (sourceId.startsWith("js_")) scriptPrefetch(pages[index], bytes, work)
-                        else prefetchPage(pages[index])
-                    if (resource == null || sourceId == "jmcomic" && !resource.url.startsWith("file:")) return@withTimeoutOrNull
-                    var diskKey = readerPageCacheKey(resource, headers, sourceId)
-                    if (resource.url.startsWith("https:")) {
-                        val fetched = prefetchOriginalPageResult(context, resource, headers, sourceId, bytes, work)
-                        fetched.failure?.let { throw it }
-                        if (!fetched.received) return@withTimeoutOrNull
-                        diskKey = fetched.diskCacheKey ?: diskKey
-                    }
-                    val preview = readerPreviewSize(viewport.width, viewport.height)
-                    val checked = preflightReaderPage(context, resource, headers, sourceId,
-                        preview.width, preview.height, diskKey, warmMemory, work)
-                    currentCoroutineContext().ensureActive()
-                    if (!attempt.acceptsResult) return@withTimeoutOrNull
-                    if (checked.status == ReaderPagePreflightStatus.FAILED) {
-                        checked.failure?.takeIf(::isReaderPrefetchFailure)?.let {
-                            prefetchFailures[index] = it.message.orEmpty()
-                            pageFailed(pages[index])
-                        }
-                    }
-                    if (checked.status != ReaderPagePreflightStatus.DEFERRED) {
-                        inspectedPages[index] = warmMemory
-                    }
-                }
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) {
-                if (isReaderPrefetchFailure(failure) && attempt.acceptsResult) {
-                    prefetchFailures[index] = failure.message.orEmpty()
-                    pageFailed(pages[index])
-                    inspectedPages[index] = warmMemory
-                }
+    // Ordinary and guided reading share one bounded resolve/original/preview pipeline.
+    // Detection remains current-page-only and finishes before optional future work starts.
+    AdjacentPagePrefetch(
+        pages = pages, headers = headers, mode = preferences.mode,
+        composedPages = mapOf(pageIndex to true),
+        loadedPages = if (imageReady) mapOf(pageIndex to currentPage.url) else emptyMap(),
+        requests = prefetchRequests, resolvePage = prefetchPage, scriptPrefetch = scriptPrefetch,
+        enabled = active && imageReady && error == null && detection != null,
+        foregroundActive = active,
+        sourceId = sourceId, viewportWidth = { viewport.width }, viewportHeight = viewport.height,
+        onPageFailure = { index, failure ->
+            if (active && attempt.acceptsResult && index in pages.indices) {
+                prefetchFailures[index] = failure
+                pageFailed(pages[index])
             }
-        }
-    }
+        },
+        position = { pageIndex.toFloat() }, visibleRange = { pageIndex to pageIndex },
+    )
     LaunchedEffect(pageIndex, selected, detection, imageReady, active) {
         // The parent needs the displayed page for retry/source/ordinary-reading actions,
         // even when this page has no usable image yet. Only ready content is saved.

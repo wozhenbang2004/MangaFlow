@@ -1,5 +1,46 @@
 # MangaFlow detail · 2026-11-12
 
+## Adaptive reading pipeline and resource budgets · 2026-11-15 (PERFORMANCE-20261115-01–08)
+
+The user pasted the full aggressive-adaptive MangaFlow proposal as the current target after the experience UI redesign. Exact message ID is unavailable. Root stated the implementation assumption in this conversation and proceeds under the current development/main-integration authorization. The supplied claims/target numbers are a proposal, not observed product performance.
+
+Relevant exact user-provided requirements:
+
+> 可以，而且我赞成大幅提高 MangaFlow 的默认性能预算。
+>
+> 候选窗口不是同时下载的数量。并发数是调度上限，内存和字节预算仍需独立约束；设备 RAM 只是初始判断依据。
+>
+> 因此需要同时改造页面解析、网络传输、原图缓存、预解码四个独立执行阶段。
+>
+> 网络健康、解码耗时稳定、内存富余、温度正常，就逐步从 3 路提升到 4、5、6 路。
+>
+> 如果 4 路和 6 路吞吐差不多，就保持 4 路，减少额外连接和资源消耗。
+>
+> 来源返回 429、503，或者发生内存压力、明显卡顿，就按对应原因降低并发。恢复稳定后再逐渐提升。
+>
+> 已解码的当前页、紧邻未来页、最近回看页，以及超大图当前需要显示的细节图块。
+>
+> 更远的 20～40 页可以先缓存压缩原图，不必全部提前解码。
+>
+> 不是把当前保守参数简单乘三，而是建立可以持续试探性能上限、监测收益、自动回退的调度器。
+
+The supplied initial PERFORMANCE goals are12–16 /20–24 /24–40 future candidates,3–4 /5–6 /8–12 network requests,1–2 /2–3 /3–4 decode operations,2–3 /3–5 /5–8 warmed previews,96–128 /192–256 /256–512MiB encoded windows and4 /6 /8–12 background pages for ordinary phone / capable phone / capable desktop. These are goal ranges, not minimum resource reservations. The supplied “下一页准备成功率≥98% / 可感知翻页等待尽量趋近0 / 原图品质不主动损失” remain design goals requiring real source/device/network evidence. No success rate, zero-wait result or best hardware setting is invented.
+
+Scope is the existing experience policy/configuration/observations, native resource snapshots, ordinary/guided adjacent preparation, script image materialization, Coil stage adapters and the just-delivered compact experience controls. Preserve the full async/background0e9477e application-services work, unified storage, actual source/header/session/cache identity, native original bytes, download route/generation/writer, source alignment/history and shared UI primitives. Root integrates; the three requested independent branches own policy/resource, reader pipeline and script adapter files. No new scheduler platform/runtime/library, model, test asset or alternative UI.
+
+| ID | Chosen implementation and observable acceptance |
+| --- | --- |
+| PERFORMANCE-20261115-01 | Separate candidate resolution, actual transport/cache publication and sampled preview decoding. Ordinary resolution runs in bounded observable jobs instead of suspending the window collector; original-transfer and cache-only-check maps have independent capacities. Guided reuses that same pipeline and never speculatively recognizes panels. A candidate/window count does not claim parallel HTTP, saved pages or resident decoded images. |
+| PERFORMANCE-20261115-02 | Native RAM/core observations select only a starting profile; runtime heap headroom, physical availability, CPU, thermal, battery, metered/background choices and storage remain authoritative. Ordinary/capable phone/strong desktop PERFORMANCE goals reach16/24/40 candidates,4/6/12 network operations,2/3/4 total managed decode operations,3/5/8 previews,128/256/512MiB original-byte windows and4/6/12 background pages. Unknown/weak/iOS per-process limits stay conservative. AUTO goals also rise. Manual values are ceilings and are never erased by a mode change. |
+| PERFORMANCE-20261115-03 | The original-byte disk/traffic window remains distinct from transient script working buffers. The former follows goal/disk/global slices; the latter has an independent live materialization budget from real application heap headroom with pixel/current-page reserve and a physical-availability fraction. Script body chunks are atomically charged against both budgets, with balanced release after publication/cancellation; known oversize bodies are refused before buffering. Warmed-preview count uses the live Coil cache and recent actual decoded output p90, retaining at least half for visible/backward/detail needs. An unknown image size uses a marked estimate, not an invented allocation. No physical-RAM percentage grants unbounded process memory. |
+| PERFORMANCE-20261115-04 | Network/source permits cover real HTTP only; a memory/local-cache hit never waits for that HTTP permit. Resolution and decode have separate global capacities, limited optional work and a foreground lane when capacity exceeds one. Source learning begins conservatively, compares observed completed-byte throughput and comparable request tails across bounded trials, stops/backs off on plateaus, errors and longest429/503 advertised cooldown. Required current-page work gets priority inside actual/manual source ceilings; already receiving work and native calls cannot be magically preempted. |
+| PERFORMANCE-20261115-05 | Keep the sole Coil3.2 loader/journal and Blackhole original-byte prefetch. A decorator of the actual Coil decoder registry preserves all existing options/format fallbacks/sampling and acquires decode capacity after fetching, then records actual Image.size and decode-only time. Exact-key/size warm flights can be promoted and awaited by a visible request before Coil's ordinary memory validation; cancellation completes/removes the flight without source poisoning. Cache-only inspection is hard-vetoed before any HTTP/source admission. Native Telephoto tile pools/GPU buffers remain separate bounded consumers, not falsely included in Coil cache/managed-preview counters. |
+| PERFORMANCE-20261115-06 | Script JS resolution, actual byte fetching, optional JM restoration and atomic original publication no longer hold the old one-/two-lane full-chain semaphores. Keep per-identity writer locks, source-session/revision fences, frozen prefetch/download route, image size/type checks, exact byte accounting and foreground download ownership. Plain byte publication takes no decode slot. Original JM restoration remains possible when preview warming is explicitly zero; preview-specific eligibility is separate from necessary image-restoration CPU. Native JM remains foreground-owned rather than claiming unsupported speculative/native byte progress. |
+| PERFORMANCE-20261115-07 | Actual visibility promotes work; composed future pages are not all foreground. Guided's active reader ownership is independent of image/detection readiness so a new current page keeps its original transfer. First-use handoff preserves the exact body observer; explicit retry cancels and settles only its old optional request and never inherits its bytes. Raw completion advances a page epoch to repeat an earlier cache miss, and stale checks cannot publish across that epoch. Offline/metered/disk-write restrictions can retain already-local/Coil preview work without HTTP; explicit prefetch OFF still means all advance preparation off. |
+| PERFORMANCE-20261115-08 | Keep the compact PANEL/seven domains/one numeric editor and extend the same controls with resolve/decode limits, new ranges and local restores. Use待读/回看relative to actual turn direction, never fixed left/right. Diagnostics distinguish executing stages, actual decode/queue P95 and cumulative decoded output from resident memory; no synthetic FPS/readiness score. Real high frame-work tail/slow decode samples reduce optional starts with bounded recovery. UIX grouping/44dp/font/retained motion and all truthful platform limits remain. One complete latest-main expected-head batch/ordinary CI trigger; no tests/local builds, probes, fixture renders or claimed device acceptance. |
+
+Evidence and limits: read the pinned Coil3.2 Image/Decoder/ComponentRegistry/RealImageLoader/EngineInterceptor implementations, including append order and actual decoder indices, and official Android17 memory/graphics guidance. Coil permits real component decorators; no dependency upgrade is assumed. Root/independent source review found and corrected optional-resolution cancel/requeue spinning, the Guided future-enabled/visible-owner race and JM restoration being tied to preview count. Added actual optional resolve/decode reservations without exceeding explicit capacities. JVM script buffers grow only after each observed chunk; iOS may buffer one16KiB read before reporting body bytes, with bounded header/frame overhead. iOS optional compressed HTTP image responses are deferred before its unobserved gzip inflation; explicit foreground behavior is retained. The15s recovery windows,120ms decode-work and32ms frame-work thresholds are initial heuristics, not validated device optima. Original bytes and stored downloads are unchanged. Compilation, throughput, memory peaks, cache/next-page readiness, cross-platform installed behavior and visual/gesture outcomes remain pending ordinary artifacts/user feedback.
+
 ## Screenshot correction: main network dialog · 2026-11-15
 
 User: “不知道到底在修什么”, supplying1000121745.jpg and1000121746.jpg (current conversation; exact message/build IDs unavailable). Actual images show the connection overview at roughlyy456–1127 versus the proxy-expanded pane aty242–1338 in the same699×1536 viewport. These are screenshot observations, not Compose layout specifications. The earlier NETWORK-UX batch addressed adjacent menus but did not close this visible requirement. Main-dialog geometry/information hierarchy and the self-referential proxy error are the active correction.

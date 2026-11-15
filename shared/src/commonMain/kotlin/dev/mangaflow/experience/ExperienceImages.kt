@@ -9,6 +9,8 @@ import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.decode.DataSource
 import coil3.decode.BlackholeDecoder
+import coil3.decode.Decoder
+import coil3.decode.DecodeResult
 import coil3.fetch.FetchResult
 import coil3.fetch.Fetcher
 import coil3.fetch.SourceFetchResult
@@ -23,6 +25,7 @@ import coil3.network.httpHeaders
 import coil3.request.*
 import coil3.request.Options
 import coil3.size.Scale
+import coil3.size.Size
 import dev.mangaflow.data.Page
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.net.DownloadRouteMode
@@ -41,6 +44,7 @@ import dev.mangaflow.platform.storage.cacheDirectory
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.currentCoroutineContext
@@ -240,18 +244,61 @@ internal data class ReaderPagePreflight(
 )
 private class PrefetchCacheUnavailable : IOException("预取原图已不在缓存中")
 
-/**
- * Inspect bytes already owned by this page. Far pages read headers only; only a real sampled
- * decode reports READY. Cache misses, local resource stops and cancellation are not source faults.
- * Even Coil's cache-control fallback is vetoed before transport, so inspection never downloads.
- */
+private data class WarmPreviewKey(val identity: String, val size: Size)
+private class WarmPreviewFlight(val work: PrefetchWork) {
+    val done = CompletableDeferred<ReaderPagePreflight>()
+}
+private val warmPreviewLock = StorageLock()
+private val warmPreviews = mutableMapOf<WarmPreviewKey, WarmPreviewFlight>()
+
+/** Share an exact warm attempt; the foreground still lets Coil validate the resulting memory entry. */
 internal suspend fun preflightReaderPage(
     context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
     viewportWidthPx: Int, viewportHeightPx: Int, diskCacheKey: String? = null,
     warmMemory: Boolean = true, work: PrefetchWork = PrefetchWork(),
 ): ReaderPagePreflight {
+    if (!warmMemory) return inspectReaderPage(context, page, headers, source,
+        viewportWidthPx, viewportHeightPx, diskCacheKey, false, work)
+    val size = readerPreviewSize(viewportWidthPx, viewportHeightPx)
+    val key = WarmPreviewKey(readerPageCacheKey(page, headers, source), Size(size.width, size.height))
+    var owner = false
+    val flight = synchronized(warmPreviewLock) {
+        warmPreviews[key] ?: WarmPreviewFlight(work).also { warmPreviews[key] = it; owner = true }
+    }
+    if (!owner) {
+        if (work.isForeground) flight.work.promote()
+        return flight.done.await()
+    }
+    try {
+        return inspectReaderPage(context, page, headers, source, viewportWidthPx, viewportHeightPx,
+            diskCacheKey, true, work).also { flight.done.complete(it) }
+    } finally {
+        // Cancellation/missing resources release waiters without poisoning this page or source.
+        flight.done.complete(ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED))
+        synchronized(warmPreviewLock) { if (warmPreviews[key] === flight) warmPreviews.remove(key) }
+    }
+}
+
+private suspend fun awaitWarmReaderPreview(request: ImageRequest, size: Size) {
+    if (request.extras[workKey] != ExperienceImageWork.READER || !request.memoryCachePolicy.readEnabled) return
+    val identity = request.memoryCacheKey ?: return
+    val flight = synchronized(warmPreviewLock) { warmPreviews[WarmPreviewKey(identity, size)] } ?: return
+    flight.work.promote()
+    flight.done.await()
+}
+
+/**
+ * Inspect bytes already owned by this page. Far pages read headers only; only a real sampled
+ * decode reports READY. Cache misses, local resource stops and cancellation are not source faults.
+ * Even Coil's cache-control fallback is vetoed before transport, so inspection never downloads.
+ */
+private suspend fun inspectReaderPage(
+    context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
+    viewportWidthPx: Int, viewportHeightPx: Int, diskCacheKey: String? = null,
+    warmMemory: Boolean = true, work: PrefetchWork = PrefetchWork(),
+): ReaderPagePreflight {
     val policy = ExperiencePolicyStore.get(context)
-    if (!policy.canWritePrefetch() && !work.isForeground)
+    if (warmMemory && !policy.canDecodePrefetch() && !work.isForeground)
         return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED)
     val loader = SingletonImageLoader.get(imagePlatformContext(context))
     val key = diskCacheKey ?: readerPageCacheKey(page, headers, source)
@@ -272,7 +319,7 @@ internal suspend fun preflightReaderPage(
     catch (_: OutOfMemoryError) { return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, diskCacheKey = key) }
     currentCoroutineContext().ensureActive()
     if (!warmMemory) return ReaderPagePreflight(ReaderPagePreflightStatus.UNVERIFIED, dimensions, key)
-    if (!policy.canWritePrefetch() && !work.isForeground)
+    if (!policy.canDecodePrefetch() && !work.isForeground)
         return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, dimensions, key)
     val size = readerPreviewSize(viewportWidthPx, viewportHeightPx)
     // Keep room for the visible spread and its detail tiles. Never shrink a warm preview to
@@ -329,6 +376,7 @@ internal fun initializeExperienceImages(context: PlatformContext) {
         ImageLoader.Builder(imageContext)
             .components {
                 add(NetworkFetcher.Factory(networkClient = { ExperienceImageNetworkClient(createExperienceNetworkClient(), policy) }))
+                add(ExperienceDecoderFactory(policy))
                 add(Interceptor { chain ->
                     val request = chain.request
                     val work = request.extras[workKey] ?: ExperienceImageWork.VISIBLE
@@ -336,18 +384,9 @@ internal fun initializeExperienceImages(context: PlatformContext) {
                     val cacheKey = request.diskCacheKey ?: request.data?.toString().orEmpty()
                     if (remote && request.extras[cacheOnlyKey] != true)
                         storage.noteCoil(cacheKey, false)
-                    val result = if (work == ExperienceImageWork.PREFETCH && (remote || request.extras[cacheOnlyKey] == true)) {
-                        val token = request.extras[workTokenKey]
-                        if (token?.isForeground == true) policy.withImageAdmission(true) { chain.proceed() }
-                        else try {
-                            token?.ifOptional { if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded() }
-                            policy.withPrefetchAdmission(request.extras[sourceKey] ?: experienceOrigin(request.data.toString()),
-                                policy.estimatedPageBytes(request.data.toString()), { token?.isForeground == true }) { chain.proceed() }
-                        } catch (_: PrefetchPromoted) {
-                            policy.withImageAdmission(true) { chain.proceed() }
-                        }
-                    } else if (!remote) chain.proceed()
-                    else policy.withImageAdmission(work == ExperienceImageWork.READER) { chain.proceed() }
+                    // Neither a memory hit nor a local file waits behind network admission.
+                    if (request.extras[cacheOnlyKey] != true) awaitWarmReaderPreview(request, chain.size)
+                    val result = chain.proceed()
                     if (remote && request.extras[cacheOnlyKey] != true && result is SuccessResult)
                         storage.noteCoil(result.diskCacheKey ?: cacheKey, work != ExperienceImageWork.PREFETCH)
                     result
@@ -357,6 +396,47 @@ internal fun initializeExperienceImages(context: PlatformContext) {
             .eventListenerFactory { request -> ExperienceImageEvents(policy, request) }
             .crossfade(160)
             .build().also { policy.attachImageLoader(it, memory, disk) }
+    }
+}
+
+/**
+ * Decorate the pinned Coil decoder chain rather than keeping a permit through IO.
+ * All options, format fallbacks, sampling and image ownership stay with Coil.
+ */
+private class ExperienceDecoderFactory(private val policy: ExperiencePolicyStore) : Decoder.Factory {
+    override fun create(result: SourceFetchResult, options: Options, imageLoader: ImageLoader): Decoder? {
+        val ownIndex = imageLoader.components.decoderFactories.indexOfFirst { it === this }
+        if (ownIndex < 0) return null
+        val first = imageLoader.components.newDecoder(result, options, imageLoader, ownIndex + 1) ?: return null
+        return Decoder {
+            val optional = options.extras[workKey] == ExperienceImageWork.PREFETCH
+            val work = options.extras[workTokenKey]
+            policy.withDecodeAdmission(optional, { work?.isForeground == true }) {
+                val started = monotonicTimeMillis()
+                var decodedBytes = 0L
+                var cancelled = false
+                try {
+                    var candidate: Pair<Decoder, Int>? = first
+                    var decoded: DecodeResult? = null
+                    while (candidate != null) {
+                        currentCoroutineContext().ensureActive()
+                        decoded = candidate.first.decode()
+                        if (decoded != null) {
+                            decodedBytes = decoded.image.size.coerceAtLeast(0L)
+                            break
+                        }
+                        candidate = imageLoader.components.newDecoder(result, options, imageLoader, candidate.second + 1)
+                    }
+                    decoded
+                } catch (stop: CancellationException) {
+                    cancelled = true
+                    throw stop
+                } finally {
+                    if (!cancelled) policy.recordDecode(monotonicTimeMillis() - started, decodedBytes,
+                        optional && work?.isForeground != true)
+                }
+            }
+        }
     }
 }
 
@@ -387,9 +467,25 @@ private class ExperienceImageNetworkClient(
     private val delegate: ExperienceNetworkTransport, private val policy: ExperiencePolicyStore,
 ) : NetworkClient {
     override suspend fun <T> executeRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
-        // Coil 3.2's networkCachePolicy adds only-if-cached headers but still calls its client.
-        // A source or transport cache cannot turn this local inspection into an HTTP request.
+        // A cache-only inspection must never claim a source slot or start HTTP.
         if (request.extras[cacheOnlyKey] == true) throw PrefetchCacheUnavailable()
+        val optional = request.extras[workKey] == ExperienceImageWork.PREFETCH
+        val token = request.extras[workTokenKey]
+        val source = request.extras[sourceKey] ?: experienceOrigin(request.url)
+        suspend fun transfer(): T = performRequest(request, block)
+        return if (optional && token?.isForeground != true) {
+            try {
+                token?.ifOptional { if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded() }
+                policy.withPrefetchAdmission(source,
+                    policy.estimatedPageBytes(request.url), { token?.isForeground == true }) { transfer() }
+            } catch (_: PrefetchPromoted) {
+                policy.withImageAdmission(reader = true, source = source) { transfer() }
+            }
+        } else policy.withImageAdmission(reader = request.extras[workKey] == ExperienceImageWork.READER ||
+            token?.isForeground == true, source = source) { transfer() }
+    }
+
+    private suspend fun <T> performRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
         val started = monotonicTimeMillis()
         val optional = request.extras[workKey] == ExperienceImageWork.PREFETCH
         val budget = request.extras[bytesKey]

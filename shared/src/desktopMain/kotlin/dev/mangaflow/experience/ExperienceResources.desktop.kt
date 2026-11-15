@@ -17,6 +17,8 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
         // Heap load and physical availability remain separately named measurements.
         processHeapBytes = runtime.totalMemory() - runtime.freeMemory(),
         processHeapLimitBytes = runtime.maxMemory(),
+        totalMemoryBytes = runCatching { os?.totalMemorySize?.takeIf { it > 0L } }.getOrNull(),
+        processorCount = runtime.availableProcessors().takeIf { it > 0 },
         availableMemoryBytes = runCatching { os?.freeMemorySize?.takeIf { it >= 0L } }.getOrNull(),
         lowMemoryDevice = runCatching { os?.totalMemorySize?.takeIf { it > 0L }?.let { it < 4L * 1024 * EXPERIENCE_MIB } }.getOrNull(),
         cpuLoad = runCatching { os?.cpuLoad?.takeIf { it.isFinite() && it in 0.0..1.0 } }.getOrNull(),

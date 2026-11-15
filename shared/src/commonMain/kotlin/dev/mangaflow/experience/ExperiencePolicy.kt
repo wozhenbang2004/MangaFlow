@@ -13,7 +13,7 @@ import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
-internal val maximumBackgroundPageParallelism: Int get() = if (platformKind == PlatformKind.DESKTOP) 8 else 4
+internal val maximumBackgroundPageParallelism: Int get() = if (platformKind == PlatformKind.DESKTOP) 12 else 6
 
 /** Stored intent, effective limits and measured usage are separate. One controller owns admissions. */
 class ExperiencePolicyStore private constructor(context: PlatformContext) {
@@ -48,15 +48,26 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var activePages = 0
     private var activeImages = 0
     private var activeReaderImages = 0
+    private var activeResolves = 0
+    private var activeDecodes = 0
+    private var activeOptionalResolves = 0
+    private var activeOptionalDecodes = 0
+    private var framePressureUntil = 0L
+    private var decodePressureUntil = 0L
+    private var foregroundResolveWaiters = 0
+    private var foregroundDecodeWaiters = 0
+    private var nextDecodeBudgetAt = 0L
     private var activePrefetch = 0
     private var prefetchReserved = 0L
     private var prefetchStreamingBytes = 0L
+    private var materializationStreamingBytes = 0L
     private var queued = 0
     private var nextTicket = 0L
     private val pageQueue = linkedMapOf<Long, String>()
     private val chapterQueue = linkedMapOf<Long, String>()
     private val chapters = mutableSetOf<String>()
     private val sourceActive = mutableMapOf<String, Int>()
+    private val sourceReaderWaiters = mutableMapOf<String, Int>()
     private val sources = mutableMapOf<String, SourceObservation>()
     private val measurements = ExperienceMeasurements()
     private val revision = MutableStateFlow(0L)
@@ -84,15 +95,17 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
 
     fun setOverrides(value: ExperienceOverrides) {
         val next = value.copy(
-            ahead = value.ahead?.coerceIn(0, 12), behind = value.behind?.coerceIn(0, 4),
-            prefetchRequests = value.prefetchRequests?.coerceIn(1, 3),
-            prefetchMiB = value.prefetchMiB?.coerceIn(4, 96),
+            ahead = value.ahead?.coerceIn(0, 40), behind = value.behind?.coerceIn(0, 8),
+            prefetchRequests = value.prefetchRequests?.coerceIn(1, 12),
+            prefetchMiB = value.prefetchMiB?.coerceIn(4, 512),
             readerRequests = value.readerRequests?.coerceIn(1, 4),
+            resolveRequests = value.resolveRequests?.coerceIn(1, 8),
+            decodeRequests = value.decodeRequests?.coerceIn(1, 4),
             downloadPages = value.downloadPages?.coerceIn(1, maximumBackgroundPageParallelism),
-            sourcePages = value.sourcePages?.coerceIn(1, 4), chapters = value.chapters?.coerceIn(1, 4),
+            sourcePages = value.sourcePages?.coerceIn(1, 8), chapters = value.chapters?.coerceIn(1, 4),
             memoryMiB = value.memoryMiB?.coerceIn(16, 512),
             diskMiB = value.diskMiB?.coerceIn(32, 8192), refreshHz = value.refreshHz?.coerceIn(30, 360),
-            decodedPrefetchPages = value.decodedPrefetchPages?.coerceIn(0, 2),
+            decodedPrefetchPages = value.decodedPrefetchPages?.coerceIn(0, 8),
         )
         if (next == mutableOverrides.value) return
         // One typed, backup-compatible preference makes a restore/change atomic.
@@ -249,15 +262,125 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         source: String, maxWaitMillis: Long? = null, onWaiting: (AdmissionWait?) -> Unit = {}, block: suspend () -> T,
     ): T =
         admit({ activePages < mutableState.value.backgroundPages && sourceAvailable(source) },
-            { activePages++; sourceActive[source] = (sourceActive[source] ?: 0) + 1 },
+            { activePages++; enterSource(source) },
             { activePages--; releaseSource(source) }, source, fairPages = true,
             maxWaitMillis = maxWaitMillis, waiting = { backgroundWait(source) }, onWaiting = onWaiting, block = block)
 
-    internal suspend fun <T> withImageAdmission(reader: Boolean, block: suspend () -> T): T =
-        if (reader) admit({ activeReaderImages < mutableState.value.readerRequests },
-            { activeReaderImages++ }, { activeReaderImages-- }, block = block)
-        else admit({ activeImages < if (platformKind == PlatformKind.DESKTOP) 8 else 4 },
-            { activeImages++ }, { activeImages-- }, block = block)
+    internal suspend fun <T> withImageAdmission(
+        reader: Boolean, source: String? = null, block: suspend () -> T,
+    ): T {
+        if (reader && source != null) synchronized(lock) {
+            sourceReaderWaiters[source] = (sourceReaderWaiters[source] ?: 0) + 1
+            revision.value++
+        }
+        try {
+            return admit(
+                ready = {
+                    (if (reader) activeReaderImages < mutableState.value.readerRequests
+                        else activeImages < if (platformKind == PlatformKind.DESKTOP) 12 else 6) &&
+                        (source == null || sourceAvailable(source, reader))
+                },
+                enter = {
+                    if (reader) activeReaderImages++ else activeImages++
+                    if (source != null) enterSource(source)
+                },
+                leave = {
+                    if (reader) activeReaderImages-- else activeImages--
+                    if (source != null) releaseSource(source)
+                },
+                source = source,
+                waiting = { if (source == null) AdmissionWait(AdmissionWaitReason.GLOBAL_LIMIT) else backgroundWait(source) },
+                block = block,
+            )
+        } finally {
+            if (reader && source != null) synchronized(lock) {
+                val left = (sourceReaderWaiters[source] ?: 1) - 1
+                if (left > 0) sourceReaderWaiters[source] = left else sourceReaderWaiters.remove(source)
+                revision.value++
+            }
+        }
+    }
+
+    /** JS/native metadata resolution is separate from transport and pixel decoding. */
+    internal suspend fun <T> withResolveAdmission(
+        promoted: () -> Boolean = { true }, block: suspend () -> T,
+    ): T {
+        val foreground = promoted()
+        var enteredOptional = false
+        synchronized(lock) { if (foreground) foregroundResolveWaiters++ }
+        try {
+            return admit(
+                ready = {
+                    val cap = mutableState.value.resolveRequests
+                    val optionalCap = if (readerUsers > 0 && cap > 1) cap - 1 else cap
+                    activeResolves < cap && (promoted() || foregroundResolveWaiters == 0 &&
+                        activeOptionalResolves < optionalCap && !readerWaiting && canResolveOptional())
+                },
+                enter = { activeResolves++; enteredOptional = !promoted(); if (enteredOptional) activeOptionalResolves++ },
+                leave = { activeResolves--; if (enteredOptional) activeOptionalResolves-- },
+                abandon = { !promoted() && !canResolveOptional() }, block = block,
+            )
+        } finally {
+            synchronized(lock) {
+                if (foreground) foregroundResolveWaiters--
+                revision.value++
+            }
+        }
+    }
+
+    /** Local bytes use the same decode permits and need no source or network reservation. */
+    internal suspend fun <T> withDecodeAdmission(
+        optional: Boolean = false, promoted: () -> Boolean = { false }, block: suspend () -> T,
+    ): T {
+        val started = monotonicTimeMillis()
+        val foreground = !optional || promoted()
+        var enteredOptional = false
+        synchronized(lock) { if (foreground) foregroundDecodeWaiters++ }
+        try {
+            return admit(
+                ready = {
+                    val cap = mutableState.value.decodeRequests
+                    val optionalCap = if (readerUsers > 0 && cap > 1) cap - 1 else cap
+                    activeDecodes < cap && (!optional || promoted() || foregroundDecodeWaiters == 0 &&
+                        activeOptionalDecodes < optionalCap && !readerWaiting && canDecodeOptional())
+                },
+                enter = { activeDecodes++; enteredOptional = optional && !promoted(); if (enteredOptional) activeOptionalDecodes++ },
+                leave = { activeDecodes--; if (enteredOptional) activeOptionalDecodes-- },
+                abandon = { optional && !promoted() && !canDecodeOptional() },
+            ) {
+                synchronized(lock) {
+                    measurements.recordDecodeQueue(monotonicTimeMillis() - started)
+                    updateUsage()
+                }
+                block()
+            }
+        } finally {
+            synchronized(lock) {
+                if (foreground) foregroundDecodeWaiters--
+                revision.value++
+            }
+        }
+    }
+
+    private fun canResolveOptional(): Boolean {
+        val budget = mutableState.value
+        // CPU/thermal pressure already reduces the published capacity/window. Rejecting
+        // an otherwise retained candidate would make its completion immediately requeue it.
+        return budget.foreground &&
+            (budget.prefetchAhead > 0 || budget.prefetchBehind > 0 || budget.browseWarmup)
+    }
+
+    private fun canDecodeOptional(): Boolean {
+        val budget = mutableState.value
+        // Original restoration (e.g. script JM) is CPU work even with preview warming off.
+        // Severe protection closes the candidate window; moderate load reduces decode capacity.
+        return budget.foreground &&
+            (budget.prefetchAhead > 0 || budget.prefetchBehind > 0 || budget.browseWarmup)
+    }
+
+    internal fun canDecodePrefetch(): Boolean = synchronized(lock) {
+        !readerWaiting && mutableState.value.decodedPrefetchPages > 0 && canDecodeOptional()
+    }
 
     internal suspend fun <T> withPrefetchAdmission(
         source: String, estimatedBytes: Long, promoted: () -> Boolean, block: suspend () -> T,
@@ -278,7 +401,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 !readerWaiting && (!browseOnly || b.browseWarmup && readerUsers == 0) &&
                     activePrefetch < b.prefetchRequests && reserved <= b.prefetchBytes - prefetchReserved && sourceAvailable(source)
             },
-            enter = { activePrefetch++; prefetchReserved += reserved; sourceActive[source] = (sourceActive[source] ?: 0) + 1 },
+            enter = { activePrefetch++; prefetchReserved += reserved; enterSource(source) },
             leave = { activePrefetch--; prefetchReserved -= reserved; releaseSource(source) },
             source = source,
             abandon = {
@@ -358,11 +481,21 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         ((sources[source]?.blockedUntil ?: 0L) - monotonicTimeMillis()).coerceAtLeast(0L)
     }
 
-    private fun sourceAvailable(source: String): Boolean {
+    private fun sourceAvailable(source: String, reader: Boolean = false): Boolean {
         val now = monotonicTimeMillis()
         val observed = sources[source]
-        val limit = minOf(observed?.parallelism ?: 1, mutableState.value.sourceParallelism)
-        return (observed?.blockedUntil ?: 0L) <= now && (sourceActive[source] ?: 0) < limit
+        if ((observed?.blockedUntil ?: 0L) > now) return false
+        val ceiling = mutableState.value.sourceParallelism.coerceAtLeast(1)
+        val learned = minOf(observed?.parallelism ?: 1, ceiling)
+        val active = sourceActive[source] ?: 0
+        if (reader) {
+            // One foreground lane may sit above learned optional concurrency, but never above
+            // the user's/effective source ceiling or an advertised 429/503 cooldown.
+            return active < minOf(ceiling, learned + 1)
+        }
+        if ((sourceReaderWaiters[source] ?: 0) > 0) return false
+        val reserve = if (foregroundUsers > 0 && readerUsers > 0 && ceiling > 1) 1 else 0
+        return active < minOf(learned, ceiling - reserve)
     }
 
     private fun protectionWait(): AdmissionWait? = when {
@@ -391,6 +524,12 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             else -> AdmissionWaitReason.GLOBAL_LIMIT
         })
     }
+    private fun enterSource(source: String) {
+        val active = (sourceActive[source] ?: 0) + 1
+        sourceActive[source] = active
+        sources[source]?.let { it.windowPeak = maxOf(it.windowPeak, active) }
+    }
+
     private fun releaseSource(source: String) {
         val left = (sourceActive[source] ?: 1) - 1
         if (left > 0) sourceActive[source] = left else sourceActive.remove(source)
@@ -403,24 +542,61 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 sources.keys.firstOrNull { (sourceActive[it] ?: 0) == 0 }?.let(sources::remove)
             }
             val observed = sources.getOrPut(source) { SourceObservation() }
+            val slow = bytes >= 64L * 1024L && elapsed > 0L &&
+                bytes.toDouble() * 1000.0 / elapsed < 64L * 1024L
             if (code == 429 || code == 503) {
-                // Concurrent failures cannot shorten an already advertised source cooldown.
+                // Server backoff wins over throughput learning; concurrent replies never shorten it.
                 observed.blockedUntil = maxOf(observed.blockedUntil, now + experienceRetryDelay(retryAfter))
                 observed.recoverAfter = maxOf(observed.recoverAfter, observed.blockedUntil + 30_000L)
                 observed.parallelism = 1
-                observed.healthySince = 0L; observed.successes = 0
-            } else if (failed || code != null && code >= 500 ||
-                (bytes >= 64L * 1024L && elapsed > 0L && bytes * 1000L / elapsed < 128L * 1024L)) {
+                observed.resetWindow()
+                observed.clearTrial()
+            } else if (failed || code != null && code >= 500 || slow) {
                 observed.recoverAfter = maxOf(observed.recoverAfter, now + 30_000L)
                 observed.parallelism = (observed.parallelism - 1).coerceAtLeast(1)
-                observed.healthySince = 0L; observed.successes = 0
-            } else if (code != null && code in 200..299 && bytes > 0L && now >= observed.recoverAfter) {
-                if (observed.healthySince == 0L) observed.healthySince = now
-                observed.successes++
-                if (observed.successes >= 4 && now - observed.healthySince >= 20_000L && now >= observed.nextIncreaseAt) {
-                    observed.parallelism = minOf(observed.parallelism + 1, mutableState.value.sourceParallelism)
-                    observed.nextIncreaseAt = now + 30_000L
-                    observed.healthySince = now; observed.successes = 0
+                observed.resetWindow()
+                observed.clearTrial()
+            } else if (code != null && code in 200..299 && bytes > 0L && elapsed > 0L && now >= observed.recoverAfter) {
+                if (observed.windowStartedAt == 0L) observed.windowStartedAt = (now - elapsed).coerceAtLeast(1L)
+                observed.windowBytes += bytes
+                observed.windowSuccesses++
+                observed.windowPeak = maxOf(observed.windowPeak, sourceActive[source] ?: 1)
+                observed.windowLatencies.addLast(elapsed)
+                if (observed.windowLatencies.size > 32) observed.windowLatencies.removeFirst()
+                val duration = now - observed.windowStartedAt
+                if (observed.windowSuccesses >= 4 && duration >= 4_000L && observed.windowBytes >= 256L * 1024L) {
+                    val rate = observed.windowBytes.toDouble() * 1000.0 / duration
+                    val meanBytes = observed.windowBytes.toDouble() / observed.windowSuccesses
+                    val sorted = observed.windowLatencies.sorted()
+                    val tail = sorted[((sorted.size * 95 + 99) / 100 - 1).coerceIn(sorted.indices)]
+                    val limit = mutableState.value.sourceParallelism
+                    val saturated = observed.windowPeak >= observed.parallelism
+                    if (observed.trialFrom > 0) {
+                        // Compare completed-byte throughput and similar-size request tails,
+                        // rather than calling a higher request count a performance improvement.
+                        val comparable = observed.baselineMeanBytes > 0.0 &&
+                            meanBytes / observed.baselineMeanBytes in .5..2.0
+                        val tailWorse = comparable && tail > maxOf(15_000L, observed.baselineTailMillis * 2L)
+                        val gain = rate / observed.baselineRate.coerceAtLeast(1.0)
+                        if (gain < 1.08) observed.plateauWindows++ else observed.plateauWindows = 0
+                        if (gain < .85 || tailWorse || observed.plateauWindows >= 2) {
+                            observed.parallelism = observed.trialFrom.coerceAtLeast(1)
+                            observed.nextIncreaseAt = now + 60_000L
+                            observed.recoverAfter = maxOf(observed.recoverAfter, now + 15_000L)
+                            observed.clearTrial()
+                        } else if (gain >= 1.08) {
+                            observed.clearTrial()
+                            observed.nextIncreaseAt = maxOf(observed.nextIncreaseAt, now + 8_000L)
+                        }
+                    } else if (saturated && now >= observed.nextIncreaseAt && observed.parallelism < limit) {
+                        observed.trialFrom = observed.parallelism
+                        observed.baselineRate = rate
+                        observed.baselineTailMillis = tail
+                        observed.baselineMeanBytes = meanBytes
+                        observed.parallelism++
+                        observed.nextIncreaseAt = now + 8_000L
+                    }
+                    observed.resetWindow()
                 }
             }
             measurements.recordTransfer(bytes, elapsed)
@@ -433,104 +609,152 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             measurements.recordImage(elapsed, memory, disk, prefetch, key, bytes)
             updateUsage()
         }
-    internal fun estimatedPageBytes(key: String): Long = synchronized(lock) { measurements.estimate(key) }
-    internal fun acceptPrefetchChunk(bytes: Long) = synchronized(lock) {
-        if (bytes > mutableState.value.prefetchBytes - prefetchStreamingBytes) throw PrefetchBudgetExceeded()
-        prefetchStreamingBytes += bytes
+    internal fun recordDecode(elapsedMillis: Long, decodedBytes: Long, optional: Boolean) = synchronized(lock) {
+        measurements.recordDecode(elapsedMillis, decodedBytes, optional)
+        val now = monotonicTimeMillis()
+        if (readerUsers > 0 && elapsedMillis >= 120L) decodePressureUntil = now + 15_000L
+        // Re-budget from real output sizes without persisting or resizing for every decode.
+        if (now >= nextDecodeBudgetAt) {
+            nextDecodeBudgetAt = now + 2_000L
+            publish()
+        }
+        updateUsage()
     }
-    internal fun releasePrefetchBytes(bytes: Long) = synchronized(lock) { prefetchStreamingBytes -= bytes }
+    internal fun estimatedPageBytes(key: String): Long = synchronized(lock) { measurements.estimate(key) }
+    internal fun acceptPrefetchChunk(bytes: Long, memoryBacked: Boolean = false) = synchronized(lock) {
+        if (bytes > mutableState.value.prefetchBytes - prefetchStreamingBytes ||
+            memoryBacked && bytes > mutableState.value.materializationBytes - materializationStreamingBytes)
+            throw PrefetchBudgetExceeded()
+        prefetchStreamingBytes += bytes
+        if (memoryBacked) materializationStreamingBytes += bytes
+    }
+    internal fun releasePrefetchBytes(bytes: Long, memoryBacked: Boolean = false) = synchronized(lock) {
+        prefetchStreamingBytes -= bytes
+        if (memoryBacked) materializationStreamingBytes -= bytes
+    }
     internal fun canWritePrefetch(): Boolean = synchronized(lock) {
         mutableState.value.prefetchBytes > 0L && diskCache?.acceptsPrefetchWrites != false
     }
     fun recordFrame(durationNanos: Long) = synchronized(lock) {
-        if (measurements.recordFrame(durationNanos)) updateUsage()
+        if (measurements.recordFrame(durationNanos)) {
+            updateUsage()
+            val now = monotonicTimeMillis()
+            // Actual frame work, not an invented FPS or an assumed display refresh rate.
+            if (readerUsers > 0 && (mutableUsage.value.frameP95Millis ?: 0.0) > 32.0 &&
+                framePressureUntil < now + 5_000L) {
+                framePressureUntil = now + 15_000L
+                publish()
+            }
+        }
     }
 
     private fun budget(): ExperienceBudget {
         val o = mutableOverrides.value
         val desktop = platformKind == PlatformKind.DESKTOP
-        val goal = goalBudget(desktop)
+        val tier = resourceTier(desktop)
+        val goal = goalBudget(desktop, tier)
         val now = monotonicTimeMillis()
         val warning = resources.memoryPressure == true || memoryUntil > now
         val hot = (resources.thermalPressure ?: 0) >= 2 || heatUntil > now
         val warm = (resources.thermalPressure ?: 0) >= 1 || warmUntil > now
         val heapHigh = resources.processHeapBytes?.let { used ->
-            resources.processHeapLimitBytes?.takeIf { it > 0L }?.let { used.toDouble() / it > .88 }
+            resources.processHeapLimitBytes?.takeIf { it > 0L }?.let { limit ->
+                used.toDouble() / limit > .88 || limit - used < 32L * EXPERIENCE_MIB
+            }
+        } == true
+        val physicalFloor = (if (desktop) 512L else 256L) * EXPERIENCE_MIB
+        val physicalTight = resources.availableMemoryBytes?.let { available ->
+            available < maxOf(physicalFloor, (resources.totalMemoryBytes ?: 0L) / 20L)
         } == true
         val lowBattery = o.batteryProtection && resources.charging != true && resources.batteryPercent?.let { it <= 20 } == true
         val power = resources.lowPower == true || powerUntil > now || lowBattery
         val cpuBusy = (resources.cpuLoad ?: 0.0) > .85 || cpuUntil > now
+        val frameBusy = framePressureUntil > now
+        val decodeBusy = decodePressureUntil > now
         val lowRam = resources.lowMemoryDevice == true
-        val severe = warning || heapHigh || hot
+        val severe = warning || heapHigh || physicalTight || hot
         val reserve = diskReserve()
         val free = resources.freeDiskBytes
         val diskLow = storageLow || free != null && free <= reserve
         val foreground = foregroundUsers > 0
         val reading = foreground && readerUsers > 0 && o.yieldToReading
-        var background = o.downloadPages ?: goal.backgroundPages
-        // LIGHT thermal pressure reduces speculative work first. Do not turn all three goals
-        // into the same memory/window preset after one ordinary Android LIGHT sample.
-        if (warm) background = minOf(background, maxOf(1, goal.backgroundPages / 2))
-        if (reading || power || lowRam || cpuBusy) background = minOf(background, if (desktop && !severe && !readerWaiting) 2 else 1)
-        if (severe) background = minOf(background, 1)
-        if (diskLow || resources.networkAvailable == false || (!foreground && !o.allowBackgroundDownloads) ||
-            (resources.thermalPressure ?: 0) >= 3 || reading && readerWaiting) background = 0
-        var ahead = if (o.prefetchMode == PrefetchMode.MANUAL) o.ahead ?: 3 else
-            goal.prefetchAhead
-        var behind = if (o.prefetchMode == PrefetchMode.MANUAL) o.behind ?: 1 else
-            goal.prefetchBehind
+        var networkCap = when (tier) { 0 -> 2; 1 -> 6; 2 -> 8; else -> 12 }
+        var resolveCap = when (tier) { 0 -> 2; 1 -> 4; 2 -> 6; else -> 8 }
+        var decodeCap = when (tier) { 0 -> 1; 1 -> 2; 2 -> 3; else -> 4 }
+        decodeCap = minOf(decodeCap, resources.processorCount?.coerceIn(1, 4) ?: 1)
+        var backgroundCap = when (tier) { 0 -> 2; 1 -> 4; 2 -> if (desktop) 8 else 6; else -> maximumBackgroundPageParallelism }
         if (warm) {
-            ahead = minOf(ahead, when (mode) { ExperienceMode.ECO -> 1; ExperienceMode.AUTO -> 4; ExperienceMode.PERFORMANCE -> 8 })
-            behind = minOf(behind, 1)
+            networkCap = minOf(networkCap, maxOf(2, goal.prefetchRequests))
+            resolveCap = minOf(resolveCap, maxOf(2, goal.resolveRequests / 2))
+            decodeCap = minOf(decodeCap, maxOf(1, goal.decodeRequests / 2))
+            backgroundCap = minOf(backgroundCap, maxOf(1, goal.backgroundPages / 2))
         }
         if (power || lowRam || cpuBusy) {
-            ahead = minOf(ahead, when (mode) { ExperienceMode.ECO -> 1; ExperienceMode.AUTO -> 2; ExperienceMode.PERFORMANCE -> 4 })
-            behind = 0
+            networkCap = minOf(networkCap, 2)
+            resolveCap = minOf(resolveCap, 2)
+            decodeCap = 1
+            backgroundCap = minOf(backgroundCap, if (desktop) 2 else 1)
         }
-        if (resources.metered == null && mode == ExperienceMode.AUTO &&
-            !o.allowMeteredPrefetch && o.prefetchMode != PrefetchMode.MANUAL) {
-            ahead = minOf(ahead, 1); behind = 0
+        if (frameBusy || decodeBusy) {
+            networkCap = minOf(networkCap, 2); resolveCap = minOf(resolveCap, 2)
+            decodeCap = 1; backgroundCap = minOf(backgroundCap, 1)
         }
-        if (diskLow || severe || o.prefetchMode == PrefetchMode.OFF ||
-            !foreground || resources.networkAvailable == false || (resources.metered == true && !o.allowMeteredPrefetch)) {
-            ahead = 0; behind = 0
+        if (severe) { networkCap = 1; resolveCap = 1; decodeCap = 1; backgroundCap = 1 }
+        var background = minOf(o.downloadPages ?: goal.backgroundPages, backgroundCap, maximumBackgroundPageParallelism)
+        if (reading) background = minOf(background, maxOf(1, goal.backgroundPages / 2))
+        if (diskLow || resources.networkAvailable == false || (!foreground && !o.allowBackgroundDownloads) ||
+            (resources.thermalPressure ?: 0) >= 3 || reading && readerWaiting) background = 0
+
+        // This is a candidate window. Cached/offline candidates still resolve and decode when
+        // transport is disabled; only the separate byte/request allocation permits new traffic.
+        var ahead = if (o.prefetchMode == PrefetchMode.MANUAL) o.ahead ?: goal.prefetchAhead else goal.prefetchAhead
+        var behind = if (o.prefetchMode == PrefetchMode.MANUAL) o.behind ?: goal.prefetchBehind else goal.prefetchBehind
+        if (warm) {
+            ahead = minOf(ahead, maxOf(1, goal.prefetchAhead * 2 / 3))
+            behind = minOf(behind, 2)
         }
-        // Temperature/CPU alone do not imply a memory shortage. Keeping usable images avoids
-        // evict/decode cycles while only the expensive optional starts are being restricted.
+        if (power || lowRam || cpuBusy) {
+            ahead = minOf(ahead, maxOf(1, goal.prefetchAhead / 3))
+            behind = minOf(behind, 1)
+        }
+        if (severe || o.prefetchMode == PrefetchMode.OFF || !foreground) { ahead = 0; behind = 0 }
         val fraction = when {
-            warning || heapHigh -> .06
+            warning || heapHigh || physicalTight -> .06
             lowRam -> minOf(goal.memoryCacheFraction, .10)
-            power -> minOf(goal.memoryCacheFraction, .10)
+            power -> minOf(goal.memoryCacheFraction, .12)
             else -> goal.memoryCacheFraction
         }
         val ceiling = o.diskMiB?.toLong()?.times(EXPERIENCE_MIB) ?: goal.diskCacheBytes
-        // Existing cache is reclaimable. Its own growth must not repeatedly lower its budget.
         val bytes = if (free == null) ceiling else minOf(ceiling,
             (free + sampledDiskBytes - reserve).coerceAtLeast(0L)) / EXPERIENCE_MIB * EXPERIENCE_MIB
-        val protections = buildList {
-            if (diskLow) add("磁盘空间不足")
-            if (warning) add(if (resources.memoryPressure == true) "系统内存紧张" else "内存保护恢复中")
-            if (heapHigh) add("应用堆内存占用较高")
-            if (hot) add(if ((resources.thermalPressure ?: 0) >= 2) "温度保护" else "温度恢复中")
-            else if (warm) add(if ((resources.thermalPressure ?: 0) >= 1) "设备温度升高" else "温度恢复中")
-            if (power) add(if (lowBattery) "电量较低" else "系统省电保护")
-            if (cpuBusy) add(if ((resources.cpuLoad ?: 0.0) > .85) "处理器负载较高" else "负载恢复中")
-            if (resources.metered == true && !o.allowMeteredPrefetch) add("计费网络暂停预取")
-            if (resources.networkAvailable == false) add("网络未连接")
-            if (!foreground && !o.allowBackgroundDownloads) add("后台下载已限制")
-            if (lowRam) add("低内存设备预算")
+        val heapHeadroom = resources.processHeapLimitBytes?.let { limit ->
+            resources.processHeapBytes?.let { used -> (limit - used).coerceAtLeast(0L) }
         }
-        val refresh = o.refresh ?: if (mode == ExperienceMode.ECO) RefreshPreference.SYSTEM else RefreshPreference.INTERACTION
-        val high = foreground && interactionUntil > now && !severe && !power && !cpuBusy && refresh != RefreshPreference.SYSTEM
-        val requestedHz = if (high && refresh == RefreshPreference.MANUAL) o.refreshHz else null
-        val prefetchBytes = if (ahead + behind == 0) 0L else minOf(
-            o.prefetchMiB?.toLong()?.times(EXPERIENCE_MIB) ?: goal.prefetchBytes,
-            bytes,
-        )
+        val pixelReserve = maxOf(32L * EXPERIENCE_MIB, measurements.estimatedDecodedPageBytes() * 2L)
+        // Script fetches can hold complete encoded arrays plus transform copies. Only a
+        // fraction of measured app headroom can be optional encoded work at one time.
+        val heapTransferBudget = heapHeadroom?.let { ((it - pixelReserve).coerceAtLeast(0L) / 3L) }
+            ?: (if (desktop) 24L else 12L) * EXPERIENCE_MIB
+        val physicalTransferBudget = resources.availableMemoryBytes?.let { it / 12L } ?: Long.MAX_VALUE
+        val transportHeadroom = minOf(heapTransferBudget, physicalTransferBudget)
+        val networkAllowed = resources.networkAvailable != false && !diskLow &&
+            !(resources.metered == true && !o.allowMeteredPrefetch)
+        var prefetchBytes = if (ahead + behind == 0 || !networkAllowed) 0L else minOf(
+            o.prefetchMiB?.toLong()?.times(EXPERIENCE_MIB) ?: goal.prefetchBytes, bytes)
+        if (resources.metered == null && !o.allowMeteredPrefetch)
+            prefetchBytes = minOf(prefetchBytes, (if (mode == ExperienceMode.PERFORMANCE) 64L else 24L) * EXPERIENCE_MIB)
         var decodedPages = o.decodedPrefetchPages ?: goal.decodedPrefetchPages
-        if (warm || lowRam) decodedPages = minOf(decodedPages, 1)
-        if (severe || power || cpuBusy || prefetchBytes == 0L) decodedPages = 0
-        decodedPages = minOf(decodedPages, ahead)
+        if (warm) decodedPages = minOf(decodedPages, maxOf(1, goal.decodedPrefetchPages / 2))
+        if (severe || power || cpuBusy || lowRam || frameBusy) decodedPages = 0
+        else if (decodeBusy) decodedPages = minOf(decodedPages, 1)
+        // Keep at least half the live Coil budget for visible/backward images and details.
+        // The recent decode p90 is only a conservative sizing estimate, never a hit guarantee.
+        val previewEstimate = measurements.estimatedDecodedPageBytes()
+        val memoryLimit = memoryCache?.maxSize ?: 64L * EXPERIENCE_MIB
+        val protectedPreviewBytes = maxOf(memoryLimit / 2L, previewEstimate * 2L)
+        val warmPageLimit = ((memoryLimit - protectedPreviewBytes).coerceAtLeast(0L) / previewEstimate)
+            .coerceAtMost(8L).toInt()
+        decodedPages = minOf(decodedPages, ahead, warmPageLimit)
         val recovery = o.sourceRecovery ?: goal.sourceRecovery
         val standby = if (prefetchBytes > 0L && !warm && !power && !cpuBusy && !lowRam &&
             (resources.metered == false || o.allowMeteredPrefetch)) when (recovery) {
@@ -541,24 +765,43 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         val browseWarmup = o.browseWarmup && goal.browseWarmup && foreground && readerUsers == 0 &&
             prefetchBytes > 0L && !warm && !power && !cpuBusy && !lowRam &&
             (resources.metered == false || o.allowMeteredPrefetch)
+        val protections = buildList {
+            if (diskLow) add("磁盘空间不足")
+            if (warning) add(if (resources.memoryPressure == true) "系统内存紧张" else "内存保护恢复中")
+            if (heapHigh) add("应用堆内存余量较低")
+            if (physicalTight) add("可用系统内存较低")
+            if (hot) add(if ((resources.thermalPressure ?: 0) >= 2) "温度保护" else "温度恢复中")
+            else if (warm) add(if ((resources.thermalPressure ?: 0) >= 1) "设备温度升高" else "温度恢复中")
+            if (power) add(if (lowBattery) "电量较低" else "系统省电保护")
+            if (cpuBusy) add(if ((resources.cpuLoad ?: 0.0) > .85) "处理器负载较高" else "负载恢复中")
+            if (frameBusy) add("帧工作耗时较高")
+            else if (decodeBusy) add("图片解码耗时较高")
+            if (resources.metered == true && !o.allowMeteredPrefetch) add("计费网络暂停网络预取")
+            if (resources.networkAvailable == false) add("网络未连接，本地准备仍可用")
+            if (!foreground && !o.allowBackgroundDownloads) add("后台下载已限制")
+            if (lowRam) add("低内存设备预算")
+        }
+        val refresh = o.refresh ?: if (mode == ExperienceMode.ECO) RefreshPreference.SYSTEM else RefreshPreference.INTERACTION
+        val high = foreground && interactionUntil > now && !severe && !power && !cpuBusy && refresh != RefreshPreference.SYSTEM
+        val requestedHz = if (high && refresh == RefreshPreference.MANUAL) o.refreshHz else null
         val reason = protections.firstOrNull()?.let { it + "，已收敛可选工作" } ?: when {
             o.prefetchMode == PrefetchMode.OFF -> "预取已关闭，当前页按需加载"
             reading && readerWaiting -> "优先加载当前页，后台下载让路"
-            reading -> "优先阅读，按翻页速度预取"
+            reading -> "当前页优先，按方向与速度准备"
             mode == ExperienceMode.ECO -> "减少预取与后台唤醒"
-            mode == ExperienceMode.PERFORMANCE -> "优先交互与阅读，保留资源保护"
-            else -> "按实际资源调整，当前页优先"
+            mode == ExperienceMode.PERFORMANCE -> "扩大准备窗口，按实际资源保护"
+            else -> "按设备余量准备，当前页优先"
         }
         return ExperienceBudget(mode, background, ahead, behind, high, fraction, bytes, reason,
             chapterParallelism = if (background == 0) 0 else minOf(o.chapters ?: goal.chapterParallelism,
                 if (severe || warm || power || lowRam || cpuBusy || reading) 1 else 4),
-            sourceParallelism = minOf(o.sourcePages ?: goal.sourceParallelism,
-                if (severe || power || lowRam || cpuBusy) 1 else if (warm) 2 else 4),
+            sourceParallelism = minOf(o.sourcePages ?: goal.sourceParallelism, networkCap, 8),
             readerRequests = minOf(o.readerRequests ?: goal.readerRequests, if (severe) 1 else 4),
-            prefetchRequests = minOf(o.prefetchRequests ?: goal.prefetchRequests,
-                if (severe || warm || power || lowRam || cpuBusy) 1 else 3),
-            prefetchBytes = prefetchBytes,
-            crossChapter = o.crossChapter && ahead > 0 && !warm && !power && !cpuBusy && !lowRam &&
+            resolveRequests = minOf(o.resolveRequests ?: goal.resolveRequests, resolveCap).coerceAtLeast(1),
+            decodeRequests = minOf(o.decodeRequests ?: goal.decodeRequests, decodeCap).coerceAtLeast(1),
+            prefetchRequests = if (prefetchBytes == 0L) 0 else minOf(o.prefetchRequests ?: goal.prefetchRequests, networkCap),
+            prefetchBytes = prefetchBytes, materializationBytes = transportHeadroom,
+            crossChapter = o.crossChapter && prefetchBytes > 0L && !warm && !power && !cpuBusy && !lowRam &&
                 (resources.metered == false || o.allowMeteredPrefetch),
             memoryCacheBytes = o.memoryMiB?.toLong()?.times(EXPERIENCE_MIB),
             refreshHz = requestedHz, protections = protections, foreground = foreground,
@@ -572,26 +815,56 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         )
     }
 
-    private fun goalBudget(desktop: Boolean) = when (mode) {
-        ExperienceMode.ECO -> ExperienceGoalBudget(
-            prefetchAhead = 1, prefetchBehind = 0, decodedPrefetchPages = 0,
+    /** RAM/cores select an initial profile, never permission to ignore live pressure. */
+    private fun resourceTier(desktop: Boolean): Int {
+        val total = resources.totalMemoryBytes
+        val heap = resources.processHeapLimitBytes
+        val cores = resources.processorCount
+        if (resources.lowMemoryDevice == true || total != null && total < 3L * 1024L * EXPERIENCE_MIB ||
+            heap != null && heap < 192L * EXPERIENCE_MIB || cores != null && cores < 4) return 0
+        if (total == null || cores == null) return 0
+        if (desktop && total >= 16L * 1024L * EXPERIENCE_MIB && cores >= 8 && heap != null && heap >= 1024L * EXPERIENCE_MIB) return 3
+        if (total >= 8L * 1024L * EXPERIENCE_MIB && cores >= 6 &&
+            heap != null && heap >= (if (desktop) 512L else 384L) * EXPERIENCE_MIB) return 2
+        // iOS has real physical/core observations but no portable process heap limit.
+        // Keep its unknown per-process allowance conservative rather than inventing one.
+        if (total >= 4L * 1024L * EXPERIENCE_MIB && cores >= 4 &&
+            (heap != null && heap >= 256L * EXPERIENCE_MIB || platformKind == PlatformKind.IOS)) return 1
+        return 0
+    }
+
+    private fun goalBudget(desktop: Boolean, tier: Int): ExperienceGoalBudget {
+        if (mode == ExperienceMode.ECO) return ExperienceGoalBudget(
+            prefetchAhead = 3, prefetchBehind = 1, decodedPrefetchPages = 0,
             backgroundPages = if (desktop) 2 else 1, chapterParallelism = 1,
-            sourceParallelism = 1, prefetchBytes = 8L * EXPERIENCE_MIB,
+            sourceParallelism = 1, readerRequests = 2, resolveRequests = 2, decodeRequests = 1,
+            prefetchRequests = 1, prefetchBytes = 24L * EXPERIENCE_MIB,
             standbySources = 0, browseWarmup = false, memoryCacheFraction = .10,
-            diskCacheBytes = 128L * EXPERIENCE_MIB, sourceHedgeDelayMillis = 3_500L,
+            diskCacheBytes = 256L * EXPERIENCE_MIB, sourceHedgeDelayMillis = 3_500L,
             sourceRecovery = SourceRecoveryMode.OFF,
         )
-        ExperienceMode.AUTO -> ExperienceGoalBudget(
-            backgroundPages = if (desktop) 4 else 2, chapterParallelism = if (desktop) 3 else 2,
-            diskCacheBytes = (if (desktop) 1024L else 512L) * EXPERIENCE_MIB,
-        )
-        ExperienceMode.PERFORMANCE -> ExperienceGoalBudget(
-            prefetchAhead = 12, prefetchBehind = 2, decodedPrefetchPages = 2,
-            backgroundPages = maximumBackgroundPageParallelism, chapterParallelism = if (desktop) 3 else 2,
-            sourceParallelism = 3, readerRequests = 3, prefetchRequests = 2,
-            prefetchBytes = 64L * EXPERIENCE_MIB, standbySources = 2,
-            memoryCacheFraction = .24, diskCacheBytes = (if (desktop) 2048L else 1024L) * EXPERIENCE_MIB,
-            sourceHedgeDelayMillis = 650L, sourceRecovery = SourceRecoveryMode.AGGRESSIVE,
+        val performance = mode == ExperienceMode.PERFORMANCE
+        val ahead = if (performance) listOf(8, 16, 24, 40)[tier] else listOf(6, 12, 18, 24)[tier]
+        val behind = if (performance) listOf(1, 2, 4, 8)[tier] else listOf(1, 2, 3, 4)[tier]
+        val network = if (performance) listOf(2, 4, 6, 12)[tier] else listOf(2, 3, 4, 8)[tier]
+        val decode = if (performance) listOf(1, 2, 3, 4)[tier] else listOf(1, 2, 2, 3)[tier]
+        val decoded = if (performance) listOf(1, 3, 5, 8)[tier] else listOf(1, 2, 3, 5)[tier]
+        val bytesMiB = if (performance) listOf(64L, 128L, 256L, 512L)[tier] else listOf(48L, 96L, 160L, 256L)[tier]
+        val background = if (performance) listOf(2, 4, if (desktop) 8 else 6, 12)[tier]
+            else listOf(2, 3, if (desktop) 6 else 4, 8)[tier]
+        return ExperienceGoalBudget(
+            prefetchAhead = ahead, prefetchBehind = behind, decodedPrefetchPages = decoded,
+            backgroundPages = minOf(background, maximumBackgroundPageParallelism),
+            chapterParallelism = if (tier >= 2) 4 else 2,
+            sourceParallelism = if (performance) listOf(2, 4, 6, 8)[tier] else listOf(2, 3, 4, 6)[tier],
+            readerRequests = if (performance) 4 else 3, resolveRequests = listOf(2, 4, 6, 8)[tier],
+            decodeRequests = decode, prefetchRequests = network, prefetchBytes = bytesMiB * EXPERIENCE_MIB,
+            standbySources = if (performance) 2 else 1, browseWarmup = true,
+            memoryCacheFraction = if (performance) (if (tier >= 2) .28 else .24) else (if (tier >= 2) .24 else .18),
+            diskCacheBytes = (if (desktop) (if (tier >= 3) 4096L else 2048L)
+                else if (tier >= 2) 2048L else if (tier == 1) 1024L else 512L) * EXPERIENCE_MIB,
+            sourceHedgeDelayMillis = if (performance) 650L else 1_800L,
+            sourceRecovery = if (performance) SourceRecoveryMode.AGGRESSIVE else SourceRecoveryMode.BALANCED,
         )
     }
 
@@ -611,6 +884,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         mutableUsage.value = measurements.usage(mutableUsage.value).copy(
             resources = resources, activeChapters = chapters.size, activeBackgroundPages = activePages,
             activeReaderImages = activeReaderImages, activePrefetch = activePrefetch,
+            activeResolves = activeResolves, activeDecodes = activeDecodes,
             queuedTasks = queued, prefetchReservedBytes = prefetchReserved,
             throttledSources = sources.values.count { it.recoverAfter > monotonicTimeMillis() },
         )
@@ -621,8 +895,27 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
 
     private class SourceObservation(
         var blockedUntil: Long = 0L, var recoverAfter: Long = 0L, var parallelism: Int = 1,
-        var healthySince: Long = 0L, var successes: Int = 0, var nextIncreaseAt: Long = 0L,
-    )
+        var nextIncreaseAt: Long = 0L,
+    ) {
+        var windowStartedAt = 0L
+        var windowBytes = 0L
+        var windowSuccesses = 0
+        var windowPeak = 0
+        val windowLatencies = ArrayDeque<Long>()
+        var trialFrom = 0
+        var baselineRate = 0.0
+        var baselineTailMillis = 0L
+        var baselineMeanBytes = 0.0
+        var plateauWindows = 0
+        fun resetWindow() {
+            windowStartedAt = 0L; windowBytes = 0L; windowSuccesses = 0; windowPeak = 0
+            windowLatencies.clear()
+        }
+        fun clearTrial() {
+            trialFrom = 0; baselineRate = 0.0; baselineTailMillis = 0L; baselineMeanBytes = 0.0
+            plateauWindows = 0
+        }
+    }
 
     companion object {
         private const val MODE_KEY = "experience_mode_v1"

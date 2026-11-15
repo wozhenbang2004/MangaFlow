@@ -49,6 +49,8 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
         processHeapBytes = runtime.totalMemory() - runtime.freeMemory(),
         processHeapLimitBytes = runtime.maxMemory(),
         availableMemoryBytes = info?.takeIf { memory != null }?.availMem,
+        totalMemoryBytes = info?.takeIf { memory != null }?.totalMem?.takeIf { it > 0L },
+        processorCount = runtime.availableProcessors().takeIf { it > 0 },
         batteryPercent = battery?.let {
             val level = it.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
             val scale = it.getIntExtra(BatteryManager.EXTRA_SCALE, -1)

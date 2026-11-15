@@ -41,9 +41,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 data class ScriptImageEvent(val sourceId: String, val stage: String, val success: Boolean, val at: Long)
@@ -59,9 +57,7 @@ private val imageStateLock = SynchronizedObject()
 private val resolvedImages = linkedMapOf<ImageRequestKey, ResolvedImage>()
 private val failedImageRetries = linkedSetOf<ImageRequestKey>()
 private val imageGates = Array(16) { Mutex() }
-private val decodeGates = Array(16) { Mutex() }
-private val decodeSlots = Semaphore(2)
-private val scriptPrefetchSlots = Semaphore(1)
+private val decodeGates = Array(64) { Mutex() }
 private val savedHeaderRefs = linkedSetOf<String>()
 private val headerSecrets = linkedMapOf<String, String>()
 private val sourceEpochOverrides = mutableMapOf<String, String>()
@@ -184,6 +180,7 @@ private fun headers(value: JSONObject?): Map<String, String> = checkedScriptImag
 suspend fun resolveScriptPage(
     context: PlatformContext, mangaId: String, chapterId: String, page: Page,
     route: DownloadRouteSnapshot? = null,
+    promoted: () -> Boolean = { true },
 ): Page {
     if (page.url.startsWith("file://")) return page.copy(headers = emptyMap())
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
@@ -214,10 +211,12 @@ suspend fun resolveScriptPage(
             val retryFailure = synchronized(imageStateLock) { failedImageRetries.remove(key) }
             val call: suspend () -> String = { store.runtime.call(bundle, "resolveImage", JSONArray()
                 .put(original.sourceImageToken).put(ref.mangaId).put(ref.chapterId).put(retryFailure)) }
-            val response = withImageSession(context, ref.sourceId, epoch) {
-                if (selectedRoute == null || transport?.route == selectedRoute) call() else {
-                    val client = NetworkClient(route = selectedRoute)
-                    try { withContext(ChapterDownloadTransport(selectedRoute, client)) { call() } } finally { client.close() }
+            val response = ExperiencePolicyStore.get(context).withResolveAdmission(promoted) {
+                withImageSession(context, ref.sourceId, epoch) {
+                    if (selectedRoute == null || transport?.route == selectedRoute) call() else {
+                        val client = NetworkClient(route = selectedRoute)
+                        try { withContext(ChapterDownloadTransport(selectedRoute, client)) { call() } } finally { client.close() }
+                    }
                 }
             }
             currentCoroutineContext().ensureActive()
@@ -252,6 +251,7 @@ suspend fun materializeScriptPage(
     route: DownloadRouteSnapshot? = null,
     onBytes: ((Long) -> Unit)? = null,
     prefetched: Boolean = false,
+    promoted: () -> Boolean = { false },
 ): Page {
     if (page.url.startsWith("file://")) return page.copy(headers = emptyMap())
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
@@ -282,18 +282,22 @@ suspend fun materializeScriptPage(
     val fingerprint = digest(scriptImageOwner(mangaId, chapterId) + "|" + bundle.digest + "|" + epoch + "|" +
         page.url + "|" + page.transform + "|" + encodedHeaders)
     val target = StorageFile(StorageFile(cacheDirectory(context), "script-decoded"), "$fingerprint.img")
+    val policy = ExperiencePolicyStore.get(context)
     val releaseCache = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
         dev.mangaflow.storage.CacheBackend.SCRIPT, target, mangaId, chapterId, ref.sourceId, page.index, !prefetched)
     val stage = if (page.transform == "jm") "decode" else "image"
     fun current() = scriptSourceImageEpoch(context, ref.sourceId) == epoch &&
         store.installed.value.any { it.sourceId == ref.sourceId && it.digest == bundle.digest }
-    return try { decodeGates[(fingerprint.hashCode() and Int.MAX_VALUE) % decodeGates.size].withLock { decodeSlots.withPermit {
+    // A key has one writer; unrelated originals no longer hold CPU slots while downloading.
+    return try { decodeGates[(fingerprint.hashCode() and Int.MAX_VALUE) % decodeGates.size].withLock {
         withContext(Dispatchers.IO) {
             if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
             if (target.isFile && target.length() in 128L..MAX_IMAGE_BYTES && storageImageBounds(target) != null)
                 return@withContext page.copy(url = target.toURI(), headers = emptyMap(), transform = "", sourceSessionEpoch = epoch)
+            val transport = currentCoroutineContext()[ChapterDownloadTransport]
+            val selectedRoute = route ?: transport?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId)
             try {
-                val bytes = withImageSession(context, ref.sourceId, epoch) {
+                val fetch: suspend () -> ByteArray = { withImageSession(context, ref.sourceId, epoch) {
                     val started = monotonicTimeMillis()
                     var responseCode: Int? = null
                     var retryAfter: String? = null
@@ -301,9 +305,7 @@ suspend fun materializeScriptPage(
                     var failed = false
                     var ignoreFeedback = false
                     try {
-                        fetchScriptImageBytes(context, page.url, actualHeaders,
-                            route ?: currentCoroutineContext()[ChapterDownloadTransport]?.route
-                                ?: DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId),
+                        fetchScriptImageBytes(context, page.url, actualHeaders, selectedRoute,
                             onBytes = { count ->
                                 if (count > 0L) {
                                     received += count
@@ -312,6 +314,20 @@ suspend fun materializeScriptPage(
                             }, onResponse = { code, responseHeaders ->
                                 responseCode = code
                                 retryAfter = responseHeaders.entries.firstOrNull { it.key.equals("Retry-After", true) }?.value
+                                if (prefetched && !promoted()) {
+                                    val length = responseHeaders.entries.firstOrNull { it.key.equals("Content-Length", true) }
+                                        ?.value?.toLongOrNull()
+                                    if (length != null && length > policy.state.value.materializationBytes)
+                                        throw PrefetchBudgetExceeded()
+                                    val encoding = responseHeaders.entries.firstOrNull { it.key.equals("Content-Encoding", true) }
+                                        ?.value?.trim()
+                                    // Darwin's optional image path buffers the HTTP message before
+                                    // decoding gzip. Its inflation is not observable as body chunks.
+                                    // Leave that response to an explicit foreground request.
+                                    if (dev.mangaflow.platform.platformKind == dev.mangaflow.platform.PlatformKind.IOS &&
+                                        !encoding.isNullOrEmpty() && !encoding.equals("identity", true))
+                                        throw PrefetchBudgetExceeded()
+                                }
                             })
                     } catch (failure: Exception) {
                         ignoreFeedback = failure is CancellationException || failure is PrefetchBudgetExceeded || failure is PrefetchPromoted ||
@@ -323,12 +339,30 @@ suspend fun materializeScriptPage(
                             ref.sourceId, responseCode, received, monotonicTimeMillis() - started, retryAfter, failed,
                         )
                     }
+                } }
+                val bytes = when {
+                    prefetched -> {
+                        if (promoted()) policy.withImageAdmission(reader = true, source = ref.sourceId) { fetch() }
+                        else try {
+                            policy.withPrefetchAdmission(ref.sourceId, policy.estimatedPageBytes(page.url), promoted) { fetch() }
+                        } catch (_: PrefetchPromoted) {
+                            policy.withImageAdmission(reader = true, source = ref.sourceId) { fetch() }
+                        }
+                    }
+                    // Download workers already own their frozen route and background-page permit.
+                    transport != null -> fetch()
+                    else -> policy.withImageAdmission(reader = true, source = ref.sourceId) { fetch() }
                 }
                 require(bytes.size.toLong() in 128L..MAX_IMAGE_BYTES) { "来源原图为空或超过大小限制。" }
                 currentCoroutineContext().ensureActive()
                 if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
-                val outputBytes = if (page.transform == "jm")
-                    decodeScriptJmImage(bytes, ref.chapterId, filename, page.url, page.index) else bytes
+                val outputBytes = if (page.transform == "jm") {
+                    policy.withDecodeAdmission(optional = prefetched, promoted = promoted) {
+                        withContext(Dispatchers.Default) {
+                            decodeScriptJmImage(bytes, ref.chapterId, filename, page.url, page.index)
+                        }
+                    }
+                } else bytes
                 require(outputBytes.size.toLong() in 128L..MAX_IMAGE_BYTES) { "来源图片处理结果无效。" }
                 currentCoroutineContext().ensureActive()
                 if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
@@ -351,15 +385,17 @@ suspend fun materializeScriptPage(
                 throw failure
             }
         }
-    } } } finally { releaseCache() }
+    } } finally { releaseCache() }
 }
 
 /** The same original-byte cache as foreground reading, admitted under its current future-page budget. */
 internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: String, chapterId: String,
-    page: Page, budget: PrefetchByteBudget, work: PrefetchWork): Page? = scriptPrefetchSlots.withPermit {
+    page: Page, budget: PrefetchByteBudget, work: PrefetchWork): Page? {
     val source = SourceKeys.decodeChapter(mangaId, chapterId).sourceId
-    if (!source.startsWith("js_")) return@withPermit null
+    if (!source.startsWith("js_")) return null
     val policy = ExperiencePolicyStore.get(context)
+    val route = currentCoroutineContext()[ChapterDownloadTransport]?.route
+        ?: DownloadRoutingStore.get(context).sourceSnapshot(source)
     val transferLock = SynchronizedObject()
     var retained = 0L
     var received = 0L
@@ -367,15 +403,16 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
     val started = monotonicTimeMillis()
     suspend fun load(): Page {
         currentCoroutineContext().ensureActive()
-        val resolved = resolveScriptPage(context, mangaId, chapterId, page)
-        val result = materializeScriptPage(context, mangaId, chapterId, resolved, prefetched = true, onBytes = { count ->
+        val resolved = resolveScriptPage(context, mangaId, chapterId, page, route, promoted = { work.isForeground })
+        val result = materializeScriptPage(context, mangaId, chapterId, resolved, route,
+            prefetched = true, promoted = { work.isForeground }, onBytes = { count ->
             synchronized(transferLock) {
                 if (closed) throw CancellationException("图片预取已结束。")
                 received += count
                 work.ifOptional {
                     if (!policy.canWritePrefetch()) throw PrefetchBudgetExceeded()
                     budget.accept(count)
-                    policy.acceptPrefetchChunk(count)
+                    policy.acceptPrefetchChunk(count, memoryBacked = true)
                     retained += count
                 }
             }
@@ -388,12 +425,11 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
             prefetch = !work.isForeground, key = page.url, bytes = size)
         return result
     }
-    try {
-        try { policy.withPrefetchAdmission(source, policy.estimatedPageBytes(page.url), { work.isForeground }) { load() } }
-        catch (_: PrefetchPromoted) { policy.withImageAdmission(reader = true) { load() } }
+    return try {
+        load()
     } finally {
         val released = synchronized(transferLock) { closed = true; retained.also { retained = 0L } }
-        policy.releasePrefetchBytes(released)
+        policy.releasePrefetchBytes(released, memoryBacked = true)
     }
 }
 
