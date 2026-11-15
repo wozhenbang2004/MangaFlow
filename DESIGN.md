@@ -1,5 +1,15 @@
 # MangaFlow detail · 2026-11-12
 
+## Experience settings micro elements · 2026-11-15 (EXPERIENCE-MICRO-20261115-01–03)
+
+User feedback: “少文字化多微型元素呢？” (current conversation, exact message ID unavailable). This refines EXPERIENCE-UI-20261115-01/03/04; the seven recognizable domain names, original numeric ranges/callbacks, nullable follow/off distinctions and PERFORMANCE-20261115 goal/effective/observed authority remain. The rejected current636d4c5 presentation still repeated auto/manual captions on each number and used separate whole-row help/advanced/reset actions.
+
+- EXPERIENCE-MICRO-20261115-01: Parameter rows keep the real name, value/unit,14dp sync/manual-edit mark and a small ≤effective value only when it differs. Full chosen/follow/effective meaning belongs to button semantics and the selected editor. Preserve typography and44dp targets; narrow/font-scaled values can flow rather than truncating the number. Unknown cache values use — with the disclosed meaning, never an invented zero or normal state.
+- EXPERIENCE-MICRO-20261115-02: Each expanded domain uses one44dp tool row: Info, optional Tune/runtime icon and the group's reset at the trailing edge. Icons are18dp, have scoped tooltips/names/expanded semantics and actual active-owner guards. Reuse existing MotionIconButton/MotionSwap/ExperienceReveal, including the fixed reset slot and reduced-motion/input ownership; no new component family, dependency or nested size animation. Restore retains the exact prior reset fields; the selected numeric editor also uses a sync icon instead of a repeated follow-goal text button.
+- EXPERIENCE-MICRO-20261115-03: Remove the always-visible reason sentence, static image-quality prose and repeated smart-window/source-goal rows. Preserve the complete original-quality explanation, goal values, protection reason/names and platform limits in their local Info disclosure; protection count remains visible on its domain. All runtime diagnostics remain on-demand. Source review checks the actual control/state mapping; ordinary CI activation is separate from compilation or installed visual/gesture/accessibility acceptance. No tests/local builds/UI/device/service probes or synthetic previews.
+
+This is a bounded adaptation of the already adopted PANEL/Ovio/beUI press/disclosure and Fluid Slider controls, not a new visual direction or an aesthetic approval claim. No original/cache/source/route/task/session/history/async policy changes.
+
 ## Adaptive reading pipeline and resource budgets · 2026-11-15 (PERFORMANCE-20261115-01–08)
 
 The user pasted the full aggressive-adaptive MangaFlow proposal as the current target after the experience UI redesign. Exact message ID is unavailable. Root stated the implementation assumption in this conversation and proceeds under the current development/main-integration authorization. The supplied claims/target numbers are a proposal, not observed product performance.

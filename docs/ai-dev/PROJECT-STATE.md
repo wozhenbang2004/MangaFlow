@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Experience micro-element refinement · 2026-11-15
+
+Current user feedback “少文字化多微型元素呢？” is recorded with its source-only design/change mapping in DESIGN EXPERIENCE-MICRO-20261115-01–03. Refine the636d4c5 experience UI directly: numeric sync/edit/limited marks replace repeated auto/manual captions, and a single Info/advanced/reset icon row replaces full-row tool labels. The persistent reason/quality/repeated goal prose moves into scoped help; recognizable names, values, actual protection count and failures remain visible. Existing press/reveal/slider/PANEL sources,44dp targets, active-owner guards, font-scaled flow and fixed-slot reset motion remain.
+
+Scope is ExperienceSettings.kt and existing documentation only; preserve all23 preference fields/ranges/reset behavior, the aggressive pipeline and actual source/route/cache/task/history/async identities. No new primitives/dependencies or global aesthetic-library edits. Source review/integrity is the available evidence; no tests/local builds/device/UI/service probes. One complete expected-head latest-main integration and ordinary CI activation; compilation and installed motion/accessibility/visual acceptance remain pending. Handle concrete later CI/device feedback without a status-only push.
+
 ## Aggressive adaptive reading pipeline · 2026-11-15
 
 User supplied the complete performance-budget/pipeline proposal after the experience UI redesign; root explicitly proceeds with implementation. DESIGN PERFORMANCE-20261115-01–08 records the supplied requirements, initial goal table, component/API reuse, exact boundaries and evidence. Base0e9477e already contains the async application-services batch; retain it and later990522a/f2c1554 settings/network fixes, rather than replaying their work.
