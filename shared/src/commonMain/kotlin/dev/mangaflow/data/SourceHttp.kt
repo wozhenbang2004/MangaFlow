@@ -51,7 +51,10 @@ internal class SourceHttp(
             throw SourceException("$operation 暂时受限，请在 ${seconds} 秒后重试。", publicUrl, seconds)
         }
         val frozen = currentCoroutineContext()[ChapterDownloadTransport]
-        val route = if (frozen == null) sourceId?.let { DownloadRoutingStore.activeSourceSnapshot(it) } else null
+        val route = if (frozen == null) {
+            sourceId?.let { DownloadRoutingStore.activeSourceSnapshot(it) }
+                ?: DownloadRoutingStore.activeDefaultSnapshot()
+        } else null
         val owned = route?.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let { NetworkClient(http1Only = http1Only, route = it) }
         if (owned != null) synchronized(transportLock) { routedClients.add(owned) }
         val transport = frozen?.client ?: owned ?: ordinaryClient

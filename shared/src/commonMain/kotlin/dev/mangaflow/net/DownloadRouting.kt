@@ -239,6 +239,13 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
             synchronized(lock) { instance }?.sourceSnapshot(sourceId)
                 ?: DownloadRouteSnapshot(DownloadRouteMode.SYSTEM)
 
+        /** Unowned images and catalogue APIs still obey the app-wide route at request start. */
+        internal fun activeDefaultSnapshot(): DownloadRouteSnapshot {
+            val current = synchronized(lock) { instance }?.state?.value
+                ?: return DownloadRouteSnapshot(DownloadRouteMode.SYSTEM)
+            return configuredRoute(current.defaultMode, current.proxy)
+        }
+
         internal fun sourceRevision(sourceId: String): String {
             val current = synchronized(lock) { instance }?.state?.value ?: DownloadRoutingSettings()
             val source = current.sourceOverrides[sourceId]

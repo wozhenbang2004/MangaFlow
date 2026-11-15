@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Relay coverage completion · 2026-11-15
+
+User asks “能做到我们所有网络下载的东西都联动配置吗”, then clarifies “网络版是什么鬼？我们到时候手机要同时用网络版和预览版吗” (exact message IDs unavailable). Daily use requires MangaFlow and one compatible Relay; the network-edition name is the existing VPN APK identity, not a requirement to run two Relay apps. Existing preview and network packages may coexist during migration, but they are not two required runtime components. Do not change the established package/signer or imply that installing a different package transfers its private data.
+
+The source coverage audit found two real gaps: Coil requests without sourceKey (some covers/avatars/Steam previews), and SourceHttp without sourceId (external reviews/rankings) used an unrouted delegate. Both now capture the live application default at each actual request through activeDefaultSnapshot; marked sources retain source/global decisions and frozen chapter tasks retain their original client. Existing cache hits stay valid and no new category is invented. Nine categorized transfer paths, marked reading/prefetch and these previously unowned requests use the same routing authority. WebView authorization pages and an external browser remain system/VPN-controlled rather than claimed precise-entry coverage. No tests/local builds/probes; source/diff/whitespace inspection is separate from ordinary CI and installed/network acceptance. Root publishes this one bounded complete coverage batch after e17e077; no Relay rebuild or second Relay installation is required.
+
 ## Relay Link cross-platform compilation recovery · 2026-11-15
 
 Integration12bede854777bdad72f5b226395453f4ced4fbc4 is published on main. Android276/run43709223772 has completed APK assembly and was building the optional Steam component; native run43709223741 Windows job132796959615 actually failed :shared:compileKotlinDesktop at ExperienceResources.desktop.kt36 because its direct platformHttpClient call omitted the new observeRelayTraffic parameter. The matching iOS call has the same source omission; its archive was still running when inspected, so no iOS failure result is asserted.

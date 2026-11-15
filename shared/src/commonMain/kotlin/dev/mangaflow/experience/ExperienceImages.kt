@@ -498,7 +498,8 @@ private class ExperienceImageNetworkClient(
         var failed = false
         var interrupted = false
         val selectedRoute = request.extras[sourceKey]?.let { DownloadRoutingStore.activeSourceSnapshot(it) }
-        val owned = selectedRoute?.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let(::createExperienceNetworkClient)
+            ?: DownloadRoutingStore.activeDefaultSnapshot()
+        val owned = selectedRoute.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let(::createExperienceNetworkClient)
         try {
             return (owned?.client ?: delegate.client).executeRequest(request) responseBlock@{ response ->
                 code = response.code
