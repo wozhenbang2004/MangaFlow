@@ -10,6 +10,11 @@ import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.javaProxy
+import dev.mangaflow.update.AndroidTransferIntents
+import dev.mangaflow.update.ApplicationTransferIntent
+import dev.mangaflow.update.ApplicationTransferKind
+import dev.mangaflow.update.ApplicationTransferResult
+import dev.mangaflow.update.ApplicationTransferStatus
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -27,7 +32,6 @@ import javax.net.ssl.SSLException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -69,6 +73,10 @@ actual class PanelRuntimeStore private constructor(context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val control = Any()
     private val loadGate = Mutex()
+    private val queueGate = Mutex()
+    private val transferTokens = mutableMapOf<PanelRuntimeId, String>()
+    private data class HostDenial(val workId: String, val reason: String, val terminal: Boolean)
+    private val hostDenials = mutableMapOf<PanelRuntimeId, HostDenial>()
     private val ready = CompletableDeferred<Unit>()
     private val downloads = mutableMapOf<PanelRuntimeId, Job>()
     private val calls = mutableMapOf<PanelRuntimeId, Call>()
@@ -89,7 +97,11 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         scope.launch {
             try {
                 if (!directory.isDirectory && !directory.mkdirs()) throw IOException("runtime directory")
-                directory.listFiles()?.filter { it.name.startsWith(".staging-") }?.forEach { deleteTree(it) }
+                directory.listFiles()?.filter { it.name.startsWith(".staging-") }?.forEach { stage ->
+                    val id = PanelRuntimeId.entries.firstOrNull { stage.name == ".staging-${it.name.lowercase()}" }
+                    val intent = id?.let { AndroidTransferIntents.read(context, ApplicationTransferKind.RUNTIME, it.name) }
+                    if (intent == null) deleteTree(stage)
+                }
                 for (id in PanelRuntimeId.entries) {
                     // An explicit removal outlives the process which still owns dlopen handles.
                     val marker = removalMarker(id)
@@ -126,49 +138,124 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             } catch (_: Exception) {
                 PanelRuntimeId.entries.forEach { updateError(it, "运行库存储暂不可用，请检查可用空间") }
             } finally { ready.complete(Unit) }
+            for (id in PanelRuntimeId.entries) runCatching {
+                val intent = AndroidTransferIntents.read(context, ApplicationTransferKind.RUNTIME, id.name) ?: return@runCatching
+                var schedule = false
+                AndroidTransferIntents.withCurrent(context, intent) { current ->
+                    synchronized(control) {
+                        transferTokens[id] = current.workId
+                        if (states.value.getValue(id).installed) AndroidTransferIntents.update(context, current) {
+                            it.copy(status = ApplicationTransferStatus.COMPLETED)
+                        } else if (current.resumable && !states.value.getValue(id).pendingRemoval) {
+                            val denial = hostDenials[id]?.takeIf { it.workId == current.workId }
+                                ?: current.message.takeIf { it.isNotBlank() }?.let { HostDenial(current.workId, it, false) }
+                            mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = denial?.terminal != true, error = denial?.reason)) }
+                            schedule = true
+                        } else if (current.message.isNotBlank()) {
+                            mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = false, error = current.message)) }
+                        }
+                    }
+                }
+                if (schedule) AndroidTransferIntents.schedule(context, intent)?.let { scheduled ->
+                    synchronized(control) { transferTokens[id] = scheduled.workId }
+                }
+            }
         }
     }
 
     actual fun spec(id: PanelRuntimeId): PanelRuntimeSpec = SPECS.getValue(id)
 
-    /** The store owns the transfer so closing a sheet does not cancel an explicit download. */
-    actual suspend fun download(id: PanelRuntimeId) {
-        synchronized(control) {
-            if (id in removing || downloads.containsKey(id)) return
-            if (states.value.getValue(id).pendingRemoval) { updateError(id, "运行库已安排在重启后删除"); return }
-            if (id in touched) { updateError(id, "运行库已在本次启动中使用，请完全退出应用后再管理"); return }
-            if (installed.containsKey(id)) return
-            if (abi == null) { updateError(id, "当前应用进程的架构暂不支持可选运行库"); return }
-            val job = scope.launch(start = CoroutineStart.LAZY) { downloadRuntime(id) }
-            downloads[id] = job
-            job.invokeOnCompletion {
-                synchronized(control) {
-                    // Cancellation may win before the coroutine body starts.
-                    if (downloads[id] === job) {
-                        downloads.remove(id)
-                        calls.remove(id)?.cancel()
-                        deleteTree(staging(id))
-                        mutableStates.update { old -> old + (id to old.getValue(id).copy(
-                            downloading = false, progress = null,
-                            bytes = if (old.getValue(id).installed) old.getValue(id).totalBytes else 0,
-                        )) }
-                    }
+    /** The OS owns execution; closing the caller only stops observing the queued transfer. */
+    actual suspend fun download(id: PanelRuntimeId): Unit = withContext(Dispatchers.IO) {
+        ready.await()
+        queueGate.withLock {
+            val allowed = synchronized(control) {
+                when {
+                    id in removing || downloads.containsKey(id) -> false
+                    states.value.getValue(id).pendingRemoval -> { updateError(id, "运行库已安排在重启后删除"); false }
+                    id in touched -> { updateError(id, "运行库已在本次启动中使用，请完全退出应用后再管理"); false }
+                    installed.containsKey(id) -> false
+                    abi == null -> { updateError(id, "当前应用进程的架构暂不支持可选运行库"); false }
+                    else -> true
                 }
             }
-            mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = true, progress = 0f, error = null)) }
-            job.start()
+            if (!allowed) return@withLock
+            val previous = AndroidTransferIntents.read(context, ApplicationTransferKind.RUNTIME, id.name)
+            val task = if (previous?.resumable == true) previous else {
+                val matching = previous?.takeIf { it.status == ApplicationTransferStatus.PAUSED &&
+                    it.payload.optLong("versionCode") == appVersionCode && it.payload.optString("abi") == abi }
+                val category = if (id == PanelRuntimeId.STEAM) DownloadCategory.STEAM_COMPONENT else DownloadCategory.COMPONENTS
+                AndroidTransferIntents.create(context, ApplicationTransferKind.RUNTIME, id.name,
+                    matching?.route ?: DownloadRoutingStore.get(context).snapshot(category),
+                    matching?.payload ?: JSONObject().put("versionCode", appVersionCode).put("versionName", appVersionName).put("abi", abi))
+            }
+            synchronized(control) { transferTokens[id] = task.workId }
+            synchronized(control) {
+                val denial = hostDenials[id]?.takeIf { it.workId == task.workId }
+                    ?: task.message.takeIf { it.isNotBlank() }?.let { HostDenial(task.workId, it, false) }
+                mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = denial?.terminal != true,
+                    progress = null, error = denial?.reason)) }
+            }
+            try { AndroidTransferIntents.schedule(context, task)?.let { scheduled ->
+                synchronized(control) { transferTokens[id] = scheduled.workId }
+            } }
+            catch (failure: Exception) {
+                mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = false, error = "后台下载未能排队，请重试")) }
+                throw failure
+            }
+        }
+    }
+
+    internal suspend fun runScheduledDownload(id: PanelRuntimeId, task: ApplicationTransferIntent): ApplicationTransferResult = withContext(Dispatchers.IO) {
+        ready.await()
+        val current = AndroidTransferIntents.read(context, task.kind, task.owner)
+        if (current?.workId != task.workId || !current.resumable) return@withContext ApplicationTransferResult.OBSOLETE
+        val ownJob = currentCoroutineContext()[Job] ?: return@withContext ApplicationTransferResult.FAILED
+        val accepted = synchronized(control) {
+            if (id in removing || downloads.containsKey(id)) false else {
+                downloads[id] = ownJob
+                transferTokens[id] = task.workId
+                true
+            }
+        }
+        if (!accepted) return@withContext ApplicationTransferResult.RETRY
+        downloadRuntime(id, task)
+    }
+
+    internal suspend fun publishScheduledWait(id: PanelRuntimeId, task: ApplicationTransferIntent, reason: String, terminal: Boolean) = withContext(Dispatchers.IO) {
+        AndroidTransferIntents.withCurrent(context, task) { owned ->
+            if (owned.status !in setOf(ApplicationTransferStatus.PAUSED, ApplicationTransferStatus.COMPLETED)) synchronized(control) {
+                if (downloads[id]?.isActive == true || transferTokens[id]?.let { it != task.workId } == true) return@synchronized
+                transferTokens[id] = task.workId
+                hostDenials[id] = HostDenial(task.workId, reason, terminal)
+                mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = !terminal, progress = null, error = reason)) }
+            }
+        }
+    }
+
+    internal fun stopScheduledDownload(id: PanelRuntimeId, workId: String) {
+        synchronized(control) {
+            if (transferTokens[id] == workId) { calls[id]?.cancel(); downloads[id]?.cancel() }
         }
     }
 
     actual fun cancel(id: PanelRuntimeId) {
-        synchronized(control) {
-            val call = calls[id]
-            downloads[id]?.cancel()
-            call?.cancel()
+        val workId = synchronized(control) { transferTokens[id] } ?: return
+        scope.launch {
+            var notice = "下载已暂停，可继续下载"
+            try { AndroidTransferIntents.read(context, ApplicationTransferKind.RUNTIME, id.name)
+                ?.takeIf { it.workId == workId }?.let { AndroidTransferIntents.pause(context, it) } }
+            catch (_: Exception) { notice = "下载已停止，任务记录未能保存，请重新下载" }
+            if (synchronized(control) { transferTokens[id] == workId }) mutableStates.update { old ->
+                old + (id to old.getValue(id).copy(downloading = false, error = notice))
+            }
         }
     }
 
     actual suspend fun remove(id: PanelRuntimeId) = withContext(NonCancellable + Dispatchers.IO) {
+        AndroidTransferIntents.read(context, ApplicationTransferKind.RUNTIME, id.name)?.let {
+            AndroidTransferIntents.pause(context, it)
+        }
         val job = synchronized(control) {
             if (id in touched) { markPendingRemoval(id); return@withContext }
             if (!removing.add(id)) return@withContext
@@ -259,7 +346,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         throw RuntimeFailure(message)
     }
 
-    private suspend fun downloadRuntime(id: PanelRuntimeId) {
+    private suspend fun downloadRuntime(id: PanelRuntimeId, task: ApplicationTransferIntent): ApplicationTransferResult {
         val ownJob = currentCoroutineContext()[Job]
         val transferContext = currentCoroutineContext()
         val stage = staging(id)
@@ -269,24 +356,36 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         try {
             ready.await()
             transferContext.ensureActive()
+            if (AndroidTransferIntents.claim(context, task) == null) throw CancellationException("后台任务已暂停或更新")
+            synchronized(control) {
+                hostDenials.remove(id)
+                mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = true, error = null)) }
+            }
             if (states.value.getValue(id).pendingRemoval) throw RuntimeFailure("运行库正在等待删除，请完全退出应用后重试")
-            synchronized(control) { installed[id] }?.let { success = it; return }
-            val category = if (id == PanelRuntimeId.STEAM) DownloadCategory.STEAM_COMPONENT else DownloadCategory.COMPONENTS
-            val route = DownloadRoutingStore.get(context).snapshot(category)
+            synchronized(control) { installed[id] }?.let { success = it; return ApplicationTransferResult.COMPLETED }
+            require(task.payload.getLong("versionCode") == appVersionCode && task.payload.getString("versionName") == appVersionName &&
+                task.payload.getString("abi") == abi) { "应用或运行库架构已更新，请重新发起下载" }
+            val route = task.route
             val client = OkHttpClient.Builder().proxy(route.javaProxy())
                 .connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
                 .callTimeout(10, TimeUnit.MINUTES).retryOnConnectionFailure(false)
                 .followRedirects(false).followSslRedirects(false).build()
             taskClient = client
             if (!directory.isDirectory && !directory.mkdirs()) throw RuntimeFailure("无法创建运行库目录")
-            val envelope = readRemoteCatalog(id, client)
+            val envelope = task.payload.optString("envelope").takeIf { it.isNotBlank() }
+                ?.let { Base64.decode(it, Base64.DEFAULT) } ?: readRemoteCatalog(id, client)
             val entry = verifyCatalog(envelope, currentRelease = true).single { it.id == id && it.abi == abi }
+            task.payload.put("envelope", Base64.encodeToString(envelope, Base64.NO_WRAP))
+            AndroidTransferIntents.update(context, task) { it.copy(payload = task.payload) }
             mutableStates.update { old -> old + (id to old.getValue(id).copy(totalBytes = entry.archiveBytes)) }
             val unpacked = entry.libraries.sumOf { it.bytes }
             if (directory.usableSpace < entry.archiveBytes + unpacked + 16L * 1024 * 1024) throw RuntimeFailure("存储空间不足，无法下载并展开运行库")
-            if (!deleteTree(stage) || !stage.mkdir()) throw RuntimeFailure("无法准备运行库下载目录")
+            if (!stage.isDirectory && !stage.mkdir()) throw RuntimeFailure("无法准备运行库下载目录")
             val archive = File(stage, "download.zip.part")
+            // Unpacked files are disposable; the signed, size/hash-bound archive alone is resumable.
+            stage.listFiles()?.filter { it.name !in setOf("download.zip.part", "download.validator") }?.forEach { deleteTree(it) }
             downloadArchive(id, entry, archive, client)
+            File(stage, "download.validator").delete()
             unpack(archive, stage, entry)
             archive.delete()
             writeSynced(File(stage, RECEIPT), envelope)
@@ -301,8 +400,9 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                 success = Installation(destination, entry)
                 installed[id] = requireNotNull(success)
             }
-        } catch (_: CancellationException) {
-            // Cancel leaves neither an installed flag nor an unsigned partial runtime.
+        } catch (cancelled: CancellationException) {
+            // The isolated archive is never executable; exact intent records whether this was a user pause.
+            throw cancelled
         } catch (failure: Exception) {
             error = if (!currentCoroutineContext().isActive) null else when (failure) {
                 is DownloadRouteException -> failure.message
@@ -316,8 +416,14 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         } finally {
             taskClient?.dispatcher?.executorService?.shutdown()
             taskClient?.connectionPool?.evictAll()
-            deleteTree(stage)
-            synchronized(control) {
+            if (success != null) deleteTree(stage)
+            try { AndroidTransferIntents.update(context, task) {
+                if (it.status == ApplicationTransferStatus.PAUSED) it else it.copy(status = when {
+                    success != null -> ApplicationTransferStatus.COMPLETED
+                    !transferContext.isActive -> ApplicationTransferStatus.WAITING_SYSTEM
+                    else -> ApplicationTransferStatus.FAILED
+                })
+            } } finally { synchronized(control) {
                 if (downloads[id] === ownJob) {
                     downloads.remove(id)
                     calls.remove(id)?.cancel()
@@ -329,8 +435,9 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                         error = error,
                     )) }
                 }
-            }
+            } }
         }
+        return if (success != null) ApplicationTransferResult.COMPLETED else ApplicationTransferResult.FAILED
     }
 
     private suspend fun readRemoteCatalog(id: PanelRuntimeId, client: OkHttpClient): ByteArray {
@@ -353,13 +460,41 @@ actual class PanelRuntimeStore private constructor(context: Context) {
     }
 
     private suspend fun downloadArchive(id: PanelRuntimeId, entry: Entry, destination: File, client: OkHttpClient) {
-        open(id, entry.archiveUrl, client).use { response ->
+        val validator = File(destination.parentFile, "download.validator")
+        if (destination.isFile && destination.length() == entry.archiveBytes && checksum(destination) == entry.archiveHash) return
+        val saved = runCatching { JSONObject(validator.readText()) }.getOrNull()
+        val tag = saved?.optString("etag")?.takeIf { it.startsWith('"') && it.endsWith('"') && !it.startsWith("W/") }
+        val matching = saved != null && saved.optString("sha256") == entry.archiveHash && saved.optLong("bytes") == entry.archiveBytes &&
+            saved.optString("url") == entry.archiveUrl
+        var offset = destination.length()
+        if (offset !in 1L until entry.archiveBytes || tag == null || !matching) {
+            destination.delete(); validator.delete(); offset = 0L
+        }
+        open(id, entry.archiveUrl, client, offset, tag).use { response ->
             val body = response.body ?: throw RuntimeFailure("运行库下载内容为空")
-            if (body.contentLength() > entry.archiveBytes) throw RuntimeFailure("运行库归档大小不符")
-            val digest = MessageDigest.getInstance("SHA-256")
-            var received = 0L
+            val start = if (response.code == 206) {
+                val range = Regex("bytes (\\d+)-(\\d+)/(\\d+)").matchEntire(response.header("Content-Range").orEmpty())
+                    ?: throw RuntimeFailure("运行库续传范围无效")
+                val first = range.groupValues[1].toLongOrNull()
+                val last = range.groupValues[2].toLongOrNull()
+                require(first == offset && last != null && last >= offset && last < entry.archiveBytes &&
+                    range.groupValues[3].toLongOrNull() == entry.archiveBytes) { "运行库续传身份不匹配" }
+                if (offset > 0L) require(response.header("ETag") == null || response.header("ETag") == tag) { "运行库续传标识已改变" }
+                offset
+            } else {
+                require(response.code == 200) { "运行库下载响应无效" }
+                0L
+            }
+            val length = body.contentLength()
+            if (length > entry.archiveBytes - start) throw RuntimeFailure("运行库归档大小不符")
+            val currentTag = response.header("ETag")?.takeIf { it.startsWith('"') && it.endsWith('"') && !it.startsWith("W/") }
+                ?: tag?.takeIf { start > 0L }
+            if (currentTag != null) writeSynced(validator, JSONObject().put("etag", currentTag)
+                .put("sha256", entry.archiveHash).put("bytes", entry.archiveBytes).put("url", entry.archiveUrl).toString().toByteArray())
+            else validator.delete()
+            var received = start
             var emitted = 0L
-            body.byteStream().use { input -> FileOutputStream(destination).use { output ->
+            body.byteStream().use { input -> FileOutputStream(destination, start > 0L).use { output ->
                 val buffer = ByteArray(64 * 1024)
                 while (true) {
                     currentCoroutineContext().ensureActive()
@@ -368,9 +503,8 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                     received += count
                     if (received > entry.archiveBytes) throw RuntimeFailure("运行库归档大小不符")
                     output.write(buffer, 0, count)
-                    digest.update(buffer, 0, count)
                     val now = SystemClock.elapsedRealtime()
-                    if (now - emitted >= 100L) {
+                    if (now - emitted >= 200L) {
                         emitted = now
                         mutableStates.update { old -> old + (id to old.getValue(id).copy(
                             bytes = received, progress = received.toFloat() / entry.archiveBytes,
@@ -379,19 +513,26 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                 }
                 output.fd.sync()
             } }
-            if (received != entry.archiveBytes || digest.digest().hex() != entry.archiveHash) throw RuntimeFailure("运行库归档校验失败，请重新下载")
+            if (received != entry.archiveBytes) throw RuntimeFailure("运行库下载中断，可继续下载")
+            if (checksum(destination) != entry.archiveHash) {
+                destination.delete(); validator.delete()
+                throw RuntimeFailure("运行库归档校验失败，请重新下载")
+            }
         }
     }
 
     /** Redirects retain HTTPS, a closed GitHub CDN host set and the original repository asset path. */
-    private suspend fun open(id: PanelRuntimeId, initial: String, client: OkHttpClient): Response {
+    private suspend fun open(id: PanelRuntimeId, initial: String, client: OkHttpClient,
+        offset: Long = 0L, validator: String? = null): Response {
         val initialUrl = initial.toHttpUrl()
         var url = initialUrl
         repeat(6) {
             currentCoroutineContext().ensureActive()
             require(url.scheme == "https" && url.port == 443 && url.username.isEmpty() && url.password.isEmpty() && url.fragment == null && url.host in HOSTS) { "运行库下载地址无效" }
             if (url.host == "github.com") require(url.encodedPath == initialUrl.encodedPath && url.query == null) { "运行库下载仓库不匹配" }
-            val call = client.newCall(Request.Builder().url(url).header("Accept-Encoding", "identity").build())
+            val call = client.newCall(Request.Builder().url(url).header("Accept-Encoding", "identity").apply {
+                if (offset > 0L && validator != null) { header("Range", "bytes=$offset-"); header("If-Range", validator) }
+            }.build())
             synchronized(control) { calls[id] = call }
             currentCoroutineContext().ensureActive()
             val response = call.execute()

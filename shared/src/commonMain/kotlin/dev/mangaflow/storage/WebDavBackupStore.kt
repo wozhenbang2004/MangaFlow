@@ -8,10 +8,12 @@ import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.NetworkResponse
 import dev.mangaflow.net.Request
 import dev.mangaflow.net.RequestBody
 import dev.mangaflow.platform.PlatformContext
+import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.storage.*
 import kotlinx.atomicfu.locks.synchronized
@@ -31,6 +33,11 @@ data class WebDavBackupConfig(
     val configured: Boolean get() = endpoint.isNotBlank() && remotePath.isNotBlank()
     companion object { const val DEFAULT_REMOTE_PATH = "MangaFlow/reading-backup.json" }
 }
+
+/** In-memory credentials for one accepted transfer; never serialized or included in diagnostics. */
+internal class WebDavTransferSnapshot internal constructor(
+    val config: WebDavBackupConfig, internal val password: String, val route: DownloadRouteSnapshot,
+)
 
 /** The same bounded HTTPS WebDAV protocol on every platform, with an OS-protected secret. */
 class WebDavBackupStore(private val context: PlatformContext) {
@@ -76,13 +83,21 @@ class WebDavBackupStore(private val context: PlatformContext) {
         }
     }
 
-    suspend fun upload(payload: String) {
+    internal suspend fun captureTransfer(route: DownloadRouteSnapshot): WebDavTransferSnapshot = withContext(Dispatchers.IO) {
+        val credentials = readCredentials()
+        WebDavTransferSnapshot(credentials.first, credentials.second, route)
+    }
+
+    suspend fun upload(payload: String) = upload(payload,
+        captureTransfer(DownloadRoutingStore.get(context).snapshot(DownloadCategory.WEBDAV)))
+
+    internal suspend fun upload(payload: String, snapshot: WebDavTransferSnapshot): Unit = withContext(Dispatchers.IO) {
         val bytes = payload.encodeToByteArray()
         require(bytes.isNotEmpty() && bytes.size <= MAX_BACKUP_BYTES) { "阅读备份为空或超过 8 MiB，已停止上传。" }
-        val credentials = withContext(Dispatchers.IO) { readCredentials() }
+        val credentials = snapshot.config to snapshot.password
         var transfer: NetworkClient? = null
         try {
-            val client = transferClient()
+            val client = transferClient(snapshot.route)
             transfer = client
             val base = normalizeEndpoint(credentials.first.endpoint)
             val segments = normalizeRemotePath(credentials.first.remotePath)
@@ -94,15 +109,18 @@ class WebDavBackupStore(private val context: PlatformContext) {
             val response = execute(client, requestBuilder(buildUrl(base, segments), credentials)
                 .method("PUT", RequestBody(bytes, "application/json; charset=utf-8")).build(), "上传阅读备份")
             ensureSuccessful(response, "上传阅读备份")
-            rememberTransfer(upload = true)
+            rememberTransfer(upload = true, expected = snapshot.config)
         } finally { transfer?.close() }
     }
 
-    suspend fun download(): String {
-        val credentials = withContext(Dispatchers.IO) { readCredentials() }
+    suspend fun download(): String = download(
+        captureTransfer(DownloadRoutingStore.get(context).snapshot(DownloadCategory.WEBDAV)))
+
+    internal suspend fun download(snapshot: WebDavTransferSnapshot): String = withContext(Dispatchers.IO) {
+        val credentials = snapshot.config to snapshot.password
         var transfer: NetworkClient? = null
         try {
-            val client = transferClient()
+            val client = transferClient(snapshot.route)
             transfer = client
             val base = normalizeEndpoint(credentials.first.endpoint)
             val response = execute(client, requestBuilder(buildUrl(base, normalizeRemotePath(credentials.first.remotePath)), credentials)
@@ -110,14 +128,14 @@ class WebDavBackupStore(private val context: PlatformContext) {
             ensureSuccessful(response, "下载阅读备份")
             check(response.bytes.isNotEmpty()) { "远端备份为空。" }
             val payload = response.text()
-            rememberTransfer(upload = false)
-            return payload
+            rememberTransfer(upload = false, expected = snapshot.config)
+            payload
         } finally { transfer?.close() }
     }
 
-    private fun transferClient() = NetworkClient(
+    private fun transferClient(route: DownloadRouteSnapshot) = NetworkClient(
         connectTimeoutMillis = 20_000, readTimeoutMillis = 40_000, callTimeoutMillis = 60_000,
-        route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.WEBDAV),
+        route = route,
     )
 
     private suspend fun execute(client: NetworkClient, request: Request, operation: String): NetworkResponse = try {
@@ -139,9 +157,13 @@ class WebDavBackupStore(private val context: PlatformContext) {
         val password = if (current.hasPassword) readSecret(context, SECRET) ?: error("已保存的 WebDAV 密码无法读取，请重新输入。") else ""
         current to password
     }
-    private fun rememberTransfer(upload: Boolean) = synchronized(lock) {
-        disk.edit().putLong(if (upload) "last_upload" else "last_download", wallTimeMillis()).apply()
-        _config.value = readConfig()
+    private fun rememberTransfer(upload: Boolean, expected: WebDavBackupConfig) = synchronized(lock) {
+        val current = readConfig()
+        if (current.endpoint == expected.endpoint && current.username == expected.username &&
+            current.remotePath == expected.remotePath) {
+            disk.edit().putLong(if (upload) "last_upload" else "last_download", wallTimeMillis()).apply()
+            _config.value = readConfig()
+        }
     }
     private fun readConfig() = WebDavBackupConfig(
         endpoint = disk.getString("endpoint", "").orEmpty().trim(), username = disk.getString("username", "").orEmpty().trim(),
@@ -184,5 +206,13 @@ class WebDavBackupStore(private val context: PlatformContext) {
             else -> "$operation 暂时不可用（HTTP ${response.code}）。"
         })
     }
-    private companion object { const val SECRET = "webdav.password"; const val MAX_BACKUP_BYTES = 8 * 1024 * 1024 }
+    companion object {
+        private const val SECRET = "webdav.password"
+        private const val MAX_BACKUP_BYTES = 8 * 1024 * 1024
+        private val instanceLock = StorageLock()
+        private var instance: WebDavBackupStore? = null
+        fun get(context: PlatformContext): WebDavBackupStore = synchronized(instanceLock) {
+            instance ?: WebDavBackupStore(applicationContext(context)).also { instance = it }
+        }
+    }
 }

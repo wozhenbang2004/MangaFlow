@@ -332,12 +332,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         if (restrictedMode || account.profile == null || account.busy || reading != null || detail != null || copySyncOpen)
             return@LaunchedEffect
         experienceLifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            try {
-                while (true) {
-                    model.copyShelfSync.checkInBackground()
-                    kotlinx.coroutines.delay(5 * 60_000L)
-                }
-            } finally { model.copyShelfSync.pauseCheck() }
+            val release = model.services.retainPassiveSync()
+            try { awaitCancellation() } finally { release() }
         }
     }
     LaunchedEffect(account.profile?.username, account.busy, section, reading == null, detail == null, restrictedMode) {
@@ -1338,6 +1334,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         contentTopPadding = chromePadding,
                                         sourceBackdrop = searchBackdrop, sourceRegistry = model.bodySources,
                                         sourcePlugins = model.sourcePlugins, sourceRepository = model.repository,
+                                        active = rootActive && !searchVisible,
                                         onOpenDownloads = { changeSection(Section.DOWNLOADS) })
                                 }
                                 }

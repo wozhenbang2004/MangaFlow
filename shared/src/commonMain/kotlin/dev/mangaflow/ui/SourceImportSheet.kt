@@ -1,5 +1,10 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.background.ApplicationOperations
+import dev.mangaflow.background.ApplicationOperationPhase
+import dev.mangaflow.background.UserOperationKeys
+import dev.mangaflow.background.installSource
+
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrlOrNull
 import dev.mangaflow.platform.LocalMangaContext as LocalContext
 import dev.mangaflow.platform.PlatformKind
@@ -83,10 +88,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 
 /** A preview is inert metadata. Only the explicit final action validates and installs source code. */
 @Composable
@@ -103,6 +106,11 @@ internal fun SourceImportSheet(
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val scope = rememberCoroutineScope()
+    val operations = remember(context) { ApplicationOperations.get(context) }
+    val operationStates by operations.state.collectAsStateWithLifecycle()
+    val installOperation = remember(operationStates) { operations.find(UserOperationKeys.SOURCE_INSTALL) }
+    var submittedInstallId by remember { mutableStateOf<String?>(null) }
+    var installNotice by remember { mutableStateOf<String?>(null) }
     val runtimes = remember(context) { PanelRuntimeStore.get(context) }
     val runtimeStates by runtimes.states.collectAsStateWithLifecycle()
     val engine = runtimeStates[PanelRuntimeId.QUICKJS] ?: PanelRuntimeState()
@@ -126,7 +134,8 @@ internal fun SourceImportSheet(
         }
     }
     var prepared by remember { mutableStateOf<ScriptSourcePackage?>(null) }
-    var busy by remember { mutableStateOf<String?>(null) }
+    var previewBusy by remember { mutableStateOf<String?>(null) }
+    val busy = previewBusy ?: installOperation?.takeIf { it.active }?.let { "正在后台安装，可关闭此页…" }
     var failure by remember { mutableStateOf<String?>(null) }
     var activeJob by remember { mutableStateOf<Job?>(null) }
     var completedName by remember { mutableStateOf<String?>(null) }
@@ -143,7 +152,7 @@ internal fun SourceImportSheet(
         focus.clearFocus(force = true)
         keyboard?.hide()
         failure = null
-        busy = label
+        previewBusy = label
         activeJob = scope.launch {
             try {
                 block()
@@ -154,7 +163,7 @@ internal fun SourceImportSheet(
             } catch (error: Exception) {
                 failure = error.message?.takeIf(String::isNotBlank) ?: "来源导入未完成，请重试。"
             } finally {
-                busy = null
+                previewBusy = null
                 activeJob = null
             }
         }
@@ -209,6 +218,26 @@ internal fun SourceImportSheet(
         onDismiss()
         completedName?.let(onImported)
     }, backdrop = backdrop, containerColor = colors.surface.copy(alpha = .97f)) { dismiss ->
+        LaunchedEffect(installOperation?.id, installOperation?.phase) {
+            val operation = installOperation ?: return@LaunchedEffect
+            if (operation.active) return@LaunchedEffect
+            when (operation.phase) {
+                ApplicationOperationPhase.SUCCEEDED -> operations.result<String>(operation.id)?.let { result ->
+                    val name = result.await()
+                    installNotice = "$name 已安装并启用"
+                    operations.consumeResult(operation.id)
+                    if (submittedInstallId == operation.id) {
+                        completedName = name
+                        dismiss()
+                    }
+                }
+                ApplicationOperationPhase.FAILED, ApplicationOperationPhase.INTERRUPTED -> {
+                    failure = operation.message
+                    operations.consumeResult(operation.id)
+                }
+                else -> Unit
+            }
+        }
         Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height * .84f)
             .imePadding().navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
@@ -223,6 +252,9 @@ internal fun SourceImportSheet(
             LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false),
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 6.dp, bottom = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                installNotice?.let { message -> item(key = "install-notice") {
+                    Text(message, fontSize = 12.sp, color = colors.onSurfaceVariant)
+                } }
                 failure?.let { message -> item(key = "failure") {
                     Text(message, fontSize = 12.sp, lineHeight = 17.sp, color = colors.error,
                         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
@@ -233,7 +265,9 @@ internal fun SourceImportSheet(
                         MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
                         Text(busy.orEmpty(), fontSize = 12.sp, color = colors.onSurfaceVariant,
                             modifier = Modifier.weight(1f))
-                        MotionTextButton(onClick = { activeJob?.cancel() }) { Text("取消", fontSize = 11.sp) }
+                        if (previewBusy != null) MotionTextButton(onClick = { activeJob?.cancel() }) { Text("取消", fontSize = 11.sp) }
+                        else if (installOperation?.cancellable == true) MotionTextButton(
+                            onClick = { operations.cancel(installOperation.id) }) { Text("取消", fontSize = 11.sp) }
                     }
                 }
                 val bundle = prepared
@@ -440,23 +474,10 @@ internal fun SourceImportSheet(
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = colors.onSurface, contentColor = colors.surface),
                             onClick = {
-                                operate("正在校验并安装…") {
-                                    store.install(bundle)
-                                    // The ViewModel installs the actual adapter before the registry publishes it.
-                                    try {
-                                        withTimeout(10_000L) {
-                                            registry.entries.first { entries -> entries.any {
-                                                it.isInstalled && it.source.id == bundle.sourceId &&
-                                                    it.source.revision == bundle.digest
-                                            } }
-                                        }
-                                    } catch (_: TimeoutCancellationException) {
-                                        error("来源已保存，但尚未接入来源列表，请重新打开源管理重试。")
-                                    }
-                                    if (markAdult) registry.setAdult(bundle.sourceId, true)
-                                    registry.restore(bundle.sourceId)
-                                    completedName = bundle.metadata.optString("name")
-                                    dismiss()
+                                val handle = operations.installSource(store, registry, bundle, markAdult)
+                                if (handle.accepted) {
+                                    failure = null
+                                    submittedInstallId = handle.id
                                 }
                             }) { Text("导入并启用", fontSize = 13.sp) }
                         MotionTextButton(enabled = busy == null, modifier = Modifier.fillMaxWidth(),

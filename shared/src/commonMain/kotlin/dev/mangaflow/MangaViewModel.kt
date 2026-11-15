@@ -13,15 +13,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.mangaflow.account.AccountProfile
 import dev.mangaflow.account.CloudHistoryEntry
-import dev.mangaflow.account.CopyAccountRepository
-import dev.mangaflow.account.CopyShelfSyncController
 import dev.mangaflow.account.CopyShelfMetadata
 import dev.mangaflow.storage.SavedResumeTarget
 import dev.mangaflow.ui.CopyProgressHintState
 import dev.mangaflow.data.Chapter
-import dev.mangaflow.data.CopyAnonymousIdentityStore
-import dev.mangaflow.data.CopyMangaRepository
-import dev.mangaflow.data.CopyCommunityRepository
 import dev.mangaflow.data.DiscoveryMode
 import dev.mangaflow.data.RankPeriod
 import dev.mangaflow.data.RankAudience
@@ -31,8 +26,6 @@ import dev.mangaflow.data.SearchTarget
 import dev.mangaflow.data.CopySearchTags
 import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.data.MangaMetric
-import dev.mangaflow.data.MangaMetricsRepository
-import dev.mangaflow.data.ReviewRepository
 import dev.mangaflow.data.ReviewProviders
 import dev.mangaflow.data.ReviewSource
 import dev.mangaflow.data.ReviewStatus
@@ -45,7 +38,6 @@ import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRouteException
-import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.UnifiedMangaRepository
@@ -55,36 +47,21 @@ import dev.mangaflow.data.bodySourceSearchTerms
 import dev.mangaflow.data.normalizedBodySourceTitle
 import dev.mangaflow.data.SiteRankedWork
 import dev.mangaflow.data.rankedCandidateRelevant
-import dev.mangaflow.data.SiteRankingsRepository
 import dev.mangaflow.data.SourceDiscoveryIdentity
 import dev.mangaflow.data.SourceDiscoveryResult
 import dev.mangaflow.data.SourceDiscoveryStatus
 import dev.mangaflow.data.FederatedSearchSource
 import dev.mangaflow.data.FederatedSearchGroup
 import dev.mangaflow.data.FederatedSearchGrouper
-import dev.mangaflow.data.plugins.ScriptBodySource
-import dev.mangaflow.data.plugins.SourcePluginStore
-import dev.mangaflow.data.sources.BaoziBodySource
 import dev.mangaflow.data.sources.KomiicBodySource
-import dev.mangaflow.data.sources.MangaDexBodySource
-import dev.mangaflow.data.sources.PicacgBodySource
-import dev.mangaflow.data.sources.createJmBodySource
-import dev.mangaflow.data.sources.ManhuaguiBodySource
-import dev.mangaflow.data.sources.MangaBzBodySource
-import dev.mangaflow.storage.UnifiedChapterStore
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
 import dev.mangaflow.storage.DownloadStore
-import dev.mangaflow.storage.ChapterPreparationPhase
-import dev.mangaflow.storage.ChapterPreparationState
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.PageCollection
 import dev.mangaflow.storage.ReadingProgress
-import dev.mangaflow.storage.ReaderCatalogStore
-import dev.mangaflow.storage.BrowseCache
 import dev.mangaflow.storage.BrowseSnapshot
-import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.update.UpdateManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -263,39 +240,31 @@ private class RankedSourceIdentityMismatch : IllegalArgumentException("来源资
 
 class MangaViewModel(context: PlatformContext) : ViewModel() {
     private val application = applicationContext(context)
-    private val copyRepository = CopyMangaRepository(identityProvider = { CopyAnonymousIdentityStore.load(application) })
+    internal val services = MangaApplicationServices.get(application)
     private val sourcePreferences = preferences(application, "mangaflow_library")
-    private val komiicSource = KomiicBodySource {
-        sourcePreferences.getString("body_source_komiic_domain", KomiicBodySource.BASE_URLS.first())
-            ?.takeIf { it in KomiicBodySource.BASE_URLS } ?: KomiicBodySource.BASE_URLS.first()
-    }
-    val picacgSource = PicacgBodySource(application)
-    private val jmSource = createJmBodySource(application)
-    val unifiedChapters = UnifiedChapterStore(application)
-    val repository = UnifiedMangaRepository(copyRepository, unifiedChapters,
-        bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(), komiicSource,
-            MangaDexBodySource(), picacgSource) + listOfNotNull(jmSource),
-        catalogStore = ReaderCatalogStore(application), storageCache = dev.mangaflow.storage.StorageCacheStore.get(application))
-    val bodySources = BodySourceRegistry(application, repository.sources)
-    val sourcePlugins = SourcePluginStore.get(application)
-    internal val starterSources = dev.mangaflow.data.plugins.StarterSourceInstaller(application, sourcePlugins, viewModelScope)
-    private val pluginSourceSync = Mutex()
-    val library = LibraryStore(application)
-    val downloads = DownloadStore.get(application)
-    val updates = UpdateManager.get(application)
-    val community = CopyCommunityRepository(copyRepository)
-    val reviews = ReviewRepository(application)
-    private val siteRankingsRepository = SiteRankingsRepository(application)
+    private val komiicSource = services.komiicSource
+    val picacgSource = services.picacgSource
+    val unifiedChapters = services.unifiedChapters
+    val repository = services.repository
+    val bodySources = services.bodySources
+    val sourcePlugins = services.sourcePlugins
+    internal val starterSources = services.starterSources
+    val library = services.library
+    val downloads = services.downloads
+    val updates = services.updates
+    val community = services.community
+    val reviews = services.reviews
+    private val siteRankingsRepository = services.siteRankingsRepository
     val siteRankings = SiteRankingsController(siteRankingsRepository, viewModelScope)
     private var rankedWorkJob: Job? = null
     private var rankedWorkRequest = 0L
-    private val readerCatalogs = ReaderCatalogStore(application)
-    private val browseCache = BrowseCache(application)
-    private val metricsRepository = MangaMetricsRepository(application, reviews, community)
+    private val readerCatalogs = services.readerCatalogs
+    private val browseCache = services.browseCache
+    private val metricsRepository = services.metricsRepository
     private val _metrics = MutableStateFlow<Map<String, List<MangaMetric>>>(emptyMap())
     val metrics = _metrics.asStateFlow()
-    private val accountRepository = CopyAccountRepository(application)
-    val copyShelfSync = CopyShelfSyncController(application, accountRepository, library, repository, viewModelScope)
+    private val accountRepository = services.accountRepository
+    val copyShelfSync = services.copyShelfSync
     private val _account = MutableStateFlow(AccountUiState())
     val account = _account.asStateFlow()
     private val _copyProgress = MutableStateFlow<CopyProgressHintState?>(null)
@@ -340,10 +309,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private var sourceManagementRequest = 0L
     private val _libraryOpening = MutableStateFlow<LibraryOpenState?>(null)
     val libraryOpening = _libraryOpening.asStateFlow()
-    private val _refreshingDownloads = MutableStateFlow<Set<String>>(emptySet())
-    val refreshingDownloads = _refreshingDownloads.asStateFlow()
-    private val _chapterPreparations = MutableStateFlow<List<ChapterPreparationState>>(emptyList())
-    val chapterPreparations = _chapterPreparations.asStateFlow()
+    val refreshingDownloads = services.preparations.refreshingDownloads
+    val chapterPreparations = services.preparations.state
     private val messages = Channel<String>(Channel.BUFFERED)
     val events = messages.receiveAsFlow()
     private var browseJob: Job? = null
@@ -367,10 +334,6 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     @Volatile private var browseRequestId = 0L
     private val reviewPageJobs = mutableMapOf<String, Job>()
     private val reviewOverrides = ConcurrentSet<String>()
-    private data class PreparationJob(val generation: Long, val job: Job)
-    private val preparationJobs = mutableMapOf<String, PreparationJob>()
-    private var preparationGeneration = 0L
-    private val downloadPreparationSlots = Semaphore(2)
     private var accountJob: Job? = null
     private var accountRequestId = 0L
     private var websiteLoginAttempt: Long? = null
@@ -379,80 +342,56 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private var cloudHistoryJob: Job? = null
     private var cloudFavoritesRequestId = 0L
     private var cloudHistoryRequestId = 0L
-    private var chapterSyncJob: Job? = null
-    private var pendingChapterSync: Pair<Manga, Chapter>? = null
     private var cloudFavoritesPage = -1
     private var cloudHistoryPage = -1
     private var cloudFavoritesFailedPage: Int? = null
     private var cloudHistoryFailedPage: Int? = null
-    private var lastChapterSync: String? = null
     private var visibleReading: Pair<Manga, Chapter>? = null
     private var projectionRequestId = 0L
     private val projectionSaveLock = Mutex()
 
     init {
-        repository.setEnabledSources(bodySources.enabledSourceIds)
         showBrowse(_browse.value)
         restoreAccount()
         viewModelScope.launch {
-            try {
-                sourcePlugins.ready.await()
-                sourcePlugins.installed.collect { packages ->
-                    try {
-                        val scope = withContext(Dispatchers.Default) {
-                            pluginSourceSync.withLock {
-                                repository.replaceImportedSources(packages.map { ScriptBodySource(it, sourcePlugins.runtime, application) })
-                                bodySources.updateInstalledSources(repository.sources)
-                                repository.setEnabledSources(bodySources.enabledSourceIds)
-                                repository.sourceConfigurationKey()
-                            }
-                        }
-                        val current = _browse.value
-                        cancelReaderSourceStandbys()
-                        if (current.isFederatedSearch && current.sourceScope != scope) showBrowse(current.copy(
-                            items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
-                            searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
-                            loading = true, loadingMore = false, refreshing = false, error = null,
-                            failedPage = null, page = 0, updatedAt = 0,
-                        ))
-                    } catch (cancel: CancellationException) { throw cancel
-                    } catch (failure: Exception) {
-                        messages.send(failure.message ?: "第三方源已保存，但暂未接入，请在源设置中重试导入。")
-                    }
-                }
-            } catch (cancel: CancellationException) { throw cancel
-            } catch (failure: Exception) {
-                messages.send(failure.message ?: "第三方源未能加载，可在漫画源设置中重新导入。")
+            services.sourceConfiguration.drop(1).collect { scope ->
+                val current = _browse.value
+                cancelReaderSourceStandbys()
+                if (current.isFederatedSearch && current.sourceScope != scope) showBrowse(current.copy(
+                    items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
+                    searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
+                    loading = true, loadingMore = false, refreshing = false, error = null,
+                    failedPage = null, page = 0, updatedAt = 0,
+                ))
             }
+        }
+        viewModelScope.launch {
+            services.sourceError.collect { error -> if (error != null) messages.send(error) }
+        }
+        viewModelScope.launch {
+            services.readingOutbox.state.collect { state ->
+                _account.update { current ->
+                    if (current.profile?.username != state.owner) current
+                    else current.copy(
+                        syncMessage = state.error ?: state.message ?: current.syncMessage,
+                        canRetrySync = state.pending > 0 && !state.running,
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
+            services.preparations.persistenceError.collect { error -> if (error != null) messages.send(error) }
         }
         viewModelScope.launch {
             library.backupRestored.drop(1).collect {
                 cancelReaderSourceStandbys()
-                copyShelfSync.invalidateAfterRestore()
                 clearCopyProgress()
                 try {
-                    bodySources.reload()
                     _sourceResumePolicy.value = sourcePreferences.getString("source_resume_policy", "same_page")
                         ?.takeIf { it in setOf("ask", "same_page", "source_record") } ?: "ask"
                 } catch (cancel: CancellationException) { throw cancel
                 } catch (failure: Exception) {
                     messages.send(failure.message ?: "漫画源设置未能刷新，请重新打开应用。")
-                }
-            }
-        }
-        viewModelScope.launch {
-            bodySources.entries.collect {
-                val enabled = bodySources.enabledSourceIds
-                if (enabled != repository.enabledSources()) {
-                    cancelReaderSourceStandbys()
-                    withContext(Dispatchers.Default) { repository.setEnabledSources(enabled) }
-                    val current = _browse.value
-                    if (current.isFederatedSearch) showBrowse(current.copy(
-                        items = emptyList(), sourceMatches = emptyMap(), sourceChoiceIds = emptySet(),
-                        searchSources = emptyMap(), sourceNextPages = emptyMap(), hasMore = false,
-                        loading = true, loadingMore = false, refreshing = false, error = null,
-                        failedPage = null, page = 0, updatedAt = 0,
-                    ))
                 }
             }
         }
@@ -467,7 +406,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     fun flushPendingStorage() {
-        viewModelScope.launch {
+        services.scope.launch {
             if (!library.flushPendingWrites()) notifyStorageFailure()
         }
     }
@@ -2393,16 +2332,23 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                             .sortedBy(Chapter::index),
                     )
                 }
-                // Entering the reader while detail refreshes shares that catalog work.
-                // Only the background directory waits; current chapter images load independently.
-                pendingDetail?.join()
+                // A verified catalogue can be ready before the detail coroutine finishes
+                // its unrelated persistence and metrics. Share only work still needed here.
+                val earlyCatalog = if (forceRefresh) null else withContext(Dispatchers.Default) {
+                    repository.cachedDetail(session.manga.id)?.takeIf {
+                        repository.isCatalogFresh(session.manga.id) &&
+                            findSourceChapter(it.chapters, session.chapterId) != null
+                    }
+                }
+                val directoryWork = pendingDetail.takeIf { earlyCatalog == null }
+                directoryWork?.join()
                 if (requestId != readingRequestId) return@launch
-                if (pendingDetail != null && detailJob === pendingDetail) {
+                if (directoryWork != null && detailJob === directoryWork) {
                     _detail.value?.takeIf { it.manga.id == session.manga.id }?.error?.let { failure ->
                         throw IllegalStateException(failure)
                     }
                 }
-                val cached = if (forceRefresh) null else withContext(Dispatchers.Default) {
+                val cached = earlyCatalog ?: if (forceRefresh) null else withContext(Dispatchers.Default) {
                     repository.cachedDetail(session.manga.id)
                         ?.takeIf { findSourceChapter(it.chapters, session.chapterId) != null }
                 }
@@ -2598,8 +2544,6 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         chapterPrefetchKey = null
         _reading.value = null
         visibleReading = null
-        chapterSyncJob?.cancel()
-        lastChapterSync = null
     }
 
     fun loginWithPassword(username: String, password: String) = authenticate {
@@ -2756,6 +2700,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 if (requestId != accountRequestId) return@launch
                 _account.value = AccountUiState(profile = profile, busy = false)
                 copyShelfSync.accountChanged()
+                services.readingOutbox.accountChanged()
                 cloudFavoritesPage = -1
                 cloudHistoryPage = -1
                 if (profile != null) {
@@ -2779,23 +2724,32 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         clearCopyProgress()
         cancelCopyShelfMetadata(clear = true)
         websiteLoginAttempt = null
-        accountRequestId++
+        val request = ++accountRequestId
         accountJob?.cancel()
         cancelAccountRequests()
         cloudFavoritesPage = -1
         cloudHistoryPage = -1
         cloudFavoritesFailedPage = null
         cloudHistoryFailedPage = null
-        try {
-            accountRepository.logout()
-            accountCleanupFailed = false
-            _account.value = AccountUiState(busy = false)
-            previousOwner?.let(library::clearResumeTargets)
-            copyShelfSync.accountChanged()
-        } catch (failure: Exception) {
-            accountCleanupFailed = true
-            _account.value = AccountUiState(busy = false,
-                error = accountError(failure, "账号已退出，但设备凭据清理未完成，请重试。"), canRetryConnection = true)
+        _account.value = AccountUiState(busy = true)
+        previousOwner?.let(library::clearResumeTargets)
+        // Session invalidation starts on Main; protected disk/Keystore cleanup belongs
+        // to the application's owner and cannot be cancelled by an outgoing screen.
+        services.scope.launch {
+            try {
+                accountRepository.logout()
+                if (request != accountRequestId) return@launch
+                accountCleanupFailed = false
+                _account.value = AccountUiState(busy = false)
+                copyShelfSync.accountChanged()
+                services.readingOutbox.accountChanged()
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (failure: Exception) {
+                if (request != accountRequestId) return@launch
+                accountCleanupFailed = true
+                _account.value = AccountUiState(busy = false,
+                    error = accountError(failure, "账号已退出，但设备凭据清理未完成，请重试。"), canRetryConnection = true)
+            }
         }
     }
 
@@ -2972,9 +2926,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     fun retryAccountSync() {
         if (_account.value.profile == null || _account.value.busy) return
         copyShelfSync.check()
-        pendingChapterSync?.let { (manga, chapter) ->
-            if (chapterSyncJob?.isActive != true) syncChapterProgress(manga, chapter, accountRepository.sessionVersion)
-        }
+        services.readingOutbox.retry()
     }
 
     /** Called after a visible image succeeds; public reading never awaits this side channel. */
@@ -2989,52 +2941,17 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (chapter.sourceId != "copy" || SourceKeys.isEncoded(chapter.id) || manga.sourceId != "copy") return
         if (manga.sourceUrl == LOCAL_SOURCE_URL) return
         if (_account.value.profile == null || _account.value.busy) return
-        val version = accountRepository.sessionVersion
-        val key = "$version/${manga.id}/${chapter.id}"
-        if (lastChapterSync == key) return
-        lastChapterSync = key
-        syncChapterProgress(manga, chapter, version)
-    }
-
-    private fun syncChapterProgress(manga: Manga, chapter: Chapter, version: Long) {
-        chapterSyncJob?.cancel()
-        pendingChapterSync = null
-        _account.update { it.copy(canRetrySync = hasPendingSync()) }
-        chapterSyncJob = viewModelScope.launch {
-            try {
-                delay(700)
-                if (!isCurrentAccount(version)) return@launch
-                accountRepository.syncChapter(manga.id, chapter.id)
-                if (!isCurrentAccount(version)) return@launch
-                _account.update { it.copy(
-                    syncMessage = "云端记录已同步至 ${chapter.title}；页内位置保存在本机。",
-                    canRetrySync = hasPendingSync(),
-                ) }
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (failure: Exception) {
-                if (isCurrentAccount(version)) {
-                    pendingChapterSync = manga to chapter
-                    _account.update { it.copy(syncMessage = accountError(failure, "云端章节记录暂未同步。") +
-                        " 本机阅读进度已保留。", canRetrySync = true) }
-                }
-            }
-        }
+        services.readingOutbox.submit(manga, chapter)
     }
 
     private fun isCurrentAccount(version: Long) = accountRepository.sessionVersion == version &&
         _account.value.profile != null && !_account.value.busy
-
-    private fun hasPendingSync() = pendingChapterSync != null
 
     private fun cancelAccountRequests() {
         cloudFavoritesRequestId++
         cloudHistoryRequestId++
         cloudFavoritesJob?.cancel()
         cloudHistoryJob?.cancel()
-        chapterSyncJob?.cancel()
-        pendingChapterSync = null
-        lastChapterSync = null
     }
 
     private fun accountError(failure: Exception, fallback: String) =
@@ -3050,48 +2967,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         enqueueChapterDownload(manga, resolveChapter(chapter, variant), route)
     }
 
-    fun cancelChapterPreparation(id: String, generation: Long) {
-        val current = _chapterPreparations.value.firstOrNull { it.id == id } ?: return
-        if (current.generation != generation) return
-        // Store's handoff is a non-cancellable file transaction. Once entered, its
-        // real download row owns pause/removal instead of pretending preparation can undo it.
-        if (current.phase == ChapterPreparationPhase.COMMITTING) return
-        val owned = preparationJobs[id]?.takeIf { it.generation == current.generation }
-        if (owned != null) preparationJobs.remove(id)
-        _chapterPreparations.update { tasks -> tasks.filterNot { it.id == id && it.generation == current.generation } }
-        current.refreshingEntryId?.let { entryId -> _refreshingDownloads.update { it - entryId } }
-        owned?.job?.cancel()
-    }
+    fun cancelChapterPreparation(id: String, generation: Long) = services.preparations.cancel(id, generation)
 
     fun retryChapterPreparation(id: String, generation: Long) =
-        retryChapterPreparation(id, generation, useLatestRoute = false)
+        services.preparations.retry(id, generation, useLatestRoute = false)
 
     fun retryChapterPreparationUsingLatestRoute(id: String, generation: Long) =
-        retryChapterPreparation(id, generation, useLatestRoute = true)
-
-    private fun retryChapterPreparation(id: String, generation: Long, useLatestRoute: Boolean) {
-        val current = _chapterPreparations.value.firstOrNull { it.id == id } ?: return
-        if (current.generation != generation) return
-        if (current.phase != ChapterPreparationPhase.FAILED) return
-        if (!useLatestRoute && current.route == null) {
-            messages.trySend("原线路尚未成功配置，请选择使用当前设置重试。")
-            return
-        }
-        val expected = if (current.refreshingEntryId != null)
-            downloads.entryFor(current.manga.id, current.chapter.id) else null
-        if (current.refreshingEntryId != null && expected?.id != current.refreshingEntryId) {
-            cancelChapterPreparation(id, generation)
-            return
-        }
-        if (expected?.status in setOf(DownloadStatus.COMPLETED, DownloadStatus.QUEUED,
-                DownloadStatus.RUNNING, DownloadStatus.WAITING)) {
-            cancelChapterPreparation(id, generation)
-            return
-        }
-        enqueueChapterDownload(current.manga, current.chapter,
-            routeMode = if (useLatestRoute) null else current.routeMode, refreshingEntry = expected,
-            frozenRoute = if (useLatestRoute) null else current.route)
-    }
+        services.preparations.retry(id, generation, useLatestRoute = true)
 
     private fun enqueueChapterDownload(
         manga: Manga,
@@ -3100,91 +2982,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         refreshingEntry: DownloadEntry? = null,
         frozenRoute: DownloadRouteSnapshot? = null,
     ) {
-        val key = ChapterPreparationState.key(manga.id, chapter.id)
-        val previous = _chapterPreparations.value.firstOrNull { it.id == key }
-        if (previous != null && previous.phase != ChapterPreparationPhase.FAILED) return
-        val expectedEntry = refreshingEntry ?: downloads.entryFor(manga.id, chapter.id)
-        if (expectedEntry?.status in
-            setOf(DownloadStatus.COMPLETED, DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.WAITING)) {
-            if (previous != null) cancelChapterPreparation(key, previous.generation)
-            messages.trySend("本章已在下载列表中")
-            return
-        }
-        val generation = ++preparationGeneration
-        // Freeze before waiting for preparation capacity. Later settings edits apply
-        // only to another explicit attempt, never to this attempt's metadata or bytes.
-        val route = try { frozenRoute ?: DownloadRoutingStore.get(application).sourceSnapshot(
-            dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(manga.id, chapter), chapter.id).sourceId,
-            DownloadCategory.CHAPTERS, routeMode) }
-        catch (failure: Exception) {
-            val failed = ChapterPreparationState(key, generation, manga, chapter, routeMode, null,
-                ChapterPreparationPhase.FAILED, preparationError(failure), expectedEntry?.id)
-            _chapterPreparations.update { tasks -> tasks.filterNot { it.id == key } + failed }
-            messages.trySend("章节准备失败，可在下载页重试")
-            return
-        }
-        val task = ChapterPreparationState(key, generation, manga, chapter, routeMode, route,
-            ChapterPreparationPhase.WAITING, refreshingEntryId = expectedEntry?.id)
-        _chapterPreparations.update { tasks -> tasks.filterNot { it.id == key } + task }
-        messages.trySend("正在准备章节，可在下载页查看或取消")
-        expectedEntry?.let { entry -> _refreshingDownloads.update { it + entry.id } }
-        fun ownsAttempt() = _chapterPreparations.value.any { it.id == key && it.generation == generation }
-        fun phase(next: ChapterPreparationPhase) {
-            _chapterPreparations.update { tasks -> tasks.map {
-                if (it.id == key && it.generation == generation) it.copy(phase = next) else it
-            } }
-        }
-        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
-            try {
-                downloadPreparationSlots.withPermit {
-                    currentCoroutineContext().ensureActive()
-                    if (!ownsAttempt()) return@withPermit
-                    phase(ChapterPreparationPhase.PREPARING)
-                    val prepared = withTimeout(25_000L) {
-                        dev.mangaflow.data.foregroundRequest("下载章节图片") {
-                            repository.prepareDownload(application, chapterSourceMangaId(manga.id, chapter), chapter.id,
-                                route, forceRefresh = expectedEntry != null)
-                        }
-                    }
-                    currentCoroutineContext().ensureActive()
-                    if (!ownsAttempt()) return@withPermit
-                    phase(ChapterPreparationPhase.COMMITTING)
-                    val accepted = if (expectedEntry == null) {
-                        downloads.enqueue(manga, chapter, prepared.pages, prepared.headers, route = route)
-                        true
-                    } else downloads.refreshReadingDownload(manga, chapter, prepared.pages, prepared.headers,
-                        expectedEntry = expectedEntry, route = route)
-                    _chapterPreparations.update { tasks -> tasks.filterNot { it.id == key && it.generation == generation } }
-                    if (!accepted) messages.trySend("下载任务已变化，已保留当前状态")
-                }
-            } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
-                currentCoroutineContext().ensureActive()
-                val currentAttempt = ownsAttempt()
-                _chapterPreparations.update { tasks -> tasks.map {
-                    if (it.id == key && it.generation == generation)
-                        it.copy(phase = ChapterPreparationPhase.FAILED,
-                            error = "来源未在 25 秒内返回章节信息，可重试或更换下载线路。") else it
-                } }
-                if (currentAttempt) messages.trySend("章节准备超时，可在下载页重试")
-            } catch (cancel: CancellationException) {
-                _chapterPreparations.update { tasks -> tasks.filterNot { it.id == key && it.generation == generation } }
-                throw cancel
-            } catch (failure: Exception) {
-                val currentAttempt = ownsAttempt()
-                _chapterPreparations.update { tasks -> tasks.map {
-                    if (it.id == key && it.generation == generation)
-                        it.copy(phase = ChapterPreparationPhase.FAILED, error = preparationError(failure)) else it
-                } }
-                if (currentAttempt) messages.trySend("章节准备失败，可在下载页重试")
-            } finally {
-                if (preparationJobs[key]?.generation == generation) {
-                    preparationJobs.remove(key)
-                    expectedEntry?.let { entry -> _refreshingDownloads.update { it - entry.id } }
-                }
-            }
-        }
-        preparationJobs[key] = PreparationJob(generation, job)
-        job.start()
+        services.preparations.enqueue(manga, chapter, routeMode, refreshingEntry, frozenRoute)
+        messages.trySend("已加入章节准备队列，可在下载页查看或取消")
     }
 
     private fun preparationError(failure: Exception): String = when {

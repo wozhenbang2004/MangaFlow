@@ -24,6 +24,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -169,7 +170,11 @@ class LibraryStore(context: Context) {
         }.also { it.start() }
     }
 
-    suspend fun awaitReady() { ready.first { it } }
+    suspend fun awaitReady() {
+        val restored = combine(ready, restoreError) { loaded, error -> loaded to error }
+            .first { (loaded, error) -> loaded || error != null }
+        check(restored.first) { restored.second ?: "本地记录暂未恢复，请重试读取。" }
+    }
 
     /** Await the actual library writers before flushing the platform preference write queue. */
     suspend fun flushPendingWrites(): Boolean = withContext(Dispatchers.IO) {

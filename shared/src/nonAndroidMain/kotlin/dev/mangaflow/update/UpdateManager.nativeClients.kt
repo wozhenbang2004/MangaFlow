@@ -5,6 +5,10 @@ import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRouteMode
+import dev.mangaflow.net.DownloadProxyEndpoint
+import dev.mangaflow.net.DownloadProxyType
+import dev.mangaflow.net.checked
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.Request
 import dev.mangaflow.net.HttpUrl.Companion.toHttpUrl
@@ -28,11 +32,37 @@ actual class UpdateManager private constructor(private val context: PlatformCont
     private var job: Job? = null
     private var started = false
     private var incrementalPlan: NativeIncrementalPlan? = null
+    private var retainedRoute: DownloadRouteSnapshot? = null
+    private val checkpoint = StorageFile(StorageFile(dataDirectory(context), "application-transfers"), "native-update.json")
 
     actual fun start() {
         if (started) return
         started = true
-        if (automatic && wallTimeMillis() - prefs.getLong("last_check", 0) >= 6L * 60 * 60 * 1_000) check(false)
+        job = scope.launch {
+            val retained = try { withContext(Dispatchers.IO) { readCheckpoint() } }
+                catch (_: Exception) {
+                    _state.value = _state.value.copy(phase = UpdatePhase.ERROR, message = "更新下载计划未能恢复，请重新检查更新")
+                    job = null
+                    return@launch
+                }
+            if (retained != null) {
+                retainedRoute = retained.route
+                val file = releaseAssetSuffixes().firstOrNull { retained.release.url.substringBefore('?').endsWith(it, true) }
+                    ?.let { StorageFile(root, retained.release.sha256 + it) }
+                _state.value = _state.value.copy(phase = UpdatePhase.VERIFYING, message = "正在恢复更新任务…")
+                val complete = withContext(Dispatchers.IO) {
+                    file != null && file.isFile && file.length() == retained.release.bytes && sha256File(file.path) == retained.release.sha256
+                }
+                _state.value = UpdateState(if (complete) UpdatePhase.READY else UpdatePhase.AVAILABLE, retained.release,
+                    downloaded = if (complete) retained.release.bytes else 0L, total = retained.release.bytes,
+                    message = if (complete) "安装包已下载，可继续安装" else "已恢复下载计划；未完成文件将在继续时重新下载")
+                job = null
+                if (!complete && retained.status in setOf("queued", "running", "verifying")) download(retained.route)
+            } else {
+                job = null
+                if (automatic && wallTimeMillis() - prefs.getLong("last_check", 0) >= 6L * 60 * 60 * 1_000) check(false)
+            }
+        }
     }
 
     actual fun setAutomatic(enabled: Boolean) {
@@ -95,6 +125,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                         AppRelease(code, version, notes, checkedUrl(asset.optString("browser_download_url")), digest, bytes, 0, commit)
                     }
                 }
+                retainedRoute = null
                 val now = wallTimeMillis()
                 prefs.edit().putLong("last_check", now).apply()
                 _state.value = if (release.versionCode <= versionOrder(platformVersion(context))) {
@@ -122,7 +153,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
     }
 
     actual fun download() {
-        val route = try { DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES) }
+        val route = try { retainedRoute ?: DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES) }
         catch (failure: DownloadRouteException) { fail(failure.message ?: "下载线路不可用"); return }
         download(route)
     }
@@ -172,6 +203,14 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                 activeClient = client
                 withContext(Dispatchers.IO) {
                     check(root.isDirectory || root.mkdirs()) { "无法创建更新目录" }
+                    writeCheckpoint(release, route, "running")
+                    retainedRoute = route
+                    if (target.isFile && target.length() == release.bytes && sha256File(target.path) == release.sha256) {
+                        writeCheckpoint(release, route, "completed")
+                        return@withContext
+                    }
+                    // Without a trustworthy retained response validator, never append a partial installer.
+                    // The user intent/route survives; incomplete bytes are explicitly restarted.
                     val url = resolveAssetUrl(release.url, client)
                     incoming.outputStream().use { output ->
                         val response = client.download(Request.Builder().url(url).build(), release.bytes,
@@ -179,21 +218,27 @@ actual class UpdateManager private constructor(private val context: PlatformCont
                             onProgress = { received, _ -> _state.value = _state.value.copy(downloaded = received, total = release.bytes) })
                         require(response.code == 200) { "安装包下载失败（HTTP ${response.code}）" }
                     }
+                    writeCheckpoint(release, route, "verifying")
                     _state.value = _state.value.copy(phase = UpdatePhase.VERIFYING, message = "正在核对安装包…")
                     require(incoming.length() == release.bytes && sha256File(incoming.path) == release.sha256) {
                         "安装包校验不一致，请重新下载"
                     }
                     check(incoming.renameTo(target)) { "无法保存安装包" }
+                    writeCheckpoint(release, route, "completed")
                 }
                 _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = release.bytes,
                     total = release.bytes, message = "安装包已下载")
             } catch (cancelled: CancellationException) {
-                withContext(NonCancellable + Dispatchers.IO) { incoming.delete() }
-                _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE, message = "下载已取消")
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching { writeCheckpoint(release, route, "paused") }.onFailure { checkpoint.delete() }
+                }
+                _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE, message = "下载已暂停；继续时重新下载未完成文件")
                 throw cancelled
             } catch (failure: Exception) {
-                withContext(Dispatchers.IO) { incoming.delete() }
-                fail(failure.message ?: "下载失败，请重试")
+                withContext(Dispatchers.IO) {
+                    runCatching { writeCheckpoint(release, route, "failed") }.onFailure { checkpoint.delete() }
+                }
+                fail((failure.message ?: "下载失败") + "；下载计划已保留，重试将重新下载未完成文件")
             } finally {
                 if (activeClient === taskClient) activeClient = null
                 taskClient?.close()
@@ -234,6 +279,46 @@ actual class UpdateManager private constructor(private val context: PlatformCont
         }
     }
 
+    private data class RetainedUpdate(val release: AppRelease, val route: DownloadRouteSnapshot, val status: String)
+
+    private fun writeCheckpoint(release: AppRelease, route: DownloadRouteSnapshot, status: String) {
+        check(checkpoint.parentFile?.let { it.isDirectory || it.mkdirs() } == true)
+        val proxy = route.proxy
+        val json = JSONObject().put("schema", 1).put("status", status)
+            .put("code", release.versionCode).put("version", release.versionName).put("notes", release.notes.take(6000))
+            .put("url", release.url).put("sha256", release.sha256).put("bytes", release.bytes)
+            .put("sourceCommit", release.sourceCommit).put("route", route.mode.name)
+        if (proxy != null) json.put("proxy", JSONObject().put("host", proxy.host).put("port", proxy.port).put("type", proxy.type.name))
+        val atomic = StorageAtomicFile(checkpoint)
+        val output = atomic.startWrite()
+        try { output.write(json.toString().encodeToByteArray()); atomic.finishWrite(output) }
+        catch (failure: Exception) { atomic.failWrite(output); throw failure }
+    }
+
+    private fun readCheckpoint(): RetainedUpdate? {
+        if (platformKind == PlatformKind.IOS || !checkpoint.isFile) return null
+        require(checkpoint.length() in 1..65_536L) { "更新任务记录无效" }
+        val json = JSONObject(checkpoint.readText())
+        require(json.getInt("schema") == 1)
+        val version = json.getString("version")
+        val code = json.getLong("code")
+        require(version.length in 1..80 && code == versionOrder(version))
+        if (code <= versionOrder(platformVersion(context))) { checkpoint.delete(); return null }
+        val hash = json.getString("sha256")
+        val bytes = json.getLong("bytes")
+        require(hash.matches(Regex("[a-f0-9]{64}")) && bytes in 1..MAX_INSTALLER_BYTES)
+        val url = checkedUrl(json.getString("url"))
+        require(releaseAssetSuffixes().any { url.substringBefore('?').endsWith(it, true) })
+        val proxy = json.optJSONObject("proxy")?.let {
+            DownloadProxyEndpoint(it.getString("host"), it.getInt("port"), DownloadProxyType.valueOf(it.getString("type")))
+        }
+        val route = DownloadRouteSnapshot(DownloadRouteMode.valueOf(json.getString("route")), proxy).checked()
+        val status = json.getString("status")
+        require(status in setOf("queued", "running", "verifying", "paused", "failed", "completed"))
+        return RetainedUpdate(AppRelease(code, version, json.optString("notes"), url, hash, bytes, 0,
+            json.optString("sourceCommit")), route, status)
+    }
+
     private fun fail(message: String) {
         _state.value = _state.value.copy(phase = if (_state.value.release == null) UpdatePhase.ERROR else UpdatePhase.AVAILABLE,
             message = message)
@@ -261,7 +346,8 @@ actual class UpdateManager private constructor(private val context: PlatformCont
         actual fun get(context: PlatformContext): UpdateManager = instances.computeIfAbsent(applicationContext(context)) { UpdateManager(it) }
         private fun checkedUrl(value: String): String {
             val url = value.toHttpUrl()
-            require(url.scheme == "https" && url.host in setOf("github.com", "api.github.com", "release-assets.githubusercontent.com",
+            require(url.scheme == "https" && url.port == 443 && url.username.isEmpty() && url.password.isEmpty() &&
+                url.fragment == null && url.host in setOf("github.com", "api.github.com", "release-assets.githubusercontent.com",
                 "objects.githubusercontent.com", "github-releases.githubusercontent.com")) { "发布服务返回了非官方的下载地址" }
             return url.toString()
         }

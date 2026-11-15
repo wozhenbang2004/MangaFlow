@@ -1,5 +1,12 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.background.ApplicationOperations
+import dev.mangaflow.background.ApplicationOperationPhase
+import dev.mangaflow.background.UserOperationKeys
+import dev.mangaflow.background.StorageCleanupResult
+import dev.mangaflow.background.StorageCleanupFailure
+import dev.mangaflow.background.clearStorageCache
+
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -33,7 +40,8 @@ import dev.mangaflow.ui.motion.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 private data class StorageClearPlan(val items: List<StoredCacheItem>, val legacy: Boolean, val data: Boolean,
@@ -44,6 +52,7 @@ private data class StoragePane(val area: CacheArea?, val book: String?, val revi
 @Composable
 internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, library: LibraryStore,
     repository: dev.mangaflow.data.UnifiedMangaRepository?,
+    active: Boolean = true,
     clearBrowse: suspend () -> Unit, clearMetadata: suspend () -> Unit,
     onDismiss: () -> Unit, onClosed: () -> Unit, onDownloads: () -> Unit, onModels: () -> Unit,
 ) {
@@ -57,7 +66,9 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     val runtimeStates by runtimes.states.collectAsStateWithLifecycle()
     val favorites by library.favorites.collectAsStateWithLifecycle()
     val history by library.history.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
+    val operations = remember(context) { ApplicationOperations.get(context) }
+    val operationStates by operations.state.collectAsStateWithLifecycle()
+    val clearOperation = remember(operationStates) { operations.find(UserOperationKeys.CACHE) }
     val colors = MaterialTheme.colorScheme
     var snapshot by remember { mutableStateOf<StorageCacheSnapshot?>(null) }
     var area by remember { mutableStateOf<CacheArea?>(null) }
@@ -65,7 +76,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var details by remember { mutableStateOf<Map<String, MangaDetail>>(emptyMap()) }
     var plan by remember { mutableStateOf<StorageClearPlan?>(null) }
-    var busy by remember { mutableStateOf(false) }
+    val busy = clearOperation?.active == true
     var loading by remember { mutableStateOf(false) }
     var notice by remember { mutableStateOf<String?>(null) }
     var offlineBytes by remember { mutableLongStateOf(0L) }
@@ -75,8 +86,8 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
         (details.values.map { it.manga } + history.map { it.manga } + entries.map { it.manga } + favorites)
             .associateBy { it.id }
     }
-    LaunchedEffect(visible, revision) {
-        if (!visible || busy) return@LaunchedEffect
+    LaunchedEffect(visible, active, revision, clearOperation?.id, clearOperation?.phase) {
+        if (!visible || !active || busy) return@LaunchedEffect
         loading = true
         try {
             snapshot = store.snapshot()
@@ -112,46 +123,56 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
             if (selectedInScope.isNotEmpty()) "已选内容" else book?.let { known[it]?.title ?: "当前作品" } ?: area?.label ?: "可回收缓存")
     }
     fun applyClear(reviewed: StorageClearPlan) {
-        if (busy) return
-        busy = true
-        scope.launch {
-            var freed = 0L
-            try {
-                val result = store.clear(reviewed.items, reviewed.legacy)
-                freed += result.freedBytes
-                if (reviewed.data) {
-                    val before = store.snapshot()
-                    clearBrowse()
-                    clearMetadata()
-                    val after = store.snapshot()
-                    freed += ((before.auxiliaryBytes + before.catalogBytes) -
-                        (after.auxiliaryBytes + after.catalogBytes)).coerceAtLeast(0L)
-                }
-                // Remove only the decoded variants of reviewed, unprotected originals.
-                val keys = result.removedKeys
-                imageLoader.memoryCache?.let { memory -> memory.keys.filter {
-                    it.key in keys || it.key.removePrefix("manga-cover:") in keys
-                }.forEach { memory.remove(it) } }
-                snapshot = store.snapshot()
-                selected = emptySet()
-                plan = null
-                notice = "已释放 ${storageBytes(freed)}" +
-                    if (result.failed > 0) " · 部分内容未清理，请重试" else if (result.skipped > 0) " · 使用中的内容已保留" else ""
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) {
-                notice = if (freed > 0) "已释放 ${storageBytes(freed)} · 其余内容未清理，请刷新重试" else "清理未完成，请刷新重试"
-                plan = null
-            } finally { busy = false; revision++ }
+        if (operations.find(UserOperationKeys.CACHE)?.active == true) return
+        val handle = operations.clearStorageCache(store, imageLoader, reviewed.items,
+            reviewed.legacy, reviewed.data, clearBrowse, clearMetadata)
+        if (handle.accepted) {
+            plan = null
+            selected = emptySet()
+            notice = "已在后台清理，可关闭此页"
         }
     }
-    MotionDialog(visible, onDismissRequest = { if (!busy) back() },
+    LaunchedEffect(clearOperation?.id, clearOperation?.phase, visible, active) {
+        val operation = clearOperation ?: return@LaunchedEffect
+        if (!visible || !active || operation.active) return@LaunchedEffect
+        fun showResult(result: StorageCleanupResult) {
+            if (!result.accountingComplete) {
+                notice = "可能已释放部分内容，请刷新用量核对"
+                return
+            }
+            notice = "已释放 ${storageBytes(result.freedBytes)}" + when {
+                result.failed > 0 -> " · 部分内容未清理，请重试"
+                result.skipped > 0 -> " · 使用中的内容已保留"
+                else -> ""
+            }
+        }
+        when (operation.phase) {
+            ApplicationOperationPhase.SUCCEEDED, ApplicationOperationPhase.FAILED -> {
+                try {
+                    val result = operations.result<StorageCleanupResult>(operation.id)
+                    if (result != null) showResult(result.await()) else notice = operation.message
+                } catch (failure: StorageCleanupFailure) {
+                    showResult(failure.result)
+                } catch (cancel: CancellationException) {
+                    currentCoroutineContext().ensureActive()
+                    notice = operation.message
+                } catch (_: Exception) { notice = operation.message }
+            }
+            ApplicationOperationPhase.CANCELLED -> notice = "清理已取消，可能已释放部分内容；正在刷新实际用量"
+            else -> notice = operation.message
+        }
+        if (!operation.statusDurable) notice = notice.orEmpty() + " · 操作状态未保存"
+        // This small outcome remains available across panel/page reopening; a new CACHE
+        // operation or the registry's bounded terminal retention releases it.
+    }
+    MotionDialog(visible, onDismissRequest = ::back,
         properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 560.dp, onClosed = onClosed) {
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
             val maximum = minOf(maxHeight, LocalMangaWindow.current.height * .9f, 680.dp)
             ReaderDialogSurface(Modifier.fillMaxWidth(), backdrop) {
                 Column(Modifier.fillMaxWidth().heightIn(max = maximum).padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (area != null || plan != null) MotionIconButton({ if (!busy) back() }, enabled = !busy,
+                        if (area != null || plan != null) MotionIconButton(::back,
                             modifier = Modifier.size(44.dp), tooltip = "返回") {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                         }
@@ -164,9 +185,17 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                 else Icon(Icons.Outlined.Refresh, "刷新用量", Modifier.size(18.dp))
                             }
                         }
-                        MotionIconButton(onDismiss, enabled = !busy, modifier = Modifier.size(44.dp), tooltip = "关闭存储管理") {
+                        MotionIconButton(onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭存储管理") {
                             Icon(Icons.Outlined.Close, "关闭存储管理", Modifier.size(20.dp))
                         }
+                    }
+                    if (busy) Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+                        Text(clearOperation?.message ?: "后台清理中 · 可关闭此页", Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        if (clearOperation?.cancellable == true) MotionTextButton(
+                            onClick = { operations.cancel(clearOperation.id) }) { Text("取消") }
                     }
                     val review = plan
                     if (review == null) {
@@ -218,7 +247,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                     CacheArea.ARTWORK -> "封面 · 用户头像"
                                     CacheArea.DATA -> "推荐 · 榜单 · 目录 · 评分与评论"
                                     CacheArea.PANELS -> "识别坐标，可重新生成"
-                                }, storageBytes(paneSnapshot?.areaBytes(kind) ?: 0L), areaIcon(kind), !busy) {
+                                }, storageBytes(paneSnapshot?.areaBytes(kind) ?: 0L), areaIcon(kind), true) {
                                     area = kind; selected = emptySet()
                                 }
                             }
@@ -226,7 +255,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                 StorageLine("旧版图片缓存", if (paneSnapshot?.legacyReclaimable == true) "归属会在再次使用后补齐" else "正在使用，稍后可清理",
                                     storageBytes(paneSnapshot?.coilUnclassifiedBytes ?: 0L))
                             }
-                            item("offline") { StorageNavigationRow("离线下载", "独立保存", storageBytes(offlineBytes), Icons.Outlined.Download, !busy, onDownloads) }
+                            item("offline") { StorageNavigationRow("离线下载", "独立保存", storageBytes(offlineBytes), Icons.Outlined.Download, true, onDownloads) }
                             if (PanelReadingAvailable) item("models") { StorageNavigationRow("模型与组件", "按需下载", storageBytes(modelStates.values.sumOf { it.bytes } +
                                 runtimeStates.values.sumOf { it.bytes }), Icons.Outlined.Extension, !busy, onModels) }
                             item("budget") {

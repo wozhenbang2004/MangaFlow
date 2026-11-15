@@ -8,6 +8,7 @@ import kotlinx.atomicfu.locks.synchronized
 import dev.mangaflow.platform.PlatformContext as Context
 import dev.mangaflow.platform.storage.applicationContext
 import dev.mangaflow.platform.storage.cacheDir
+import dev.mangaflow.platform.storage.preferences
 import dev.mangaflow.data.CopyAnonymousIdentityStore
 import dev.mangaflow.data.CopyMangaConfig
 import dev.mangaflow.data.Manga
@@ -17,6 +18,9 @@ import dev.mangaflow.data.SourceResponse
 import dev.mangaflow.data.sourceClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -44,6 +48,8 @@ data class CopyAccountSyncSnapshot(
     val progressError: String? = null,
 )
 
+enum class CopyAccountSyncDomain { FAVORITES, PROGRESS }
+
 /** Relay's owner-only routes. Public catalogs, pages and downloads never use this client. */
 class CopyAccountRepository(context: Context) {
     private val store = AccountTokenStore(context)
@@ -54,6 +60,8 @@ class CopyAccountRepository(context: Context) {
     private val accountPauses = ConcurrentHashMap<String, Long>()
     private val accountHttp = SourceHttp(accountClient, accountPauses, sourceId = "copy", http1Only = true)
     private val appContext = context.applicationContext
+    private val restorationControl by lazy { preferences(appContext, "mangaflow_account_restoration") }
+    private var logoutRequested = false
     private val appProtocol by lazy { CopyAppAccountProtocol(CopyAnonymousIdentityStore.load(appContext)) }
     private val requests = Mutex()
     private val sessionLock = SynchronizedObject()
@@ -61,6 +69,14 @@ class CopyAccountRepository(context: Context) {
     val profile: StateFlow<AccountProfile?> = mutableProfile.asStateFlow()
     @kotlin.concurrent.Volatile private var version = 0L
     val sessionVersion: Long get() = version
+    /** Only a committed credential contributes to this opaque queue owner; no token leaves the repository. */
+    internal fun readingQueueOwner(): CopyReadingOwner? = synchronized(sessionLock) {
+        val profile = mutableProfile.value ?: return@synchronized null
+        val credential = sessionCredential ?: return@synchronized null
+        val digest = sha256(("copy-reading-owner-v1\u0000" + credential.channel.value + "\u0000" + credential.token)
+            .encodeToByteArray()).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
+        CopyReadingOwner(profile.username, digest, version)
+    }
     private var sessionCredential: StoredAccountCredential? = null
     private var pendingLogin: PendingLogin? = null
     val hasPendingLogin: Boolean get() = synchronized(sessionLock) { pendingLogin?.lease?.version == version }
@@ -75,7 +91,10 @@ class CopyAccountRepository(context: Context) {
     private val publicConfig = CopyMangaConfig()
 
     suspend fun restore(): AccountProfile? {
-        val expected = synchronized(sessionLock) { version }
+        val expected = synchronized(sessionLock) {
+            if (logoutRequested && pendingLogin?.lease?.version != version) return null
+            version
+        }
         return withContext(Dispatchers.IO) {
             requests.withLock {
                 ensureVersion(expected)
@@ -86,6 +105,11 @@ class CopyAccountRepository(context: Context) {
                         throw SourceException("本次登录验证已超时，请重新输入账号密码。")
                     }
                     return@withLock finishLogin(pending)
+                }
+                if (restorationControl.getBoolean("logout_pending", false)) {
+                    synchronized(sessionLock) { if (version == expected) logoutRequested = true }
+                    ensureVersion(expected)
+                    return@withLock null
                 }
                 val current = synchronized(sessionLock) {
                     if (version != expected) staleSession()
@@ -180,13 +204,27 @@ class CopyAccountRepository(context: Context) {
         }
     }
 
-    fun logout() = synchronized(sessionLock) {
-        version++
-        pendingLogin = null
-        sessionCredential = null
-        mutableProfile.value = null
+    suspend fun logout() {
+        synchronized(sessionLock) {
+            version++
+            logoutRequested = true
+            pendingLogin = null
+            sessionCredential = null
+            mutableProfile.value = null
+        }
         accountHttp.cancelAll()
-        store.clear()
+        withContext(Dispatchers.IO) {
+            requests.withLock {
+                // A later verified login owns its saved credential. A failed/in-flight login
+                // cannot prevent cleanup of the account that the user explicitly left.
+                val shouldClear = synchronized(sessionLock) { sessionCredential == null }
+                if (shouldClear) {
+                    // Keep an explicit logout authoritative even when protected-store cleanup fails.
+                    runCatching { restorationControl.edit().putBoolean("logout_pending", true).commit() }
+                    store.clear()
+                }
+            }
+        }
     }
 
     suspend fun favorites(page: Int): CloudPage<Manga> = favoritePage(page, strict = false)
@@ -249,79 +287,103 @@ class CopyAccountRepository(context: Context) {
         return second
     }
 
-    /** Each domain is complete or explicitly unavailable; a failed read is never empty membership. */
+    /** Independent stable reads share the existing one-request account gate, never extra origin fanout. */
     suspend fun completeSyncSnapshot(
         includeFavorites: Boolean = true,
         includeProgress: Boolean = true,
+        onDomainRead: suspend (CopyAccountSyncSnapshot, CopyAccountSyncDomain) -> Unit = { _, _ -> },
     ): CopyAccountSyncSnapshot {
         val expected = sessionVersion
-        var favoritesReady = false
-        var progressReady = false
-        var favoritesError: String? = null
-        var progressError: String? = null
-        var collected = emptyList<FavoriteRow>()
-        var progress = emptyMap<String, CloudHistoryEntry>()
-        if (includeFavorites) {
-            try {
-                collected = completeFavoriteRows()
+        val callbackContext = currentCoroutineContext().minusKey(Job)
+        return supervisorScope {
+            val favorites = async(Dispatchers.Default) {
+                val read: AccountDomainRead<List<FavoriteRow>> = if (!includeFavorites) AccountDomainRead(emptyList<FavoriteRow>(), false, null)
+                else try {
+                    AccountDomainRead(completeFavoriteRows(), true, null)
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Exception) {
+                    ensureVersion(expected)
+                    AccountDomainRead(emptyList(), false, failure.message ?: "拷贝收藏暂时无法读取，请重试。")
+                }
                 ensureVersion(expected)
-                favoritesReady = true
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) {
-                ensureVersion(expected)
-                favoritesError = failure.message ?: "拷贝收藏暂时无法读取，请重试。"
+                if (includeFavorites) withContext(callbackContext) {
+                    ensureVersion(expected)
+                    onDomainRead(CopyAccountSyncSnapshot(read.value.map(FavoriteRow::manga), emptyMap(),
+                        favoritesReady = read.ready, favoritesError = read.error), CopyAccountSyncDomain.FAVORITES)
+                }
+                read
             }
-        }
-        if (includeProgress) {
-            try {
-                suspend fun scanHistory(): List<CloudHistoryEntry> {
-                    val result = mutableListOf<CloudHistoryEntry>()
-                    val seen = mutableSetOf<String>()
-                    for (page in 0..500) {
-                        ensureVersion(expected)
-                        val next = historyPage(page, strict = true)
-                        ensureVersion(expected)
-                        for (entry in next.items) {
-                            if (!seen.add(entry.manga.id)) throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
-                            result += entry
+            val history = async(Dispatchers.Default) {
+                val read: AccountDomainRead<List<CloudHistoryEntry>> = if (!includeProgress) AccountDomainRead(emptyList<CloudHistoryEntry>(), false, null)
+                else try {
+                    suspend fun scanHistory(): List<CloudHistoryEntry> {
+                        val result = mutableListOf<CloudHistoryEntry>()
+                        val seen = mutableSetOf<String>()
+                        for (page in 0..500) {
+                            ensureVersion(expected)
+                            val next = historyPage(page, strict = true)
+                            ensureVersion(expected)
+                            for (entry in next.items) {
+                                if (!seen.add(entry.manga.id)) throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
+                                result += entry
+                            }
+                            if (!next.hasMore) return result
                         }
-                        if (!next.hasMore) return result
+                        throw SourceException("拷贝阅读记录尚未完整读取，请稍后重试。")
                     }
-                    throw SourceException("拷贝阅读记录尚未完整读取，请稍后重试。")
+                    val first = scanHistory()
+                    val second = scanHistory()
+                    if (first.map { it.manga.id to it.chapterId } != second.map { it.manga.id to it.chapterId })
+                        throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
+                    AccountDomainRead(second, true, null)
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Exception) {
+                    ensureVersion(expected)
+                    AccountDomainRead(emptyList(), false, failure.message ?: "拷贝阅读记录暂时无法读取，请重试。")
                 }
-                val first = scanHistory()
-                val history = scanHistory()
-                if (first.map { it.manga.id to it.chapterId } != history.map { it.manga.id to it.chapterId }) {
-                    throw SourceException("拷贝阅读记录在读取期间发生变化，请重新检查。")
+                ensureVersion(expected)
+                if (includeProgress) withContext(callbackContext) {
+                    ensureVersion(expected)
+                    val verified = read.value.filter { UUID_PATTERN.matches(it.chapterId) && it.chapterId.any { c -> c != '0' && c != '-' } }
+                        .associateBy { it.manga.id }
+                    onDomainRead(CopyAccountSyncSnapshot(emptyList(), verified,
+                        progressReady = read.ready, progressError = read.error), CopyAccountSyncDomain.PROGRESS)
                 }
+                read
+            }
+            val favoriteRead = favorites.await()
+            val historyRead = history.await()
+            ensureVersion(expected)
+            withContext(Dispatchers.Default) {
+                var progressError = historyRead.error
+                var progressReady = historyRead.ready
                 val values = mutableMapOf<String, CloudHistoryEntry>()
-                collected.forEach { row ->
-                    val chapter = row.metadata.chapterId.takeIf { UUID_PATTERN.matches(it) && it.any { c -> c != '0' && c != '-' } }
-                    if (chapter != null) values[row.manga.id] = CloudHistoryEntry(row.manga, chapter, row.metadata.chapterTitle)
-                }
-                history.forEach { entry ->
-                    if (UUID_PATTERN.matches(entry.chapterId) && entry.chapterId.any { it != '0' && it != '-' }) {
+                if (progressReady) {
+                    favoriteRead.value.forEach { row ->
+                        val chapter = row.metadata.chapterId.takeIf { UUID_PATTERN.matches(it) && it.any { c -> c != '0' && c != '-' } }
+                        if (chapter != null) values[row.manga.id] = CloudHistoryEntry(row.manga, chapter, row.metadata.chapterTitle)
+                    }
+                    for (entry in historyRead.value) {
+                        if (!UUID_PATTERN.matches(entry.chapterId) || entry.chapterId.none { it != '0' && it != '-' }) continue
                         val previous = values[entry.manga.id]
                         if (previous != null && previous.chapterId != entry.chapterId) {
-                            throw SourceException("拷贝进度在检查期间发生变化，请重新检查后合并。")
+                            progressReady = false
+                            progressError = "拷贝进度在检查期间发生变化，请重新检查后合并。"
+                            values.clear()
+                            break
                         }
                         values[entry.manga.id] = entry.copy(manga = previous?.manga ?: entry.manga,
                             chapterTitle = entry.chapterTitle.ifBlank { previous?.chapterTitle.orEmpty() })
                     }
                 }
                 ensureVersion(expected)
-                progress = values
-                progressReady = true
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) {
-                ensureVersion(expected)
-                progressError = failure.message ?: "拷贝阅读记录暂时无法读取，请重试。"
+                CopyAccountSyncSnapshot(favoriteRead.value.map(FavoriteRow::manga), values,
+                    favoriteRead.ready, progressReady, favoriteRead.error, progressError)
             }
         }
-        ensureVersion(expected)
-        return CopyAccountSyncSnapshot(collected.map(FavoriteRow::manga), progress,
-            favoritesReady, progressReady, favoritesError, progressError)
     }
+
+    private data class AccountDomainRead<T>(val value: T, val ready: Boolean, val error: String?)
 
     /**
      * Read only the actual account collection. The API exposes collection/read ordering even
@@ -435,12 +497,15 @@ class CopyAccountRepository(context: Context) {
     }
 
     /** True means a readback confirmed the requested state, including removal. */
-    suspend fun setFavorite(mangaId: String, comicUuid: String, favorite: Boolean): Boolean {
+    suspend fun setFavorite(mangaId: String, comicUuid: String, favorite: Boolean,
+        beforeWrite: suspend () -> Unit = {}): Boolean {
         val lease = requireSession()
         val slug = segment(mangaId)
         val id = uuid(comicUuid)
         return withContext(Dispatchers.IO) {
             requests.withLock {
+                beforeWrite()
+                ensureLease(lease)
                 val queryUrl = apiUrl("comic2/$slug/query", "platform" to "3")
                 if (collected(accountObject(lease, queryUrl, "个人收藏状态")) == favorite) {
                     ensureLease(lease)
@@ -448,7 +513,8 @@ class CopyAccountRepository(context: Context) {
                 }
                 val body = FormBody.Builder().add("comic_id", id).add("is_collect", if (favorite) "1" else "0")
                     .add("authorization", "Token ${lease.token}").build()
-                accountRequest(lease, apiUrl("member/collect/comic", "platform" to "3"), "更新个人收藏", body = body)
+                accountRequest(lease, apiUrl("member/collect/comic", "platform" to "3"), "更新个人收藏",
+                    body = body, beforeSend = beforeWrite)
                 val confirmed = accountObject(lease, queryUrl, "个人收藏状态")
                 ensureLease(lease)
                 collected(confirmed) == favorite
@@ -457,14 +523,16 @@ class CopyAccountRepository(context: Context) {
     }
 
     /** Only chapter identity is synced. Page images and exact page progress remain on the public/local paths. */
-    suspend fun syncChapter(mangaId: String, chapterId: String) {
+    suspend fun syncChapter(mangaId: String, chapterId: String, beforeWrite: suspend () -> Unit = {}) {
         val lease = requireSession()
         val slug = segment(mangaId)
         val id = uuid(chapterId)
         withContext(Dispatchers.IO) {
             requests.withLock {
+                beforeWrite()
+                ensureLease(lease)
                 val data = accountObject(lease, apiUrl("comic/$slug/chapter2/$id", "platform" to "3"),
-                    "云端章节进度同步", maxChars = 8 * 1024 * 1024)
+                    "云端章节进度同步", maxChars = 8 * 1024 * 1024, beforeSend = beforeWrite)
                 val chapter = data.optJSONObject("chapter")
                 if (chapter == null || chapter.text("uuid") != id || chapter.text("comic_path_word") != slug) {
                     throw SourceException("云端返回的章节归属不匹配，未确认同步成功。")
@@ -512,12 +580,14 @@ class CopyAccountRepository(context: Context) {
             .header("sec-fetch-site", "same-origin").header("sec-fetch-mode", "cors").header("sec-fetch-dest", "empty")
             .header("Cookie", "webp=1")
 
-    private suspend fun accountObject(lease: SessionLease, url: HttpUrl, operation: String, maxChars: Int = 256 * 1024): JSONObject =
-        accountRequest(lease, url, operation, maxChars = maxChars) as? JSONObject
+    private suspend fun accountObject(lease: SessionLease, url: HttpUrl, operation: String,
+        maxChars: Int = 256 * 1024, beforeSend: suspend () -> Unit = {}): JSONObject =
+        accountRequest(lease, url, operation, maxChars = maxChars, beforeSend = beforeSend) as? JSONObject
             ?: throw SourceException("$operation 没有返回有效数据，请稍后重试。")
 
     private suspend fun accountRequest(lease: SessionLease, url: HttpUrl, operation: String,
-        body: FormBody? = null, maxChars: Int = 256 * 1024): Any? {
+        body: FormBody? = null, maxChars: Int = 256 * 1024,
+        beforeSend: suspend () -> Unit = {}): Any? {
         ensureLease(lease)
         val method = if (body == null) "GET" else "POST"
         if (!allowed(url, method) || (!lease.committed && url != profileUrl(lease))) {
@@ -542,6 +612,8 @@ class CopyAccountRepository(context: Context) {
             if (body != null) builder.post(body)
             builder.build()
         }
+        beforeSend()
+        ensureLease(lease)
         val response = try { accountHttp.request(request, operation, readAccountErrors = true) }
             catch (error: Exception) { ensureLease(lease); throw error }
         ensureLease(lease)
@@ -719,7 +791,12 @@ class CopyAccountRepository(context: Context) {
         currentCoroutineContext().ensureActive()
         return synchronized(sessionLock) {
             if (version != lease.version) staleSession()
-            if (persist) store.write(lease.credential)
+            if (persist) {
+                store.write(lease.credential)
+                if (!restorationControl.edit().putBoolean("logout_pending", false).commit())
+                    throw SourceException("账号已验证，但设备尚未确认保存登录状态，请重试。")
+            }
+            logoutRequested = false
             pendingLogin = null
             sessionCredential = lease.credential
             version++

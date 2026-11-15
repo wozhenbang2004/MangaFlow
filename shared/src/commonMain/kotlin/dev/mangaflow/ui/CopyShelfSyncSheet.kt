@@ -114,7 +114,7 @@ internal fun CopyShelfSyncSheet(
     }
     // Staging valid evidence is harmless during a read; apply must wait for the coordinator.
     val canChoose = visible && state.owner != null && state.checked && !state.importing && !state.uploading
-    val canApply = canChoose && !state.checking
+    val canApply = canChoose && !state.checking && !state.projecting
     val scoped = state.differences.filter {
         filter == 0 || filter == 1 && it.kind == CopySyncDifferenceKind.FAVORITE ||
             filter == 2 && it.kind == CopySyncDifferenceKind.PROGRESS

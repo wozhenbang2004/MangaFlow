@@ -1,5 +1,12 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.background.ApplicationOperations
+import dev.mangaflow.background.ApplicationOperationPhase
+import dev.mangaflow.background.UserOperationKeys
+import dev.mangaflow.background.LocalImportInput as LocalImportSource
+import dev.mangaflow.background.importLocal
+import androidx.compose.runtime.DisposableEffect
+
 import androidx.compose.foundation.layout.WindowInsetsSides
 
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -153,18 +160,6 @@ private data class DownloadDirectoryEntry(
     val id: String, val mangaId: String, val group: String, val chapterIndex: Int, val saved: Boolean,
 )
 
-private sealed interface LocalImportSource {
-    data class Archive(val uri: String) : LocalImportSource
-    data class Images(val uris: List<String>) : LocalImportSource
-    data class Folder(val uri: String) : LocalImportSource
-}
-
-private fun LocalImportSource.documents(): List<String> = when (this) {
-    is LocalImportSource.Archive -> listOf(uri)
-    is LocalImportSource.Images -> uris
-    is LocalImportSource.Folder -> listOf(uri)
-}
-
 private data class PendingLocalImport(
     val source: LocalImportSource,
     val mangaTitle: String,
@@ -202,6 +197,9 @@ fun DownloadsScreen(
     val entries by store.entries.collectAsStateWithLifecycle()
     val loading by store.loading.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val operations = remember(context) { ApplicationOperations.get(context) }
+    val operationStates by operations.state.collectAsStateWithLifecycle()
+    val importOperation = remember(operationStates) { operations.find(UserOperationKeys.LOCAL_IMPORT) }
     val haptics = dev.mangaflow.ui.motion.rememberFeelFeedback()
     val snackbar = remember { SnackbarHostState() }
     var filter by rememberSaveable { mutableStateOf(DownloadFilter.ALL) }
@@ -220,7 +218,15 @@ fun DownloadsScreen(
     val filterChoices = remember { listOf(GlassTabChoice("全部", Icons.Outlined.Inventory2), GlassTabChoice("进行中", Icons.Outlined.Downloading), GlassTabChoice("已下载", Icons.Outlined.CheckCircleOutline)) }
     val preferredFilterWidth = morphGlassTabWidth(filterChoices)
     var pendingImport by remember { mutableStateOf<PendingLocalImport?>(null) }
-    var importBusy by remember { mutableStateOf(false) }
+    val importInputOpen = remember { mutableStateOf(true) }
+    DisposableEffect(Unit) {
+        onDispose {
+            importInputOpen.value = false
+            // Read the actual delegated state: acceptance clears it before navigation/disposal.
+            pendingImport?.source?.documents()?.let(::releasePickedDocuments)
+        }
+    }
+    val importBusy = importOperation?.active == true
     var importError by remember { mutableStateOf<String?>(null) }
     val allScroll = rememberLazyListState()
     val activeScroll = rememberLazyListState()
@@ -301,7 +307,7 @@ fun DownloadsScreen(
 
     val archivePicker = rememberOpenDocumentPicker() { uri ->
         uri?.let {
-            if (!localImportAllowed) {
+            if (!importInputOpen.value || !localImportAllowed) {
                 releasePickedDocuments(listOf(it))
                 return@rememberOpenDocumentPicker
             }
@@ -310,7 +316,7 @@ fun DownloadsScreen(
         }
     }
     val imagePicker = rememberMultipleDocumentPicker() { uris ->
-        if (!localImportAllowed) {
+        if (!importInputOpen.value || !localImportAllowed) {
             releasePickedDocuments(uris)
             return@rememberMultipleDocumentPicker
         }
@@ -320,7 +326,7 @@ fun DownloadsScreen(
     }
     val folderPicker = rememberFolderPicker() { uri ->
         uri?.let {
-            if (!localImportAllowed) {
+            if (!importInputOpen.value || !localImportAllowed) {
                 releasePickedDocuments(listOf(it))
                 return@rememberFolderPicker
             }
@@ -336,27 +342,25 @@ fun DownloadsScreen(
             return
         }
         if (importBusy) return
-        importBusy = true
-        importError = null
-        scope.launch {
-            try {
-                val entry = when (val source = pending.source) {
-                    is LocalImportSource.Archive -> store.importArchive(source.uri, mangaTitle, chapterTitle)
-                    is LocalImportSource.Images -> store.importImages(source.uris, mangaTitle, chapterTitle)
-                    is LocalImportSource.Folder -> store.importFolder(source.uri, mangaTitle, chapterTitle)
-                }
-                releasePickedDocuments(pending.source.documents())
-                pendingImport = null
+        val handle = operations.importLocal(store, pending.source, mangaTitle.trim(), chapterTitle.trim())
+        if (handle.accepted) {
+            // The task owns picked files from acceptance until terminal cleanup.
+            pendingImport = null
+            importError = null
+        } else importError = "已有导入正在进行，可在下载页查看或取消"
+    }
+
+    LaunchedEffect(importOperation?.id, importOperation?.phase, active) {
+        val operation = importOperation ?: return@LaunchedEffect
+        if (!active || operation.active) return@LaunchedEffect
+        if (operation.phase == ApplicationOperationPhase.SUCCEEDED) {
+            operations.result<DownloadEntry>(operation.id)?.let {
+                it.await()
                 filter = DownloadFilter.SAVED
-                snackbar.showSnackbar("已导入 ${entry.manga.title} · ${entry.chapter.title}")
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                importError = failure.message ?: "本地漫画导入失败"
-            } finally {
-                importBusy = false
+                operations.consumeResult(operation.id)
             }
-        }
+        } else if (operation.phase == ApplicationOperationPhase.FAILED ||
+            operation.phase == ApplicationOperationPhase.INTERRUPTED) importError = operation.message
     }
 
     fun toggleSelection(targets: List<DownloadEntry>) {
@@ -440,6 +444,14 @@ fun DownloadsScreen(
                                     Text(availableBytes?.let { "${downloadBytes(it)} 可用" }
                                         ?: if (spaceReadFailed) "暂时无法读取可用空间" else "正在读取可用空间…",
                                         fontSize = 11.sp, color = secondary)
+                                    if (importOperation != null) {
+                                        Text("本地导入 · " + (if (importBusy) "后台处理中" else importOperation.message.orEmpty()),
+                                            fontSize = 11.sp, color = secondary)
+                                        if (importOperation.cancellable) CompactMenuAction(Icons.Outlined.Close, "取消导入") {
+                                            operations.cancel(importOperation.id)
+                                            showQueueActions = false
+                                        }
+                                    }
                                 }
                                 HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                                     color = foreground.copy(alpha = .07f))
@@ -522,6 +534,22 @@ fun DownloadsScreen(
                     modifier = Modifier.fillMaxSize(), state = scroll,
                     contentPadding = PaddingValues(start = contentInset, end = contentInset, top = contentTopPadding, bottom = 32.dp + bottomInset),
                 ) {
+                    if (pageFilter != DownloadFilter.SAVED && localImportAllowed && importOperation != null &&
+                        (importOperation.active || importOperation.phase == ApplicationOperationPhase.FAILED ||
+                            importOperation.phase == ApplicationOperationPhase.INTERRUPTED)) item(key = "local-import-operation") {
+                        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (importBusy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                            else Icon(Icons.Outlined.Info, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+                            Text(if (importBusy) "本地导入 · 可离开此页" else importOperation.message.orEmpty(),
+                                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant)
+                            if (importOperation.cancellable) MotionIconButton(onClick = { operations.cancel(importOperation.id) },
+                                modifier = Modifier.size(44.dp), tooltip = "取消导入") {
+                                Icon(Icons.Outlined.Close, "取消本地导入", Modifier.size(18.dp))
+                            }
+                        }
+                    }
                     if (pageFilter != DownloadFilter.SAVED) items(visiblePreparations,
                         key = { "preparation:" + it.id }, contentType = { "chapter-preparation" }) { preparation ->
                         ChapterPreparationRow(preparation, backdrop = backdrop, active = active && pageFilter == filter,
@@ -805,11 +833,11 @@ fun DownloadsScreen(
         error = importError,
         backdrop = backdrop,
         allowed = localImportAllowed,
-        onDismiss = { if (!importBusy) {
+        onDismiss = {
             pendingImport?.source?.documents()?.let(::releasePickedDocuments)
             pendingImport = null
             importError = null
-        } },
+        },
         onConfirm = { pending, mangaTitle, chapterTitle -> importLocal(pending, mangaTitle, chapterTitle) },
     )
 
@@ -837,7 +865,7 @@ private fun ChapterPreparationRow(
     }
     val source = dev.mangaflow.data.sourceDisplayName(sourceId)
     val status = when (state.phase) {
-        ChapterPreparationPhase.WAITING -> "等待准备"
+        ChapterPreparationPhase.WAITING -> state.error.ifBlank { "等待准备" }
         ChapterPreparationPhase.PREPARING -> "正在获取章节信息"
         ChapterPreparationPhase.COMMITTING -> "正在加入下载"
         ChapterPreparationPhase.FAILED -> "准备失败"
@@ -1040,7 +1068,7 @@ private fun LocalImportDetailsDialog(
             onConfirm(displayed, mangaTitle, chapterTitle)
         }
     }
-    MotionDialog(visible = pending != null, onDismissRequest = { if (!busy) onDismiss() }) {
+    MotionDialog(visible = pending != null, onDismissRequest = onDismiss) {
         LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 24.dp,
             role = GlassSurfaceRole.PANEL, elevation = 0.dp) {
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.height)
@@ -1055,7 +1083,7 @@ private fun LocalImportDetailsDialog(
                             Text(sourceLabel, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                         }
                     }
-                    MotionIconButton(enabled = !busy, onClick = onDismiss, modifier = Modifier.size(44.dp)) {
+                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.Outlined.Close, "取消导入", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
                     }
                 }

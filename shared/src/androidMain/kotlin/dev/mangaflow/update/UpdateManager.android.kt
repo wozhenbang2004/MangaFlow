@@ -21,6 +21,8 @@ import android.provider.Settings
 import android.util.AtomicFile
 import android.util.Base64
 import androidx.core.content.FileProvider
+import dev.mangaflow.reader.panels.PanelRuntimeId
+import dev.mangaflow.reader.panels.PanelRuntimeStore
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
@@ -42,9 +44,13 @@ import java.security.cert.CertificateFactory
 import java.security.interfaces.RSAPublicKey
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.UUID
 import javax.net.ssl.SSLException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -65,6 +71,10 @@ actual class UpdateManager private constructor(private val context: Context) {
     private val _state = MutableStateFlow(UpdateState(lastChecked = preferences.getLong("last_check", 0)))
     actual val state: StateFlow<UpdateState> = _state.asStateFlow()
     @Volatile private var connection: HttpURLConnection? = null
+    @Volatile private var scheduledWork: String? = null
+    @Volatile private var queuedWork: String? = null
+    @Volatile private var checkToken: String? = null
+    @Volatile private var checkJob: Job? = null
 
     actual val automatic: Boolean get() = preferences.getBoolean("automatic", true)
 
@@ -73,6 +83,11 @@ actual class UpdateManager private constructor(private val context: Context) {
         if (!started.compareAndSet(false, true)) return
         scope.launch {
             recover()
+            runCatching { AndroidTransferIntents.read(context, ApplicationTransferKind.UPDATE, "apk")
+                ?.takeIf { it.resumable }?.let { queuedWork = AndroidTransferIntents.schedule(context, it)?.workId } }
+            if (PanelRuntimeId.entries.any { id -> runCatching {
+                    AndroidTransferIntents.read(context, ApplicationTransferKind.RUNTIME, id.name)?.resumable == true
+                }.getOrDefault(false) }) PanelRuntimeStore.get(context)
             if (automatic && System.currentTimeMillis() - preferences.getLong("last_check", 0) >= CHECK_INTERVAL) {
                 check(manual = false)
             }
@@ -86,17 +101,29 @@ actual class UpdateManager private constructor(private val context: Context) {
     }
 
     actual fun check(manual: Boolean, onComplete: (() -> Unit)?) {
+        startCheck(manual, onComplete)
+    }
+
+    internal fun startScheduledCheck(onComplete: () -> Unit): String? = startCheck(false, onComplete)
+
+    internal fun stopScheduledCheck(token: String) {
+        if (checkToken == token) { checkJob?.cancel(); connection?.disconnect() }
+    }
+
+    private fun startCheck(manual: Boolean, onComplete: (() -> Unit)?): String? {
         if (!manual && !automatic) {
             complete(onComplete)
-            return
+            return null
         }
         if (!operation.compareAndSet(false, true)) {
             complete(onComplete)
-            return
+            return null
         }
+        val token = UUID.randomUUID().toString()
+        checkToken = token
         val beforeCheck = _state.value
         _state.value = beforeCheck.copy(phase = UpdatePhase.CHECKING, message = "正在检查新版本…")
-        scope.launch {
+        checkJob = scope.launch {
             try {
                 val route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES)
                 val bytes = readBytes(MANIFEST_URL, MAX_MANIFEST_BYTES, route)
@@ -138,109 +165,221 @@ actual class UpdateManager private constructor(private val context: Context) {
                     message = updateFailureMessage(failure, "检查失败，请稍后重试"),
                 )
             } finally {
+                val deliver = currentCoroutineContext().isActive && checkToken == token
                 connection = null
                 operation.set(false)
-                complete(onComplete)
+                if (checkToken == token) { checkToken = null; checkJob = null }
+                if (deliver) complete(onComplete)
+            }
+        }
+        return token
+    }
+
+    actual fun download() {
+        val release = _state.value.release ?: return
+        if (!operation.compareAndSet(false, true)) return
+        scope.launch {
+            var handedOff = false
+            try {
+                val previous = AndroidTransferIntents.read(context, ApplicationTransferKind.UPDATE, "apk")
+                if (previous?.resumable == true && previous.payload.optString("sha256") == release.sha256 &&
+                    previous.payload.optLong("versionCode") == release.versionCode) {
+                    queuedWork = previous.workId
+                    handedOff = true
+                    operation.set(false)
+                    queuedWork = AndroidTransferIntents.schedule(context, previous)?.workId
+                    return@launch
+                }
+                if (previous?.resumable == true) AndroidTransferIntents.pause(context, previous)
+                val envelope = envelopeFor(release)
+                val checked = verifyManifest(envelope)
+                require(checked.sha256 == release.sha256 && checked.versionCode == release.versionCode)
+                val matching = previous?.takeIf { it.payload.optString("sha256") == release.sha256 }
+                val task = AndroidTransferIntents.create(context, ApplicationTransferKind.UPDATE, "apk",
+                    matching?.route ?: DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES),
+                    JSONObject().put("envelope", Base64.encodeToString(envelope, Base64.NO_WRAP))
+                        .put("sha256", release.sha256).put("versionCode", release.versionCode))
+                queuedWork = task.workId
+                _state.value = _state.value.copy(phase = UpdatePhase.DOWNLOADING, message = "等待网络或系统调度")
+                handedOff = true
+                operation.set(false)
+                queuedWork = AndroidTransferIntents.schedule(context, task)?.workId
+            } catch (failure: Exception) {
+                _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE, message = failure.message ?: "后台下载未能排队，请重试")
+            } finally { if (!handedOff) operation.set(false) }
+        }
+    }
+
+    internal suspend fun runScheduledDownload(task: ApplicationTransferIntent): ApplicationTransferResult = withContext(Dispatchers.IO) {
+        val current = AndroidTransferIntents.read(context, task.kind, task.owner)
+        if (current?.workId != task.workId || !current.resumable) return@withContext ApplicationTransferResult.OBSOLETE
+        if (!operation.compareAndSet(false, true)) return@withContext ApplicationTransferResult.RETRY
+        cancelled.set(false)
+        scheduledWork = task.workId
+        var partial: File? = null
+        try {
+            if (AndroidTransferIntents.claim(context, task) == null) return@withContext ApplicationTransferResult.OBSOLETE
+            requireNotCancelled()
+            val route = task.route
+            val release = verifyManifest(Base64.decode(task.payload.getString("envelope"), Base64.DEFAULT))
+            require(release.sha256 == task.payload.getString("sha256") && release.versionCode == task.payload.getLong("versionCode"))
+            _state.value = UpdateState(UpdatePhase.DOWNLOADING, release, total = release.bytes, message = "正在后台下载安装包…")
+            require(release.versionCode > versionCode(installed())) { "此版本已安装，请重新检查更新" }
+            if (!root.isDirectory && !root.mkdirs()) throw IOException("无法创建更新目录")
+            val target = readyFile(release)
+            if (target.isFile && runCatching { validateApk(target, release) }.isSuccess) {
+                _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = release.bytes, total = release.bytes, message = "新版本已下载，可继续安装")
+                return@withContext ApplicationTransferResult.COMPLETED
+            }
+            val incoming = File(root, release.sha256 + ".part")
+            val validator = File(root, release.sha256 + ".validator")
+            partial = incoming
+            root.listFiles()?.filter { it.isFile && it != target && it != incoming && it != validator }?.forEach { it.delete() }
+            if (incoming.length() > release.bytes) incoming.delete()
+            if (incoming.length() == release.bytes) {
+                if (runCatching { validateApk(incoming, release) }.isSuccess) {
+                    if (target.exists() && !target.delete()) throw IOException("无法替换旧安装包")
+                    if (!incoming.renameTo(target)) throw IOException("无法保存安装包")
+                    _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = release.bytes, total = release.bytes, message = "新版本已下载，可继续安装")
+                    return@withContext ApplicationTransferResult.COMPLETED
+                }
+                incoming.delete()
+            }
+            val saved = runCatching { JSONObject(validator.readText()) }.getOrNull()
+            val tag = saved?.optString("etag")?.takeIf { it.startsWith('"') && it.endsWith('"') && !it.startsWith("W/") }
+            val resumeMatches = tag != null && saved != null && saved.optString("sha256") == release.sha256 &&
+                saved.optString("url") == release.url
+            if (incoming.length() > 0L && !resumeMatches) { incoming.delete(); validator.delete() }
+            val offset = incoming.length()
+            if (root.usableSpace < release.bytes - offset + 16L * 1024 * 1024) throw IOException("存储空间不足，请清理后重试")
+            requireNotCancelled()
+            val active = open(release.url, offset, route, tag)
+            connection = active
+            val deadline = System.nanoTime() + 20L * 60 * 1_000_000_000
+            try {
+                val start = if (active.responseCode == 206) {
+                    val range = Regex("bytes (\\d+)-(\\d+)/(\\d+)").matchEntire(active.getHeaderField("Content-Range").orEmpty())
+                        ?: throw IOException("更新服务返回了无效的续传信息")
+                    val end = range.groupValues[2].toLongOrNull()
+                    if (range.groupValues[1].toLongOrNull() != offset || end == null || end != release.bytes - 1 ||
+                        range.groupValues[3].toLongOrNull() != release.bytes || offset > 0L &&
+                        active.getHeaderField("ETag")?.let { it != tag } == true) {
+                        throw IOException("更新服务返回了不匹配的续传信息")
+                    }
+                    offset
+                } else 0L
+                val currentTag = active.getHeaderField("ETag")?.takeIf { it.startsWith('"') && it.endsWith('"') && !it.startsWith("W/") }
+                    ?: tag?.takeIf { start > 0L }
+                if (currentTag != null) {
+                    val atomic = AtomicFile(validator)
+                    val savedOutput = atomic.startWrite()
+                    try {
+                        savedOutput.write(JSONObject().put("etag", currentTag).put("sha256", release.sha256)
+                            .put("url", release.url).toString().toByteArray())
+                        atomic.finishWrite(savedOutput)
+                    } catch (failure: Exception) { atomic.failWrite(savedOutput); throw failure }
+                } else validator.delete()
+                val advertised = active.getHeaderFieldLong("Content-Length", -1)
+                if (advertised >= 0 && advertised != release.bytes - start) throw IOException("安装包大小与发布信息不一致")
+                active.inputStream.use { input ->
+                    FileOutputStream(incoming, start > 0).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var received = start
+                        var lastEmission = 0L
+                        while (true) {
+                            requireNotCancelled()
+                            if (System.nanoTime() > deadline) throw IOException("下载超时，请重试")
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            received += count
+                            if (received > release.bytes) throw IOException("下载内容超出声明大小")
+                            output.write(buffer, 0, count)
+                            val now = System.currentTimeMillis()
+                            if (now - lastEmission >= 200 || received == release.bytes) {
+                                _state.value = _state.value.copy(downloaded = received, total = release.bytes)
+                                lastEmission = now
+                            }
+                        }
+                        if (received != release.bytes) throw IOException("下载未完成，请重试")
+                    }
+                }
+            } finally {
+                active.disconnect()
+                connection = null
+            }
+            requireNotCancelled()
+            _state.value = _state.value.copy(phase = UpdatePhase.VERIFYING, message = "正在核对安装包…")
+            try { validateApk(incoming, release) } catch (invalid: Exception) { incoming.delete(); throw invalid }
+            requireNotCancelled()
+            if (target.exists() && !target.delete()) throw IOException("无法替换旧安装包")
+            if (!incoming.renameTo(target)) throw IOException("无法保存安装包")
+            validator.delete()
+            _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = release.bytes, total = release.bytes, message = "已准备好，安装后保留书架和阅读进度")
+            ApplicationTransferResult.COMPLETED
+        } catch (failure: Exception) {
+            _state.value = _state.value.copy(
+                phase = UpdatePhase.AVAILABLE,
+                downloaded = partial?.length() ?: 0,
+                message = if (cancelled.get() || failure is CancellationException) "下载已暂停，可继续下载"
+                    else updateFailureMessage(failure, "下载失败，请重试"),
+            )
+            AndroidTransferIntents.update(context, task) {
+                if (it.status == ApplicationTransferStatus.PAUSED) it else it.copy(status =
+                    if (failure is CancellationException || cancelled.get()) ApplicationTransferStatus.WAITING_SYSTEM else ApplicationTransferStatus.FAILED)
+            }
+            if (failure is CancellationException) throw failure
+            ApplicationTransferResult.FAILED
+        } finally {
+            try {
+                if (_state.value.phase == UpdatePhase.READY) AndroidTransferIntents.update(context, task) {
+                    if (it.status == ApplicationTransferStatus.PAUSED) it else it.copy(status = ApplicationTransferStatus.COMPLETED)
+                }
+            } finally {
+                connection = null
+                scheduledWork = null
+                operation.set(false)
             }
         }
     }
 
-    actual fun download() {
-        if (_state.value.release == null || !operation.compareAndSet(false, true)) return
-        cancelled.set(false)
-        _state.value = _state.value.copy(phase = UpdatePhase.DOWNLOADING, downloaded = 0, message = "正在下载安装包…")
-        scope.launch {
-            var partial: File? = null
-            try {
-                val route = DownloadRoutingStore.get(context).snapshot(DownloadCategory.UPDATES)
-                val release = verifyManifest(metadata.readFully())
-                require(release.versionCode > versionCode(installed())) { "此版本已安装，请重新检查更新" }
-                if (!root.isDirectory && !root.mkdirs()) throw IOException("无法创建更新目录")
-                val target = readyFile(release)
-                if (target.isFile && runCatching { validateApk(target, release) }.isSuccess) {
-                    _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = release.bytes, total = release.bytes, message = "新版本已下载，可继续安装")
-                    return@launch
+    internal suspend fun publishScheduledWait(task: ApplicationTransferIntent, reason: String, terminal: Boolean) = withContext(Dispatchers.IO) {
+        if (!operation.compareAndSet(false, true)) return@withContext
+        try {
+            val release = verifyManifest(Base64.decode(task.payload.getString("envelope"), Base64.DEFAULT))
+            AndroidTransferIntents.withCurrent(context, task) { owned ->
+                if (owned.status !in setOf(ApplicationTransferStatus.PAUSED, ApplicationTransferStatus.COMPLETED)) {
+                    queuedWork = task.workId
+                    _state.value = UpdateState(if (terminal) UpdatePhase.AVAILABLE else UpdatePhase.DOWNLOADING,
+                        release, total = release.bytes, message = reason)
                 }
-                val incoming = File(root, release.sha256 + ".part")
-                partial = incoming
-                root.listFiles()?.filter { it.isFile && it != target && it != incoming }?.forEach { it.delete() }
-                if (incoming.length() > release.bytes) incoming.delete()
-                if (incoming.length() == release.bytes) {
-                    if (runCatching { validateApk(incoming, release) }.isSuccess) {
-                        if (target.exists() && !target.delete()) throw IOException("无法替换旧安装包")
-                        if (!incoming.renameTo(target)) throw IOException("无法保存安装包")
-                        _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = release.bytes, total = release.bytes, message = "新版本已下载，可继续安装")
-                        return@launch
-                    }
-                    incoming.delete()
-                }
-                val offset = incoming.length()
-                if (root.usableSpace < release.bytes - offset + 16L * 1024 * 1024) throw IOException("存储空间不足，请清理后重试")
-                val active = open(release.url, offset, route)
-                connection = active
-                val deadline = System.nanoTime() + 20L * 60 * 1_000_000_000
-                try {
-                    val start = if (active.responseCode == 206) {
-                        val range = Regex("bytes (\\d+)-(\\d+)/(\\d+)").matchEntire(active.getHeaderField("Content-Range").orEmpty())
-                            ?: throw IOException("更新服务返回了无效的续传信息")
-                        if (range.groupValues[1].toLongOrNull() != offset || range.groupValues[3].toLongOrNull() != release.bytes) {
-                            throw IOException("更新服务返回了不匹配的续传信息")
-                        }
-                        offset
-                    } else 0L
-                    val advertised = active.getHeaderFieldLong("Content-Length", -1)
-                    if (advertised >= 0 && advertised != release.bytes - start) throw IOException("安装包大小与发布信息不一致")
-                    active.inputStream.use { input ->
-                        FileOutputStream(incoming, start > 0).use { output ->
-                            val buffer = ByteArray(64 * 1024)
-                            var received = start
-                            var lastEmission = 0L
-                            while (true) {
-                                requireNotCancelled()
-                                if (System.nanoTime() > deadline) throw IOException("下载超时，请重试")
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                received += count
-                                if (received > release.bytes) throw IOException("下载内容超出声明大小")
-                                output.write(buffer, 0, count)
-                                val now = System.currentTimeMillis()
-                                if (now - lastEmission >= 200 || received == release.bytes) {
-                                    _state.value = _state.value.copy(downloaded = received, total = release.bytes)
-                                    lastEmission = now
-                                }
-                            }
-                            if (received != release.bytes) throw IOException("下载未完成，请重试")
-                        }
-                    }
-                } finally {
-                    active.disconnect()
-                    connection = null
-                }
-                requireNotCancelled()
-                _state.value = _state.value.copy(phase = UpdatePhase.VERIFYING, message = "正在核对安装包…")
-                try { validateApk(incoming, release) } catch (invalid: Exception) { incoming.delete(); throw invalid }
-                requireNotCancelled()
-                if (target.exists() && !target.delete()) throw IOException("无法替换旧安装包")
-                if (!incoming.renameTo(target)) throw IOException("无法保存安装包")
-                _state.value = _state.value.copy(phase = UpdatePhase.READY, downloaded = release.bytes, total = release.bytes, message = "已准备好，安装后保留书架和阅读进度")
-            } catch (failure: Exception) {
-                _state.value = _state.value.copy(
-                    phase = UpdatePhase.AVAILABLE,
-                    downloaded = partial?.length() ?: 0,
-                    message = if (cancelled.get() || failure is CancellationException) "下载已暂停，可继续下载"
-                        else updateFailureMessage(failure, "下载失败，请重试"),
-                )
-            } finally {
-                connection = null
-                operation.set(false)
             }
-        }
+        } catch (_: Exception) {
+            AndroidTransferIntents.withCurrent(context, task) { owned ->
+                if (owned.status !in setOf(ApplicationTransferStatus.PAUSED, ApplicationTransferStatus.COMPLETED))
+                    _state.value = _state.value.copy(phase = UpdatePhase.ERROR, message = "后台传输状态未能恢复，请重新检查更新")
+            }
+        } finally { operation.set(false) }
+    }
+
+    internal fun stopScheduledDownload(workId: String) {
+        if (scheduledWork == workId) { cancelled.set(true); connection?.disconnect() }
     }
 
     actual fun cancelDownload() {
         if (_state.value.phase != UpdatePhase.DOWNLOADING && _state.value.phase != UpdatePhase.VERIFYING) return
+        val expected = scheduledWork ?: queuedWork ?: return
         cancelled.set(true)
         connection?.disconnect()
+        scope.launch {
+            try {
+                AndroidTransferIntents.read(context, ApplicationTransferKind.UPDATE, "apk")?.takeIf { it.workId == expected }?.let {
+                    AndroidTransferIntents.pause(context, it)
+                }
+                _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE, message = "下载已暂停，可继续下载")
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(phase = UpdatePhase.AVAILABLE, message = "下载已停止，任务记录未能保存，请重新检查更新")
+            }
+        }
     }
 
     actual fun install(context: Context) {
@@ -250,10 +389,11 @@ actual class UpdateManager private constructor(private val context: Context) {
             _state.value = _state.value.copy(message = "请在应用窗口中继续安装")
             return
         }
+        val expected = _state.value.release ?: return
         if (_state.value.phase != UpdatePhase.READY || !operation.compareAndSet(false, true)) return
         scope.launch {
             try {
-                val release = verifyManifest(metadata.readFully())
+                val release = verifyManifest(envelopeFor(expected))
                 val apk = readyFile(release)
                 validateApk(apk, release)
                 withContext(Dispatchers.Main) {
@@ -281,8 +421,15 @@ actual class UpdateManager private constructor(private val context: Context) {
     private suspend fun recover() {
         if (!operation.compareAndSet(false, true)) return
         try {
-            if (!metadata.baseFile.exists()) return
-            val release = verifyManifest(metadata.readFully())
+            val task = AndroidTransferIntents.read(context, ApplicationTransferKind.UPDATE, "apk")
+            val accepted = task?.let { Base64.decode(it.payload.getString("envelope"), Base64.DEFAULT) }
+            val acceptedRelease = accepted?.let(::verifyManifest)
+            if (task != null && acceptedRelease != null && acceptedRelease.versionCode <= versionCode(installed())) {
+                AndroidTransferIntents.update(context, task) { it.copy(status = ApplicationTransferStatus.COMPLETED) }
+            }
+            val ownedEnvelope = if (acceptedRelease != null && acceptedRelease.versionCode > versionCode(installed())) accepted else null
+            val envelope = ownedEnvelope ?: if (metadata.baseFile.exists()) metadata.readFully() else return
+            val release = verifyManifest(envelope)
             if (release.versionCode <= versionCode(installed())) {
                 metadata.delete()
                 root.listFiles()?.forEach { it.delete() }
@@ -290,18 +437,35 @@ actual class UpdateManager private constructor(private val context: Context) {
             }
             val ready = readyFile(release)
             val valid = ready.isFile && runCatching { validateApk(ready, release) }.isSuccess
+            val ownedTask = task?.takeIf { it.payload.optString("sha256") == release.sha256 }
             _state.value = _state.value.copy(
-                phase = if (valid) UpdatePhase.READY else UpdatePhase.AVAILABLE,
+                phase = if (valid) UpdatePhase.READY else if (ownedTask?.resumable == true) UpdatePhase.DOWNLOADING else UpdatePhase.AVAILABLE,
                 release = release,
                 total = release.bytes,
                 downloaded = if (valid) release.bytes else 0,
-                message = if (valid) "新版本已下载，可继续安装" else "发现新版本 ${release.versionName}",
+                message = if (valid) "新版本已下载，可继续安装" else ownedTask?.message?.takeIf { it.isNotBlank() }
+                    ?: if (ownedTask?.resumable == true) "等待系统恢复后台下载" else "发现新版本 ${release.versionName}",
             )
         } catch (_: Exception) {
-            metadata.delete()
+            runCatching { AndroidTransferIntents.read(context, ApplicationTransferKind.UPDATE, "apk")?.let { task ->
+                AndroidTransferIntents.update(context, task) { if (it.resumable) it.copy(status = ApplicationTransferStatus.FAILED) else it }
+            } }
+            _state.value = _state.value.copy(phase = UpdatePhase.ERROR, message = "更新下载记录未能恢复，请重新检查更新")
         } finally {
             operation.set(false)
         }
+    }
+
+    private fun envelopeFor(expected: AppRelease): ByteArray {
+        val task = AndroidTransferIntents.read(context, ApplicationTransferKind.UPDATE, "apk")
+        val bytes = if (task != null && task.payload.optString("sha256") == expected.sha256 &&
+            task.payload.optLong("versionCode") == expected.versionCode)
+            Base64.decode(task.payload.getString("envelope"), Base64.DEFAULT) else metadata.readFully()
+        val release = verifyManifest(bytes)
+        require(release.sha256 == expected.sha256 && release.versionCode == expected.versionCode) {
+            "更新任务已变化，请重新检查更新后再安装"
+        }
+        return bytes
     }
 
     private fun verifyManifest(envelope: ByteArray): AppRelease {
@@ -397,7 +561,7 @@ actual class UpdateManager private constructor(private val context: Context) {
         }
     }
 
-    private fun open(initial: String, offset: Long = 0, route: DownloadRouteSnapshot): HttpURLConnection {
+    private fun open(initial: String, offset: Long = 0, route: DownloadRouteSnapshot, validator: String? = null): HttpURLConnection {
         val proxy = route.javaProxy()
         var url = URL(initial)
         repeat(6) {
@@ -408,9 +572,14 @@ actual class UpdateManager private constructor(private val context: Context) {
                 readTimeout = 30_000
                 setRequestProperty("User-Agent", "MangaFlow-Android")
                 setRequestProperty("Accept-Encoding", "identity")
-                if (offset > 0) setRequestProperty("Range", "bytes=$offset-")
+                if (offset > 0 && validator != null) {
+                    setRequestProperty("Range", "bytes=$offset-")
+                    setRequestProperty("If-Range", validator)
+                }
                 useCaches = false
             }
+            connection = active
+            if (scheduledWork != null) requireNotCancelled()
             val status = try { active.responseCode } catch (failure: Exception) { active.disconnect(); throw failure }
             if (status in setOf(301, 302, 303, 307, 308)) {
                 val location = active.getHeaderField("Location")

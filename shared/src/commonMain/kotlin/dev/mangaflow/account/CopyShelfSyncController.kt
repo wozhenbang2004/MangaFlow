@@ -14,9 +14,17 @@ import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.storage.preferences
 import dev.mangaflow.storage.LibraryStore
 import dev.mangaflow.storage.SavedResumeTarget
+import dev.mangaflow.storage.ReadingProgress
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,8 +72,9 @@ data class CopyShelfSyncState(
     val progressUnavailableCount: Int = 0,
     val error: String? = null,
     val message: String? = null,
+    val projecting: Boolean = false,
 ) {
-    val busy: Boolean get() = checking || importing || uploading
+    val busy: Boolean get() = checking || importing || uploading || projecting
 }
 
 /** Read-only comparison; every merge is explicit and cloud reading is written only by the reader. */
@@ -77,7 +86,7 @@ class CopyShelfSyncController(
     private val scope: CoroutineScope,
 ) {
     // Separate from library backup data: an old restored backup must not restore cloud deletion authority.
-    private val disk = preferences(applicationContext(context), "mangaflow_copy_shelf_sync")
+    private val disk by lazy { preferences(applicationContext(context), "mangaflow_copy_shelf_sync") }
     private val mutableState = MutableStateFlow(CopyShelfSyncState())
     val state: StateFlow<CopyShelfSyncState> = mutableState.asStateFlow()
     private var owner: String? = null
@@ -91,7 +100,20 @@ class CopyShelfSyncController(
     private var observedProgress = emptyMap<String, CloudHistoryEntry>()
     private var verifiedProgressIds = emptySet<String>()
     private var differenceSignature = ""
-    private var lastLocalSignature = ""
+    private var projectionJob: Job? = null
+    private var projectionVersion = 0L
+    private var evidenceRevision = 0L
+    private val projectionGate = Mutex()
+    private val persistenceGate = Mutex()
+    private val mutationGate = Mutex()
+    private var persistedImported = false
+    private var localValidated = false
+    private var restoration: Job? = null
+    private var restored = CompletableDeferred(Unit)
+    private var localChanges: Job? = null
+    private var lastHistory: List<ReadingProgress>? = null
+    private var lastTargets: Map<String, SavedResumeTarget>? = null
+    private var lastFavorites: List<Manga>? = null
     private var baseline = Baseline()
     private var localRevision = 0L
     private var previewRevision = -1L
@@ -113,8 +135,13 @@ class CopyShelfSyncController(
         val nextSession = accountRepository.sessionVersion
         if (owner == nextOwner && session == nextSession) return
         operation?.cancel()
+        restoration?.cancel()
+        localChanges?.cancel()
+        projectionJob?.cancel()
         operationId++
+        projectionVersion++
         operation = null
+        localChanges = null
         backgroundCheckOperation = false
         generation++
         owner = nextOwner
@@ -124,40 +151,75 @@ class CopyShelfSyncController(
         observedProgress = emptyMap()
         verifiedProgressIds = emptySet()
         differenceSignature = ""
-        lastLocalSignature = ""
+        lastHistory = null; lastTargets = null; lastFavorites = null
         localRevision++
         previewRevision = -1L
-        baseline = if (restoreInvalidated) Baseline() else nextOwner?.let(::readBaseline) ?: Baseline()
+        baseline = Baseline()
+        persistedImported = false
+        localValidated = false
         mutableState.value = CopyShelfSyncState(owner = nextOwner)
+        val ready = CompletableDeferred<Unit>()
+        restored = ready
         val lease = generation
-        if (nextOwner != null) scope.launch {
+        if (nextOwner == null) { ready.complete(Unit); return }
+        restoration = scope.launch {
             try {
+                val loaded = if (restoreInvalidated) Baseline() else withContext(Dispatchers.IO) {
+                    persistenceGate.withLock { readBaseline(nextOwner) }
+                }
+                requireOwner(lease)
+                evidenceRevision++
+                baseline = loaded
+                persistedImported = loaded.imported
+                ready.complete(Unit)
                 library.awaitReady()
-                if (!owns(lease)) return@launch
-                validateLocal()
-                publish()
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (failure: Exception) {
+                awaitLocalChanges(lease)
+                mutationGate.withLock { requireOwner(lease); validateLocal(); publish() }
+            } catch (cancelled: CancellationException) {
+                ready.cancel(cancelled)
+                throw cancelled
+            } catch (failure: Exception) {
+                ready.complete(Unit)
                 if (owns(lease)) mutableState.value = mutableState.value.copy(error = failure.message ?: "收藏同步状态暂时无法恢复。")
             }
         }
     }
 
-    /** The caller invokes this after an actual user favorite operation, never after backup/import. */
+    /** Capture a real local tap immediately; durable bookkeeping is serialized away from input. */
     fun onLocalFavoriteChanged(manga: Manga, favorite: Boolean) {
         accountChanged()
         if (owner == null || !nativeCopy(manga)) return
+        val lease = generation
+        val previous = localChanges
         localRevision++
-        if (baseline.imported) {
-            // A new add can already be in flight before it becomes a managed cloud item.
-            // Its later local cancellation must replace the old true intent as well.
-            baseline.intents[manga.id] = favorite
-            baseline.expectedLocal = localCopyIds()
-            try { persist() } catch (failure: Exception) {
-                mutableState.value = mutableState.value.copy(error = failure.message ?: "收藏更改尚未保存到同步队列。")
+        localChanges = scope.launch {
+            previous?.join()
+            restored.await()
+            library.awaitReady()
+            requireOwner(lease)
+            mutationGate.withLock {
+                requireOwner(lease)
+                if (baseline.imported) {
+                    evidenceRevision++
+                    baseline.intents[manga.id] = favorite
+                    baseline.expectedLocal = localCopyIds()
+                    try { persist() } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (failure: Exception) {
+                        if (owns(lease)) mutableState.value = mutableState.value.copy(error = failure.message ?: "收藏更改尚未保存到同步队列。")
+                    }
+                }
+                if (owns(lease)) publish()
             }
         }
-        publish()
+    }
+
+    private suspend fun awaitLocalChanges(lease: Long) {
+        while (true) {
+            val pending = localChanges
+            pending?.join()
+            requireOwner(lease)
+            if (pending === localChanges) return
+        }
     }
 
     fun check(kind: CopySyncDifferenceKind? = null) = checkSnapshot(background = false, kind = kind)
@@ -170,7 +232,11 @@ class CopyShelfSyncController(
             validateLocal()
             val favorites = kind != CopySyncDifferenceKind.PROGRESS
             val progress = kind != CopySyncDifferenceKind.FAVORITE
-            val remote = accountRepository.completeSyncSnapshot(includeFavorites = favorites, includeProgress = progress)
+            val remote = accountRepository.completeSyncSnapshot(includeFavorites = favorites, includeProgress = progress) { partial, domain ->
+                requireOwner(lease)
+                acceptSnapshot(partial, domain == CopyAccountSyncDomain.FAVORITES, domain == CopyAccountSyncDomain.PROGRESS)
+                publish(checked = true)
+            }
             requireOwner(lease)
             acceptSnapshot(remote, favorites, progress)
             previewRevision = localRevision
@@ -186,6 +252,7 @@ class CopyShelfSyncController(
             try {
                 val current = accountRepository.cloudProgress(manga.id)
                 requireOwner(lease)
+                evidenceRevision++
                 if (current != null && current.manga.id == manga.id && nativeCopy(current.manga) &&
                     nativeChapter(current.chapterId)) {
                     val previous = remoteProgress[manga.id]?.takeIf { it.chapterId == current.chapterId }
@@ -202,13 +269,15 @@ class CopyShelfSyncController(
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
                 requireOwner(lease)
+                evidenceRevision++
                 verifiedProgressIds = verifiedProgressIds - manga.id
                 publish(checked = true, error = failure.message ?: "这部作品的拷贝进度尚未重新核实，请重试。")
             }
         }
     }
 
-    private fun acceptSnapshot(remote: CopyAccountSyncSnapshot, favorites: Boolean, progress: Boolean) {
+    private suspend fun acceptSnapshot(remote: CopyAccountSyncSnapshot, favorites: Boolean, progress: Boolean) {
+        evidenceRevision++
         if (favorites && remote.favoritesReady) {
             snapshot = remote.favorites
             reconcileSubmittedAdds(snapshot)
@@ -229,12 +298,14 @@ class CopyShelfSyncController(
         return try {
             val favorites = accountRepository.completeFavorites()
             requireOwner(lease)
+            evidenceRevision++
             snapshot = favorites
             mutableState.value = mutableState.value.copy(favoritesReady = true, favoritesError = null)
             favorites
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {
             requireOwner(lease)
+            evidenceRevision++
             mutableState.value = mutableState.value.copy(favoritesReady = false,
                 favoritesError = failure.message ?: "拷贝收藏暂时无法读取，请重试。")
             throw failure
@@ -247,8 +318,11 @@ class CopyShelfSyncController(
     fun onLocalReadingChanged() {
         accountChanged()
         if (owner == null) return
-        val current = localSignature()
-        if (current == lastLocalSignature) return
+        val history = library.history.value
+        val targets = library.resumeTargets.value
+        val favorites = library.favorites.value
+        if (history === lastHistory && targets === lastTargets && favorites === lastFavorites) return
+        lastHistory = history; lastTargets = targets; lastFavorites = favorites
         localRevision++
         publish()
     }
@@ -257,6 +331,7 @@ class CopyShelfSyncController(
     fun observeCloudProgress(manga: Manga, chapterId: String, chapterTitle: String) {
         accountChanged()
         if (owner == null || !nativeCopy(manga) || !nativeChapter(chapterId)) return
+        evidenceRevision++
         val entry = CloudHistoryEntry(manga, chapterId, chapterTitle.take(160))
         observedProgress = observedProgress + (manga.id to entry)
         remoteProgress = remoteProgress + (manga.id to entry)
@@ -289,22 +364,44 @@ class CopyShelfSyncController(
         verifiedProgressIds = emptySet()
         differenceSignature = ""
         baseline = Baseline()
+        persistedImported = false
+        localValidated = false
         restoreInvalidated = true
-        val cleared = runCatching { disk.edit().clear().commit() }.getOrDefault(false)
-        if (cleared) restoreInvalidated = false
+        restoration?.cancel()
+        localChanges?.cancel()
+        projectionJob?.cancel()
+        localChanges = null
+        val lease = generation
+        val ready = CompletableDeferred<Unit>()
+        restored = ready
         mutableState.value = CopyShelfSyncState(owner = owner,
-            message = "本机备份已恢复，请重新完整导入拷贝收藏后再提交更改",
-            error = if (cleared) null else "尚未清理旧同步状态，请检查存储空间后重新完整导入。")
+            message = "本机备份已恢复，请重新完整导入拷贝收藏后再提交更改")
+        restoration = scope.launch {
+            try {
+                val cleared = withContext(Dispatchers.IO) { persistenceGate.withLock { disk.edit().clear().commit() } }
+                requireOwner(lease)
+                if (cleared) restoreInvalidated = false
+                else mutableState.value = mutableState.value.copy(error = "尚未清理旧同步状态，请检查存储空间后重新完整导入。")
+            } catch (cancelled: CancellationException) { throw cancelled }
+            finally { ready.complete(Unit) }
+        }
     }
 
     /** An interrupted write is re-read before the next submission, never blindly replayed. */
     fun cancel() {
+        if (operation?.isActive != true && mutableState.value.projecting) {
+            projectionJob?.cancel()
+            projectionVersion++
+            mutableState.value = mutableState.value.copy(projecting = false, checked = false,
+                message = "已停止整理差异，可重新检查后继续。")
+            return
+        }
         val interruptedMerge = mutableState.value.uploading
         operation?.cancel()
         operationId++
         operation = null
         backgroundCheckOperation = false
-        if (interruptedMerge) verifiedProgressIds = emptySet()
+        if (interruptedMerge) { evidenceRevision++; verifiedProgressIds = emptySet() }
         mutableState.value = mutableState.value.copy(checking = false, importing = false, uploading = false,
             favoritesReady = mutableState.value.favoritesReady && !interruptedMerge,
             progressReady = mutableState.value.progressReady && !interruptedMerge,
@@ -316,9 +413,10 @@ class CopyShelfSyncController(
         library.awaitReady()
         requireOwner(lease)
         if (restoreInvalidated) {
-            if (!runCatching { disk.edit().clear().commit() }.getOrDefault(false)) {
+            if (!withContext(Dispatchers.IO) { persistenceGate.withLock { disk.edit().clear().commit() } }) {
                 throw SourceException("尚未清理备份恢复前的同步状态，请检查本机存储空间。")
             }
+            requireOwner(lease)
             restoreInvalidated = false
         }
         validateLocal()
@@ -340,6 +438,7 @@ class CopyShelfSyncController(
         baseline.managed.addAll(remote.map(Manga::id))
         baseline.expectedLocal = localCopyIds()
         baseline.imported = true
+        evidenceRevision++
         snapshot = remote
         reconcileSubmittedAdds(remote)
         persist()
@@ -350,7 +449,7 @@ class CopyShelfSyncController(
     fun upload(selectedRemovalIds: Set<String>) = runOperation(uploading = true) { lease ->
         library.awaitReady()
         requireOwner(lease)
-        if (!validateLocal() || !baseline.imported) throw SourceException("请先完整导入当前账号的拷贝收藏。")
+        if (!validateLocal() || !hasImportedAuthority) throw SourceException("请先完整导入当前账号的拷贝收藏。")
         if (!mutableState.value.checked || !mutableState.value.favoritesReady || previewRevision != localRevision) {
             throw SourceException("本机书架已变化，请重新检查并确认同步内容。")
         }
@@ -359,6 +458,7 @@ class CopyShelfSyncController(
         // Re-read before mutation. Cloud additions absent locally never become deletion requests.
         val remote = readCompleteFavorites(lease)
         requireOwner(lease)
+        evidenceRevision++
         snapshot = remote
         reconcileSubmittedAdds(remote)
         publish(checked = true)
@@ -372,7 +472,7 @@ class CopyShelfSyncController(
         val failures = mutableListOf<String>()
         for ((manga, favorite) in additions.map { it to true } + removals.map { it to false }) {
             requireOwner(lease)
-            if (!baseline.imported) throw SourceException("收藏同步状态已失效，请先重新完整导入。")
+            if (!hasImportedAuthority) throw SourceException("收藏同步状态已失效，请先重新完整导入。")
             // Edits made while the preview/request was active must not be replayed as stale intent.
             if (baseline.intents[manga.id] != favorite || library.isFavorite(manga.id) != favorite) continue
             try {
@@ -388,17 +488,21 @@ class CopyShelfSyncController(
                     throw SourceException("未确认拷贝作品身份，已保留本机收藏。")
                 }
                 if (baseline.intents[manga.id] != favorite || library.isFavorite(manga.id) != favorite) continue
-                if (!baseline.imported) throw SourceException("收藏同步状态已失效，请先重新完整导入。")
+                if (!hasImportedAuthority) throw SourceException("收藏同步状态已失效，请先重新完整导入。")
                 if (favorite) {
                     // Persist before sending: after cancellation, a later read can reconcile an
                     // add that reached the server without returning its confirmation to this app.
                     baseline.submittedAdds += manga.id
                     persist()
                 }
-                val confirmed = accountRepository.setFavorite(manga.id, comicUuid, favorite)
+                requireFavoriteIntent(lease, manga.id, favorite)
+                val confirmed = accountRepository.setFavorite(manga.id, comicUuid, favorite) {
+                    withContext(Dispatchers.Main.immediate) { requireFavoriteIntent(lease, manga.id, favorite) }
+                }
                 requireOwner(lease)
                 if (!confirmed) throw SourceException("拷贝尚未确认这项收藏变更。")
                 if (baseline.intents[manga.id] == favorite) baseline.intents.remove(manga.id)
+                evidenceRevision++
                 if (favorite) {
                     baseline.managed += manga.id
                     baseline.submittedAdds -= manga.id
@@ -414,7 +518,7 @@ class CopyShelfSyncController(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                if (!baseline.imported) throw failure
+                if (!hasImportedAuthority) throw failure
                 failures += manga.title + "：" + (failure.message ?: "尚未确认成功")
             }
         }
@@ -460,7 +564,10 @@ class CopyShelfSyncController(
         acceptSnapshot(fresh, favorites, progress)
         // This merge only authorizes the selected works; a failed history fallback
         // does not revoke an unrelated work's previously verified detail observation.
-        if (progress && !fresh.progressReady) verifiedProgressIds = verifiedProgressIds + unselectedProgress
+        if (progress && !fresh.progressReady) {
+            evidenceRevision++
+            verifiedProgressIds = verifiedProgressIds + unselectedProgress
+        }
         val preflightFailures = mutableMapOf<String, String>()
         selected.forEach { (evidence, _) ->
             if (evidence.row.kind == CopySyncDifferenceKind.FAVORITE && !fresh.favoritesReady) {
@@ -481,6 +588,7 @@ class CopyShelfSyncController(
             try {
                 val current = accountRepository.cloudProgress(manga.id)
                 requireOwner(lease)
+                evidenceRevision++
                 if (current != null && current.manga.id == manga.id && nativeCopy(current.manga) &&
                     nativeChapter(current.chapterId)) {
                     val previous = evidence.cloudChapter?.takeIf { it.chapterId == current.chapterId }
@@ -497,6 +605,7 @@ class CopyShelfSyncController(
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
                 requireOwner(lease)
+                evidenceRevision++
                 verifiedProgressIds = verifiedProgressIds - manga.id
                 preflightFailures[evidence.row.key] = failure.message ?: "这一部的拷贝进度尚未重新核实。"
             }
@@ -519,7 +628,7 @@ class CopyShelfSyncController(
                 }
                 when (evidence.row.kind) {
                     CopySyncDifferenceKind.FAVORITE -> if (choice == CopyMergeChoice.USE_LOCAL) {
-                        if (!baseline.imported || !validateLocal()) throw SourceException("请先完整导入当前账号的拷贝收藏。")
+                        if (!hasImportedAuthority || !validateLocal()) throw SourceException("请先完整导入当前账号的拷贝收藏。")
                         writeRemoteFavorite(evidence, lease)
                     } else {
                         val manga = evidence.row.manga
@@ -591,7 +700,7 @@ class CopyShelfSyncController(
             }
         }
         requireOwner(lease)
-        if (comicUuid.isBlank() || !baseline.imported) throw SourceException("尚未确认拷贝作品身份或完整导入状态。")
+        if (comicUuid.isBlank() || !hasImportedAuthority) throw SourceException("尚未确认拷贝作品身份或完整导入状态。")
         if (differences(includeReviewed = true).firstOrNull { it.row.key == evidence.row.key }?.fingerprint != evidence.fingerprint) {
             throw SourceException("本机收藏已变化，请重新比较。")
         }
@@ -601,9 +710,15 @@ class CopyShelfSyncController(
         if (evidence.cloudFavorite == true) baseline.managed += manga.id
         if (favorite) baseline.submittedAdds += manga.id
         persist()
-        if (!accountRepository.setFavorite(manga.id, comicUuid, favorite)) throw SourceException("拷贝尚未确认这项收藏变更。")
+        requireFavoriteIntent(lease, manga.id, favorite)
+        if (differences(includeReviewed = true).firstOrNull { it.row.key == evidence.row.key }?.fingerprint != evidence.fingerprint)
+            throw SourceException("所选收藏差异已变化，请重新比较。")
+        if (!accountRepository.setFavorite(manga.id, comicUuid, favorite) {
+            withContext(Dispatchers.Main.immediate) { requireFavoriteIntent(lease, manga.id, favorite) }
+        }) throw SourceException("拷贝尚未确认这项收藏变更。")
         requireOwner(lease)
         if (baseline.intents[manga.id] == favorite) baseline.intents.remove(manga.id)
+        evidenceRevision++
         if (favorite) {
             baseline.managed += manga.id
             snapshot = snapshot.filterNot { it.id == manga.id } + manga
@@ -614,6 +729,12 @@ class CopyShelfSyncController(
         baseline.submittedAdds -= manga.id
         baseline.expectedLocal = localCopyIds()
         persist()
+    }
+
+    private suspend fun requireFavoriteIntent(lease: Long, mangaId: String, favorite: Boolean) {
+        requireOwner(lease)
+        if (!hasImportedAuthority || baseline.intents[mangaId] != favorite || library.isFavorite(mangaId) != favorite)
+            throw SourceException("本机收藏已变化，已停止过期的云端操作，请重新比较。")
     }
 
     private fun runOperation(checking: Boolean = false, importing: Boolean = false, uploading: Boolean = false,
@@ -637,7 +758,17 @@ class CopyShelfSyncController(
         mutableState.value = mutableState.value.copy(checking = checking, importing = importing,
             uploading = uploading, mergeCompleted = 0, mergeTotal = 0, error = null, message = null)
         operation = scope.launch {
-            try { block(lease) }
+            try {
+                restored.await()
+                awaitLocalChanges(lease)
+                while (uploading) {
+                    val pending = projectionJob
+                    pending?.join()
+                    requireOwner(lease)
+                    if (pending === projectionJob) break
+                }
+                mutationGate.withLock { requireOwner(lease); block(lease) }
+            }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (failure: Exception) {
                 if (owns(lease) && operationLease == operationId) mutableState.value = mutableState.value.copy(error = failure.message ?: "拷贝比较或合并未完成，请重试。")
@@ -663,9 +794,24 @@ class CopyShelfSyncController(
 
     private data class ReadingSide(val chapterId: String, val label: String, val snapshot: String)
 
-    private fun localReading(mangaId: String): ReadingSide {
-        val target = library.resumeTargets.value[mangaId]?.takeIf { it.accountOwner == owner }
-        val recent = library.history.value.firstOrNull { it.manga.id == mangaId && nativeCopy(it.manga) }
+    private data class ProjectionInput(
+        val owner: String?, val session: Long, val local: List<Manga>, val history: List<ReadingProgress>,
+        val targets: Map<String, SavedResumeTarget>, val cloud: List<Manga>,
+        val progress: Map<String, CloudHistoryEntry>, val verified: Set<String>,
+        val imported: Boolean, val intents: Map<String, Boolean>, val managed: Set<String>,
+        val reviewed: Map<String, String>, val favoritesReady: Boolean,
+    )
+
+    private fun projectionInput() = ProjectionInput(owner, session, library.favorites.value,
+        library.history.value, library.resumeTargets.value, snapshot,
+        remoteProgress.toMap(), verifiedProgressIds.toSet(), hasImportedAuthority,
+        baseline.intents.toMap(), baseline.managed.toSet(), baseline.reviewedProgress.toMap(),
+        mutableState.value.favoritesReady)
+
+    private fun localReading(mangaId: String, input: ProjectionInput,
+        history: Map<String, ReadingProgress>): ReadingSide {
+        val target = input.targets[mangaId]?.takeIf { it.accountOwner == input.owner }
+        val recent = history[mangaId]
         val snapshot = JSONObject()
         if (target != null) {
             snapshot.put("target", target.chapterId).put("title", target.chapterTitle).put("owner", target.accountOwner)
@@ -683,43 +829,58 @@ class CopyShelfSyncController(
     }
 
     /** An old account/session selection cannot match a new account's otherwise identical diff. */
-    private fun differenceKey(kind: String, mangaId: String): String = owner.orEmpty().let {
-        it.length.toString() + ":" + it + ":" + session + ":" + kind + ":" + mangaId
+    private fun differenceKey(kind: String, mangaId: String, input: ProjectionInput): String = input.owner.orEmpty().let {
+        it.length.toString() + ":" + it + ":" + input.session + ":" + kind + ":" + mangaId
     }
 
     private fun differenceFingerprint(kind: String, mangaId: String, local: String, cloud: String): String = JSONObject()
         .put("kind", kind).put("manga", mangaId).put("local", local).put("cloud", cloud)
         .toString()
 
-    private fun differences(checked: Boolean = mutableState.value.checked, includeReviewed: Boolean = false): List<DifferenceEvidence> {
-        val local = library.favorites.value.filter(::nativeCopy).associateBy(Manga::id)
-        val cloud = snapshot.filter(::nativeCopy).associateBy(Manga::id)
+    private suspend fun differences(checked: Boolean = mutableState.value.checked,
+        includeReviewed: Boolean = false): List<DifferenceEvidence> {
+        val lease = generation
+        val revision = localRevision
+        val evidence = evidenceRevision
+        val input = projectionInput()
+        val result = withContext(Dispatchers.Default) { computeDifferences(input, checked, includeReviewed) }
+        requireOwner(lease)
+        if (revision != localRevision || evidence != evidenceRevision)
+            throw SourceException("比较依据已变化，请重新查看差异。")
+        return result
+    }
+
+    private fun computeDifferences(input: ProjectionInput, checked: Boolean,
+        includeReviewed: Boolean = false): List<DifferenceEvidence> {
+        val local = input.local.filter(::nativeCopy).associateBy(Manga::id)
+        val cloud = input.cloud.filter(::nativeCopy).associateBy(Manga::id)
+        val history = input.history.asReversed().filter { nativeCopy(it.manga) }.associateBy { it.manga.id }
         val result = mutableListOf<DifferenceEvidence>()
-        if (checked && mutableState.value.favoritesReady) (local.keys + cloud.keys).sorted().forEach { id ->
+        if (checked && input.favoritesReady) (local.keys + cloud.keys).sorted().forEach { id ->
             val inLocal = id in local
             val inCloud = id in cloud
             if (inLocal != inCloud) {
                 val manga = local[id] ?: cloud.getValue(id)
                 val fingerprint = differenceFingerprint("favorite", id, inLocal.toString(), inCloud.toString())
-                val row = CopySyncDifference(differenceKey("favorite", id), CopySyncDifferenceKind.FAVORITE, manga,
+                val row = CopySyncDifference(differenceKey("favorite", id, input), CopySyncDifferenceKind.FAVORITE, manga,
                     if (inLocal) "已收藏" else "未收藏", if (inCloud) "已收藏" else "未收藏",
                     if (inLocal) "加入拷贝" else "移出拷贝", if (inCloud) "加入本机" else "移出本机收藏",
-                    canUseLocal = baseline.imported, canUseCopy = true,
-                    detail = if (baseline.imported) null else "完整导入当前账号收藏后，才能向拷贝提交更改。",
+                    canUseLocal = input.imported, canUseCopy = true,
+                    detail = if (input.imported) null else "完整导入当前账号收藏后，才能向拷贝提交更改。",
                     reviewKey = fingerprint)
                 result += DifferenceEvidence(row, fingerprint,
                     localFavorite = inLocal, cloudFavorite = inCloud)
             }
         }
-        remoteProgress.entries.sortedBy { it.key }.forEach { (id, entry) ->
+        input.progress.entries.sortedBy { it.key }.forEach { (id, entry) ->
             if (!nativeCopy(entry.manga) || !nativeChapter(entry.chapterId)) return@forEach
-            val reading = localReading(id)
+            val reading = localReading(id, input, history)
             if (reading.chapterId == entry.chapterId) return@forEach
             val cloudLabel = entry.chapterTitle.ifBlank { "拷贝已保存章节" }
             val fingerprint = differenceFingerprint("progress", id, reading.chapterId, entry.chapterId)
-            if (!includeReviewed && baseline.reviewedProgress[id] == fingerprint) return@forEach
-            val verified = id in verifiedProgressIds
-            val row = CopySyncDifference(differenceKey("progress", id), CopySyncDifferenceKind.PROGRESS,
+            if (!includeReviewed && input.reviewed[id] == fingerprint) return@forEach
+            val verified = id in input.verified
+            val row = CopySyncDifference(differenceKey("progress", id, input), CopySyncDifferenceKind.PROGRESS,
                 local[id] ?: cloud[id] ?: entry.manga, reading.label, cloudLabel,
                 "保留本机", "采用拷贝", canUseLocal = verified, canUseCopy = verified,
                 detail = if (verified) "拷贝提供章节进度；每章页内位置保留在本机。"
@@ -730,25 +891,13 @@ class CopyShelfSyncController(
         return result
     }
 
-    private fun localSignature(): String = buildString {
-        fun part(value: String) { append(value.length).append(':').append(value) }
-        library.favorites.value.filter(::nativeCopy).map(Manga::id).sorted().forEach(::part)
-        library.history.value.filter { nativeCopy(it.manga) }.sortedBy { it.manga.id }.forEach {
-            part(it.manga.id); part(it.chapterId); part(it.chapterTitle); part(it.pageIndex.toString()); part(it.pageCount.toString())
-            part(it.scrollOffset.toString()); part(it.panelIndex.toString()); part(it.panelLayout)
-        }
-        library.resumeTargets.value.values.filter { it.accountOwner == owner }.sortedBy { it.mangaId }.forEach {
-            part(it.mangaId); part(it.chapterId); part(it.chapterTitle)
-        }
-    }
-
-    private fun unavailableProgressCount(): Int = library.history.value.filter { nativeCopy(it.manga) }
-        .map { it.manga.id }.plus(library.resumeTargets.value.values.filter { it.accountOwner == owner }.map { it.mangaId })
-        .distinct().count { it !in verifiedProgressIds }
+    private fun unavailableProgressCount(input: ProjectionInput): Int = input.history.filter { nativeCopy(it.manga) }
+        .map { it.manga.id }.plus(input.targets.values.filter { it.accountOwner == input.owner }.map { it.mangaId })
+        .distinct().count { it !in input.verified }
 
     private fun localCopyIds() = library.favorites.value.filter(::nativeCopy).mapTo(mutableSetOf(), Manga::id)
 
-    private fun reconcileSubmittedAdds(remote: List<Manga>) {
+    private suspend fun reconcileSubmittedAdds(remote: List<Manga>) {
         val confirmed = remote.map(Manga::id).filter { it in baseline.submittedAdds }
         if (confirmed.isEmpty()) return
         baseline.managed.addAll(confirmed)
@@ -757,35 +906,67 @@ class CopyShelfSyncController(
     }
 
     /** A restore/unobserved bulk mutation is not evidence that the user deleted cloud books. */
-    private fun validateLocal(): Boolean {
-        if (!baseline.imported || baseline.expectedLocal == localCopyIds()) return true
+    private suspend fun validateLocal(): Boolean {
+        if (!baseline.imported || !persistedImported || baseline.expectedLocal == localCopyIds()) {
+            if (!localValidated) evidenceRevision++
+            localValidated = true
+            return true
+        }
+        localValidated = false
+        evidenceRevision++
         baseline = Baseline(expectedLocal = localCopyIds())
         persist()
+        localValidated = true
         mutableState.value = mutableState.value.copy(error = "本机书架发生批量变化，请重新完整导入后再向拷贝同步。")
         return false
     }
 
     private fun publish(checked: Boolean = mutableState.value.checked,
         message: String? = mutableState.value.message, error: String? = mutableState.value.error) {
-        val local = library.favorites.value
-        val copy = local.filter(::nativeCopy).associateBy(Manga::id)
-        val cloud = snapshot.associateBy(Manga::id)
-        val changes = differences(checked)
-        val signature = changes.joinToString("\n") { it.row.reviewKey + "/" + it.row.canUseLocal + "/" + it.row.canUseCopy }
-        val revision = mutableState.value.revision + if (signature != differenceSignature) 1L else 0L
-        differenceSignature = signature
-        lastLocalSignature = localSignature()
-        mutableState.value = mutableState.value.copy(owner = owner, hasFullImport = baseline.imported,
-            checked = checked, cloudFavorites = snapshot,
-            cloudAdded = if (mutableState.value.favoritesReady) snapshot.filter { it.id !in copy && baseline.intents[it.id] != false } else emptyList(),
-            toAdd = if (mutableState.value.favoritesReady) copy.values.filter { baseline.intents[it.id] == true && it.id !in cloud } else emptyList(),
-            toRemove = if (mutableState.value.favoritesReady) snapshot.filter {
-                it.id in baseline.managed && baseline.intents[it.id] == false && it.id !in copy
-            } else emptyList(),
-            localOnlyCount = local.count { !nativeCopy(it) }, differences = changes.map { it.row }, revision = revision,
-            progressUnavailableCount = if (checked) unavailableProgressCount() else 0,
-            message = message, error = error)
+        val lease = generation
+        val projection = ++projectionVersion
+        projectionJob?.cancel()
+        mutableState.value = mutableState.value.copy(checked = checked, message = message, error = error,
+            projecting = owner != null)
+        if (owner == null) return
+        projectionJob = scope.launch {
+            try {
+                // Conflate bursts of page-position updates before taking an immutable input.
+                delay(40L)
+                val input = projectionInput()
+                val evidence = evidenceRevision
+                val local = localRevision
+                val calculated = withContext(Dispatchers.Default) { projectionGate.withLock {
+                    val copy = input.local.filter(::nativeCopy).associateBy(Manga::id)
+                    val cloud = input.cloud.associateBy(Manga::id)
+                    val changes = computeDifferences(input, checked)
+                    val signature = changes.joinToString("\n") { it.row.reviewKey + "/" + it.row.canUseLocal + "/" + it.row.canUseCopy }
+                    ProjectionResult(changes.map { it.row }, signature,
+                        if (input.favoritesReady) input.cloud.filter { it.id !in copy && input.intents[it.id] != false } else emptyList(),
+                        if (input.favoritesReady) copy.values.filter { input.intents[it.id] == true && it.id !in cloud } else emptyList(),
+                        if (input.favoritesReady) input.cloud.filter { it.id in input.managed && input.intents[it.id] == false && it.id !in copy } else emptyList(),
+                        input.local.count { !nativeCopy(it) }, if (checked) unavailableProgressCount(input) else 0)
+                } }
+                if (!owns(lease) || projection != projectionVersion || evidence != evidenceRevision || local != localRevision)
+                    return@launch
+                val revision = mutableState.value.revision + if (calculated.signature != differenceSignature) 1L else 0L
+                differenceSignature = calculated.signature
+                mutableState.value = mutableState.value.copy(owner = owner, hasFullImport = input.imported,
+                    cloudFavorites = input.cloud, cloudAdded = calculated.added, toAdd = calculated.toAdd,
+                    toRemove = calculated.toRemove, localOnlyCount = calculated.localOnly,
+                    differences = calculated.differences, revision = revision,
+                    progressUnavailableCount = calculated.unavailable, projecting = false)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                if (owns(lease) && projection == projectionVersion) mutableState.value = mutableState.value.copy(
+                    projecting = false, error = failure.message ?: "差异暂时无法整理，请重新检查。")
+            }
+        }
     }
+
+    private data class ProjectionResult(val differences: List<CopySyncDifference>, val signature: String,
+        val added: List<Manga>, val toAdd: List<Manga>, val toRemove: List<Manga>,
+        val localOnly: Int, val unavailable: Int)
 
     private fun owns(lease: Long) = generation == lease && owner != null &&
         accountRepository.sessionVersion == session && accountRepository.profile.value?.username == owner
@@ -820,21 +1001,33 @@ class CopyShelfSyncController(
             strings("submittedAdds").toMutableSet(), reviewed)
     }.getOrDefault(Baseline())
 
-    private fun persist() {
+    private suspend fun persist() {
         val name = owner ?: return
-        try {
-            val intents = JSONObject()
-            baseline.intents.forEach { (id, desired) -> intents.put(id, desired) }
-            val reviewed = JSONObject()
-            baseline.reviewedProgress.forEach { (id, fingerprint) -> reviewed.put(id, fingerprint) }
-            val json = JSONObject().put("imported", baseline.imported)
-                .put("managed", JSONArray(baseline.managed.sorted())).put("local", JSONArray(baseline.expectedLocal.sorted()))
-                .put("intents", intents).put("submittedAdds", JSONArray(baseline.submittedAdds.sorted()))
-                .put("reviewedProgress", reviewed)
-            if (disk.edit().putString(storageKey(name), json.toString()).commit()) return
-        } catch (_: Exception) {
-            // False returns and thrown storage/encoding failures invalidate the same authority.
-        }
+        val lease = generation
+        val frozen = baseline.copy(managed = baseline.managed.toMutableSet(),
+            expectedLocal = baseline.expectedLocal.toSet(), intents = baseline.intents.toMutableMap(),
+            submittedAdds = baseline.submittedAdds.toMutableSet(), reviewedProgress = baseline.reviewedProgress.toMutableMap())
+        val saved = try {
+            withContext(Dispatchers.IO) {
+                persistenceGate.withLock {
+                    val intents = JSONObject()
+                    frozen.intents.forEach { (id, desired) -> intents.put(id, desired) }
+                    val reviewed = JSONObject()
+                    frozen.reviewedProgress.forEach { (id, fingerprint) -> reviewed.put(id, fingerprint) }
+                    val json = JSONObject().put("imported", frozen.imported)
+                        .put("managed", JSONArray(frozen.managed.sorted())).put("local", JSONArray(frozen.expectedLocal.sorted()))
+                        .put("intents", intents).put("submittedAdds", JSONArray(frozen.submittedAdds.sorted()))
+                        .put("reviewedProgress", reviewed)
+                    disk.edit().putString(storageKey(name), json.toString()).commit()
+                }
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { false }
+        requireOwner(lease)
+        evidenceRevision++
+        if (saved) { persistedImported = frozen.imported && baseline.imported; return }
+        persistedImported = false
+        localValidated = false
         baseline.imported = false
         previewRevision = -1L
         verifiedProgressIds = emptySet()
@@ -842,6 +1035,8 @@ class CopyShelfSyncController(
             favoritesReady = false, progressReady = false, message = null)
         throw SourceException("尚未保存收藏同步状态，请检查本机可用空间后重新导入。")
     }
+
+    private val hasImportedAuthority: Boolean get() = baseline.imported && persistedImported && localValidated
 
     private fun nativeCopy(manga: Manga) = manga.sourceId == "copy" && !SourceKeys.isEncoded(manga.id) &&
         manga.sourceUrl != LOCAL_SOURCE_URL && COPY_ID.matches(manga.id)

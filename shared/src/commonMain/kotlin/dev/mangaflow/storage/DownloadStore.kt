@@ -96,6 +96,9 @@ internal data class DownloadRecord(
     val networkAttempts: Int = 0,
 )
 
+/** Exact prepared manifest ownership, used only to settle a cancellation at handoff. */
+internal data class PreparedChapterCommit(val id: String, val generation: String, val workId: String)
+
 /** Durable chapter manifests paired with WorkManager's persistent scheduler. */
 class DownloadStore private constructor(context: Context) {
     private val context = context.applicationContext
@@ -457,10 +460,37 @@ class DownloadStore private constructor(context: Context) {
         route: DownloadRouteSnapshot? = null,
     ): Boolean = enqueueInternal(manga, chapter, pages, headers, expectedEntry = expectedEntry, route = route) != null
 
+    /** Process-restored preparation may replace only its captured record, or its captured absence. */
+    internal suspend fun enqueuePreparedChapter(
+        manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>,
+        route: DownloadRouteSnapshot, expectedEntryId: String?, expectedGeneration: String?, expectedWorkId: String?,
+    ): PreparedChapterCommit? {
+        require(expectedEntryId == null && expectedGeneration == null && expectedWorkId == null ||
+            expectedEntryId == chapterKey(manga.id, chapter.id) && !expectedGeneration.isNullOrBlank() && expectedWorkId != null) {
+            "下载准备的目标身份不完整，请重新准备。"
+        }
+        var committed: PreparedChapterCommit? = null
+        enqueueInternal(manga, chapter, pages, headers, route = route,
+            requireAbsent = expectedEntryId == null,
+            expectedGeneration = expectedGeneration, expectedWorkId = expectedWorkId,
+            onAccepted = { record -> committed = PreparedChapterCommit(record.entry.id, record.generation, record.workId) })
+        return committed
+    }
+
+    internal fun pausePreparedChapter(commit: PreparedChapterCommit) {
+        if (commit.workId.isBlank()) return // Valid completed offline files are never removed by cancellation.
+        if (synchronized(lock) { records[commit.id]?.generation == commit.generation })
+            pause(commit.id, expectedWorkId = commit.workId)
+    }
+
     private suspend fun enqueueInternal(
         manga: Manga, chapter: Chapter, pages: List<Page>, headers: Map<String, String>,
         expectedEntry: DownloadEntry? = null,
         route: DownloadRouteSnapshot? = null,
+        requireAbsent: Boolean = false,
+        expectedGeneration: String? = null,
+        expectedWorkId: String? = null,
+        onAccepted: (DownloadRecord) -> Unit = {},
     ): String? = withContext(Dispatchers.IO) {
         awaitReady()
         require(pages.isNotEmpty()) { "本章没有可下载的图片" }
@@ -472,6 +502,9 @@ class DownloadStore private constructor(context: Context) {
         changeChapter(id) {
             val (change, capturedRoute) = synchronized(lock) {
                 val old = records[id]
+                if (requireAbsent && old != null) return@changeChapter null
+                if (expectedGeneration != null && (old?.generation != expectedGeneration || old?.workId != expectedWorkId))
+                    return@changeChapter null
                 if (expectedEntry != null && old?.entry !== expectedEntry) return@changeChapter null
                 if (old?.entry?.status in ACTIVE_STATUSES) return@changeChapter id
                 // Validate before detaching an older download or replacing any local image.
@@ -506,6 +539,7 @@ class DownloadStore private constructor(context: Context) {
                 prunePartialDownloads(id, pages, headers)
                 save(DownloadRecord(entry, pages, headers, route = capturedRoute))
                 if (!complete) schedule(id, userInitiated = true)
+                records[id]?.let(onAccepted)
             }
             id
         }

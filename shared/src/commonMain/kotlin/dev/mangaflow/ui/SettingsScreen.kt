@@ -1,5 +1,17 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.background.ApplicationOperations
+import dev.mangaflow.background.ApplicationOperation
+import dev.mangaflow.background.ApplicationOperationKind
+import dev.mangaflow.background.ApplicationOperationPhase
+import dev.mangaflow.background.UserOperationKeys
+import dev.mangaflow.background.InspectedReadingBackup
+import dev.mangaflow.background.WebDavOperationDraft
+import dev.mangaflow.background.exportReadingBackup
+import dev.mangaflow.background.inspectReadingBackup
+import dev.mangaflow.background.restoreReadingBackup
+import dev.mangaflow.background.webDav
+
 import androidx.compose.foundation.layout.asPaddingValues
 
 import kotlinx.coroutines.IO
@@ -121,6 +133,8 @@ import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.storage.LibraryBackupInfo
 import dev.mangaflow.storage.LibraryStore
@@ -156,6 +170,7 @@ fun SettingsScreen(
     clearBrowseCache: suspend () -> Unit,
     clearMetadataCache: suspend () -> Unit,
     contentTopPadding: Dp = 0.dp,
+    active: Boolean = true,
     sourceBackdrop: HazeState? = null,
     sourceRegistry: BodySourceRegistry? = null,
     sourcePlugins: SourcePluginStore? = null,
@@ -169,6 +184,11 @@ fun SettingsScreen(
     }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleState by lifecycleOwner.lifecycle.currentStateFlow.collectAsStateWithLifecycle()
+    val screenActive = active && lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
+    val operations = remember(context) { ApplicationOperations.get(context) }
+    val operationStates by operations.state.collectAsStateWithLifecycle()
+    val backupOperation = remember(operationStates) { operations.find(UserOperationKeys.BACKUP) }
     val preferences by libraryStore.preferences.collectAsStateWithLifecycle()
     val update by updateManager.state.collectAsStateWithLifecycle()
     var automatic by remember(updateManager) { mutableStateOf(updateManager.automatic) }
@@ -193,110 +213,119 @@ fun SettingsScreen(
     var showStorageModels by remember { mutableStateOf(false) }
     var storageDestination by remember { mutableStateOf<String?>(null) }
     val storageBackdrop = sourceBackdrop ?: dev.chrisbanes.haze.rememberHazeState()
-    var backupBusy by remember { mutableStateOf<String?>(null) }
+    var exportSaving by remember { mutableStateOf(false) }
+    val backupBusy = if (exportSaving) "export-saving" else backupOperation?.takeIf { it.active }?.kind?.let { kind -> when (kind) {
+        ApplicationOperationKind.BACKUP_EXPORT -> "export"
+        ApplicationOperationKind.BACKUP_INSPECT -> "inspect"
+        ApplicationOperationKind.BACKUP_RESTORE -> "restore"
+        ApplicationOperationKind.WEBDAV_UPLOAD -> "webdav-upload"
+        ApplicationOperationKind.WEBDAV_READ -> "webdav-download"
+        else -> "webdav-save"
+    } }
     var backupNotice by remember { mutableStateOf<String?>(null) }
     var pendingRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
     var pendingWebDavRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
-    val webDavStore = remember(context.applicationContext) { WebDavBackupStore(context.applicationContext) }
+    val webDavStore = remember(context.applicationContext) { WebDavBackupStore.get(context.applicationContext) }
     val webDavConfig by webDavStore.config.collectAsStateWithLifecycle()
     val wallpaperStore = remember(context.applicationContext) { WallpaperStore.get(context.applicationContext) }
     val wallpaper by wallpaperStore.state.collectAsStateWithLifecycle()
     var showWebDav by remember { mutableStateOf(false) }
+    var webDavPresent by remember { mutableStateOf(false) }
     var webDavNotice by remember { mutableStateOf<String?>(null) }
     var expandedSetting by rememberSaveable { mutableStateOf<String?>(null) }
     var showBodySources by remember { mutableStateOf(false) }
     var showNetworkDownloads by remember { mutableStateOf(false) }
     var showExperience by remember { mutableStateOf(false) }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
+    LaunchedEffect(showWebDav, screenActive) {
+        if (showWebDav && screenActive) webDavPresent = true
+    }
+    LaunchedEffect(screenActive, webDavPresent, pendingWebDavRestore) {
+        if (screenActive && !webDavPresent && !showWebDav) pendingWebDavRestore?.let {
+            backupNotice = null
+            pendingRestore = it
+            pendingWebDavRestore = null
+        }
+    }
 
     val backupWriter = rememberTextDocumentSaver { result ->
         backupNotice = if (result.saved) "阅读备份已导出" else result.error
-        backupBusy = null
+        exportSaving = false
     }
     fun exportBackup() {
         if (backupBusy != null) return
-        backupBusy = "export"
         backupNotice = null
-        cacheScope.launch {
-            try {
-                val payload = libraryStore.exportBackup()
-                backupWriter.launch("MangaFlow-backup.json", payload)
-            } catch (cancel: CancellationException) {
-                backupBusy = null
-                throw cancel
-            } catch (failure: Exception) {
-                backupNotice = failure.message ?: "备份导出失败"
-                backupBusy = null
-            }
-        }
+        operations.exportReadingBackup(libraryStore)
     }
     val importBackup = rememberOpenDocumentPicker() { uri ->
-        if (uri != null && backupBusy == null) {
-            backupBusy = "inspect"
-            backupNotice = null
-            cacheScope.launch {
-                try {
-                    val payload = withContext(Dispatchers.IO) {
-                        readDocumentText(context, uri)
-                    }
-                    require(payload.length <= 8 * 1024 * 1024) { "备份文件过大或格式异常" }
-                    val info = libraryStore.inspectBackup(payload)
-                    pendingRestore = PendingLibraryRestore(payload, info)
-                } catch (cancel: CancellationException) { throw cancel }
-                catch (failure: Exception) {
-                    backupNotice = failure.message ?: "备份文件无法读取"
-                } finally {
-                    releasePickedDocuments(listOf(uri))
-                    backupBusy = null
-                }
+        if (uri != null) {
+            if (backupBusy == null) {
+                backupNotice = null
+                val handle = operations.inspectReadingBackup(context, libraryStore, uri)
+                if (!handle.accepted) releasePickedDocuments(listOf(uri))
+            } else releasePickedDocuments(listOf(uri))
+        }
+    }
+
+    LaunchedEffect(backupOperation?.id, backupOperation?.phase, screenActive) {
+        val operation = backupOperation ?: return@LaunchedEffect
+        if (!screenActive || operation.active) return@LaunchedEffect
+        if (operation.phase != ApplicationOperationPhase.SUCCEEDED) {
+            backupNotice = operation.message
+            if (operation.kind in setOf(ApplicationOperationKind.WEBDAV_SAVE,
+                ApplicationOperationKind.WEBDAV_UPLOAD, ApplicationOperationKind.WEBDAV_READ))
+                webDavNotice = operation.message
+            operations.consumeResult(operation.id)
+            return@LaunchedEffect
+        }
+        when (operation.kind) {
+            ApplicationOperationKind.BACKUP_EXPORT -> operations.result<String>(operation.id)?.let { result ->
+                val payload = result.await()
+                operations.consumeResult(operation.id)
+                // The document picker belongs only to this active UI, never to the worker.
+                exportSaving = true
+                backupWriter.launch("MangaFlow-backup.json", payload)
             }
+            ApplicationOperationKind.BACKUP_INSPECT -> operations.result<InspectedReadingBackup>(operation.id)?.let { result ->
+                val inspected = result.await()
+                pendingRestore = PendingLibraryRestore(inspected.payload, inspected.info)
+                operations.consumeResult(operation.id)
+            }
+            ApplicationOperationKind.BACKUP_RESTORE -> operations.result<LibraryBackupInfo>(operation.id)?.let { result ->
+                val restored = result.await()
+                backupNotice = "已恢复 ${restored.favorites} 本收藏、${restored.history} 条阅读记录"
+                operations.consumeResult(operation.id)
+            }
+            ApplicationOperationKind.WEBDAV_READ -> operations.result<InspectedReadingBackup?>(operation.id)?.let { result ->
+                result.await()?.let { inspected ->
+                    val pending = PendingLibraryRestore(inspected.payload, inspected.info)
+                    if (showWebDav || webDavPresent) { pendingWebDavRestore = pending; showWebDav = false }
+                    else { backupNotice = null; pendingRestore = pending }
+                }
+                webDavNotice = "已读取远端备份，确认后才会恢复"
+                operations.consumeResult(operation.id)
+            }
+            ApplicationOperationKind.WEBDAV_UPLOAD -> {
+                webDavNotice = "阅读备份已上传并覆盖远端文件"
+                operations.consumeResult(operation.id)
+            }
+            ApplicationOperationKind.WEBDAV_SAVE -> {
+                webDavNotice = "备份连接设置已更新"
+                operations.consumeResult(operation.id)
+            }
+            else -> Unit
         }
     }
 
     fun runWebDav(action: String, draft: WebDavBackupDraft? = null) {
         if (backupBusy != null) return
-        backupBusy = "webdav-$action"
         webDavNotice = null
-        cacheScope.launch {
-            try {
-                if (action == "clear") {
-                    webDavStore.clearConfiguration()
-                    showWebDav = false
-                    webDavNotice = "WebDAV 本机配置已清除，远端备份未删除"
-                    return@launch
-                }
-                val values = draft ?: error("缺少 WebDAV 配置")
-                webDavStore.saveConfiguration(
-                    endpoint = values.endpoint,
-                    username = values.username,
-                    remotePath = values.remotePath,
-                    password = values.password.takeIf { it.isNotEmpty() },
-                )
-                when (action) {
-                    "save" -> {
-                        webDavNotice = "WebDAV 配置已安全保存"
-                    }
-                    "upload" -> {
-                        val payload = libraryStore.exportBackup()
-                        webDavStore.upload(payload)
-                        webDavNotice = "阅读备份已上传并覆盖远端文件"
-                    }
-                    "download" -> {
-                        val payload = webDavStore.download()
-                        val info = libraryStore.inspectBackup(payload)
-                        pendingWebDavRestore = PendingLibraryRestore(payload, info)
-                        showWebDav = false
-                        webDavNotice = "已读取远端备份，确认后才会恢复"
-                    }
-                    else -> error("未知 WebDAV 操作")
-                }
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Exception) {
-                webDavNotice = failure.message ?: "WebDAV 操作失败，请稍后重试"
-            } finally {
-                backupBusy = null
-            }
-        }
+        try {
+            val route = if (action == "upload" || action == "download") routeStore.snapshot(DownloadCategory.WEBDAV)
+                else DownloadRouteSnapshot(DownloadRouteMode.SYSTEM)
+            val accepted = draft?.let { WebDavOperationDraft(it.endpoint, it.username, it.password, it.remotePath) }
+            operations.webDav(libraryStore, webDavStore, action, accepted, route)
+        } catch (_: Exception) { webDavNotice = "备份线路不可用，请检查连接设置" }
     }
 
     LaunchedEffect(context) { notifications = queryNotificationsEnabled(context) }
@@ -397,9 +426,10 @@ fun SettingsScreen(
                                 if (backupBusy == null) importBackup.launch(arrayOf("application/json", "text/plain"))
                             }
                             SettingsLinkRow("WebDAV 阅读备份", webDavStatusDetail(webDavConfig, backupBusy), Icons.Outlined.CloudSync) {
-                                if (backupBusy == null) { webDavNotice = null; showWebDav = true }
+                                if (backupBusy == null || backupBusy.startsWith("webdav-")) { webDavNotice = null; showWebDav = true }
                             }
                         }
+                        SettingsOperationStatus(backupOperation) { operations.cancel(it) }
                         Text("备份不包含账号、密码、缓存与漫画文件；恢复前会再次确认。",
                             style = MaterialTheme.typography.bodySmall, color = secondary)
                     }
@@ -555,7 +585,7 @@ fun SettingsScreen(
         repository = sourceRepository, registry = sourceRegistry)
     ExperienceSettingsDialog(showExperience, sourceBackdrop, onDismiss = { showExperience = false })
 
-    StorageManagementDialog(showStorage, storageBackdrop, libraryStore, repository = sourceRepository,
+    StorageManagementDialog(showStorage, storageBackdrop, libraryStore, repository = sourceRepository, active = screenActive,
         clearBrowse = clearBrowseCache, clearMetadata = clearMetadataCache,
         onDismiss = { showStorage = false },
         onDownloads = { storageDestination = "downloads"; showStorage = false },
@@ -569,41 +599,39 @@ fun SettingsScreen(
     dev.mangaflow.reader.panels.PanelModelsDialog(showStorageModels, storageBackdrop) { showStorageModels = false }
 
     BackupRestoreDialog(
-        pending = pendingRestore,
+        pending = pendingRestore.takeIf { screenActive },
         backdrop = sourceBackdrop,
         busy = backupBusy == "restore",
         error = backupNotice?.takeIf { pendingRestore != null },
-        onDismiss = { if (backupBusy == null) pendingRestore = null },
+        onDismiss = { pendingRestore = null },
         onConfirm = {
             val pending = pendingRestore ?: return@BackupRestoreDialog
             if (backupBusy != null) return@BackupRestoreDialog
-            backupBusy = "restore"
-            backupNotice = null
-            cacheScope.launch {
-                try {
-                    val restored = libraryStore.restoreBackup(pending.payload)
-                    backupNotice = "已恢复 ${restored.favorites} 本收藏、${restored.history} 条阅读记录"
-                    pendingRestore = null
-                } catch (cancel: CancellationException) { throw cancel }
-                catch (failure: Exception) {
-                    backupNotice = failure.message ?: "恢复失败，本机数据未完成替换"
-                } finally {
-                    backupBusy = null
-                }
+            val handle = operations.restoreReadingBackup(libraryStore, pending.payload)
+            if (handle.accepted) {
+                backupNotice = null
+                pendingRestore = null
             }
         },
     )
     WebDavBackupDialog(
-        visible = showWebDav,
+        visible = showWebDav && screenActive,
         backdrop = sourceBackdrop,
         config = webDavConfig,
         busy = backupBusy?.takeIf { it.startsWith("webdav-") },
         notice = webDavNotice,
-        onDismiss = { if (backupBusy == null) showWebDav = false },
+        onDismiss = { showWebDav = false },
+        onCancel = { backupOperation?.takeIf { it.cancellable }?.let { operations.cancel(it.id) } },
         onClosed = {
             // Present the inspected restore only after the connection workspace has left.
-            pendingWebDavRestore?.let { backupNotice = null; pendingRestore = it }
-            pendingWebDavRestore = null
+            if (!showWebDav || !screenActive) {
+                webDavPresent = false
+                if (screenActive) pendingWebDavRestore?.let {
+                    backupNotice = null
+                    pendingRestore = it
+                    pendingWebDavRestore = null
+                }
+            }
         },
         onSave = { runWebDav("save", it) },
         onUpload = { runWebDav("upload", it) },
@@ -625,6 +653,22 @@ private data class WebDavBackupDraft(
 )
 
 @Composable
+private fun SettingsOperationStatus(operation: ApplicationOperation?, onCancel: (String) -> Unit) {
+    if (operation == null || !operation.active && operation.statusDurable &&
+        operation.phase != ApplicationOperationPhase.FAILED && operation.phase != ApplicationOperationPhase.INTERRUPTED) return
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (operation.active) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
+        else Icon(Icons.Outlined.Info, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+        Text(if (operation.active) operation.message ?: "后台处理中 · 可离开此页" else operation.message.orEmpty(),
+            Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (operation.cancellable) TextButton(onClick = { onCancel(operation.id) }) { Text("取消") }
+    }
+}
+
+@Composable
 private fun ReadingBackupPanel(backdrop: HazeState?, modifier: Modifier, content: @Composable () -> Unit) {
     if (backdrop != null) {
         LiquidGlassSurface(backdrop, modifier, cornerRadius = 22.dp,
@@ -644,6 +688,7 @@ private fun WebDavBackupDialog(
     busy: String?,
     notice: String?,
     onDismiss: () -> Unit,
+    onCancel: () -> Unit,
     onClosed: () -> Unit,
     onSave: (WebDavBackupDraft) -> Unit,
     onUpload: (WebDavBackupDraft) -> Unit,
@@ -684,7 +729,7 @@ private fun WebDavBackupDialog(
                         Icon(Icons.Outlined.CloudSync, null, Modifier.size(19.dp), tint = colors.onSurfaceVariant)
                         Text("WebDAV 备份", Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.titleMedium,
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        MotionIconButton(onClick = onDismiss, enabled = active, modifier = Modifier.size(44.dp), tooltip = "关闭备份") {
+                        MotionIconButton(onClick = onDismiss, enabled = visible, modifier = Modifier.size(44.dp), tooltip = "关闭备份") {
                             Icon(Icons.Outlined.Close, "关闭备份", Modifier.size(19.dp))
                         }
                     }
@@ -697,6 +742,7 @@ private fun WebDavBackupDialog(
                                 }
                                 Text(webDavStatusDetail(config, busy), style = MaterialTheme.typography.labelSmall,
                                     color = colors.onSurfaceVariant)
+                                if (busy != null) TextButton(onClick = onCancel) { Text("取消后台操作") }
                             }
                         }
                         CopyShelfReveal(editing) {

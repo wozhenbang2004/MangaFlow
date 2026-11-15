@@ -7,7 +7,7 @@ import dev.mangaflow.net.DownloadRouteSnapshot
 
 enum class ChapterPreparationPhase { WAITING, PREPARING, COMMITTING, FAILED }
 
-/** ViewModel-owned metadata work, before a real downloadable manifest exists. */
+/** Application-owned, durably queued metadata work before the image manifest exists. */
 data class ChapterPreparationState(
     val id: String,
     val generation: Long,
