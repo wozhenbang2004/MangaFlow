@@ -918,6 +918,8 @@ internal fun SettingsDisclosure(
     icon: ImageVector,
     expanded: Boolean,
     onToggle: () -> Unit,
+    compact: Boolean = false,
+    modified: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -926,26 +928,45 @@ internal fun SettingsDisclosure(
     val reveal = animateFloatAsState(if (expanded) 1f else 0f,
         if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(), label = "setting-disclosure")
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-            .semantics {
-                stateDescription = listOf(value, if (expanded) "已展开" else "已收起")
-                    .filter(String::isNotBlank).joinToString("，")
-            }
-            .clickable(interactionSource = interaction, indication = null, onClick = onToggle)
-            .motionPress(interaction, pressedScale = .99f)
-            .heightIn(min = 48.dp).padding(vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            SettingsRowIcon(icon)
-            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
-                color = colors.onSurface)
-            Text(value, Modifier.weight(.8f, fill = false).widthIn(max = 132.dp), style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Box(Modifier.width(44.dp).height(32.dp), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp)
-                    .graphicsLayer { rotationZ = 90f * reveal.value }, tint = colors.onSurfaceVariant.copy(alpha = .65f))
+        val header: @Composable (Boolean) -> Unit = { stacked ->
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                .semantics(mergeDescendants = compact) {
+                    stateDescription = listOf(if (compact) "" else value,
+                        if (modified) "已自定义" else "", if (expanded) "已展开" else "已收起")
+                        .filter(String::isNotBlank).joinToString("，")
+                }
+                .clickable(interactionSource = interaction, indication = null,
+                    role = if (compact) Role.Button else null, onClick = onToggle)
+                .motionPress(interaction, pressedScale = .99f)
+                .heightIn(min = if (compact) 44.dp else 48.dp).padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 12.dp)) {
+                SettingsRowIcon(icon)
+                if (stacked) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(title, style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+                        if (value.isNotBlank()) Text(value, style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                } else {
+                    Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurface, maxLines = if (compact) 1 else Int.MAX_VALUE,
+                        overflow = if (compact) TextOverflow.Ellipsis else TextOverflow.Clip)
+                    Text(value, Modifier.weight(.8f, fill = false).widthIn(max = 132.dp),
+                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                        maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (compact && modified) Box(Modifier.size(4.dp).clip(CircleShape)
+                    .background(colors.onSurfaceVariant.copy(alpha = .65f)))
+                Box(Modifier.width(if (compact) 16.dp else 44.dp).height(32.dp), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp)
+                        .graphicsLayer { rotationZ = 90f * reveal.value }, tint = colors.onSurfaceVariant.copy(alpha = .65f))
+                }
             }
         }
+        if (compact) BoxWithConstraints(Modifier.fillMaxWidth()) {
+            header(maxWidth < 300.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f))
+        } else header(false)
         Column(Modifier.fillMaxWidth().clipToBounds().motionInputGate(expanded)
             .layout { measurable, constraints ->
                 // Keep the composed child alive for imports, but do not measure it when closed.
@@ -958,8 +979,8 @@ internal fun SettingsDisclosure(
                     }
                 }
             }.graphicsLayer { alpha = reveal.value }
-            .padding(top = 4.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
+            .padding(top = 4.dp, bottom = if (compact) 8.dp else 12.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 10.dp), content = content)
     }
 }
 

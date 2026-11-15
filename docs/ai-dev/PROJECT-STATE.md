@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Experience settings UIUX redesign · 2026-11-15
+
+User requests a complete experience-policy UIUX redesign through Gestalt grouping, information hierarchy, minimal wording and micro elements, with explicit subagents. DESIGN EXPERIENCE-UI-20261115-01–06 preserves the raw request, chosen source/component map and ten-dimension acceptance boundary. Source baseline6473062 includes the completed storage/network/reading-core work; do not replay or change those engines. The current implementation scope is ExperienceSettings.kt plus opt-in compact SettingsDisclosure and these existing records. Root is sole integrator; domain design, aesthetic-source lookup and interaction work are assigned independently.
+
+The source redesign retains a single PANEL/three modes/seven domains, attaches values and manual/effective differences to their parameter, discloses one precise numeric editor and moves help/diagnostics out of the primary flow. All original preferences, nullable-follow semantics, platform/unknown boundaries and current motion material remain. No new library or parallel prototype. Shared disclosure defaults preserve other settings. Evidence is bounded source/API and integration review; no tests/local builds, fixture renders, service/device/UI probes. Current rendered density, animations, font/IME/accessibility and actual sensor behavior remain pending ordinary CI artifact/user feedback. Next exact action: integrate the completed batch on the actual latest main with an expected-head guard, observe ordinary Android/native CI activation once and stop without waiting for artifacts; do not call source completion installed acceptance.
+
 ## Network/download interaction repair · 2026-11-15
 
 User's current exact feedback “网络下载那块的 uiuxbug 很多啊。。。” is mapped to DESIGN NETWORK-UX-20261115-01–05. Baseline6473062 includes the authorized unified storage upgrade. Root is the sole writer; independent read-only review confirmed the ordinary/current-settings retry wording mismatch and reviewed window handoffs. Its initial generic-apply/disk-exception diagnosis was disproved by actual platform overrides and is withdrawn, rather than reported as a fixed crash.
