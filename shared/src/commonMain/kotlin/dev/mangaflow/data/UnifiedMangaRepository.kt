@@ -294,7 +294,7 @@ class UnifiedMangaRepository(
     suspend fun sourceProbe(id: String, route: DownloadRouteSnapshot? = null) {
         require(sources.any { it.id == id }) { "这个漫画源尚未安装。" }
         val selected = (route ?: DownloadRoutingStore.activeSourceSnapshot(id)).checked()
-        val client = NetworkClient(route = selected)
+        val client = NetworkClient(route = selected, observeRelayTraffic = false)
         try {
             withContext(Dispatchers.IO + ChapterDownloadTransport(selected, client, connectionCheck = true)) { browseSource(id, 0) }
         } finally { client.close() }

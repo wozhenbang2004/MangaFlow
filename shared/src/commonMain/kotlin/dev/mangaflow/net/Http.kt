@@ -133,7 +133,7 @@ data class NetworkTransferObservation(
 )
 
 /** Engines retain system TLS validation. Each client has isolated jobs and no cookie installation. */
-internal expect fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, configure: HttpClientConfig<*>.() -> Unit): HttpClient
+internal expect fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, observeRelayTraffic: Boolean, configure: HttpClientConfig<*>.() -> Unit): HttpClient
 
 class NetworkClient(
     http1Only: Boolean = false,
@@ -142,11 +142,12 @@ class NetworkClient(
     callTimeoutMillis: Long = 45_000,
     acceptCompression: Boolean = true,
     route: DownloadRouteSnapshot? = null,
+    observeRelayTraffic: Boolean = true,
     private val onTransfer: ((NetworkTransferObservation) -> Unit)? = null,
 ) {
     private val timeouts = Triple(connectTimeoutMillis, readTimeoutMillis, callTimeoutMillis)
     private val selectedRoute = route?.checked()
-    private val client = platformHttpClient(http1Only, selectedRoute) {
+    private val client = platformHttpClient(http1Only, selectedRoute, observeRelayTraffic) {
         expectSuccess = false
         followRedirects = false
         if (acceptCompression) install(ContentEncoding) { gzip(); deflate() }

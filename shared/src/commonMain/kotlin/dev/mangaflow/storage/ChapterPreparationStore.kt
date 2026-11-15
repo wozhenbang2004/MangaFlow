@@ -1,5 +1,8 @@
 package dev.mangaflow.storage
 
+import dev.mangaflow.net.writeRelayBinding
+import dev.mangaflow.net.readRelayBinding
+
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
@@ -459,6 +462,7 @@ class ChapterPreparationStore(
         state.routeMode?.let { put("routeMode", it.name) }
         state.route?.let { route -> put("route", JSONObject().apply {
             put("mode", route.mode.name)
+            route.writeRelayBinding(this)
             route.proxy?.let { put("host", it.host); put("port", it.port); put("type", it.type.name) }
         }) }
         target?.let { put("target", JSONObject().apply {
@@ -480,9 +484,9 @@ class ChapterPreparationStore(
         }
         val route = json.optJSONObject("route")?.let { saved ->
             val mode = DownloadRouteMode.valueOf(saved.getString("mode"))
-            DownloadRouteSnapshot(mode, if (mode == DownloadRouteMode.PROXY)
+            DownloadRouteSnapshot(mode, if (mode == DownloadRouteMode.PROXY && !saved.has("relay"))
                 DownloadProxyEndpoint(saved.getString("host"), saved.getInt("port"),
-                    DownloadProxyType.valueOf(saved.getString("type"))) else null).checked()
+                    DownloadProxyType.valueOf(saved.getString("type"))) else null, readRelayBinding(saved)).checked()
         }
         val generation = json.getLong("generation").also { require(it > 0L) }
         val state = ChapterPreparationState(id, generation, manga, chapter,

@@ -12,6 +12,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +35,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.net.*
 import dev.mangaflow.platform.LocalMangaContext
@@ -60,6 +65,8 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     initialScene: NetworkDownloadScene = NetworkDownloadScene.CONNECTION,
 ) {
     val context = LocalMangaContext.current
+    val relay = remember(context) { RelayLinkController.get(context) }
+    val relayState by relay.state.collectAsStateWithLifecycle()
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     val foreground = lifecycle.isAtLeast(Lifecycle.State.RESUMED)
     val colors = MaterialTheme.colorScheme
@@ -76,6 +83,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     var suggestedProxy by remember { mutableStateOf<DownloadProxyEndpoint?>(null) }
     var suggestionRevision by remember { mutableIntStateOf(0) }
     val active = visible && foreground
+    LaunchedEffect(active, environmentRevision, context) { if (active) relay.refresh() }
     fun useReportedProxy(endpoint: DownloadProxyEndpoint) {
         val current = environment
         val supported = platformKind != PlatformKind.IOS || endpoint.type != DownloadProxyType.HTTP
@@ -158,6 +166,8 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                                 onSuggestionConsumed = { suggestedProxy = null }, repository = repository, registry = registry,
                                 proxyEditing = proxyEditing, onProxyEditing = { proxyEditing = it },
                                 connectionSummary = {
+                                    RelayLinkSummary(relayState, relay, enabled = active && shown == scene,
+                                        onDetails = { showInfo = true })
                                     NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
                                         enabled = active && shown == scene, compact = true,
                                         onRefresh = { environmentRevision++ }, onUse = ::useReportedProxy)
@@ -189,12 +199,13 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                 }
                 Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    RelayLinkDetails(relayState, relay, enabled = active && showInfo)
                     NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
                         enabled = active && showInfo, onRefresh = { environmentRevision++ }, onUse = { endpoint ->
                             pendingReportedProxy = endpoint
                             showInfo = false
                         })
-                    NetworkConnectionHelp()
+                    NetworkConnectionHelp(relayState.installed)
                 }
             }
         }
@@ -240,6 +251,128 @@ internal fun <T : Any> NetworkSceneContent(
             target.placeRelative(0, 0)
         }
     }
+}
+
+@Composable
+private fun RelayLinkSummary(
+    state: RelayLinkState, controller: RelayLinkController, enabled: Boolean, onDetails: () -> Unit,
+) {
+    if (!state.installed) return
+    val colors = MaterialTheme.colorScheme
+    val busy = state.phase == RelayLinkPhase.AUTHORIZING || state.phase == RelayLinkPhase.CONNECTING ||
+        state.phase == RelayLinkPhase.SYNCING
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+        MotionTextButton(onClick = onDetails, enabled = enabled, modifier = Modifier.weight(1f)) {
+            Icon(Icons.Outlined.Link, null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Relay 联动", style = MaterialTheme.typography.bodyMedium)
+                Text(relayPhaseLabel(state), style = MaterialTheme.typography.labelSmall,
+                    color = if (state.phase == RelayLinkPhase.ERROR || state.phase == RelayLinkPhase.CONFLICT)
+                        colors.error else colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        when {
+            busy -> MotionBusyIndicator(Modifier.padding(13.dp).size(18.dp), strokeWidth = 1.5.dp)
+            !state.supported -> MotionTextButton(onClick = controller::openProvider, enabled = enabled) {
+                Text("打开", style = MaterialTheme.typography.labelMedium)
+            }
+            !state.authorized -> MotionTextButton(onClick = controller::requestAuthorization, enabled = enabled) {
+                Text("授权", style = MaterialTheme.typography.labelMedium)
+            }
+            else -> MotionIconButton(onClick = { if (state.enabled) controller.disable() else controller.enable() },
+                enabled = enabled, modifier = Modifier.size(44.dp),
+                tooltip = if (state.enabled) "暂停 Relay 联动" else "启用 Relay 联动") {
+                Icon(if (state.enabled) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                    if (state.enabled) "暂停 Relay 联动" else "启用 Relay 联动", Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun RelayLinkDetails(state: RelayLinkState, controller: RelayLinkController, enabled: Boolean) {
+    if (!state.installed) return
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Relay 联动", style = MaterialTheme.typography.labelMedium)
+                Text(relayPhaseLabel(state), style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant)
+            }
+            MotionIconButton(onClick = controller::retry, enabled = enabled && state.supported,
+                modifier = Modifier.size(44.dp), tooltip = "重新核对联动状态") {
+                Icon(Icons.Outlined.Refresh, "重新核对联动状态", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            }
+        }
+        if (state.authorized) {
+            RelayEvidenceRow("规则保存", if (state.savedRevision > 0) "v${state.savedRevision} · ${state.ruleCount} 项" else "待同步",
+                state.savedRevision > 0)
+            RelayEvidenceRow("核心应用", if (state.phase == RelayLinkPhase.APPLIED && state.vpnConnected)
+                "v${state.appliedRevision}" else if (state.appliedRevision > 0) "v${state.appliedRevision} · 待核对" else "未应用",
+                state.phase == RelayLinkPhase.APPLIED && state.vpnConnected && state.savedRevision == state.appliedRevision)
+            RelayEvidenceRow("实际请求", if (state.realRequestVerified) "联动入口已收到响应" else "尚未收到可验证响应",
+                state.realRequestVerified)
+            if (state.realRequestVerified) Text("响应只证明该次请求经过联动入口，不代表公网出口已经核实。",
+                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        }
+        state.conflicts.forEach { conflict ->
+            Text(relayConflictLabel(conflict), style = MaterialTheme.typography.bodySmall, color = colors.error)
+        }
+        state.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
+        if (state.phase == RelayLinkPhase.WAITING_FOR_VPN) Text("在 Relay 连接 VPN 后会自动恢复。",
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            MotionTextButton(onClick = controller::openProvider, enabled = enabled) {
+                Text(if (state.supported) "打开 Relay" else "更新 Relay", style = MaterialTheme.typography.labelMedium)
+            }
+            if (state.supported && !state.authorized) MotionTextButton(onClick = controller::requestAuthorization, enabled = enabled) {
+                Text("授权联动", style = MaterialTheme.typography.labelMedium)
+            }
+            if (state.authorized) MotionTextButton(onClick = controller::revoke, enabled = enabled) {
+                Text("撤销授权", style = MaterialTheme.typography.labelMedium, color = colors.error)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RelayEvidenceRow(label: String, value: String, confirmed: Boolean) {
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Icon(if (confirmed) Icons.Outlined.Check else Icons.Outlined.Info, null, Modifier.size(14.dp),
+            tint = colors.onSurfaceVariant)
+        Text(label, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.weight(1f))
+        Text(value, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+private fun relayPhaseLabel(state: RelayLinkState): String = when (state.phase) {
+    RelayLinkPhase.NOT_AVAILABLE, RelayLinkPhase.NOT_INSTALLED -> "未检测到"
+    RelayLinkPhase.INCOMPATIBLE -> "需要更新 Relay"
+    RelayLinkPhase.AUTHORIZATION_REQUIRED -> "首次使用需要授权"
+    RelayLinkPhase.AUTHORIZING -> "等待授权"
+    RelayLinkPhase.DISABLED -> "已暂停"
+    RelayLinkPhase.CONNECTING -> "正在核对"
+    RelayLinkPhase.WAITING_FOR_VPN -> "等待 VPN 连接"
+    RelayLinkPhase.SYNCING -> "正在同步规则"
+    RelayLinkPhase.SAVED -> "规则已保存 · 等待应用"
+    RelayLinkPhase.APPLIED -> "已应用 · ${state.ruleCount} 项规则"
+    RelayLinkPhase.CONFLICT -> "规则冲突 · 查看详情"
+    RelayLinkPhase.ERROR -> "联动中断 · 查看详情"
+}
+
+private fun relayConflictLabel(conflict: String): String = when {
+    conflict.contains("bypass", ignoreCase = true) -> "MangaFlow 已被设为绕过 VPN，请在 Relay 调整应用规则。"
+    conflict.contains("block", ignoreCase = true) -> "MangaFlow 已被禁止联网，请在 Relay 调整应用规则。"
+    conflict.contains("global", ignoreCase = true) -> "全局模式需要额外的例外授权，请在 Relay 查看授权范围。"
+    conflict.contains("revision", ignoreCase = true) -> "Relay 的规则已变化，请先核对后重试同步。"
+    conflict.contains("app_policy", ignoreCase = true) -> "Relay 的应用强制出口与源级规则冲突，请在 Relay 调整。"
+    else -> conflict
 }
 
 @Composable
@@ -329,13 +462,15 @@ private fun NetworkEnvironmentSummary(
 }
 
 @Composable
-private fun NetworkConnectionHelp() {
+private fun NetworkConnectionHelp(relayInstalled: Boolean) {
     val colors = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("连接与识别", style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
         listOf(
-            "识别系统公开的 VPN、代理地址和自动代理配置；不读取外部节点、分流规则或未公开端口。检测到配置不代表请求一定使用它。",
-            "直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。需要按下载分别直连或代理时，外部软件须支持应用排除与本地代理监听。",
+            if (relayInstalled) "Relay 联动只管理 MangaFlow 自己的规则。首次需要授权；规则保存、核心应用和实际请求响应分别记录。"
+                else "识别系统公开的 VPN、代理地址和自动代理配置。检测到配置不代表请求一定使用它。",
+            if (relayInstalled) "联动启用后的直连与代理由 Relay 执行，无需填写端口；共享图片域名使用专用入口。绕过 VPN、强制出口或授权变化会明确提示。"
+                else "直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。外部软件需提供相应的分流能力。",
             "Steam 连接沿用系统网络；指定 HTTP / SOCKS 出口需配置地址。部分扩展安装与 iOS 连接不支持 HTTP 代理，会明确提示。",
             "每个漫画源可单独设置搜索、阅读、账号接口与新下载线路；网页认证仍遵循系统网络，进行中任务保留原线路。",
             "新请求使用新设置。已有下载保留原线路，需明确选择“使用当前设置重试”才更换。代理地址目前不支持账号密码。",

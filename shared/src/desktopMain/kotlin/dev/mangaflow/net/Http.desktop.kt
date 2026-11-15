@@ -8,7 +8,8 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 
 // Unconfigured clients retain their existing ProxySelector; transfer overrides stay client-local.
-internal actual fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, configure: HttpClientConfig<*>.() -> Unit): HttpClient = HttpClient(OkHttp) {
+internal actual fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, observeRelayTraffic: Boolean, configure: HttpClientConfig<*>.() -> Unit): HttpClient = HttpClient(OkHttp) {
+    if (route?.relayBinding != null) throw DownloadRouteException("Relay 联动线路仅支持 Android，请选择当前设备的线路。")
     engine {
         config {
             followRedirects(false)

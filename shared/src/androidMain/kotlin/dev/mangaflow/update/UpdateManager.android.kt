@@ -26,7 +26,7 @@ import dev.mangaflow.reader.panels.PanelRuntimeStore
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
-import dev.mangaflow.net.javaProxy
+import dev.mangaflow.net.openDownloadConnection
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -562,11 +562,10 @@ actual class UpdateManager private constructor(private val context: Context) {
     }
 
     private fun open(initial: String, offset: Long = 0, route: DownloadRouteSnapshot, validator: String? = null): HttpURLConnection {
-        val proxy = route.javaProxy()
         var url = URL(initial)
         repeat(6) {
             require(url.protocol == "https" && url.userInfo == null && url.port in setOf(-1, 443) && url.host in ALLOWED_HOSTS) { "更新服务重定向地址无效" }
-            val active = ((if (proxy == null) url.openConnection() else url.openConnection(proxy)) as HttpURLConnection).apply {
+            val active = route.openDownloadConnection(url).apply {
                 instanceFollowRedirects = false
                 connectTimeout = 15_000
                 readTimeout = 30_000

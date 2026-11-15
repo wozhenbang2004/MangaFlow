@@ -1,6 +1,6 @@
 # Steam Workshop native component
 
-MangaFlow media adapter version 0.1.4; component identity 0.1.4-f541366.
+MangaFlow media adapter version 0.1.5; component identity 0.1.5-f541366.
 
 The module links the real tapline core pinned to
 https://github.com/UnhingedSoftware/tapline/tree/f54136611519bef50cf31336e0c28a78eb175657.
@@ -49,7 +49,8 @@ returns error code invalid_job; nativeStart returns0 when unavailable/busy.
 
 All requests are JSON, op is login/passwordLogin/account/profile/library/search/download.
 Every operation also requires an immutable network object. kind is SYSTEM or
-DIRECT, or HTTP/SOCKS5 with an explicit host and port. PROXY mode is resolved by
+DIRECT, or HTTP/SOCKS5 with an explicit host and port. Authorized Relay uses HTTP_AUTH,
+loopback host/port and in-memory credentials from the verified Binder receipt. PROXY mode is resolved by
 the shared Kotlin routing store before nativeStart; a missing/invalid endpoint is
 rejected. Login, guard polling, account restore, search and original-media download
 use the STEAM_WALLPAPERS category. Optional component acquisition uses its own
@@ -192,3 +193,5 @@ auth_connection_lost, auth_session_expired, guard_submission_unknown,
 profile_timeout, profile_unavailable, range_unsupported, content_changed and
 download_stalled. No remote error string, URL, token or filesystem
 path is logged or propagated as an error.
+
+Relay routes keep their frozen grant identity in Kotlin. Before each native poll the current grant/core receipt is checked; loss or revocation cancels the real job. HTTP_AUTH uses a bounded authenticated CONNECT handshake, with credentials restricted to 127.0.0.1 and excluded from session/vault/checkpoints. Native task completion is not used as a network-response observation: it may include local or cached work. Real origin-response evidence comes from the instrumented HTTP transports; no native task or IPC receipt attests the public exit IP.

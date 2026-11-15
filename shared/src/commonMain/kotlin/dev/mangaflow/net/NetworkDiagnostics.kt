@@ -81,7 +81,12 @@ suspend fun diagnoseNetwork(context: PlatformContext, target: NetworkProbeTarget
             .header("User-Agent", "MangaFlow-Connection-Check")
             .build()
     }
-    val routes = listOfNotNull(DownloadRouteSnapshot(DownloadRouteMode.SYSTEM), DownloadRouteSnapshot(DownloadRouteMode.DIRECT), proxy?.let { DownloadRouteSnapshot(DownloadRouteMode.PROXY, it) }).distinct()
+    val routes = listOfNotNull(
+        DownloadRouteSnapshot(DownloadRouteMode.SYSTEM),
+        DownloadRouteSnapshot(DownloadRouteMode.DIRECT, relayBinding = currentRelayBinding(DownloadRouteMode.DIRECT)),
+        proxy?.let { DownloadRouteSnapshot(DownloadRouteMode.PROXY, it) }
+            ?: currentRelayBinding(DownloadRouteMode.PROXY)?.let { DownloadRouteSnapshot(DownloadRouteMode.PROXY, relayBinding = it) },
+    ).distinct()
     val gate = Semaphore(2)
     val results = coroutineScope {
         routes.map { route -> async { gate.withPermit { probeRoute(target, route, request) } } }.awaitAll()
@@ -100,7 +105,7 @@ suspend fun diagnoseNetwork(context: PlatformContext, target: NetworkProbeTarget
 private suspend fun probeRoute(target: NetworkProbeTarget, route: DownloadRouteSnapshot, request: Request): NetworkProbeResult {
     val client = try {
         NetworkClient(connectTimeoutMillis = 4_000, readTimeoutMillis = 6_000,
-            callTimeoutMillis = 8_000, route = route)
+            callTimeoutMillis = 8_000, route = route, observeRelayTraffic = false)
     } catch (failure: DownloadRouteException) {
         return NetworkProbeResult(route, null, failure.message ?: "此线路不可用", false,
             failureKind = NetworkProbeFailure.ROUTE)

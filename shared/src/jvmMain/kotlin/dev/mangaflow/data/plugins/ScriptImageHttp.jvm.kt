@@ -1,5 +1,7 @@
 package dev.mangaflow.data.plugins
 
+import dev.mangaflow.net.observeRelayRoute
+
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRouteException
@@ -44,7 +46,7 @@ internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url:
     val sockets = route?.let { publicSourceSocketFactory(it, JvmScriptNetwork::isPublic) }
     val client = JvmScriptNetwork.defaultClient.newBuilder().connectionPool(ConnectionPool()).dispatcher(Dispatcher())
         .readTimeout(45, TimeUnit.SECONDS).callTimeout(30, TimeUnit.MINUTES)
-        .apply { if (sockets != null) socketFactory(sockets) }.build()
+        .apply { if (sockets != null) socketFactory(sockets) }.observeRelayRoute(route).build()
     try {
         repeat(4) { redirects ->
             currentCoroutineContext().ensureActive()

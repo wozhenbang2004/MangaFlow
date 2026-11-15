@@ -16,14 +16,18 @@ enum class DownloadCategory {
     COMPONENTS, SOURCE_PACKAGES, UPDATES, WEBDAV,
 }
 
-/** DIRECT disables HTTP/SOCKS proxies; it does not override an external VPN's routing. */
+/** DIRECT uses an authorized Relay exit when bound; otherwise it only disables app proxies. */
 enum class DownloadRouteMode { SYSTEM, DIRECT, PROXY }
 enum class DownloadProxyType { HTTP, SOCKS }
 
 data class DownloadProxyEndpoint(val host: String, val port: Int, val type: DownloadProxyType)
+/** A frozen authorization identity. Credentials are obtained over Binder and never persisted here. */
+data class RelayRouteBinding(val providerPackage: String, val certificate: String, val grantId: String)
+
 data class DownloadRouteSnapshot(
     val mode: DownloadRouteMode,
     val proxy: DownloadProxyEndpoint? = null,
+    val relayBinding: RelayRouteBinding? = null,
 )
 
 /** A source owns its endpoint; edits to another source or the download proxy cannot change it. */
@@ -39,11 +43,44 @@ data class DownloadRoutingSettings(
 /** Invalid or unsupported routes must fail before a request, without falling back to direct. */
 class DownloadRouteException(message: String) : IllegalStateException(message)
 
-internal fun DownloadRouteSnapshot.checked(): DownloadRouteSnapshot = when (mode) {
-    DownloadRouteMode.SYSTEM, DownloadRouteMode.DIRECT -> copy(proxy = null)
-    DownloadRouteMode.PROXY -> copy(proxy = checkedProxy(proxy
-        ?: throw DownloadRouteException("尚未配置代理，请先在网络与下载中填写代理地址。")))
+internal fun DownloadRouteSnapshot.checked(): DownloadRouteSnapshot {
+    relayBinding?.let { binding ->
+        if (mode == DownloadRouteMode.SYSTEM || proxy != null ||
+            binding.providerPackage !in setOf("dev.relay.android.network", "dev.relay.android") ||
+            !binding.certificate.matches(Regex("[a-fA-F0-9]{64}")) ||
+            !binding.grantId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) {
+            throw DownloadRouteException("已保存的 Relay 联动身份无效，请重新授权后重试。")
+        }
+        return this
+    }
+    return when (mode) {
+        DownloadRouteMode.SYSTEM, DownloadRouteMode.DIRECT -> copy(proxy = null)
+        DownloadRouteMode.PROXY -> copy(proxy = checkedProxy(proxy
+            ?: throw DownloadRouteException("尚未配置代理，请先授权 Relay 联动或填写代理地址。")))
+    }
 }
+
+private fun configuredRoute(mode: DownloadRouteMode, proxy: DownloadProxyEndpoint?): DownloadRouteSnapshot {
+    val endpoint = proxy.takeIf { mode == DownloadRouteMode.PROXY }
+    val binding = if (endpoint == null && mode != DownloadRouteMode.SYSTEM) currentRelayBinding(mode) else null
+    return DownloadRouteSnapshot(mode, endpoint, binding).checked()
+}
+
+/** Stable route identity includes the grant, never an ephemeral port or secret. */
+internal fun DownloadRouteSnapshot.identity(): String = mode.name + "|" + proxy?.type?.name.orEmpty() + "|" +
+    proxy?.host.orEmpty() + "|" + proxy?.port?.toString().orEmpty() + "|" +
+    relayBinding?.let { it.providerPackage + "|" + it.certificate + "|" + it.grantId }.orEmpty()
+
+internal fun DownloadRouteSnapshot.writeRelayBinding(json: JSONObject): JSONObject = json.apply {
+    relayBinding?.let { put("relay", JSONObject().put("package", it.providerPackage)
+        .put("certificate", it.certificate).put("grantId", it.grantId)) }
+}
+
+internal fun readRelayBinding(json: JSONObject): RelayRouteBinding? = if (json.has("relay")) {
+    // An invalid binding must not turn a previously managed route into a normal system route.
+    val value = json.getJSONObject("relay")
+    RelayRouteBinding(value.getString("package"), value.getString("certificate"), value.getString("grantId"))
+} else null
 
 private fun checkedProxy(endpoint: DownloadProxyEndpoint): DownloadProxyEndpoint {
     val input = endpoint.host.trim()
@@ -101,13 +138,13 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
     val state: StateFlow<DownloadRoutingSettings> = mutableState.asStateFlow()
 
     fun setDefault(mode: DownloadRouteMode) = synchronized(lock) {
-        if (mode == DownloadRouteMode.PROXY) DownloadRouteSnapshot(mode, mutableState.value.proxy).checked()
+        if (mode == DownloadRouteMode.PROXY) configuredRoute(mode, mutableState.value.proxy)
         disk.edit().putString("default", mode.name).apply()
         mutableState.value = readSettings()
     }
 
     fun setCategory(category: DownloadCategory, mode: DownloadRouteMode?) = synchronized(lock) {
-        if (mode == DownloadRouteMode.PROXY) DownloadRouteSnapshot(mode, mutableState.value.proxy).checked()
+        if (mode == DownloadRouteMode.PROXY) configuredRoute(mode, mutableState.value.proxy)
         val editor = disk.edit()
         if (mode == null) editor.remove(categoryKey(category)) else editor.putString(categoryKey(category), mode.name)
         editor.apply()
@@ -129,7 +166,7 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
     fun setSource(sourceId: String, settings: SourceNetworkSettings?) = synchronized(lock) {
         require(sourceId.matches(Regex("[A-Za-z0-9_.-]{1,96}"))) { "漫画源标识无效。" }
         val checked = settings?.let {
-            val route = DownloadRouteSnapshot(it.mode, it.proxy).checked()
+            val route = configuredRoute(it.mode, it.proxy)
             SourceNetworkSettings(route.mode, route.proxy)
         }
         val next = mutableState.value.sourceOverrides.toMutableMap()
@@ -148,16 +185,16 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
     fun sourceSnapshot(sourceId: String, category: DownloadCategory? = null,
         overrideMode: DownloadRouteMode? = null): DownloadRouteSnapshot {
         val current = mutableState.value
-        if (overrideMode != null) return DownloadRouteSnapshot(overrideMode, current.proxy).checked()
-        current.sourceOverrides[sourceId]?.let { return DownloadRouteSnapshot(it.mode, it.proxy).checked() }
+        if (overrideMode != null) return configuredRoute(overrideMode, current.proxy)
+        current.sourceOverrides[sourceId]?.let { return configuredRoute(it.mode, it.proxy) }
         val mode = category?.let { current.categoryOverrides[it] } ?: current.defaultMode
-        return DownloadRouteSnapshot(mode, current.proxy).checked()
+        return configuredRoute(mode, current.proxy)
     }
 
     fun snapshot(category: DownloadCategory, overrideMode: DownloadRouteMode? = null): DownloadRouteSnapshot {
         val current = mutableState.value
         val mode = overrideMode ?: current.categoryOverrides[category] ?: current.defaultMode
-        return DownloadRouteSnapshot(mode, current.proxy).checked()
+        return configuredRoute(mode, current.proxy)
     }
 
     private fun readSettings(): DownloadRoutingSettings {
@@ -207,7 +244,8 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
             val source = current.sourceOverrides[sourceId]
             val mode = source?.mode ?: current.defaultMode
             val endpoint = if (mode == DownloadRouteMode.PROXY) (if (source != null) source.proxy else current.proxy) else null
-            val text = mode.name + "|" + endpoint?.type?.name.orEmpty() + "|" + endpoint?.host.orEmpty() + "|" + endpoint?.port
+            val binding = if (mode != DownloadRouteMode.SYSTEM && endpoint == null) currentRelayBinding(mode) else null
+            val text = DownloadRouteSnapshot(mode, endpoint, binding).identity()
             return sha256(text.encodeToByteArray()).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
         }
         fun get(context: PlatformContext): DownloadRoutingStore = synchronized(lock) {

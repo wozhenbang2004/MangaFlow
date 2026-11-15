@@ -1,5 +1,7 @@
 package dev.mangaflow.update
 
+import dev.mangaflow.net.RelayRouteBinding
+
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -84,7 +86,10 @@ internal object AndroidTransferIntents {
             DownloadProxyEndpoint(it.getString("host"), it.getInt("port"), DownloadProxyType.valueOf(it.getString("type")))
         }
         ApplicationTransferIntent(id, kind, owner,
-            DownloadRouteSnapshot(DownloadRouteMode.valueOf(route.getString("mode")), proxy).checked(),
+            DownloadRouteSnapshot(DownloadRouteMode.valueOf(route.getString("mode")), proxy,
+                if (route.has("relay")) route.getJSONObject("relay").let {
+                    RelayRouteBinding(it.getString("package"), it.getString("certificate"), it.getString("grantId"))
+                } else null).checked(),
             json.getJSONObject("payload"), ApplicationTransferStatus.valueOf(json.getString("status")), json.optString("message"))
     }
 
@@ -118,6 +123,8 @@ internal object AndroidTransferIntents {
 
     private fun write(context: Context, task: ApplicationTransferIntent) {
         val route = JSONObject().put("mode", task.route.mode.name)
+        task.route.relayBinding?.let { route.put("relay", JSONObject().put("package", it.providerPackage)
+            .put("certificate", it.certificate).put("grantId", it.grantId)) }
         task.route.proxy?.let { route.put("proxy", JSONObject().put("host", it.host).put("port", it.port).put("type", it.type.name)) }
         val json = JSONObject().put("schema", 1).put("workId", task.workId).put("kind", task.kind.name)
             .put("owner", task.owner).put("status", task.status.name).put("message", task.message.take(1000))

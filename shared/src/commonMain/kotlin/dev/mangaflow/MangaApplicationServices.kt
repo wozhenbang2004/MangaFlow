@@ -23,6 +23,7 @@ import dev.mangaflow.data.sources.ManhuaguiBodySource
 import dev.mangaflow.data.sources.PicacgBodySource
 import dev.mangaflow.data.sources.createJmBodySource
 import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.net.RelayLinkController
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.storage.preferences
@@ -56,6 +57,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     private val application = applicationContext(context)
     val operations = ApplicationOperations.get(application)
     val scope = operations.scope
+    val relayLink = RelayLinkController.get(application)
     private val sourcePreferences = preferences(application, "mangaflow_library")
     val copyRepository = CopyMangaRepository(identityProvider = { CopyAnonymousIdentityStore.load(application) })
     val komiicSource = KomiicBodySource {
@@ -97,6 +99,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val preparations = ChapterPreparationStore(application, repository, downloads, scope, ::awaitSourcesReady)
 
     init {
+        relayLink.start(scope)
         repository.setEnabledSources(bodySources.enabledSourceIds)
         scope.launch {
             try {
@@ -110,7 +113,9 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
             catch (_: Exception) { mutableSourceError.value = "第三方源未能加载，请在漫画源设置中重试。" }
         }
         scope.launch {
-            bodySources.entries.collect {
+            bodySources.entries.collect { entries ->
+                relayLink.updateSources(entries.filter { it.enabled && !it.removed && it.isInstalled }
+                    .associate { it.source.id to it.source.homeUrl })
                 withContext(Dispatchers.Default) {
                     sourceSync.withLock {
                         repository.setEnabledSources(bodySources.enabledSourceIds)

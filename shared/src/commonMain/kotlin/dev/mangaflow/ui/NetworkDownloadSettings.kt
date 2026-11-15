@@ -62,6 +62,8 @@ import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.SourceNetworkSettings
+import dev.mangaflow.net.RelayLinkController
+import dev.mangaflow.net.currentRelayBinding
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.storage.BodySourceRegistry
 import dev.mangaflow.platform.PlatformKind
@@ -141,6 +143,11 @@ private fun DownloadConnectionSettings(
     proxyEditing: Boolean, onProxyEditing: (Boolean) -> Unit, connectionSummary: @Composable () -> Unit,
 ) {
     val settings by store.state.collectAsStateWithLifecycle()
+    val context = LocalMangaContext.current
+    val relay = remember(context) { RelayLinkController.get(context) }
+    val relayState by relay.state.collectAsStateWithLifecycle()
+    val relayDirect = remember(relayState) { currentRelayBinding(DownloadRouteMode.DIRECT) != null }
+    val relayProxy = remember(relayState) { currentRelayBinding(DownloadRouteMode.PROXY) != null }
     val colors = MaterialTheme.colorScheme
     var host by remember(settings.proxy) { mutableStateOf(settings.proxy?.host.orEmpty()) }
     var port by remember(settings.proxy) { mutableStateOf(settings.proxy?.port?.toString().orEmpty()) }
@@ -226,15 +233,16 @@ private fun DownloadConnectionSettings(
                 }, modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
                 fullWidthIndicator = true, controlHeight = 40.dp,
                 track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
-            if (settings.defaultMode == DownloadRouteMode.DIRECT && environment?.defaultNetworkUsesVpn == true)
+            if (settings.defaultMode == DownloadRouteMode.DIRECT && !relayDirect && environment?.defaultNetworkUsesVpn == true)
                 Text("VPN 仍可能接管直连", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             MotionTextButton(onClick = { startEditing(false) }, enabled = interactive,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
                 Icon(Icons.Outlined.Edit, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("代理地址", style = MaterialTheme.typography.bodyMedium)
-                    Text(overviewNotice ?: settings.proxy?.let(::proxyAddressLabel) ?: "未设置",
+                    Text(if (relayProxy) "指定代理" else "代理地址", style = MaterialTheme.typography.bodyMedium)
+                    Text(overviewNotice ?: settings.proxy?.let(::proxyAddressLabel) ?:
+                        if (relayProxy) "可选 · 当前由 Relay 自动管理" else "未设置",
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
@@ -314,6 +322,10 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
+    val relay = remember(context) { RelayLinkController.get(context) }
+    val relayState by relay.state.collectAsStateWithLifecycle()
+    val relayProxy = remember(relayState) { currentRelayBinding(DownloadRouteMode.PROXY) != null }
+    val relayDirect = remember(relayState) { currentRelayBinding(DownloadRouteMode.DIRECT) != null }
     val saved = settings.sourceOverrides[sourceId]
     val colors = MaterialTheme.colorScheme
     var expanded by remember(sourceId) { mutableStateOf(false) }
@@ -321,6 +333,7 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
     var host by remember(sourceId, saved) { mutableStateOf(saved?.proxy?.host.orEmpty()) }
     var port by remember(sourceId, saved) { mutableStateOf(saved?.proxy?.port?.toString().orEmpty()) }
     var type by remember(sourceId, saved) { mutableStateOf(saved?.proxy?.type ?: DownloadProxyType.SOCKS) }
+    var useManualProxy by remember(sourceId, saved) { mutableStateOf(saved?.proxy != null) }
     var notice by remember(sourceId) { mutableStateOf<String?>(null) }
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -329,6 +342,7 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
         host = saved?.proxy?.host.orEmpty()
         port = saved?.proxy?.port?.toString().orEmpty()
         type = saved?.proxy?.type ?: DownloadProxyType.SOCKS
+        useManualProxy = saved?.proxy != null
         notice = null
     }
     fun close() { expanded = false; focus.clearFocus(force = true); keyboard?.hide() }
@@ -347,7 +361,13 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
                     onSelect = { mode = choices[it]; notice = null }, modifier = Modifier.fillMaxWidth(),
                     treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 36.dp, fontSize = 12.sp,
                     track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
-                if (mode == DownloadRouteMode.PROXY) {
+                if (mode == DownloadRouteMode.PROXY && relayProxy) {
+                    MotionTabs(if (useManualProxy) 1 else 0, listOf("Relay", "指定代理"),
+                        onSelect = { useManualProxy = it == 1; notice = null }, modifier = Modifier.fillMaxWidth(),
+                        treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 36.dp,
+                        fontSize = 12.sp, track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
+                }
+                if (mode == DownloadRouteMode.PROXY && (!relayProxy || useManualProxy)) {
                     MotionTabs(if (type == DownloadProxyType.SOCKS) 0 else 1, listOf("SOCKS5", "HTTP"),
                         onSelect = { type = if (it == 0) DownloadProxyType.SOCKS else DownloadProxyType.HTTP; notice = null },
                         modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
@@ -369,8 +389,12 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
                         "此来源的指定代理使用 SOCKS5；HTTP 暂不支持。",
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 }
-                if (mode == DownloadRouteMode.DIRECT) Text("直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。",
+                if (mode == DownloadRouteMode.DIRECT && !relayDirect) Text("直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                if ((mode == DownloadRouteMode.DIRECT && relayDirect) ||
+                    (mode == DownloadRouteMode.PROXY && relayProxy && !useManualProxy))
+                    Text("使用 Relay 联动 · 无需填写端口", style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant)
                 Text("用于该源后续请求与新下载；本次下载显式线路优先。网页认证仍遵循系统网络。",
                     style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 saved?.proxy?.let { Text("已保存 · " + proxyAddressLabel(it), style = MaterialTheme.typography.labelSmall,
@@ -381,10 +405,11 @@ internal fun SourceNetworkSettingsControl(sourceId: String, enabled: Boolean = t
                     MotionTextButton(onClick = {
                         try {
                             val selectedMode = mode
-                            if (selectedMode == DownloadRouteMode.PROXY && type == DownloadProxyType.HTTP &&
+                            val manualProxy = !relayProxy || useManualProxy
+                            if (selectedMode == DownloadRouteMode.PROXY && manualProxy && type == DownloadProxyType.HTTP &&
                                 (sourceId.startsWith("js_") || platformKind == PlatformKind.IOS))
                                 throw DownloadRouteException("此来源暂不支持 HTTP 代理，请选择 SOCKS5。")
-                            val endpoint = if (selectedMode == DownloadRouteMode.PROXY)
+                            val endpoint = if (selectedMode == DownloadRouteMode.PROXY && manualProxy)
                                 DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type) else null
                             store.setSource(sourceId, selectedMode?.let { SourceNetworkSettings(it, endpoint) })
                             notice = null
@@ -410,9 +435,14 @@ internal fun DownloadRouteControl(
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
+    val relay = remember(context) { RelayLinkController.get(context) }
+    val relayState by relay.state.collectAsStateWithLifecycle()
+    val relayProxy = remember(relayState) { currentRelayBinding(DownloadRouteMode.PROXY) != null }
+    val relayDirect = remember(relayState) { currentRelayBinding(DownloadRouteMode.DIRECT) != null }
     DownloadRouteSelector(
         category = category, selected = settings.categoryOverrides[category],
-        inherited = settings.defaultMode, hasProxy = settings.proxy != null,
+        inherited = settings.defaultMode, hasProxy = settings.proxy != null || relayProxy,
+        relayManaged = relayDirect || relayProxy,
         taskOnly = false, onSelect = { store.setCategory(category, it) }, compact = compact,
         modifier = modifier, enabled = enabled, backdrop = backdrop,
     )
@@ -431,10 +461,14 @@ internal fun TaskDownloadRouteControl(
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
+    val relay = remember(context) { RelayLinkController.get(context) }
+    val relayState by relay.state.collectAsStateWithLifecycle()
+    val relayProxy = remember(relayState) { currentRelayBinding(DownloadRouteMode.PROXY) != null }
+    val relayDirect = remember(relayState) { currentRelayBinding(DownloadRouteMode.DIRECT) != null }
     DownloadRouteSelector(
         category = category, selected = selected,
         inherited = settings.categoryOverrides[category] ?: settings.defaultMode,
-        hasProxy = settings.proxy != null, taskOnly = true, onSelect = onSelect,
+        hasProxy = settings.proxy != null || relayProxy, relayManaged = relayDirect || relayProxy, taskOnly = true, onSelect = onSelect,
         modifier = modifier, enabled = enabled, backdrop = backdrop,
     )
 }
@@ -445,6 +479,7 @@ private fun DownloadRouteSelector(
     selected: DownloadRouteMode?,
     inherited: DownloadRouteMode,
     hasProxy: Boolean,
+    relayManaged: Boolean,
     taskOnly: Boolean,
     onSelect: (DownloadRouteMode?) -> Unit,
     modifier: Modifier,
@@ -471,7 +506,8 @@ private fun DownloadRouteSelector(
     val scopeHelp = if (taskOnly && category == DownloadCategory.CHAPTERS) "默认按所选漫画源确定；显式选择只用于本次下载。"
         else if (taskOnly) "只用于本次下载，不更改默认线路。"
         else "新任务使用此线路；已有任务需选择“使用当前设置重试”。"
-    val directHelp = "直连只跳过 HTTP / SOCKS，系统 VPN 仍可能接管。"
+    val directHelp = if (relayManaged) "直连与未指定地址的代理交给 Relay；联动中断时明确失败，不会自动换线。"
+        else "直连只跳过 HTTP / SOCKS，系统 VPN 仍可能接管。"
     val panel: @Composable () -> Unit = {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(Modifier.fillMaxWidth().padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -643,7 +679,7 @@ private fun ProxyValueField(
 internal fun downloadRouteLabel(mode: DownloadRouteMode): String = when (mode) {
     DownloadRouteMode.SYSTEM -> "跟随系统"
     DownloadRouteMode.DIRECT -> "直连"
-    DownloadRouteMode.PROXY -> "指定代理"
+    DownloadRouteMode.PROXY -> "代理"
 }
 
 internal fun downloadCategoryLabel(category: DownloadCategory): String = when (category) {

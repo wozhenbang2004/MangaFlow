@@ -6,7 +6,8 @@ import io.ktor.client.engine.ProxyBuilder
 import io.ktor.client.engine.darwin.Darwin
 import platform.Foundation.NSHTTPCookieAcceptPolicy.NSHTTPCookieAcceptPolicyNever
 
-internal actual fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, configure: HttpClientConfig<*>.() -> Unit): HttpClient {
+internal actual fun platformHttpClient(http1Only: Boolean, route: DownloadRouteSnapshot?, observeRelayTraffic: Boolean, configure: HttpClientConfig<*>.() -> Unit): HttpClient {
+    if (route?.relayBinding != null) throw DownloadRouteException("Relay 联动线路仅支持 Android，请选择当前设备的线路。")
     val endpoint = route?.takeIf { it.mode == DownloadRouteMode.PROXY }?.proxy
     if (endpoint?.type == DownloadProxyType.HTTP) {
         throw DownloadRouteException("当前 iOS 下载引擎不支持通过 HTTP 代理下载 HTTPS 文件，请改用 SOCKS 代理或其他线路。")

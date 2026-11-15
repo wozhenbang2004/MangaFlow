@@ -1,5 +1,7 @@
 package dev.mangaflow.data.plugins
 
+import dev.mangaflow.net.observeRelayRoute
+
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRouteException
@@ -59,13 +61,13 @@ import dev.mangaflow.data.plugins.JvmScriptNetwork.MAX_ARGUMENT_CHARS
 import dev.mangaflow.data.plugins.JvmScriptNetwork.origin
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadCategory
-internal actual class JavascriptHttpSession actual constructor(private val enabled: Boolean, private val route: DownloadRouteSnapshot?, private val maximumBytes: Int, private val allowRedirects: Boolean) {
+internal actual class JavascriptHttpSession actual constructor(private val enabled: Boolean, private val route: DownloadRouteSnapshot?, private val maximumBytes: Int, private val allowRedirects: Boolean, private val observeRelayTraffic: Boolean) {
         private val owned = route != null
         private val client = if (route == null) defaultClient else {
             val sockets = publicSourceSocketFactory(route, ::isPublic)
             // Preserve the checked public DNS/TLS host. SOCKS receives the verified numerical IP.
             defaultClient.newBuilder().connectionPool(ConnectionPool()).dispatcher(Dispatcher())
-                .apply { if (sockets != null) socketFactory(sockets) }.build()
+                .apply { if (sockets != null) socketFactory(sockets) }.observeRelayRoute(route, observeRelayTraffic).build()
         }
 
         actual fun close() {

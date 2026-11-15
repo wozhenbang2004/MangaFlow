@@ -1,5 +1,8 @@
 package dev.mangaflow.storage
 
+import dev.mangaflow.net.writeRelayBinding
+import dev.mangaflow.net.readRelayBinding
+
 import dev.mangaflow.platform.PlatformContext as Context
 import dev.mangaflow.platform.storage.*
 import dev.mangaflow.platform.storage.StorageFile as File
@@ -1612,13 +1615,14 @@ private fun readRecord(json: JSONObject): DownloadRecord {
 
 private fun DownloadRouteSnapshot.progressLabel(): String = when (mode) {
     DownloadRouteMode.SYSTEM -> "跟随系统"
-    DownloadRouteMode.DIRECT -> "直连"
-    DownloadRouteMode.PROXY -> "指定代理"
+    DownloadRouteMode.DIRECT -> if (relayBinding != null) "Relay 直连" else "直连"
+    DownloadRouteMode.PROXY -> if (relayBinding != null) "Relay 代理" else "指定代理"
 }
 
 /** No secrets are stored: only this task's already resolved endpoint and mode. */
 private fun DownloadRouteSnapshot.toDownloadJson() = JSONObject().apply {
     put("mode", mode.name)
+    writeRelayBinding(this)
     proxy?.let { endpoint ->
         put("host", endpoint.host); put("port", endpoint.port); put("type", endpoint.type.name)
     }
@@ -1627,10 +1631,11 @@ private fun DownloadRouteSnapshot.toDownloadJson() = JSONObject().apply {
 private fun readDownloadRoute(json: JSONObject): DownloadRouteSnapshot {
     val mode = DownloadRouteMode.entries.firstOrNull { it.name == json.optString("mode") }
         ?: throw DownloadRouteException("已保存的下载线路无效，请重新选择线路并重试。")
-    val proxy = if (mode == DownloadRouteMode.PROXY) {
+    val binding = readRelayBinding(json)
+    val proxy = if (mode == DownloadRouteMode.PROXY && binding == null) {
         val type = DownloadProxyType.entries.firstOrNull { it.name == json.optString("type") }
             ?: throw DownloadRouteException("已保存的代理类型无效，请重新选择线路并重试。")
         DownloadProxyEndpoint(json.getString("host"), json.getInt("port"), type)
     } else null
-    return DownloadRouteSnapshot(mode, proxy).checked()
+    return DownloadRouteSnapshot(mode, proxy, binding).checked()
 }

@@ -1,5 +1,7 @@
 package dev.mangaflow.data
 
+import dev.mangaflow.net.identity
+
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.platform.sha256
@@ -15,8 +17,7 @@ internal class ChapterDownloadTransport(
     val connectionCheck: Boolean = false,
 ) : AbstractCoroutineContextElement(Key) {
     // Completed metadata may survive a retry on this exact route; ordinary reads have no scope.
-    val cacheKey: String = sha256((route.mode.name + "|" + route.proxy?.type?.name.orEmpty() + "|" +
-        route.proxy?.host.orEmpty() + "|" + route.proxy?.port?.toString().orEmpty()).encodeToByteArray())
+    val cacheKey: String = sha256(route.identity().encodeToByteArray())
         .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
     companion object Key : CoroutineContext.Key<ChapterDownloadTransport>
 }

@@ -1,5 +1,7 @@
 package dev.mangaflow.data.plugins
 
+import dev.mangaflow.net.RelayTunnelSocketFactory
+
 import dev.mangaflow.net.DownloadProxyType
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
@@ -23,6 +25,7 @@ internal fun publicSourceSocketFactory(
     isPublic: (InetAddress) -> Boolean,
 ): SocketFactory? {
     val route = selected.checked()
+    route.relayBinding?.let { return RelayTunnelSocketFactory(it, route.mode, isPublic) }
     if (route.mode != DownloadRouteMode.PROXY) return null
     if (route.proxy?.type != DownloadProxyType.SOCKS) {
         throw DownloadRouteException("第三方源下载暂不支持 HTTP 代理，请为此类选择 SOCKS 代理或直连。")

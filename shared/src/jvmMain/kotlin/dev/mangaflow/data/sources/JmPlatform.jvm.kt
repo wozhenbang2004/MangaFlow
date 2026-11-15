@@ -11,7 +11,7 @@ import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
-import dev.mangaflow.net.javaProxy
+import dev.mangaflow.net.applyDownloadRoute
 import dev.mangaflow.net.checked
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.storage.StorageFile
@@ -114,7 +114,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         val config = JmConfiguration.Builder().clientType(ClientType.API).retryTimes(0)
             .cacheSize(24 * 1024 * 1024).closeTimeoutMs(1_000).build()
         val bundle = OkHttpBuilder.build(config)
-        val http = bundle.client.newBuilder().proxy(route.javaProxy()).retryOnConnectionFailure(false).build()
+        val http = bundle.client.newBuilder().applyDownloadRoute(route).retryOnConnectionFailure(false).build()
         val created = JmApiClient(config, http, bundle.cookieManager, bundle.domainManager)
         try {
             created.initializeAsync().get()
@@ -529,12 +529,11 @@ private class RoutedJmDownloadSession(
         val active = synchronized(control) {
             if (closed) throw CancellationException("下载已停止")
             client ?: run {
-                val proxy = route.javaProxy()
                 val config = JmConfiguration.Builder().clientType(ClientType.API)
                     .retryTimes(2).cacheSize(24 * 1024 * 1024).downloadThreadPoolSize(1)
                     .closeTimeoutMs(1_000).build()
                 val bundle = OkHttpBuilder.build(config)
-                val http = bundle.client.newBuilder().proxy(proxy).build()
+                val http = bundle.client.newBuilder().applyDownloadRoute(route).build()
                 JmApiClient(config, http, bundle.cookieManager, bundle.domainManager).also { client = it }
             }
         }

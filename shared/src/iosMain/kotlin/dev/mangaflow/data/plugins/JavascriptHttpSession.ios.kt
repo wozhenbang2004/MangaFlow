@@ -52,6 +52,7 @@ internal actual class JavascriptHttpSession actual constructor(
     private val route: DownloadRouteSnapshot?,
     private val maximumBytes: Int,
     private val allowRedirects: Boolean,
+    private val observeRelayTraffic: Boolean,
 ) {
     private val operations = atomic(0)
     private val slots = Semaphore(2)
@@ -158,6 +159,7 @@ internal actual class JavascriptHttpSession actual constructor(
         timeoutMillis: Long = 15_000L, onBytes: ((Long) -> Unit)? = null,
         onResponse: ((Int, Map<String, String>) -> Unit)? = null, imageTransfer: Boolean = false): NativeScriptResponse {
         val selected = route?.checked()
+        if (selected?.relayBinding != null) throw DownloadRouteException("Relay 联动线路仅支持 Android，请选择当前设备的线路。")
         if (selected?.mode == DownloadRouteMode.PROXY && selected.proxy?.type != DownloadProxyType.SOCKS)
             throw DownloadRouteException("第三方脚本来源在 iOS 上仅支持指定 SOCKS5 代理，暂不支持 HTTP 代理。")
         if (selected == null || selected.mode == DownloadRouteMode.SYSTEM) checkNativeSystemProxy()

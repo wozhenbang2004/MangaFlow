@@ -82,7 +82,8 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                     checkPackage()
                     val route = if (allowNetwork) currentCoroutineContext()[ChapterDownloadTransport]?.route
                         ?: DownloadRoutingStore.get(application).sourceSnapshot(bundle.sourceId) else null
-                    val network = JavascriptHttpSession(allowNetwork, route, MAX_RESPONSE_BYTES, allowRedirects)
+                    val network = JavascriptHttpSession(allowNetwork, route, MAX_RESPONSE_BYTES, allowRedirects,
+                        currentCoroutineContext()[ChapterDownloadTransport]?.connectionCheck != true)
                     requests = network
                     js.memoryLimit = 48L * 1024 * 1024
                     js.maxStackSize = 256L * 1024
@@ -216,7 +217,7 @@ class JavascriptSourceRuntime(context: PlatformContext) {
 private val ScriptSourcePackage.isVenera: Boolean get() = metadata.optString("protocol") == "venera"
 internal expect suspend fun prepareJavascriptEngine(context: PlatformContext)
 internal expect fun javascriptCodec(raw: String): String
-internal expect class JavascriptHttpSession(enabled: Boolean, route: DownloadRouteSnapshot?, maximumBytes: Int, allowRedirects: Boolean = true) {
+internal expect class JavascriptHttpSession(enabled: Boolean, route: DownloadRouteSnapshot?, maximumBytes: Int, allowRedirects: Boolean = true, observeRelayTraffic: Boolean = true) {
     suspend fun request(raw: String): String
     fun close()
 }

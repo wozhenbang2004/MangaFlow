@@ -1,5 +1,8 @@
 package dev.mangaflow.update
 
+import dev.mangaflow.net.writeRelayBinding
+import dev.mangaflow.net.readRelayBinding
+
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.NetworkClient
 import dev.mangaflow.net.DownloadCategory
@@ -288,6 +291,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
             .put("code", release.versionCode).put("version", release.versionName).put("notes", release.notes.take(6000))
             .put("url", release.url).put("sha256", release.sha256).put("bytes", release.bytes)
             .put("sourceCommit", release.sourceCommit).put("route", route.mode.name)
+        route.writeRelayBinding(json)
         if (proxy != null) json.put("proxy", JSONObject().put("host", proxy.host).put("port", proxy.port).put("type", proxy.type.name))
         val atomic = StorageAtomicFile(checkpoint)
         val output = atomic.startWrite()
@@ -312,7 +316,7 @@ actual class UpdateManager private constructor(private val context: PlatformCont
         val proxy = json.optJSONObject("proxy")?.let {
             DownloadProxyEndpoint(it.getString("host"), it.getInt("port"), DownloadProxyType.valueOf(it.getString("type")))
         }
-        val route = DownloadRouteSnapshot(DownloadRouteMode.valueOf(json.getString("route")), proxy).checked()
+        val route = DownloadRouteSnapshot(DownloadRouteMode.valueOf(json.getString("route")), proxy, readRelayBinding(json)).checked()
         val status = json.getString("status")
         require(status in setOf("queued", "running", "verifying", "paused", "failed", "completed"))
         return RetainedUpdate(AppRelease(code, version, json.optString("notes"), url, hash, bytes, 0,

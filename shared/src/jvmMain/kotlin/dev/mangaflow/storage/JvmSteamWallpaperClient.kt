@@ -1,4 +1,5 @@
 package dev.mangaflow.storage
+import dev.mangaflow.net.resolveRelayEndpoint
 
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadProxyType
@@ -541,7 +542,8 @@ internal class JvmSteamWallpaperClient(
                 requireCurrent(lane, token, lease)
                 val unrouted = restoredRequest ?: makeRequest() ?: return@launch
                 requireCurrent(lane, token, lease)
-                var request = routedRequest(unrouted, route ?: steamRoute())
+                val frozenRoute = route ?: steamRoute()
+                var request = routedRequest(unrouted, frozenRoute)
                 if (download != null) {
                     val root = File(cacheDirectory(app).path, "steam-wallpapers")
                     check(root.isDirectory || root.mkdirs())
@@ -552,7 +554,7 @@ internal class JvmSteamWallpaperClient(
                         put("directory", checkNotNull(directory).absolutePath); put("maxBytes", MAX_MEDIA)
                     }
                 }
-                runNative(lane, token, lease, request, timeout) { event ->
+                runNative(lane, token, lease, request, timeout, frozenRoute) { event ->
                     when {
                         lane.kind == LaneKind.TRANSFER && event.text("kind") == "complete" -> {
                             val value = event.text("primaryFile")
@@ -689,7 +691,7 @@ internal class JvmSteamWallpaperClient(
 
     private suspend fun runNative(
         lane: Lane, token: Long, lease: SessionLease?, request: JsonObject, timeout: Long,
-        onEvent: suspend (JsonObject) -> Unit,
+        route: DownloadRouteSnapshot, onEvent: suspend (JsonObject) -> Unit,
     ) = withTimeout(timeout) {
         requireCurrent(lane, token, lease)
         val handle = SteamNative.nativeStart(request.toString())
@@ -727,6 +729,7 @@ internal class JvmSteamWallpaperClient(
                             else -> "download_stalled"
                         })
                 }
+                route.relayBinding?.let { resolveRelayEndpoint(it, route.mode) }
                 val raw = SteamNative.nativePoll(handle)
                 if (raw == null) { delay(if (foreground) 32L else 160L); continue }
                 if (raw.length !in 1..MAX_EVENT) throw SteamFailure("invalid_response")
@@ -933,25 +936,32 @@ internal class JvmSteamWallpaperClient(
 
     private fun steamRoute(): DownloadRouteSnapshot {
         val route = DownloadRoutingStore.get(app).snapshot(DownloadCategory.STEAM_WALLPAPERS)
-        if (route.mode == DownloadRouteMode.PROXY && route.proxy == null)
+        if (route.mode == DownloadRouteMode.PROXY && route.proxy == null && route.relayBinding == null)
             throw DownloadRouteException("尚未配置代理，请先在网络与下载中填写代理地址。")
         return route
     }
 
     private fun routedRequest(request: JsonObject, route: DownloadRouteSnapshot): JsonObject = buildJsonObject {
         request.forEach { (key, value) -> put(key, value) }
+        val managed = route.relayBinding?.let { resolveRelayEndpoint(it, route.mode) }
         put("network", buildJsonObject {
-            put("kind", when (route.mode) {
-                DownloadRouteMode.SYSTEM -> "SYSTEM"
-                DownloadRouteMode.DIRECT -> "DIRECT"
-                DownloadRouteMode.PROXY -> when (checkNotNull(route.proxy).type) {
-                    DownloadProxyType.HTTP -> "HTTP"
-                    DownloadProxyType.SOCKS -> "SOCKS5"
+            if (managed != null) {
+                // This object goes only to JNI memory. Session/vault/checkpoints receive unrouted data.
+                put("kind", "HTTP_AUTH"); put("host", managed.host); put("port", managed.port)
+                put("username", managed.username); put("password", managed.password)
+            } else {
+                put("kind", when (route.mode) {
+                    DownloadRouteMode.SYSTEM -> "SYSTEM"
+                    DownloadRouteMode.DIRECT -> "DIRECT"
+                    DownloadRouteMode.PROXY -> when (checkNotNull(route.proxy).type) {
+                        DownloadProxyType.HTTP -> "HTTP"
+                        DownloadProxyType.SOCKS -> "SOCKS5"
+                    }
+                })
+                if (route.mode == DownloadRouteMode.PROXY) {
+                    val proxy = checkNotNull(route.proxy)
+                    put("host", proxy.host); put("port", proxy.port)
                 }
-            })
-            if (route.mode == DownloadRouteMode.PROXY) {
-                val proxy = checkNotNull(route.proxy)
-                put("host", proxy.host); put("port", proxy.port)
             }
         })
     }
@@ -1028,7 +1038,7 @@ internal class JvmSteamWallpaperClient(
             "profile_unavailable", "profile_timeout" -> "暂时无法读取 Steam 公开资料，登录仍然保留。"
             "too_large", "size_limit" -> "这份壁纸超过 512 MB，请选择较小的项目。"
             "unsupported_media" -> "这份项目不能直接作为原始图片或视频导入。"
-            "network_configuration" -> "Steam 连接线路未配置，请先设置应用代理地址。"
+            "network_configuration" -> "Steam 连接组件不支持这条线路，或线路配置已失效，请更新组件并检查网络设置。"
             "component_unavailable" -> "Steam 组件未能准备好，请检查网络后重试。"
             "not_found" -> "这份壁纸已不可用，请刷新后重试。"
             "download_failed" -> "壁纸下载未完成，请检查网络后重试。"

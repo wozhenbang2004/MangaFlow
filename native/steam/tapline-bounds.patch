@@ -2,11 +2,12 @@ diff --git a/crates/tapline-rt-tokio/src/network.rs b/crates/tapline-rt-tokio/sr
 new file mode 100644
 --- /dev/null
 +++ b/crates/tapline-rt-tokio/src/network.rs
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,111 @@
 +//! Immutable per-owner routes. These never alter process environment or OS VPN policy.
 +use std::io;
 +use std::time::Duration;
 +use tokio::net::TcpStream;
++use tokio::io::{AsyncReadExt, AsyncWriteExt};
 +use tokio::time::timeout;
 +use tokio_socks::tcp::Socks5Stream;
 +
@@ -16,7 +17,21 @@ new file mode 100644
 +    System,
 +    Direct,
 +    Http { host: String, port: u16 },
++    HttpAuthenticated { host: String, port: u16, username: String, password: String },
 +    Socks5 { host: String, port: u16 },
++}
++
++// Diagnostics may describe a route kind but never its proxy credentials.
++impl std::fmt::Debug for NetworkRoute {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str(match self {
++            Self::System => "System",
++            Self::Direct => "Direct",
++            Self::Http { .. } => "Http",
++            Self::HttpAuthenticated { .. } => "HttpAuthenticated(redacted)",
++            Self::Socks5 { .. } => "Socks5",
++        })
++    }
 +}
 +
 +fn valid_host(host: &str, port: u16) -> bool {
@@ -44,6 +59,31 @@ new file mode 100644
 +                        .map_err(|_| io::Error::new(io::ErrorKind::ConnectionRefused, "HTTP proxy connection failed"))?;
 +                    stream
 +                }
++                Self::HttpAuthenticated { host: proxy_host, port: proxy_port, username, password } => {
++                    if proxy_host != "127.0.0.1" || *proxy_port == 0 ||
++                        username.is_empty() || username.len() > 256 || password.is_empty() || password.len() > 512 ||
++                        username.chars().any(|c| !c.is_ascii_graphic() || c == ':') ||
++                        password.chars().any(|c| !c.is_ascii_graphic()) {
++                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid managed proxy"));
++                    }
++                    let mut stream = TcpStream::connect((proxy_host.as_str(), *proxy_port)).await?;
++                    let authority = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
++                    let auth = basic64(format!("{username}:{password}").as_bytes());
++                    stream.write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Authorization: Basic {auth}\r\n\r\n").as_bytes()).await?;
++                    let mut response = Vec::new();
++                    loop {
++                        if response.len() >= 8192 { return Err(io::Error::new(io::ErrorKind::InvalidData, "managed proxy response too large")); }
++                        let mut byte = [0u8; 1];
++                        stream.read_exact(&mut byte).await?;
++                        response.push(byte[0]);
++                        if response.ends_with(b"\r\n\r\n") { break; }
++                    }
++                    let status = response.split(|byte| *byte == b'\n').next().unwrap_or_default();
++                    if !(status.starts_with(b"HTTP/1.1 200 ") || status.starts_with(b"HTTP/1.0 200 ")) {
++                        return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "managed proxy rejected request"));
++                    }
++                    stream
++                }
 +                Self::Socks5 { host: proxy_host, port: proxy_port } => {
 +                    if !valid_host(proxy_host, *proxy_port) {
 +                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid proxy"));
@@ -58,6 +98,21 @@ new file mode 100644
 +            Ok(stream)
 +        }).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))?
 +    }
++}
++
++fn basic64(bytes: &[u8]) -> String {
++    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++    let mut output = String::new();
++    for part in bytes.chunks(3) {
++        let a = part[0] as usize;
++        let b = part.get(1).copied().unwrap_or(0) as usize;
++        let c = part.get(2).copied().unwrap_or(0) as usize;
++        output.push(TABLE[a >> 2] as char);
++        output.push(TABLE[((a & 3) << 4) | (b >> 4)] as char);
++        output.push(if part.len() > 1 { TABLE[((b & 15) << 2) | (c >> 6)] as char } else { '=' });
++        output.push(if part.len() > 2 { TABLE[c & 63] as char } else { '=' });
++    }
++    output
 +}
 diff --git a/crates/tapline-rt-tokio/Cargo.toml b/crates/tapline-rt-tokio/Cargo.toml
 --- a/crates/tapline-rt-tokio/Cargo.toml

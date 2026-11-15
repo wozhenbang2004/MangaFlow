@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RUN_USER_INITIATED_JOBS" />
     <queries>
+        <package android:name="dev.relay.android.network" />
+        <package android:name="dev.relay.android" />
         <intent>
             <action android:name="android.intent.action.TRANSLATE" />
         </intent>
@@ -39,6 +41,8 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".RelayLinkAuthorizationActivity" android:exported="false"
+            android:excludeFromRecents="true" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <activity android:name=".WallpaperImportActivity"
             android:exported="true"
             android:launchMode="singleTop"

@@ -13,6 +13,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import dev.mangaflow.experience.initializeExperienceImages
+import dev.mangaflow.background.ApplicationOperations
+import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.RelayLinkController
 import dev.mangaflow.platform.LocalMangaContext
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.ui.AppLaunchReveal
@@ -27,6 +30,9 @@ import dev.mangaflow.update.UpdateManager
 
 /** Every native entry initializes the same actual application services, then mounts the same UI. */
 fun initializeMangaFlow(context: PlatformContext) {
+    val relay = RelayLinkController.get(context)
+    DownloadRoutingStore.get(context)
+    relay.start(ApplicationOperations.get(context).scope)
     MangaHazeRuntime.initialize(context)
     initializeExperienceImages(context)
     UpdateManager.get(context).start()

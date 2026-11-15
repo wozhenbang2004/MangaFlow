@@ -136,12 +136,13 @@ fn shared() -> Arc<Shared> {
 }
 
 fn routed_shared(request: &mut Value) -> Result<(Arc<Shared>, NetworkRoute), &'static str> {
-    let network = request.get_mut("network").map(Value::take).ok_or("network_configuration")?;
+    let network_secret = SecretValue(request.get_mut("network").map(Value::take).ok_or("network_configuration")?);
+    let network = &network_secret.0;
     let kind = network.get("kind").and_then(Value::as_str).ok_or("network_configuration")?;
     let route = match kind {
         "SYSTEM" => NetworkRoute::System,
         "DIRECT" => NetworkRoute::Direct,
-        "HTTP" | "SOCKS5" => {
+        "HTTP" | "SOCKS5" | "HTTP_AUTH" => {
             let host = text(&network, "host").ok_or("network_configuration")?;
             let port = network.get("port").and_then(Value::as_u64)
                 .filter(|port| (1..=65535).contains(port)).ok_or("network_configuration")? as u16;
@@ -149,7 +150,16 @@ fn routed_shared(request: &mut Value) -> Result<(Arc<Shared>, NetworkRoute), &'s
                 c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | '@' | '?' | '#' | '[' | ']')) {
                 return Err("network_configuration");
             }
-            if kind == "HTTP" { NetworkRoute::Http { host, port } }
+            if kind == "HTTP_AUTH" {
+                let username = text(network, "username").ok_or("network_configuration")?;
+                let password = text(network, "password").ok_or("network_configuration")?;
+                if host != "127.0.0.1" || username.is_empty() || username.len() > 256 || password.is_empty() || password.len() > 512 ||
+                    username.chars().any(|c| !c.is_ascii_graphic() || c == ':') || password.chars().any(|c| !c.is_ascii_graphic()) {
+                    return Err("network_configuration");
+                }
+                NetworkRoute::HttpAuthenticated { host, port, username, password }
+            }
+            else if kind == "HTTP" { NetworkRoute::Http { host, port } }
             else { NetworkRoute::Socks5 { host, port } }
         }
         _ => return Err("network_configuration"),

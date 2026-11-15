@@ -1,5 +1,7 @@
 package dev.mangaflow.data.plugins
 
+import dev.mangaflow.net.identity
+
 import dev.mangaflow.data.ChapterDownloadTransport
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
@@ -200,8 +202,7 @@ suspend fun resolveScriptPage(
     imageState(original.sourceRevision.isNotBlank() && original.sourceRevision == bundle.digest, "图片来源已更新，请刷新本章后重试。")
     val transport = currentCoroutineContext()[ChapterDownloadTransport]
     val selectedRoute = route ?: transport?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId)
-    val routeKey = selectedRoute?.let { it.mode.name + "|" + it.proxy?.type?.name.orEmpty() + "|" +
-        it.proxy?.host.orEmpty() + "|" + it.proxy?.port?.toString().orEmpty() } ?: "reader"
+    val routeKey = selectedRoute?.identity() ?: "reader"
     val key = ImageRequestKey(ref.sourceId, owner, bundle.digest, epoch, original.sourceImageToken, routeKey)
     return imageGates[(key.hashCode() and Int.MAX_VALUE) % imageGates.size].withLock {
         synchronized(imageStateLock) {
