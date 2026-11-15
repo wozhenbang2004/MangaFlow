@@ -63,13 +63,18 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     val active = visible && lifecycle.isAtLeast(Lifecycle.State.RESUMED)
     var expanded by rememberSaveable { mutableStateOf<String?>(null) }
-    val scroll = rememberScrollState()
+    val overviewScroll = rememberScrollState()
+    val detailScroll = rememberScrollState()
+    val scroll = if (expanded == null) overviewScroll else detailScroll
+    LaunchedEffect(expanded) { if (expanded != null) detailScroll.scrollTo(0) }
     val colors = MaterialTheme.colorScheme
-    MotionDialog(visible, onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp) {
+    MotionDialog(visible, onDismissRequest = {
+        if (expanded != null) expanded = null else onDismiss()
+    }, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp) {
         val maximumHeight = minOf(LocalMangaWindow.current.height * .9f, 640.dp)
         val panel: @Composable () -> Unit = {
-            Column(Modifier.fillMaxWidth().heightIn(max = maximumHeight)
+            // One stable panel size: navigation changes its content, never its outer window.
+            Column(Modifier.fillMaxWidth().height(minOf(maximumHeight, 480.dp).coerceAtLeast(1.dp))
                 .padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("体验策略", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
@@ -136,20 +141,40 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
         }
     }
     Column(Modifier.fillMaxWidth().motionInputGate(active)) {
-        SettingsChoices(ExperienceMode.entries.map { it to experienceModeLabel(it) }, budget.mode) { mode ->
-            if (active) {
-                closeEditor()
-                try { store.setMode(mode); notice = null }
-                catch (_: Exception) { notice = "模式未保存，请重试" }
+        if (expanded == null) {
+            SettingsChoices(ExperienceMode.entries.map { it to experienceModeLabel(it) }, budget.mode) { mode ->
+                if (active) {
+                    closeEditor()
+                    try { store.setMode(mode); notice = null }
+                    catch (_: Exception) { notice = "模式未保存，请重试" }
+                }
+            }
+            if (budget.protections.isNotEmpty()) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 36.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Icon(Icons.Outlined.Shield, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
+                    Text(budget.protections.joinToString(" · "), Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        } else {
+            MotionTextButton(onClick = { toggle(expanded) }, enabled = active,
+                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
+                modifier = Modifier.heightIn(min = 44.dp)) {
+                Icon(Icons.Outlined.ArrowBack, null, Modifier.size(18.dp), tint = colors.onSurface)
+                Spacer(Modifier.width(6.dp))
+                Text("全部策略", style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
             }
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
         notice?.let {
             Text(it, Modifier.fillMaxWidth().padding(bottom = 6.dp),
                 style = MaterialTheme.typography.bodySmall, color = colors.error)
         }
 
-        SettingsDisclosure("阅读与预取",
+        if (expanded == null || expanded == "reading") SettingsDisclosure("阅读与预取",
             if (custom.prefetchMode == PrefetchMode.OFF) "已关闭"
             else budget.prefetchAhead.toString() + " 待读 · " + budget.prefetchBehind + " 回看",
             Icons.Outlined.AutoStories, expanded == "reading", { toggle("reading") },
@@ -202,7 +227,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        SettingsDisclosure("图像质量与渲染", "预解码 " + budget.decodedPrefetchPages + " 页",
+        if (expanded == null || expanded == "rendering") SettingsDisclosure("图像质量与渲染", "预解码 " + budget.decodedPrefetchPages + " 页",
             Icons.Outlined.Image, expanded == "rendering", { toggle("rendering") },
             compact = true, modified = custom.decodedPrefetchPages != null || custom.decodeRequests != null) {
             ExperienceNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
@@ -222,7 +247,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        SettingsDisclosure("多源与补页", when {
+        if (expanded == null || expanded == "sources") SettingsDisclosure("多源与补页", when {
             budget.sourceRecovery == SourceRecoveryMode.OFF -> "按需切源"
             budget.standbySources == 0 -> "预热暂停"
             else -> "备用 " + budget.standbySources + " 源"
@@ -245,7 +270,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        SettingsDisclosure("下载与后台",
+        if (expanded == null || expanded == "downloads") SettingsDisclosure("下载与后台",
             if (budget.backgroundPages == 0) "暂缓新请求"
             else budget.backgroundPages.toString() + " 页 · " + budget.chapterParallelism + " 章",
             Icons.Outlined.Download, expanded == "downloads", { toggle("downloads") },
@@ -275,7 +300,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        SettingsDisclosure("缓存与离线", cacheUsage(usage.diskBytes, usage.diskLimit),
+        if (expanded == null || expanded == "cache") SettingsDisclosure("缓存与离线", usage.diskBytes?.let { "已用 " + experienceCacheSize(it) } ?: "用量未知",
             Icons.Outlined.Storage, expanded == "cache", { toggle("cache") },
             compact = true, modified = custom.memoryMiB != null || custom.diskMiB != null) {
             ExperienceBudgetRow("解码内存", cacheUsage(usage.memoryBytes, usage.memoryLimit))
@@ -303,7 +328,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        SettingsDisclosure("显示与交互", when (custom.refresh) {
+        if (expanded == null || expanded == "display") SettingsDisclosure("显示与交互", when (custom.refresh) {
             null -> "跟随目标"; RefreshPreference.SYSTEM -> "跟随系统"; RefreshPreference.INTERACTION -> "交互高刷"
             RefreshPreference.MANUAL -> custom.refreshHz?.let { it.toString() + " Hz 请求" } ?: "指定刷新率"
         }, Icons.Outlined.Speed, expanded == "display", { toggle("display") },
@@ -337,7 +362,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        SettingsDisclosure("设备与资源保护", if (budget.protections.isEmpty()) "按需" else budget.protections.size.toString() + " 项保护",
+        if (expanded == null || expanded == "resources") SettingsDisclosure("设备与资源保护", if (budget.protections.isEmpty()) "按需" else budget.protections.size.toString() + " 项保护",
             Icons.Outlined.Tune, expanded == "resources", { toggle("resources") },
             compact = true, modified = custom.allowMeteredPrefetch || !custom.batteryProtection) {
             SettingsToggle("计费网络也可预取", custom.allowMeteredPrefetch, Icons.Outlined.NetworkCheck) { change(custom.copy(allowMeteredPrefetch = it)) }
