@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## CI270 shared settings compilation repair · 2026-11-15
+
+User reports “失败了” after the application/background publication0e9477e (exact message ID unavailable). Actual native run43676175113/job132696710242 failed :shared:compileKotlinDesktop at SettingsScreen.kt663:34: Unresolved reference Info. The new SettingsOperationStatus uses Icons.Outlined.Info but omitted its extension import. The bounded repair adds that import, retaining the application-operation status, cancellation and recovery behavior. Android270/run43676175112/job132697879151 and the same native run’s iOS job132696710036 subsequently completed with the same missing Info compiler error. Their actual final logs were also read before publication; no other compiler error was reported in the three retrieved logs.
+
+Evidence is the actual compiler log plus source/diff review; no tests, local builds or device/service probes. Preserve latest main, publish one complete expected-head repair and confirm normal Android/native CI activation only. Compilation and installed background behavior remain pending actual results/user feedback; do not replay the earlier async batch or create a status-only follow-up push.
+
 ## Asynchronous ownership and background recovery · source checkpoint 2026-11-15
 
 Current raw user requirement, source-audit findings, contracts and acceptance are recorded once in DESIGN ASYNC-215–224. Scope is the existing product's UI/app/durable task lifetimes, real Main blocking/dependency gaps and Android/native recovery.1133085 already published the prior CI fixes; do not replay them. Shared stores/account sessions now use one MangaApplicationServices graph; confirmed jobs use ApplicationOperations scope, reading outbox and chapter-preparation journals, while previews/search remain UI-owned.
