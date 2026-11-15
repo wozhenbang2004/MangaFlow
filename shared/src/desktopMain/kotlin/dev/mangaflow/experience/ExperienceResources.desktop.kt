@@ -33,7 +33,7 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
 internal actual fun observeExperienceResources(context: PlatformContext, changed: (Boolean) -> Unit): () -> Unit = {}
 
 internal actual fun createExperienceNetworkClient(route: DownloadRouteSnapshot?): ExperienceNetworkTransport {
-    val client = platformHttpClient(false, route) {
+    val client = platformHttpClient(false, route, observeRelayTraffic = true) {
     install(HttpTimeout) {
         connectTimeoutMillis = 20_000L
         socketTimeoutMillis = 45_000L

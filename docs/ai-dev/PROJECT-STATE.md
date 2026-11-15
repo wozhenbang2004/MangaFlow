@@ -1,5 +1,11 @@
 # MangaFlow · current work
 
+## Relay Link cross-platform compilation recovery · 2026-11-15
+
+Integration12bede854777bdad72f5b226395453f4ced4fbc4 is published on main. Android276/run43709223772 has completed APK assembly and was building the optional Steam component; native run43709223741 Windows job132796959615 actually failed :shared:compileKotlinDesktop at ExperienceResources.desktop.kt36 because its direct platformHttpClient call omitted the new observeRelayTraffic parameter. The matching iOS call has the same source omission; its archive was still running when inspected, so no iOS failure result is asserted.
+
+The bounded repair explicitly passes observeRelayTraffic=true at both actual experience download constructors. The common declaration and every platformHttpClient call were source-checked together; normal product transfers retain observation intent, diagnostics continue explicitly disabling it, and non-Android managed routes still fail closed. No transport/auth/route/UI contract is changed. The paired Relay0.3.2-network.1 signed arm64/x86 APKs and complete source are already saved; no Relay rebuild is needed. User's latest “继续” authorizes continuing this concrete build/delivery recovery. Root owns one expected-head repair submission and actual CI follow-up; no tests/local builds/probes, no cancellation of older Windows builds, and no installed acceptance claim.
+
 ## Relay integration · active 2026-11-15
 
 Current authorization and requirements are DESIGN RELAY-LINK-01–07; wire/frozen-route contract is docs/relay-link-protocol.md. User explicitly requests the whole supplied two-app integration and parallel implementation. Current baseline is main c8f3016552e723981a51e018107883510eef14f6 in an isolated cloud checkout; preserve other task worktrees. Relay source has been recovered separately from public-ready0.3.1/code25, not a verified repository main. Exact locked core AAR identity has been restored; private signing stays outside source.

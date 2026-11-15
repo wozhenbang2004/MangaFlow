@@ -33,7 +33,7 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
 }
 
 internal actual fun createExperienceNetworkClient(route: DownloadRouteSnapshot?): ExperienceNetworkTransport {
-    val client = platformHttpClient(false, route) {
+    val client = platformHttpClient(false, route, observeRelayTraffic = true) {
     install(HttpTimeout) {
         // Darwin supports socket/request timeouts; it has no separate Ktor connect timeout.
         socketTimeoutMillis = 45_000L
