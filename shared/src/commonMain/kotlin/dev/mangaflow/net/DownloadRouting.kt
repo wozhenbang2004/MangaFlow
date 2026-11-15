@@ -114,12 +114,14 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
         mutableState.value = readSettings()
     }
 
-    fun setProxy(endpoint: DownloadProxyEndpoint?) = synchronized(lock) {
+    fun setProxy(endpoint: DownloadProxyEndpoint?, useAsDefault: Boolean = false) = synchronized(lock) {
         val checked = endpoint?.let(::checkedProxy)
+        if (useAsDefault && checked == null) throw DownloadRouteException("请先填写有效的代理地址。")
         val editor = disk.edit()
         if (checked == null) editor.remove("proxy_host").remove("proxy_port").remove("proxy_type")
         else editor.putString("proxy_host", checked.host).putInt("proxy_port", checked.port)
             .putString("proxy_type", checked.type.name)
+        if (useAsDefault) editor.putString("default", DownloadRouteMode.PROXY.name)
         editor.apply()
         mutableState.value = readSettings()
     }

@@ -1,5 +1,13 @@
 # MangaFlow · current work
 
+## Network/download interaction repair · 2026-11-15
+
+User's current exact feedback “网络下载那块的 uiuxbug 很多啊。。。” is mapped to DESIGN NETWORK-UX-20261115-01–05. Baseline6473062 includes the authorized unified storage upgrade. Root is the sole writer; independent read-only review confirmed the ordinary/current-settings retry wording mismatch and reviewed window handoffs. Its initial generic-apply/disk-exception diagnosis was disproved by actual platform overrides and is withdrawn, rather than reported as a fixed crash.
+
+This bounded batch fixes Popup-owned nested route windows through real-exit handoff to the shared workspace, compacts route choices and moves help to a separate PANEL, combines proxy-save-and-use into one editor/state update, preserves completed settings-bound comparison results, closes transient UI on owner/scope changes, reports storage-read failures and removes the second90% viewport shrink. Keep source/task/frozen-route identities, exact existing diagnostics, original image/storage/download state and current animation primitives. No new screenshot or installed reproduction was provided, so remaining jitter is not claimed solved.
+
+Android267/run43673612651 for baseline6473062 completed successfully when read; its native applications run43673612578 was still in progress. These are preceding-build facts, not this UI batch's compilation or installed acceptance. Evidence for this batch is bounded source/configuration/identity and whitespace review only; no tests/local builds/device/service probes. Next exact action: finish final independent diff review, preserve actual latest main, publish one complete expected-head batch under the continuing authorization and confirm ordinary CI activation once without waiting for artifacts. If already in main, do not replay it; handle concrete later CI or installed UI evidence.
+
 ## Unified storage management · 2026-11-15
 
 Current request: full implementation of the user-supplied cache audit/upgrade proposal, followed by “去完整实现” (message ID unavailable); DESIGN STORAGE-20261115-01–05 is the requirements/quality/acceptance entry. Root owns the integrated write; independent read-only review identified and corrected Coil internal-LRU bypass, cross-source catalogue dependency, metadata omissions, stale file removal, legacy accounting, dropped maintenance and memory-skip risks. Existing main1133085 includes prior compile/source-network changes and must be retained.

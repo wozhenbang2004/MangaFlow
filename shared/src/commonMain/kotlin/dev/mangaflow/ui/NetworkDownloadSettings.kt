@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -174,9 +175,13 @@ private fun DownloadConnectionSettings(
                     finishEditing()
                 }
                 catch (failure: DownloadRouteException) {
-                    notice = "填写地址后即可使用指定代理。"
+                    notice = failure.message ?: "填写地址后即可使用指定代理。"
                     useAfterSave = chosen == DownloadRouteMode.PROXY
                     proxyExpanded = true
+                }
+                catch (_: Exception) {
+                    error = true
+                    notice = "线路未能保存，请重试。"
                 }
             }, modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
             fullWidthIndicator = true, controlHeight = 40.dp,
@@ -225,12 +230,17 @@ private fun DownloadConnectionSettings(
                     color = colors.onSurfaceVariant)
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     if (settings.proxy != null) MotionTextButton(enabled = active, onClick = {
-                        store.setProxy(null)
-                        host = ""
-                        port = ""
-                        finishEditing()
-                        error = false
-                        notice = "地址已移除；原有指定代理选择需重新配置。"
+                        try {
+                            store.setProxy(null)
+                            host = ""
+                            port = ""
+                            finishEditing()
+                            error = false
+                            notice = "地址已移除；原有指定代理选择需重新配置。"
+                        } catch (_: Exception) {
+                            error = true
+                            notice = "地址未能移除，请重试。"
+                        }
                     }) { Text("移除", style = MaterialTheme.typography.labelMedium) }
                     Spacer(Modifier.weight(1f))
                     MotionTextButton(enabled = active, onClick = {
@@ -243,8 +253,10 @@ private fun DownloadConnectionSettings(
                     }) { Text("取消") }
                     MotionTextButton(enabled = active, onClick = {
                         try {
-                            store.setProxy(DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type))
-                            if (useAfterSave) store.setDefault(DownloadRouteMode.PROXY)
+                            if (platformKind == PlatformKind.IOS && type == DownloadProxyType.HTTP)
+                                throw DownloadRouteException("当前平台暂不支持 HTTP 指定代理，请选择 SOCKS5。")
+                            store.setProxy(DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type),
+                                useAsDefault = useAfterSave)
                             val nowUsingProxy = useAfterSave || settings.defaultMode == DownloadRouteMode.PROXY
                             finishEditing()
                             error = false
@@ -253,6 +265,9 @@ private fun DownloadConnectionSettings(
                         } catch (failure: DownloadRouteException) {
                             error = true
                             notice = failure.message
+                        } catch (_: Exception) {
+                            error = true
+                            notice = "设置未能保存，填写内容已保留，请重试。"
                         }
                     }) { Text(if (useAfterSave) "保存并使用" else "保存地址") }
                 }
@@ -411,18 +426,35 @@ private fun DownloadRouteSelector(
     val followsSource = taskOnly && category == DownloadCategory.CHAPTERS && selected == null
     var expanded by remember(category, taskOnly) { mutableStateOf(false) }
     var notice by remember(category, taskOnly) { mutableStateOf<String?>(null) }
+    var showHelp by remember(category, taskOnly) { mutableStateOf(false) }
+    var pendingHelp by remember(category, taskOnly) { mutableStateOf(false) }
+    var popupPresent by remember(category, taskOnly) { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
-    LaunchedEffect(enabled) { if (!enabled) expanded = false }
+    LaunchedEffect(enabled) { if (!enabled) { expanded = false; pendingHelp = false; showHelp = false } }
+    LaunchedEffect(enabled, pendingHelp, popupPresent, expanded) {
+        if (enabled && pendingHelp && !popupPresent && !expanded) {
+            pendingHelp = false
+            showHelp = true
+        }
+    }
     val heading = if (taskOnly) "本次下载线路" else "本类下载默认线路"
+    val scopeHelp = if (taskOnly && category == DownloadCategory.CHAPTERS) "默认按所选漫画源确定；显式选择只用于本次下载。"
+        else if (taskOnly) "只用于本次下载，不更改默认线路。"
+        else "新任务使用此线路；已有任务需选择“使用当前设置重试”。"
+    val directHelp = "直连只跳过 HTTP / SOCKS，系统 VPN 仍可能接管。"
     val panel: @Composable () -> Unit = {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth().padding(start = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(heading, style = MaterialTheme.typography.titleSmall)
-                    Text(downloadCategoryLabel(category), style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant)
+            Row(Modifier.fillMaxWidth().padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(downloadCategoryLabel(category), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
+                    color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                MotionIconButton(onClick = {
+                    if (backdrop == null) showHelp = !showHelp
+                    else { pendingHelp = true; expanded = false }
+                }, enabled = enabled,
+                    modifier = Modifier.size(44.dp), tooltip = if (showHelp) "收起线路说明" else "线路说明") {
+                    Icon(Icons.Outlined.Info, "线路说明", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
                 }
-                MotionIconButton(onClick = { expanded = false }, modifier = Modifier.size(44.dp)) {
+                if (backdrop == null) MotionIconButton(onClick = { expanded = false }, modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Outlined.Close, "关闭线路选择", Modifier.size(20.dp))
                 }
             }
@@ -439,22 +471,23 @@ private fun DownloadRouteSelector(
                         notice = null
                         try { onSelect(choice); expanded = false }
                         catch (failure: DownloadRouteException) { notice = failure.message }
+                        catch (_: Exception) { notice = "线路未能保存，请重试。" }
                     },
                 )
             }
-            Text(if (taskOnly && category == DownloadCategory.CHAPTERS) "默认按所选漫画源确定；显式选择只用于本次下载。"
-                else if (taskOnly) "只用于本次下载，不更改默认线路。"
-                else "用于之后开始或手动重试的本类下载。",
-                modifier = Modifier.padding(horizontal = 10.dp),
-                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-            Text("直连只跳过 HTTP / SOCKS，系统 VPN 仍可能接管。", modifier = Modifier.padding(horizontal = 10.dp),
-                style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            if (showHelp && backdrop == null) {
+                Text(scopeHelp,
+                    modifier = Modifier.padding(horizontal = 10.dp),
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                Text(directHelp, modifier = Modifier.padding(horizontal = 10.dp),
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            }
             notice?.let { Text(it, modifier = Modifier.padding(horizontal = 10.dp),
                 style = MaterialTheme.typography.bodySmall, color = colors.error) }
         }
     }
     Box(modifier) {
-        MotionTextButton(onClick = { notice = null; expanded = !expanded }, enabled = enabled,
+        MotionTextButton(onClick = { notice = null; pendingHelp = false; expanded = !expanded }, enabled = enabled,
             modifier = Modifier.heightIn(min = 44.dp).semantics {
                 contentDescription = downloadCategoryLabel(category) + "的" + heading + "，" +
                     (if (followsSource) "跟随所选源" else downloadRouteLabel(effective) + if (selected == null) "，跟随默认" else "")
@@ -469,7 +502,27 @@ private fun DownloadRouteSelector(
         }
         if (backdrop != null) {
             CompactGlassPopover(visible = expanded && enabled, backdrop = backdrop,
-                onDismiss = { expanded = false }, maximumWidth = 280.dp) { panel() }
+                onDismiss = { expanded = false }, onPresenceChange = { popupPresent = it },
+                maximumWidth = 216.dp * LocalMangaWindow.current.fontScale.coerceIn(1f, 1.35f)) { panel() }
+        }
+    }
+    if (backdrop != null) MotionDialog(visible = showHelp && enabled, onDismissRequest = { showHelp = false },
+        maximumWidth = 360.dp) {
+        LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
+            role = GlassSurfaceRole.PANEL, softCard = true) {
+            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)
+                .verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(heading, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                    MotionIconButton(onClick = { showHelp = false }, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Outlined.Close, "关闭线路说明", Modifier.size(20.dp))
+                    }
+                }
+                Text(scopeHelp, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                Text(directHelp, Modifier.padding(bottom = 8.dp), style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant)
+            }
         }
     }
     if (backdrop == null) {
@@ -498,7 +551,7 @@ private fun RouteChoiceRow(
         .background(if (selected) colors.onSurface.copy(alpha = .045f) else colors.surfaceContainerLow)
         .clickable(enabled = enabled, interactionSource = interaction, indication = null,
             role = Role.Button, onClick = onClick).motionPress(interaction, enabled)
-        .heightIn(min = 48.dp).padding(horizontal = 10.dp, vertical = 8.dp),
+        .heightIn(min = 44.dp).padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(label, style = MaterialTheme.typography.bodyMedium,

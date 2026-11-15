@@ -56,13 +56,14 @@ internal enum class NetworkDownloadScene(val label: String) {
 @Composable
 internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDismiss: () -> Unit,
     repository: UnifiedMangaRepository? = null, registry: BodySourceRegistry? = null,
+    initialScene: NetworkDownloadScene = NetworkDownloadScene.CONNECTION,
 ) {
     val context = LocalMangaContext.current
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     val foreground = lifecycle.isAtLeast(Lifecycle.State.RESUMED)
     val colors = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
-    var scene by remember { mutableStateOf(NetworkDownloadScene.CONNECTION) }
+    var scene by remember { mutableStateOf(initialScene) }
     var showInfo by remember { mutableStateOf(false) }
     var environment by remember { mutableStateOf<DownloadNetworkEnvironment?>(null) }
     var environmentLoading by remember { mutableStateOf(false) }
@@ -102,7 +103,8 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
         val keyboard = LocalSoftwareKeyboardController.current
         LaunchedEffect(scene) { focus.clearFocus(force = true); keyboard?.hide() }
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
-            val maximumHeight = minOf(maxHeight, LocalMangaWindow.current.height * .9f, 640.dp)
+            // MotionDialog already provides the safe, IME-adjusted viewport. Use it once.
+            val maximumHeight = minOf(maxHeight, 640.dp)
             val panel: @Composable () -> Unit = {
                 Column(Modifier.fillMaxWidth().heightIn(max = maximumHeight)
                     .padding(horizontal = 16.dp, vertical = 8.dp),

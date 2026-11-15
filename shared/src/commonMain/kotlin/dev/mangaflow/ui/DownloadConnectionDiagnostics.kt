@@ -88,7 +88,16 @@ internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: 
         if (clearNotice) notice = null
     }
     LaunchedEffect(settings) { invalidate(clearNotice = false) }
-    LaunchedEffect(active) { if (!active) invalidate() }
+    LaunchedEffect(active) {
+        if (!active && job != null) {
+            generation += 1
+            job?.cancel()
+            job = null
+            notice = "检查已取消，可重新检查"
+        }
+        // A completed result belongs to its captured settings, not the selected tab.
+        // The settings effect and identity guards still discard genuinely stale evidence.
+    }
     DisposableEffect(Unit) { onDispose { generation += 1; job?.cancel() } }
 
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {

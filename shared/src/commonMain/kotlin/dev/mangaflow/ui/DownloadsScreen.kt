@@ -54,6 +54,7 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.CheckCircleOutline
@@ -212,6 +213,9 @@ fun DownloadsScreen(
     var expandedBooks by rememberSaveable { mutableStateOf(listOf<String>()) }
     var showImportSources by remember { mutableStateOf(false) }
     var showQueueActions by remember { mutableStateOf(false) }
+    var queueActionsPresent by remember { mutableStateOf(false) }
+    var pendingNetworkSettings by remember { mutableStateOf(false) }
+    var showNetworkSettings by remember { mutableStateOf(false) }
     var filterMenuExpanded by remember { mutableStateOf(false) }
     val filterChoices = remember { listOf(GlassTabChoice("全部", Icons.Outlined.Inventory2), GlassTabChoice("进行中", Icons.Outlined.Downloading), GlassTabChoice("已下载", Icons.Outlined.CheckCircleOutline)) }
     val preferredFilterWidth = morphGlassTabWidth(filterChoices)
@@ -268,8 +272,29 @@ fun DownloadsScreen(
     val completedEntries = manageableEntries.filter { it.status == DownloadStatus.COMPLETED }
     val usedBytes = visibleEntries.sumOf { it.downloadedBytes }
     var availableBytes by remember(store) { mutableStateOf<Long?>(null) }
-    LaunchedEffect(showQueueActions, store) {
-        if (showQueueActions) availableBytes = withContext(Dispatchers.IO) { store.availableStorageBytes() }
+    var spaceReadFailed by remember(store) { mutableStateOf(false) }
+    LaunchedEffect(showQueueActions, active, store) {
+        if (showQueueActions && active) {
+            availableBytes = null
+            spaceReadFailed = false
+            try { availableBytes = withContext(Dispatchers.IO) { store.availableStorageBytes() } }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { spaceReadFailed = true }
+        }
+    }
+    LaunchedEffect(active, includedSourceIds, excludedSourceIds) {
+        showQueueActions = false
+        filterMenuExpanded = false
+        showNetworkSettings = false
+        showImportSources = false
+        // An exiting menu cannot open a new window after its owning page/scope changes.
+        pendingNetworkSettings = false
+    }
+    LaunchedEffect(active, pendingNetworkSettings, queueActionsPresent, showQueueActions) {
+        if (pendingNetworkSettings && !queueActionsPresent && !showQueueActions) {
+            pendingNetworkSettings = false
+            if (active) showNetworkSettings = true
+        }
     }
 
     BackHandler(enabled = managing) { managing = false; selectedIds = emptySet() }
@@ -394,11 +419,16 @@ fun DownloadsScreen(
                                 Modifier.size(21.dp), tint = foreground)
                         }
                         Box {
-                            MotionIconButton(onClick = { showQueueActions = !showQueueActions }, modifier = Modifier.size(44.dp)) {
+                            MotionIconButton(onClick = {
+                                pendingNetworkSettings = false
+                                filterMenuExpanded = false
+                                showQueueActions = !showQueueActions
+                            }, enabled = active, modifier = Modifier.size(44.dp)) {
                                 Icon(Icons.Outlined.MoreHoriz, "存储与下载管理", Modifier.size(21.dp), tint = secondary)
                             }
-                            CompactGlassPopover(visible = showQueueActions, backdrop = backdrop,
+                            CompactGlassPopover(visible = showQueueActions && active, backdrop = backdrop,
                                 onDismiss = { showQueueActions = false },
+                                onPresenceChange = { queueActionsPresent = it },
                                 maximumWidth = 216.dp * LocalDensity.current.fontScale.coerceIn(1f, 1.35f)) {
                                 Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -407,12 +437,16 @@ fun DownloadsScreen(
                                         Text(downloadBytes(usedBytes), fontSize = 14.sp,
                                             fontWeight = FontWeight.Medium, color = foreground)
                                     }
-                                    Text(availableBytes?.let { "${downloadBytes(it)} 可用" } ?: "正在读取可用空间…",
+                                    Text(availableBytes?.let { "${downloadBytes(it)} 可用" }
+                                        ?: if (spaceReadFailed) "暂时无法读取可用空间" else "正在读取可用空间…",
                                         fontSize = 11.sp, color = secondary)
-                                    DownloadRouteControl(DownloadCategory.CHAPTERS)
                                 }
                                 HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                                     color = foreground.copy(alpha = .07f))
+                                CompactMenuAction(Icons.Outlined.Tune, "网络与下载") {
+                                    pendingNetworkSettings = true
+                                    showQueueActions = false
+                                }
                                 CompactMenuAction(Icons.Outlined.Inventory2, "管理下载", enabled = manageableEntries.isNotEmpty()) {
                                     showQueueActions = false; managing = true; selectedIds = emptySet()
                                 }
@@ -435,7 +469,7 @@ fun DownloadsScreen(
     }
 
     BoxWithConstraints(Modifier.fillMaxSize().onPreviewKeyEvent { event ->
-        if (!desktop || event.type != KeyEventType.KeyDown) false
+        if (!active || !desktop || event.type != KeyEventType.KeyDown) false
         else if ((event.isCtrlPressed || event.isMetaPressed) && event.key == Key.A && manageableEntries.isNotEmpty()) {
             val currentEntries = when (filter) {
                 DownloadFilter.ALL -> manageableEntries
@@ -669,8 +703,12 @@ fun DownloadsScreen(
 
         if (!desktop) MorphGlassTabSelector(backdrop, filterChoices, filter.ordinal, filterWidth,
             maximumHeight = maxHeight,
-            onToggle = { filterMenuExpanded = !filterMenuExpanded; showQueueActions = false },
-            expanded = filterMenuExpanded, onDismiss = { filterMenuExpanded = false },
+            onToggle = { if (active) {
+                pendingNetworkSettings = false
+                filterMenuExpanded = !filterMenuExpanded
+                showQueueActions = false
+            } },
+            expanded = filterMenuExpanded && active, onDismiss = { filterMenuExpanded = false },
             onSelect = { index ->
                 filterMenuExpanded = false
                 filter = DownloadFilter.entries[index]
@@ -678,6 +716,10 @@ fun DownloadsScreen(
             })
         SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 20.dp, vertical = 12.dp))
     }
+
+    NetworkDownloadDialog(showNetworkSettings && active, backdrop, { showNetworkSettings = false },
+        repository = repository as? dev.mangaflow.data.UnifiedMangaRepository,
+        initialScene = NetworkDownloadScene.CATEGORIES)
 
     pendingDeletion?.let { pendingTargets ->
         val targets = pendingTargets.mapNotNull { entriesById[it.id] }
