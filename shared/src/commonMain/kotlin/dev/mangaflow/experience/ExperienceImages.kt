@@ -330,7 +330,7 @@ internal fun initializeExperienceImages(context: PlatformContext) {
                     val request = chain.request
                     val work = request.extras[workKey] ?: ExperienceImageWork.VISIBLE
                     val remote = request.data.toString().startsWith("https:") || request.data.toString().startsWith("http:")
-                    if (work == ExperienceImageWork.PREFETCH && (remote || request.extras[cacheOnlyKey])) {
+                    if (work == ExperienceImageWork.PREFETCH && (remote || request.extras[cacheOnlyKey] == true)) {
                         val token = request.extras[workTokenKey]
                         if (token?.isForeground == true) policy.withImageAdmission(true) { chain.proceed() }
                         else try {
@@ -364,7 +364,7 @@ private class ExperienceImageEvents(
         bytes = runCatching { source.fileOrNull()?.let { source.fileSystem.metadata(it).size } }.getOrNull()
     }
     override fun onSuccess(request: ImageRequest, result: SuccessResult) {
-        if (request.extras[cacheOnlyKey]) return
+        if (request.extras[cacheOnlyKey] == true) return
         policy.recordImage(monotonicTimeMillis() - started, result.dataSource == DataSource.MEMORY_CACHE,
             result.dataSource == DataSource.DISK, prefetch && work?.isForeground != true, key, bytes)
     }
@@ -380,7 +380,7 @@ private class ExperienceImageNetworkClient(
     override suspend fun <T> executeRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
         // Coil 3.2's networkCachePolicy adds only-if-cached headers but still calls its client.
         // A source or transport cache cannot turn this local inspection into an HTTP request.
-        if (request.extras[cacheOnlyKey]) throw PrefetchCacheUnavailable()
+        if (request.extras[cacheOnlyKey] == true) throw PrefetchCacheUnavailable()
         val started = monotonicTimeMillis()
         val optional = request.extras[workKey] == ExperienceImageWork.PREFETCH
         val budget = request.extras[bytesKey]

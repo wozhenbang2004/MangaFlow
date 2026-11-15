@@ -133,7 +133,7 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
         val next = mutableState.value.sourceOverrides.toMutableMap()
         if (checked == null) next.remove(sourceId) else next[sourceId] = checked
         val encoded = JSONObject()
-        next.toSortedMap().forEach { (id, value) ->
+        next.entries.sortedBy { it.key }.forEach { (id, value) ->
             encoded.put(id, JSONObject().put("mode", value.mode.name).apply {
                 value.proxy?.let { put("host", it.host); put("port", it.port); put("type", it.type.name) }
             })

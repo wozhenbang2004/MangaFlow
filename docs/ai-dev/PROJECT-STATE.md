@@ -1,5 +1,14 @@
 # MangaFlow · current work
 
+## CI264/265 shared compilation recovery · 2026-11-15
+
+User: “ci 失败了” in this conversation (exact message ID unavailable). Retrieved actual Android264/job132536840914 and latest265/jobs132539586406,132539586769,132539587017 logs.264's original-cache preflight failed compilation at three Boolean? cacheOnlyKey conditions;265 retains those failures on Android/desktop/iOS and additionally reports SiteRankingsScreen's missing AutoMirrored MenuBook import, plus iOS's unsupported common-code toSortedMap and its downstream type-inference errors. This is observed compiler evidence, not an installed or source-service failure.
+
+The bounded fix reads the three optional Coil extras with ==true, retaining explicit cache-only transport veto/metrics/admission behavior and normal handling of an absent key. Source-route serialization sorts common Map.entries by key before writing the unchanged JSON, preserving deterministic order and source/proxy choices without a JVM-only SortedMap. The existing ranking fallback receives its missing icon extension import. No product behavior/design or workflow is otherwise changed; latest11b31db source-specific networking and compact-controls work is retained.
+
+Source/log/diff review only; no tests/local builds/probes. Publish one complete latest-main expected-head batch and confirm normal Android/native CI activation, without waiting for artifacts or calling compilation/installed acceptance passed. If this fix is already on main, do not replay it; handle concrete later CI/user feedback.
+
+
 ## Source network, ranking menus and Copy density · 2026-11-15
 
 Current raw requests/screenshots are recorded under Source network and compact review controls in DESIGN: RANK-POPOVER-20261115 and SYNC-DENSITY-20261115, plus the per-source network/one-click-check requirement. Baseline6e12a6e2 and integrated concurrent0bb92a5c retain transfer reliability, adaptive experience, script compatibility, nullable backup materials and all previous sync authority; do not replay them.
