@@ -487,6 +487,17 @@ fun ReaderScreen(
         downloadStore.entries.value.firstOrNull { it.manga.id == manga.id && it.chapter.id == chapterId }
     }
     val activeDownload by chapterDownload.collectAsStateWithLifecycle(initialValue = initialDownload)
+    val storageCache = remember(adultImageContext) { dev.mangaflow.storage.StorageCacheStore.get(adultImageContext) }
+    // The retained reader owns this chapter even while settings are overlaid or the app is paused.
+    DisposableEffect(storageCache, manga.id, chapterId, active) {
+        val release = if (active) storageCache.protectReading(manga.id, chapterId, chapterSourceMangaId(manga.id, chapter)) else ({})
+        onDispose { release() }
+    }
+    LaunchedEffect(storageCache, manga.id, chapterId, pages, headers) {
+        storageCache.registerPages(manga.id, chapterId,
+            dev.mangaflow.data.SourceKeys.decodeChapter(chapterSourceMangaId(manga.id, chapter), chapterId).sourceId,
+            pages, headers)
+    }
     val background = preferences.theme.background()
     val colors = MaterialTheme.colorScheme
     val lightChrome = colors.surface.luminance() > .5f

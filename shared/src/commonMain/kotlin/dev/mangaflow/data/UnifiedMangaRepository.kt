@@ -56,6 +56,7 @@ class UnifiedMangaRepository(
     val unified: UnifiedChapterStore,
     bodySources: List<BodySource> = listOf(KomiicBodySource(), MangaDexBodySource()),
     private val catalogStore: ReaderCatalogStore? = null,
+    private val storageCache: dev.mangaflow.storage.StorageCacheStore? = null,
 ) : MangaRepository {
     private val diagnostics = SourceDiagnostics()
     val sourceHealth = diagnostics.state
@@ -851,6 +852,13 @@ class UnifiedMangaRepository(
     }
 
     override suspend fun pages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
+        val loaded = loadPages(mangaId, chapterId, forceRefresh)
+        storageCache?.registerPages(mangaId, chapterId, SourceKeys.decodeChapter(mangaId, chapterId).sourceId,
+            loaded, imageHeaders(mangaId, chapterId))
+        return loaded
+    }
+
+    private suspend fun loadPages(mangaId: String, chapterId: String, forceRefresh: Boolean): List<Page> {
         currentCoroutineContext().ensureActive()
         val ref = SourceKeys.decodeChapter(mangaId, chapterId)
         if (ref.sourceId == "copy") return copy.pages(ref.mangaId, ref.chapterId, forceRefresh)

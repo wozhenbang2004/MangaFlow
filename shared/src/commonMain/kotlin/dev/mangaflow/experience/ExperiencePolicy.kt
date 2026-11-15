@@ -225,7 +225,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 val pending = disk?.resizePending == true
                 val error = disk?.resizeError
                 synchronized(lock) {
-                    sampledDiskBytes = snapshot[2] ?: 0L
+                    sampledDiskBytes = maxOf(snapshot[2] ?: 0L, dev.mangaflow.storage.StorageCacheStore.get(app).measuredBytes)
                     mutableUsage.value = mutableUsage.value.copy(
                         memoryBytes = snapshot[0], memoryLimit = snapshot[1],
                         diskBytes = snapshot[2], diskLimit = snapshot[3],
@@ -600,11 +600,10 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         mutableState.value = next
         revision.value++
         val memory = memoryCache
-        val cache = diskCache
         val version = ++cacheRevision
         scope.launch {
             memory?.applyBudget(next.memoryCacheFraction, next.memoryCacheBytes, version)
-            cache?.resize(next.diskCacheBytes, version)
+            dev.mangaflow.storage.StorageCacheStore.get(app).setBudget(next.diskCacheBytes, version)
         }
     }
 

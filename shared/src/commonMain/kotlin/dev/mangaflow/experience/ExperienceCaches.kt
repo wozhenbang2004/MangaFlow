@@ -49,14 +49,16 @@ internal class ExperienceDiskCache(
     override val directory: Path,
     initialBytes: Long,
     private val changed: () -> Unit,
+    private val workFinished: () -> Unit,
 ) : DiskCache {
     private val lock = StorageLock()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     override val fileSystem: FileSystem = FileSystem.SYSTEM
     private var target = initialBytes.coerceAtLeast(0L)
     private var applied = target
-    private var delegate: DiskCache? = build(target)
+    private var delegate: DiskCache? = build()
     private var leases = 0
+    private val keyLeases = mutableMapOf<String, Int>()
     private var revision = -1L
     private var scheduled = false
     private var closed = false
@@ -66,11 +68,13 @@ internal class ExperienceDiskCache(
     val resizePending: Boolean get() = synchronized(lock) { target != applied || error != null }
     /** A queued growth keeps the existing bounded journal usable while reader leases finish. */
     val acceptsPrefetchWrites: Boolean get() = synchronized(lock) {
-        !closed && error == null && delegate != null && applied > 0L && target >= applied
+        !closed && error == null && delegate != null && applied > 0L && target >= applied && (delegate?.size ?: 0L) < target
     }
     val resizeError: String? get() = synchronized(lock) { error }
-    private fun build(bytes: Long) = DiskCache.Builder().directory(directory).fileSystem(fileSystem)
-        .maxSizeBytes(bytes.coerceAtLeast(1L)).build()
+    // The shared storage owner performs value-aware eviction. An independent Coil LRU
+    // ceiling could otherwise delete a protected reading window behind that owner's back.
+    private fun build() = DiskCache.Builder().directory(directory).fileSystem(fileSystem)
+        .maxSizeBytes(Long.MAX_VALUE).build()
 
     fun resize(bytes: Long, version: Long) = synchronized(lock) {
         if (closed || version < revision) return@synchronized
@@ -86,11 +90,7 @@ internal class ExperienceDiskCache(
                 scheduled = false
                 if (closed || leases != 0 || target == applied && error == null) return@synchronized
                 try {
-                    // Never create a replacement until the old owner has really shut down.
-                    delegate?.shutdown()
-                    delegate = null
-                    delegate = build(target)
-                    // Opening size initializes the existing journal and schedules Coil's LRU trim.
+                    // The journal owner stays unchanged; the global coordinator owns trimming.
                     delegate?.size
                     applied = target
                     error = null
@@ -104,31 +104,53 @@ internal class ExperienceDiskCache(
 
     override fun openSnapshot(key: String): DiskCache.Snapshot? = synchronized(lock) {
         if (closed) return@synchronized null
-        delegate?.openSnapshot(key)?.let { leases++; SnapshotLease(it) }
+        delegate?.openSnapshot(key)?.let { acquireLease(key); SnapshotLease(key, it) }
     }
     override fun openEditor(key: String): DiskCache.Editor? = synchronized(lock) {
         // Foreground original images must still reach disk while a long-lived reader
         // snapshot delays resizing. Optional prefetch is gated before network execution.
-        if (closed || applied <= 0L) return@synchronized null
-        delegate?.openEditor(key)?.let { leases++; EditorLease(it) }
+        if (closed || target <= 0L) return@synchronized null
+        delegate?.openEditor(key)?.let { acquireLease(key); EditorLease(key, it) }
     }
     override fun remove(key: String): Boolean = synchronized(lock) { delegate?.remove(key) ?: false }
     override fun clear() = synchronized(lock) { delegate?.clear(); Unit }
     override fun shutdown() = synchronized(lock) { closed = true; delegate?.shutdown(); delegate = null }
 
-    private fun releaseLease() {
+    /** Management never edits Coil's journal or removes an entry held by a reader/editor. */
+    internal fun reclaim(key: String, bytes: Long, modifiedAt: Long, allowed: () -> Boolean): Boolean = synchronized(lock) {
+        if (closed || (keyLeases[key] ?: 0) > 0 || !allowed()) return@synchronized false
+        val snapshot = delegate?.openSnapshot(key) ?: return@synchronized false
+        val unchanged = try {
+            val data = fileSystem.metadata(snapshot.data)
+            (data.size ?: 0L) + (fileSystem.metadata(snapshot.metadata).size ?: 0L) == bytes &&
+                (data.lastModifiedAtMillis ?: 0L) == modifiedAt
+        } finally { snapshot.close() }
+        unchanged && delegate?.remove(key) == true
+    }
+    internal fun clearWhenIdle(allowed: () -> Boolean): Long = synchronized(lock) {
+        if (closed || leases != 0 || !allowed()) return@synchronized 0L
+        val before = delegate?.size ?: 0L
+        delegate?.clear()
+        (before - (delegate?.size ?: 0L)).coerceAtLeast(0L)
+    }
+
+    private fun acquireLease(key: String) { leases++; keyLeases[key] = (keyLeases[key] ?: 0) + 1 }
+    private fun releaseLease(key: String) {
         leases--
+        val remaining = (keyLeases[key] ?: 1) - 1
+        if (remaining == 0) keyLeases.remove(key) else keyLeases[key] = remaining
         check(leases >= 0)
         scheduleResize()
+        workFinished()
     }
-    private inner class SnapshotLease(private val snapshot: DiskCache.Snapshot) : DiskCache.Snapshot {
+    private inner class SnapshotLease(private val key: String, private val snapshot: DiskCache.Snapshot) : DiskCache.Snapshot {
         private var finished = false
         override val metadata: Path get() = snapshot.metadata
         override val data: Path get() = snapshot.data
         override fun close() = synchronized(lock) {
             if (!finished) {
                 finished = true
-                try { snapshot.close() } finally { releaseLease() }
+                try { snapshot.close() } finally { releaseLease(key) }
             }
         }
         override fun closeAndOpenEditor(): DiskCache.Editor? = synchronized(lock) {
@@ -136,26 +158,26 @@ internal class ExperienceDiskCache(
             finished = true
             var editor: DiskCache.Editor? = null
             try {
-                if (!closed && applied > 0L) editor = snapshot.closeAndOpenEditor()
+                if (!closed && target > 0L) editor = snapshot.closeAndOpenEditor()
                 else snapshot.close()
-                editor?.let(::EditorLease)
-            } finally { if (editor == null) releaseLease() }
+                editor?.let { EditorLease(key, it) }
+            } finally { if (editor == null) releaseLease(key) }
         }
     }
-    private inner class EditorLease(private val editor: DiskCache.Editor) : DiskCache.Editor {
+    private inner class EditorLease(private val key: String, private val editor: DiskCache.Editor) : DiskCache.Editor {
         private var finished = false
         override val metadata: Path get() = editor.metadata
         override val data: Path get() = editor.data
         override fun commit() = synchronized(lock) {
             if (!finished) {
                 finished = true
-                try { editor.commit() } finally { releaseLease() }
+                try { editor.commit() } finally { releaseLease(key) }
             }
         }
         override fun abort() = synchronized(lock) {
             if (!finished) {
                 finished = true
-                try { editor.abort() } finally { releaseLease() }
+                try { editor.abort() } finally { releaseLease(key) }
             }
         }
         override fun commitAndOpenSnapshot(): DiskCache.Snapshot? = synchronized(lock) {
@@ -164,8 +186,8 @@ internal class ExperienceDiskCache(
             var snapshot: DiskCache.Snapshot? = null
             try {
                 snapshot = editor.commitAndOpenSnapshot()
-                snapshot?.let(::SnapshotLease)
-            } finally { if (snapshot == null) releaseLease() }
+                snapshot?.let { SnapshotLease(key, it) }
+            } finally { if (snapshot == null) releaseLease(key) }
         }
     }
 }

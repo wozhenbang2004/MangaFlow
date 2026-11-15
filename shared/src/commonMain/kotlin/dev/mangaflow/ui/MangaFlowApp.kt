@@ -1334,11 +1334,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onRetrySync = model::retryAccountSync,
                                     )
                                     Section.SETTINGS -> SettingsScreen(model.updates, model.library, onRequestNotifications,
-                                        readBrowseCacheBytes = model::browseCacheSize, clearBrowseCache = model::clearBrowseCache,
-                                        readMetadataCacheBytes = model::metadataCacheSize, clearMetadataCache = model::clearMetadataCache,
+                                        clearBrowseCache = model::clearBrowseCache, clearMetadataCache = model::clearMetadataCache,
                                         contentTopPadding = chromePadding,
                                         sourceBackdrop = searchBackdrop, sourceRegistry = model.bodySources,
-                                        sourcePlugins = model.sourcePlugins, sourceRepository = model.repository)
+                                        sourcePlugins = model.sourcePlugins, sourceRepository = model.repository,
+                                        onOpenDownloads = { changeSection(Section.DOWNLOADS) })
                                 }
                                 }
                                 }

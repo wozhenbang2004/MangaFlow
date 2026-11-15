@@ -251,6 +251,7 @@ suspend fun materializeScriptPage(
     context: PlatformContext, mangaId: String, chapterId: String, page: Page,
     route: DownloadRouteSnapshot? = null,
     onBytes: ((Long) -> Unit)? = null,
+    prefetched: Boolean = false,
 ): Page {
     if (page.url.startsWith("file://")) return page.copy(headers = emptyMap())
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
@@ -281,10 +282,12 @@ suspend fun materializeScriptPage(
     val fingerprint = digest(scriptImageOwner(mangaId, chapterId) + "|" + bundle.digest + "|" + epoch + "|" +
         page.url + "|" + page.transform + "|" + encodedHeaders)
     val target = StorageFile(StorageFile(cacheDirectory(context), "script-decoded"), "$fingerprint.img")
+    val releaseCache = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
+        dev.mangaflow.storage.CacheBackend.SCRIPT, target, mangaId, chapterId, ref.sourceId, page.index, !prefetched)
     val stage = if (page.transform == "jm") "decode" else "image"
     fun current() = scriptSourceImageEpoch(context, ref.sourceId) == epoch &&
         store.installed.value.any { it.sourceId == ref.sourceId && it.digest == bundle.digest }
-    return decodeGates[(fingerprint.hashCode() and Int.MAX_VALUE) % decodeGates.size].withLock { decodeSlots.withPermit {
+    return try { decodeGates[(fingerprint.hashCode() and Int.MAX_VALUE) % decodeGates.size].withLock { decodeSlots.withPermit {
         withContext(Dispatchers.IO) {
             if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
             if (target.isFile && target.length() in 128L..MAX_IMAGE_BYTES && storageImageBounds(target) != null)
@@ -340,7 +343,6 @@ suspend fun materializeScriptPage(
                     throw SourceException("来源返回的内容不是可读取的图片。")
                 }
                 if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
-                pruneDecoded(target.parentFile)
                 imageEvents.tryEmit(ScriptImageEvent(ref.sourceId, stage, true, wallTimeMillis()))
                 page.copy(url = target.toURI(), headers = emptyMap(), transform = "", sourceSessionEpoch = epoch)
             } catch (failure: Exception) {
@@ -349,7 +351,7 @@ suspend fun materializeScriptPage(
                 throw failure
             }
         }
-    } }
+    } } } finally { releaseCache() }
 }
 
 /** The same original-byte cache as foreground reading, admitted under its current future-page budget. */
@@ -366,7 +368,7 @@ internal suspend fun prefetchScriptPage(context: PlatformContext, mangaId: Strin
     suspend fun load(): Page {
         currentCoroutineContext().ensureActive()
         val resolved = resolveScriptPage(context, mangaId, chapterId, page)
-        val result = materializeScriptPage(context, mangaId, chapterId, resolved, onBytes = { count ->
+        val result = materializeScriptPage(context, mangaId, chapterId, resolved, prefetched = true, onBytes = { count ->
             synchronized(transferLock) {
                 if (closed) throw CancellationException("图片预取已结束。")
                 received += count
@@ -450,15 +452,6 @@ private fun headerBinding(secret: String, url: String): String = hmacSha256(secr
 
 private fun digest(value: String): String = sha256(value.encodeToByteArray())
     .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
-private fun pruneDecoded(directory: StorageFile?) {
-    val files = directory?.listFiles()?.filter { it.isFile && it.extension == "img" }.orEmpty()
-    var size = files.sumOf { it.length() }
-    if (size <= 384L * 1024 * 1024) return
-    for (file in files.sortedBy { it.lastModified() }) {
-        if (size <= 256L * 1024 * 1024) break
-        val bytes = file.length(); if (file.delete()) size -= bytes
-    }
-}
 private const val MAX_IMAGE_BYTES = 96L * 1024 * 1024
 
 internal expect fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, filename: String, url: String, index: Int): ByteArray

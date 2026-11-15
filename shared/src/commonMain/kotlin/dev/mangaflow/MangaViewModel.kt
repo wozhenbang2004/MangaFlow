@@ -275,7 +275,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     val repository = UnifiedMangaRepository(copyRepository, unifiedChapters,
         bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(), komiicSource,
             MangaDexBodySource(), picacgSource) + listOfNotNull(jmSource),
-        catalogStore = ReaderCatalogStore(application))
+        catalogStore = ReaderCatalogStore(application), storageCache = dev.mangaflow.storage.StorageCacheStore.get(application))
     val bodySources = BodySourceRegistry(application, repository.sources)
     val sourcePlugins = SourcePluginStore.get(application)
     internal val starterSources = dev.mangaflow.data.plugins.StarterSourceInstaller(application, sourcePlugins, viewModelScope)
