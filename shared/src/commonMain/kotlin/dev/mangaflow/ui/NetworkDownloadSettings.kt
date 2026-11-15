@@ -20,10 +20,12 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material3.Icon
@@ -70,6 +72,7 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTabTreatment
 import dev.mangaflow.ui.motion.MotionTabs
 import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.motionPress
 import dev.mangaflow.ui.motion.motionInputGate
 
@@ -85,6 +88,9 @@ internal fun NetworkDownloadSettings(
     onSuggestionConsumed: () -> Unit = {},
     repository: UnifiedMangaRepository? = null,
     registry: BodySourceRegistry? = null,
+    proxyEditing: Boolean = false,
+    onProxyEditing: (Boolean) -> Unit = {},
+    connectionSummary: @Composable () -> Unit = {},
 ) {
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
@@ -95,7 +101,8 @@ internal fun NetworkDownloadSettings(
     } else emptyList()
     when (scene) {
         NetworkDownloadScene.CONNECTION -> DownloadConnectionSettings(
-            store, active, environment, suggestedProxy, suggestionRevision, onSuggestionConsumed)
+            store, active, environment, suggestedProxy, suggestionRevision, onSuggestionConsumed,
+            proxyEditing, onProxyEditing, connectionSummary)
         NetworkDownloadScene.CATEGORIES -> BoxWithConstraints(Modifier.fillMaxWidth()) {
             val stacked = maxWidth < 300.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -131,149 +138,172 @@ internal fun NetworkDownloadSettings(
 private fun DownloadConnectionSettings(
     store: DownloadRoutingStore, active: Boolean, environment: DownloadNetworkEnvironment?,
     suggestedProxy: DownloadProxyEndpoint?, suggestionRevision: Int, onSuggestionConsumed: () -> Unit,
+    proxyEditing: Boolean, onProxyEditing: (Boolean) -> Unit, connectionSummary: @Composable () -> Unit,
 ) {
     val settings by store.state.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
-    var proxyExpanded by remember { mutableStateOf(false) }
     var host by remember(settings.proxy) { mutableStateOf(settings.proxy?.host.orEmpty()) }
     var port by remember(settings.proxy) { mutableStateOf(settings.proxy?.port?.toString().orEmpty()) }
     var type by remember(settings.proxy) { mutableStateOf(settings.proxy?.type ?: DownloadProxyType.SOCKS) }
-    var notice by remember { mutableStateOf<String?>(null) }
-    var error by remember { mutableStateOf(false) }
+    var overviewNotice by remember { mutableStateOf<String?>(null) }
+    var editorNotice by remember { mutableStateOf<String?>(null) }
     var useAfterSave by remember { mutableStateOf(false) }
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
+    fun resetDraft() {
+        host = settings.proxy?.host.orEmpty()
+        port = settings.proxy?.port?.toString().orEmpty()
+        type = settings.proxy?.type ?: DownloadProxyType.SOCKS
+    }
+    fun startEditing(use: Boolean) {
+        resetDraft()
+        useAfterSave = use
+        editorNotice = null
+        overviewNotice = null
+        onProxyEditing(true)
+    }
     fun finishEditing() {
-        proxyExpanded = false
+        onProxyEditing(false)
         useAfterSave = false
+        editorNotice = null
         focus.clearFocus(force = true)
         keyboard?.hide()
     }
-    LaunchedEffect(suggestionRevision, suggestedProxy) {
-        if (suggestionRevision > 0 && suggestedProxy != null) {
-            // Preserve the reported protocol and port. This does not save or switch a route.
+    fun saveAddress() {
+        try {
+            if (host.isBlank()) throw DownloadRouteException("请填写代理地址")
+            val number = port.toIntOrNull()
+            if (number == null || number !in 1..65535) throw DownloadRouteException("端口需为 1–65535")
+            if (platformKind == PlatformKind.IOS && type == DownloadProxyType.HTTP)
+                throw DownloadRouteException("当前平台请使用 SOCKS5")
+            val using = useAfterSave || store.state.value.defaultMode == DownloadRouteMode.PROXY
+            store.setProxy(DownloadProxyEndpoint(host.trim(), number, type), useAsDefault = useAfterSave)
+            overviewNotice = if (using) "已使用指定代理" else "代理地址已保存"
+            finishEditing()
+        } catch (failure: DownloadRouteException) {
+            editorNotice = failure.message ?: "请检查代理地址和端口"
+        } catch (_: Exception) { editorNotice = "设置未能保存，请重试" }
+    }
+    fun cancelEditing() { resetDraft(); overviewNotice = null; finishEditing() }
+    LaunchedEffect(proxyEditing) {
+        if (!proxyEditing) {
+            useAfterSave = false
+            editorNotice = null
+            focus.clearFocus(force = true)
+            keyboard?.hide()
+        }
+    }
+    LaunchedEffect(suggestionRevision, suggestedProxy, active) {
+        if (active && suggestionRevision > 0 && suggestedProxy != null) {
             host = suggestedProxy.host
             port = suggestedProxy.port.toString()
             type = suggestedProxy.type
-            proxyExpanded = true
             useAfterSave = false
-            error = false
-            notice = "已填入识别地址，保存后可选择指定代理。"
+            editorNotice = null
+            overviewNotice = null
+            onProxyEditing(true)
             onSuggestionConsumed()
         }
     }
-    Column(Modifier.fillMaxWidth().motionInputGate(active), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        Text("应用默认线路", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-        MotionTabs(settings.defaultMode.ordinal, DownloadRouteMode.entries.map(::downloadRouteLabel),
-            onSelect = { index ->
-                notice = null
-                error = false
-                useAfterSave = false
-                val chosen = DownloadRouteMode.entries[index]
-                try {
-                    store.setDefault(chosen)
-                    finishEditing()
+    // Both real, compact scenes are measured together. Switching to the editor cannot
+    // append its height to the overview or move the centered window's heading.
+    NetworkSceneContent(proxyEditing, listOf(false, true), Modifier.fillMaxWidth().motionInputGate(active),
+        stableSize = true) { editing ->
+        val interactive = active && editing == proxyEditing
+        if (!editing) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            connectionSummary()
+            Text("默认线路", style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+            MotionTabs(settings.defaultMode.ordinal, DownloadRouteMode.entries.map(::downloadRouteLabel),
+                onSelect = { index ->
+                    if (interactive) {
+                        overviewNotice = null
+                        val chosen = DownloadRouteMode.entries[index]
+                        try { store.setDefault(chosen) }
+                        catch (_: DownloadRouteException) {
+                            startEditing(chosen == DownloadRouteMode.PROXY)
+                        } catch (_: Exception) { overviewNotice = "线路未能保存，请重试" }
+                    }
+                }, modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
+                fullWidthIndicator = true, controlHeight = 40.dp,
+                track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
+            if (settings.defaultMode == DownloadRouteMode.DIRECT && environment?.defaultNetworkUsesVpn == true)
+                Text("VPN 仍可能接管直连", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            MotionTextButton(onClick = { startEditing(false) }, enabled = interactive,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                Icon(Icons.Outlined.Edit, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("代理地址", style = MaterialTheme.typography.bodyMedium)
+                    Text(overviewNotice ?: settings.proxy?.let(::proxyAddressLabel) ?: "未设置",
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
-                catch (failure: DownloadRouteException) {
-                    notice = failure.message ?: "填写地址后即可使用指定代理。"
-                    useAfterSave = chosen == DownloadRouteMode.PROXY
-                    proxyExpanded = true
+                Icon(Icons.Outlined.ChevronRight, "编辑代理地址", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            }
+        } else Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                MotionIconButton(onClick = { resetDraft(); finishEditing() }, enabled = interactive,
+                    modifier = Modifier.size(44.dp), tooltip = "返回连接设置") {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回连接设置", Modifier.size(18.dp))
                 }
-                catch (_: Exception) {
-                    error = true
-                    notice = "线路未能保存，请重试。"
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("代理地址", style = MaterialTheme.typography.bodyMedium)
+                    Text(if (useAfterSave) "保存后使用" else "默认线路不变",
+                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 }
-            }, modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
-            fullWidthIndicator = true, controlHeight = 40.dp,
-            track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
-        if (settings.defaultMode == DownloadRouteMode.DIRECT) Text(
-            if (environment?.defaultNetworkUsesVpn == true) "当前系统 VPN 仍会影响连接。"
-            else "跳过 HTTP / SOCKS；VPN 由系统决定。",
-            style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-        MotionTextButton(onClick = {
-            notice = null
-            error = false
-            if (proxyExpanded) finishEditing() else proxyExpanded = true
-        }, enabled = active, modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
-            Icon(Icons.Outlined.Edit, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-            Spacer(Modifier.width(7.dp))
-            Text(settings.proxy?.let(::proxyAddressLabel) ?: "设置代理地址",
-                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Icon(if (proxyExpanded) Icons.Outlined.Close else Icons.Outlined.ChevronRight,
-                if (proxyExpanded) "收起代理地址" else "编辑代理地址", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-        }
-        // The network workspace owns height animation; never nest an empty/editor SizeTransform.
-        if (proxyExpanded) Column(Modifier.fillMaxWidth().padding(top = 3.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                MotionTabs(selected = if (type == DownloadProxyType.SOCKS) 0 else 1,
-                    labels = listOf("SOCKS5", "HTTP"), onSelect = {
-                        type = if (it == 0) DownloadProxyType.SOCKS else DownloadProxyType.HTTP
-                        notice = null
-                        error = false
-                    }, modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
-                    fullWidthIndicator = true, controlHeight = 36.dp,
-                    track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
-                BoxWithConstraints(Modifier.fillMaxWidth()) {
-                    val stacked = maxWidth < 280.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
-                    if (stacked) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ProxyValueField(host, { host = it; notice = null; error = false }, "主机名或 IP", Modifier.fillMaxWidth())
-                        ProxyValueField(port, { port = it.filter(Char::isDigit).take(5); notice = null; error = false }, "端口",
-                            Modifier.fillMaxWidth(), KeyboardType.Number)
-                    } else Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        ProxyValueField(host, { host = it; notice = null; error = false }, "主机名或 IP", Modifier.weight(1f))
-                        ProxyValueField(port, { port = it.filter(Char::isDigit).take(5); notice = null; error = false }, "端口",
-                            Modifier.width(88.dp), KeyboardType.Number)
+                if (settings.proxy != null) MotionIconButton(onClick = {
+                    try {
+                        store.setProxy(null)
+                        resetDraft()
+                        overviewNotice = "代理地址已移除"
+                        finishEditing()
+                    } catch (_: Exception) { editorNotice = "地址未能移除，请重试" }
+                }, enabled = interactive, modifier = Modifier.size(44.dp), tooltip = "移除代理地址") {
+                    Icon(Icons.Outlined.DeleteOutline, "移除代理地址", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+                }
+            }
+            MotionTabs(if (type == DownloadProxyType.SOCKS) 0 else 1, listOf("SOCKS5", "HTTP"),
+                onSelect = { if (interactive) {
+                    type = if (it == 0) DownloadProxyType.SOCKS else DownloadProxyType.HTTP
+                    editorNotice = null
+                } }, modifier = Modifier.fillMaxWidth(), treatment = MotionTabTreatment.Soft,
+                fullWidthIndicator = true, controlHeight = 36.dp,
+                track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                if (maxWidth < 280.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ProxyValueField(host, { host = it; editorNotice = null }, "地址", Modifier.fillMaxWidth(),
+                            placeholder = "主机名或 IP")
+                        ProxyValueField(port, { port = it.filter(Char::isDigit).take(5); editorNotice = null }, "端口",
+                            Modifier.fillMaxWidth(), KeyboardType.Number, "1–65535")
+                    }
+                } else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ProxyValueField(host, { host = it; editorNotice = null }, "地址", Modifier.weight(1f),
+                        placeholder = "主机名或 IP")
+                    ProxyValueField(port, { port = it.filter(Char::isDigit).take(5); editorNotice = null }, "端口",
+                        Modifier.width(88.dp), KeyboardType.Number, "1–65535")
+                }
+            }
+            // Validation has one bounded slot; a failed save cannot resize the centered panel.
+            Text(editorNotice.orEmpty(), style = MaterialTheme.typography.labelSmall, color = colors.error,
+                minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                if (maxWidth < 240.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)) {
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        MotionButton(onClick = ::saveAddress, enabled = interactive, modifier = Modifier.fillMaxWidth()) {
+                            Text(if (useAfterSave) "保存并使用" else "保存地址")
+                        }
+                        MotionTextButton(onClick = ::cancelEditing, enabled = interactive, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+                    }
+                } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically) {
+                    MotionTextButton(onClick = ::cancelEditing, enabled = interactive) { Text("取消") }
+                    MotionButton(onClick = ::saveAddress, enabled = interactive) {
+                        Text(if (useAfterSave) "保存并使用" else "保存地址")
                     }
                 }
-                Text("仅支持无需账号密码的代理。", style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant)
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    if (settings.proxy != null) MotionTextButton(enabled = active, onClick = {
-                        try {
-                            store.setProxy(null)
-                            host = ""
-                            port = ""
-                            finishEditing()
-                            error = false
-                            notice = "地址已移除；原有指定代理选择需重新配置。"
-                        } catch (_: Exception) {
-                            error = true
-                            notice = "地址未能移除，请重试。"
-                        }
-                    }) { Text("移除", style = MaterialTheme.typography.labelMedium) }
-                    Spacer(Modifier.weight(1f))
-                    MotionTextButton(enabled = active, onClick = {
-                        host = settings.proxy?.host.orEmpty()
-                        port = settings.proxy?.port?.toString().orEmpty()
-                        type = settings.proxy?.type ?: DownloadProxyType.SOCKS
-                        finishEditing()
-                        error = false
-                        notice = null
-                    }) { Text("取消") }
-                    MotionTextButton(enabled = active, onClick = {
-                        try {
-                            if (platformKind == PlatformKind.IOS && type == DownloadProxyType.HTTP)
-                                throw DownloadRouteException("当前平台暂不支持 HTTP 指定代理，请选择 SOCKS5。")
-                            store.setProxy(DownloadProxyEndpoint(host.trim(), port.toIntOrNull() ?: 0, type),
-                                useAsDefault = useAfterSave)
-                            val nowUsingProxy = useAfterSave || settings.defaultMode == DownloadRouteMode.PROXY
-                            finishEditing()
-                            error = false
-                            notice = if (nowUsingProxy) "已设为指定代理"
-                                else "地址已保存，选择指定代理后使用。"
-                        } catch (failure: DownloadRouteException) {
-                            error = true
-                            notice = failure.message
-                        } catch (_: Exception) {
-                            error = true
-                            notice = "设置未能保存，填写内容已保留，请重试。"
-                        }
-                    }) { Text(if (useAfterSave) "保存并使用" else "保存地址") }
-                }
+            }
         }
-        notice?.let { Text(it, style = MaterialTheme.typography.labelSmall,
-            color = if (error) colors.error else colors.onSurfaceVariant) }
     }
 }
 
@@ -584,16 +614,26 @@ private fun ProxyValueField(
     label: String,
     modifier: Modifier,
     keyboardType: KeyboardType = KeyboardType.Ascii,
+    placeholder: String? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-        Box(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
-            .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 12.dp, vertical = 12.dp)) {
+        Box(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
+            .background(colors.onSurface.copy(alpha = .045f)).padding(horizontal = 10.dp, vertical = 10.dp),
+            contentAlignment = Alignment.CenterStart) {
             BasicTextField(value, onValueChange = onValue, singleLine = true,
                 modifier = Modifier.fillMaxWidth().semantics { contentDescription = "代理" + label },
                 textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
                 cursorBrush = SolidColor(colors.onSurface),
+                decorationBox = { input ->
+                    Box(Modifier.fillMaxWidth()) {
+                        if (value.isEmpty() && placeholder != null) Text(placeholder,
+                            style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant.copy(alpha = .55f),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        input()
+                    }
+                },
                 keyboardOptions = KeyboardOptions(keyboardType = keyboardType, autoCorrectEnabled = false,
                     imeAction = ImeAction.Done))
         }

@@ -11,6 +11,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -65,6 +66,8 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     val scope = rememberCoroutineScope()
     var scene by remember { mutableStateOf(initialScene) }
     var showInfo by remember { mutableStateOf(false) }
+    var proxyEditing by remember { mutableStateOf(false) }
+    var pendingReportedProxy by remember { mutableStateOf<DownloadProxyEndpoint?>(null) }
     var environment by remember { mutableStateOf<DownloadNetworkEnvironment?>(null) }
     var environmentLoading by remember { mutableStateOf(false) }
     var environmentError by remember { mutableStateOf(false) }
@@ -73,6 +76,16 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     var suggestedProxy by remember { mutableStateOf<DownloadProxyEndpoint?>(null) }
     var suggestionRevision by remember { mutableIntStateOf(0) }
     val active = visible && foreground
+    fun useReportedProxy(endpoint: DownloadProxyEndpoint) {
+        val current = environment
+        val supported = platformKind != PlatformKind.IOS || endpoint.type != DownloadProxyType.HTTP
+        if (active && !environmentLoading && !environmentError && current?.connected != false && supported &&
+            current?.proxies?.any { it.endpoint == endpoint } == true) {
+            scene = NetworkDownloadScene.CONNECTION
+            suggestedProxy = endpoint
+            suggestionRevision++
+        }
+    }
     DisposableEffect(active, context) {
         // Native callbacks can be off Main or race with close. This child lifetime
         // queues UI writes on Main and rejects them after unregistration/disposal.
@@ -97,11 +110,22 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
             } finally { if (generation == environmentReadGeneration) environmentLoading = false }
         } else environmentLoading = false
     }
-    MotionDialog(visible, onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp) {
+    MotionDialog(visible, onDismissRequest = {
+        if (scene == NetworkDownloadScene.CONNECTION && proxyEditing) proxyEditing = false else onDismiss()
+    }, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp,
+        onClosed = {
+            proxyEditing = false
+            showInfo = false
+            pendingReportedProxy = null
+            suggestedProxy = null
+        }) {
         val focus = LocalFocusManager.current
         val keyboard = LocalSoftwareKeyboardController.current
-        LaunchedEffect(scene) { focus.clearFocus(force = true); keyboard?.hide() }
+        LaunchedEffect(scene) {
+            focus.clearFocus(force = true)
+            keyboard?.hide()
+            if (scene != NetworkDownloadScene.CONNECTION) suggestedProxy = null
+        }
         BoxWithConstraints(Modifier.padding(horizontal = 12.dp)) {
             // MotionDialog already provides the safe, IME-adjusted viewport. Use it once.
             val maximumHeight = minOf(maxHeight, 640.dp)
@@ -124,30 +148,22 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                         onSelect = { scene = NetworkDownloadScene.entries[it] }, modifier = Modifier.fillMaxWidth(),
                         treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 40.dp,
                         track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
-                    NetworkSceneContent(scene, Modifier.weight(1f, fill = false).fillMaxWidth()) { shown ->
+                    NetworkSceneContent(scene, NetworkDownloadScene.entries,
+                        Modifier.weight(1f, fill = false).fillMaxWidth()) { shown ->
                         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-                            .padding(top = 6.dp, bottom = 4.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                            if (shown == NetworkDownloadScene.CONNECTION) NetworkEnvironmentSummary(
-                                environment, loading = environmentLoading, failed = environmentError,
-                                enabled = active && shown == scene, onRefresh = { environmentRevision++ },
-                                onUse = { endpoint ->
-                                    val current = environment
-                                    val explicitSupported = platformKind != PlatformKind.IOS || endpoint.type != DownloadProxyType.HTTP
-                                    if (active && !environmentLoading && !environmentError && current?.connected != false &&
-                                        current?.proxies?.any { it.endpoint == endpoint } == true && explicitSupported) {
-                                        suggestedProxy = endpoint
-                                        suggestionRevision++
-                                    }
-                                })
+                            .padding(top = 4.dp, bottom = 4.dp)) {
                             NetworkDownloadSettings(shown, backdrop, active = active && shown == scene,
                                 environment = environment, suggestedProxy = suggestedProxy,
                                 suggestionRevision = suggestionRevision,
-                                onSuggestionConsumed = { suggestedProxy = null }, repository = repository, registry = registry)
-                            if (showInfo) NetworkConnectionHelp()
+                                onSuggestionConsumed = { suggestedProxy = null }, repository = repository, registry = registry,
+                                proxyEditing = proxyEditing, onProxyEditing = { proxyEditing = it },
+                                connectionSummary = {
+                                    NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
+                                        enabled = active && shown == scene, compact = true,
+                                        onRefresh = { environmentRevision++ }, onUse = ::useReportedProxy)
+                                })
                         }
                     }
-                    Text("新请求使用此设置 · 进行中任务保留原线路", Modifier.padding(top = 3.dp, bottom = 4.dp),
-                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 }
             }
             if (backdrop != null) LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
@@ -155,25 +171,56 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
             else Surface(shape = RoundedCornerShape(22.dp), color = colors.surfaceContainerLow, tonalElevation = 0.dp) { panel() }
         }
     }
+    MotionDialog(showInfo && visible, onDismissRequest = { showInfo = false },
+        properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 480.dp,
+        onClosed = {
+            val endpoint = pendingReportedProxy
+            pendingReportedProxy = null
+            if (endpoint != null) useReportedProxy(endpoint)
+        }) {
+        val info: @Composable () -> Unit = {
+            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)
+                .padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("网络信息", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    MotionIconButton(onClick = { showInfo = false }, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Outlined.Close, "关闭网络信息", Modifier.size(20.dp))
+                    }
+                }
+                Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
+                        enabled = active && showInfo, onRefresh = { environmentRevision++ }, onUse = { endpoint ->
+                            pendingReportedProxy = endpoint
+                            showInfo = false
+                        })
+                    NetworkConnectionHelp()
+                }
+            }
+        }
+        if (backdrop != null) LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
+            role = GlassSurfaceRole.PANEL, elevation = 0.dp) { info() }
+        else Surface(shape = RoundedCornerShape(22.dp), color = colors.surfaceContainerLow, tonalElevation = 0.dp) { info() }
+    }
 }
 
-/** Measure real destinations before switching; only this container animates pane height. */
+/** Adapt the existing retained scene motion; compact overview/editor share their real maximum. */
 @Composable
-private fun NetworkSceneContent(
-    selected: NetworkDownloadScene,
-    modifier: Modifier = Modifier,
-    content: @Composable (NetworkDownloadScene) -> Unit,
+internal fun <T : Any> NetworkSceneContent(
+    selected: T, scenes: List<T>, modifier: Modifier = Modifier, stableSize: Boolean = false,
+    content: @Composable (T) -> Unit,
 ) {
     val motion = LocalMotionEnabled.current
-    Layout(modifier = modifier.animateContentSize(
-        if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap()
-    ).clipToBounds(), content = {
-        NetworkDownloadScene.entries.forEach { scene ->
+    val selectedIndex = scenes.indexOf(selected).coerceAtLeast(0)
+    val sizing = if (stableSize) modifier else modifier.animateContentSize(
+        if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap())
+    Layout(modifier = sizing.clipToBounds(), content = {
+        scenes.forEachIndexed { index, scene ->
             key(scene) {
                 val alpha by animateFloatAsState(if (scene == selected) 1f else 0f,
                     if (motion) tween(MangaMotion.Quick) else snap(), label = "network-pane-alpha")
                 val offset by animateFloatAsState(
-                    if (scene == selected) 0f else if (scene.ordinal < selected.ordinal) -10f else 10f,
+                    if (scene == selected) 0f else if (index < selectedIndex) -10f else 10f,
                     if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap(),
                     label = "network-pane-offset")
                 Box(Modifier.fillMaxWidth().motionInputGate(scene == selected).graphicsLayer {
@@ -184,10 +231,11 @@ private fun NetworkSceneContent(
         }
     }) { measurables, constraints ->
         val panes = measurables.map { it.measure(constraints.copy(minHeight = 0)) }
-        val target = panes[selected.ordinal]
-        layout(target.width, target.height) {
+        val target = panes[selectedIndex]
+        val height = if (stableSize) panes.maxOf { it.height } else target.height
+        layout(target.width, height) {
             panes.forEachIndexed { index, pane ->
-                if (index != selected.ordinal) pane.placeRelative(0, 0)
+                if (index != selectedIndex) pane.placeRelative(0, 0)
             }
             target.placeRelative(0, 0)
         }
@@ -197,7 +245,7 @@ private fun NetworkSceneContent(
 @Composable
 private fun NetworkEnvironmentSummary(
     environment: DownloadNetworkEnvironment?, loading: Boolean, failed: Boolean, enabled: Boolean,
-    onRefresh: () -> Unit, onUse: (DownloadProxyEndpoint) -> Unit,
+    onRefresh: () -> Unit, onUse: (DownloadProxyEndpoint) -> Unit, compact: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val source = when (environment?.observation) {
@@ -216,14 +264,30 @@ private fun NetworkEnvironmentSummary(
             null -> null
         }, when (environment.defaultNetworkUsesVpn) {
             true -> "VPN"
-            false -> "未报告 VPN"
-            null -> "VPN 状态未知"
+            false -> if (compact) null else "未报告 VPN"
+            null -> if (compact) null else "VPN 状态未知"
         }, when {
             environment.automaticProxyConfigured == true -> "自动代理"
             environment.systemProxyConfigured == true -> "系统代理"
-            environment.systemProxyConfigured == false -> "未报告系统代理"
-            else -> "代理状态未知"
-        }).joinToString(" · ")
+            environment.systemProxyConfigured == false -> if (compact) null else "未报告系统代理"
+            else -> if (compact) null else "代理状态未知"
+        }).joinToString(" · ").ifBlank { "网络状态未知" }
+    }
+    if (compact) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Outlined.Language, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            Column(Modifier.weight(1f)) {
+                Text(network, style = MaterialTheme.typography.bodySmall, color = colors.onSurface,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (failed) Text("读取失败，点按重试", style = MaterialTheme.typography.labelSmall, color = colors.error)
+            }
+            if (loading) MotionBusyIndicator(Modifier.padding(13.dp).size(18.dp), strokeWidth = 1.5.dp)
+            else MotionIconButton(onRefresh, enabled = enabled, modifier = Modifier.size(44.dp), tooltip = "刷新网络状态") {
+                Icon(Icons.Outlined.Refresh, "刷新网络状态", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+            }
+        }
+        return
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -274,6 +338,7 @@ private fun NetworkConnectionHelp() {
             "直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。需要按下载分别直连或代理时，外部软件须支持应用排除与本地代理监听。",
             "Steam 连接沿用系统网络；指定 HTTP / SOCKS 出口需配置地址。部分扩展安装与 iOS 连接不支持 HTTP 代理，会明确提示。",
             "每个漫画源可单独设置搜索、阅读、账号接口与新下载线路；网页认证仍遵循系统网络，进行中任务保留原线路。",
+            "新请求使用新设置。已有下载保留原线路，需明确选择“使用当前设置重试”才更换。代理地址目前不支持账号密码。",
         ).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
     }
 }
