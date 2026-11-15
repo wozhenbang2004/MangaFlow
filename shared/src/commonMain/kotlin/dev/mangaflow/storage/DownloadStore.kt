@@ -130,6 +130,12 @@ class DownloadStore private constructor(context: Context) {
     private val _loading = MutableStateFlow(true)
     val loading: StateFlow<Boolean> = _loading.asStateFlow()
 
+    /** Physical offline storage, including manifests and retained transfer parts; never a cache target. */
+    internal fun storageBytes(): Long {
+        fun size(file: File): Long = if (file.isDirectory) file.listFiles().orEmpty().sumOf(::size) else file.length()
+        return size(root)
+    }
+
     /** Native background budgets can expire; persisted unfinished work resumes on app activation. */
     fun resumePendingDownloads() {
         scope.launch { awaitReady(); reconcileRestoredRecords() }

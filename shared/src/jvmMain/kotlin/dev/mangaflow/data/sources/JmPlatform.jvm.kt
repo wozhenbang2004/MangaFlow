@@ -348,7 +348,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> =
         mapOf("User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36", "Accept" to "image/webp,image/jpeg,*/*")
 
-    suspend fun decryptedPageFile(chapterId: String, page: Page): StorageFile = withContext(Dispatchers.IO) {
+    suspend fun decryptedPageFile(mangaId: String, chapterId: String, page: Page): StorageFile = withContext(Dispatchers.IO) {
         val key = validId(chapterId)
         require(page.index in 0..9_999) { "图片序号无效。" }
         clientCall { client ->
@@ -363,6 +363,10 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                 .digest(("$key:${page.index}:" + img.downloadUrl).toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it) }
             val target = StorageFile(root, "$fingerprint.jpg")
+            val releaseCache = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
+                dev.mangaflow.storage.CacheBackend.JM, target, SourceKeys.manga(info.id, mangaId),
+                SourceKeys.chapter(info.id, mangaId, key), info.id, page.index)
+            try {
             if (target.isFile && target.length() in 128L..MAX_IMAGE_BYTES) return@clientCall target
             if (!root.mkdirs()) throw SourceException("无法创建禁漫私有图片缓存。")
             val bytes = client.fetchImageBytes(img)
@@ -375,19 +379,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                 if (target.exists() && !target.delete()) throw SourceException("旧图片缓存无法替换。")
                 if (!pending.renameTo(target)) throw SourceException("解码后的图片无法缓存。")
             } finally { pending.delete() }
-            pruneCache()
             target
-        }
-    }
-
-    private fun pruneCache() {
-        val files = root.listFiles()?.filter { it.isFile && it.name.endsWith(".jpg") }.orEmpty()
-        var bytes = files.sumOf { it.length() }
-        if (bytes <= CACHE_CEILING) return
-        for (file in files.sortedBy { it.lastModified() }) {
-            if (bytes <= CACHE_TARGET) break
-            val size = file.length()
-            if (file.delete()) bytes -= size
+            } finally { releaseCache() }
         }
     }
 
@@ -435,8 +428,6 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         private val periodFilter = SourceFilter("period", "时间", listOf(SourceChoice("t", "今日"),
             SourceChoice("w", "本周"), SourceChoice("m", "本月"), SourceChoice("a", "全部")), "a")
         private const val MAX_IMAGE_BYTES = 96L * 1024 * 1024
-        private const val CACHE_CEILING = 384L * 1024 * 1024
-        private const val CACHE_TARGET = 256L * 1024 * 1024
     }
 }
 
@@ -453,7 +444,7 @@ actual suspend fun materializeJmPage(
 ): Page? {
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
     if (ref.sourceId != "jmcomic" || page.url.startsWith("file://")) return null
-    val file = JmNativeSourceProvider.get(context).decryptedPageFile(ref.chapterId, page)
+    val file = JmNativeSourceProvider.get(context).decryptedPageFile(ref.mangaId, ref.chapterId, page)
     return page.copy(url = file.toURI())
 }
 
@@ -462,7 +453,10 @@ actual suspend fun decryptedJmPageBytes(
 ): ByteArray? {
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
     if (ref.sourceId != "jmcomic") return null
-    return JmNativeSourceProvider.get(context).decryptedPageFile(ref.chapterId, page).readBytes()
+    val file = JmNativeSourceProvider.get(context).decryptedPageFile(ref.mangaId, ref.chapterId, page)
+    val release = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
+        dev.mangaflow.storage.CacheBackend.JM, file, mangaId, chapterId, ref.sourceId, page.index)
+    return try { file.readBytes() } finally { release() }
 }
 
 /** The upstream's public client/context constructors preserve its cookies, domains and decoder. */
@@ -508,8 +502,13 @@ private class RoutedJmDownloadSession(
             .digest((chapterId + ":" + page.index + ":" + page.url).toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
         val cached = StorageFile(StorageFile(cacheDirectory(context), "jm-decoded"), fingerprint + ".jpg")
-        if (cached.isFile && cached.length() in 128L..MAX_IMAGE_BYTES)
-            return@withContext cached.readBytes()
+        val releaseCache = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
+            dev.mangaflow.storage.CacheBackend.JM, cached, SourceKeys.manga("jmcomic", mangaId),
+            SourceKeys.chapter("jmcomic", mangaId, chapterId), "jmcomic", page.index)
+        try {
+            if (cached.isFile && cached.length() in 128L..MAX_IMAGE_BYTES)
+                return@withContext cached.readBytes()
+        } finally { releaseCache() }
         val active = runInterruptible { activeClient() }
         currentCoroutineContext().ensureActive()
         val pages = chapterImages(active)

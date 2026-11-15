@@ -167,6 +167,7 @@ internal fun readerPageRequest(
     context: PlatformContext, page: Page, headers: Map<String, String>, source: String = "",
 ): ImageRequest.Builder {
     val key = readerPageCacheKey(page, headers, source)
+    if (page.url.startsWith("file:")) dev.mangaflow.storage.StorageCacheStore.get(context).noteMemoryFile(page.url, key)
     return ImageRequest.Builder(imagePlatformContext(context)).data(page.url)
         .readerPriority(source.takeIf { it.isNotBlank() })
         .memoryCacheKey(key).diskCacheKey(key)
@@ -321,8 +322,10 @@ internal fun initializeExperienceImages(context: PlatformContext) {
     SingletonImageLoader.setSafe { imageContext ->
         val memory = ExperienceMemoryCache(MemoryCache.Builder().maxSizePercent(imageContext, .32)
             .weakReferencesEnabled(false).build())
+        val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
         val disk = ExperienceDiskCache(StorageFile(cacheDirectory(app), "image-cache").nativePath,
-            policy.state.value.diskCacheBytes, policy::refreshCacheUsage)
+            policy.state.value.diskCacheBytes, policy::refreshCacheUsage, storage::cacheWorkFinished)
+        storage.attach(disk)
         ImageLoader.Builder(imageContext)
             .components {
                 add(NetworkFetcher.Factory(networkClient = { ExperienceImageNetworkClient(createExperienceNetworkClient(), policy) }))
@@ -330,7 +333,10 @@ internal fun initializeExperienceImages(context: PlatformContext) {
                     val request = chain.request
                     val work = request.extras[workKey] ?: ExperienceImageWork.VISIBLE
                     val remote = request.data.toString().startsWith("https:") || request.data.toString().startsWith("http:")
-                    if (work == ExperienceImageWork.PREFETCH && (remote || request.extras[cacheOnlyKey] == true)) {
+                    val cacheKey = request.diskCacheKey ?: request.data?.toString().orEmpty()
+                    if (remote && request.extras[cacheOnlyKey] != true)
+                        storage.noteCoil(cacheKey, false)
+                    val result = if (work == ExperienceImageWork.PREFETCH && (remote || request.extras[cacheOnlyKey] == true)) {
                         val token = request.extras[workTokenKey]
                         if (token?.isForeground == true) policy.withImageAdmission(true) { chain.proceed() }
                         else try {
@@ -342,6 +348,9 @@ internal fun initializeExperienceImages(context: PlatformContext) {
                         }
                     } else if (!remote) chain.proceed()
                     else policy.withImageAdmission(work == ExperienceImageWork.READER) { chain.proceed() }
+                    if (remote && request.extras[cacheOnlyKey] != true && result is SuccessResult)
+                        storage.noteCoil(result.diskCacheKey ?: cacheKey, work != ExperienceImageWork.PREFETCH)
+                    result
                 })
             }
             .memoryCache(memory).diskCache(disk)

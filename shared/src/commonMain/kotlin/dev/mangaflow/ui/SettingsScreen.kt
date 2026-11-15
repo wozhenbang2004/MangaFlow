@@ -143,7 +143,6 @@ import dev.mangaflow.ui.motion.motionInputGate
 import dev.mangaflow.ui.motion.rememberDelayedBusy
 import dev.mangaflow.update.UpdateManager
 import dev.mangaflow.update.UpdatePhase
-import coil3.SingletonImageLoader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -154,15 +153,14 @@ fun SettingsScreen(
     updateManager: UpdateManager,
     libraryStore: LibraryStore,
     onRequestNotifications: () -> Unit,
-    readBrowseCacheBytes: suspend () -> Long,
     clearBrowseCache: suspend () -> Unit,
-    readMetadataCacheBytes: suspend () -> Long,
     clearMetadataCache: suspend () -> Unit,
     contentTopPadding: Dp = 0.dp,
     sourceBackdrop: HazeState? = null,
     sourceRegistry: BodySourceRegistry? = null,
     sourcePlugins: SourcePluginStore? = null,
     sourceRepository: dev.mangaflow.data.UnifiedMangaRepository? = null,
+    onOpenDownloads: () -> Unit = {},
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -180,7 +178,6 @@ fun SettingsScreen(
     val routes by routeStore.state.collectAsStateWithLifecycle()
     val experienceStore = remember(context) { ExperiencePolicyStore.get(context) }
     val experienceBudget by experienceStore.state.collectAsStateWithLifecycle()
-    val experienceUsage by experienceStore.usage.collectAsStateWithLifecycle()
     val colors = MaterialTheme.colorScheme
     val foreground = colors.onSurface
     val secondary = colors.onSurfaceVariant
@@ -192,10 +189,10 @@ fun SettingsScreen(
         if (desktop) { settingsFocus.clearFocus(); settingsScroll.scrollToItem(0) }
     }
     val cacheScope = rememberCoroutineScope()
-    val imageLoader = remember(context) { SingletonImageLoader.get(imagePlatformContext(context)) }
-    var cacheSizes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
-    var clearingCache by remember { mutableStateOf<String?>(null) }
-    var cacheNotice by remember { mutableStateOf<String?>(null) }
+    var showStorage by remember { mutableStateOf(false) }
+    var showStorageModels by remember { mutableStateOf(false) }
+    var storageDestination by remember { mutableStateOf<String?>(null) }
+    val storageBackdrop = sourceBackdrop ?: dev.chrisbanes.haze.rememberHazeState()
     var backupBusy by remember { mutableStateOf<String?>(null) }
     var backupNotice by remember { mutableStateOf<String?>(null) }
     var pendingRestore by remember { mutableStateOf<PendingLibraryRestore?>(null) }
@@ -253,45 +250,6 @@ fun SettingsScreen(
                     backupBusy = null
                 }
             }
-        }
-    }
-
-    suspend fun readCacheSizes() {
-        cacheSizes = mapOf(
-            "browse" to readBrowseCacheBytes(),
-            "metadata" to readMetadataCacheBytes(),
-            "images" to withContext(Dispatchers.IO) { imageLoader.diskCache?.size ?: 0L },
-        )
-    }
-
-    LaunchedEffect(expandedSetting, imageLoader) {
-        if (expandedSetting == "cache") {
-            cacheNotice = null
-            try { readCacheSizes() }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { cacheNotice = "暂时无法读取缓存大小" }
-        }
-    }
-
-    fun clearCache(key: String, label: String) {
-        if (clearingCache != null) return
-        clearingCache = key
-        cacheNotice = null
-        cacheScope.launch {
-            try {
-                when (key) {
-                    "browse" -> clearBrowseCache()
-                    "metadata" -> clearMetadataCache()
-                    "images" -> withContext(Dispatchers.IO) {
-                        imageLoader.memoryCache?.clear()
-                        imageLoader.diskCache?.clear()
-                    }
-                }
-                readCacheSizes()
-                cacheNotice = "$label 已清理"
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { cacheNotice = "清理未完成，请重试" }
-            finally { clearingCache = null }
         }
     }
 
@@ -445,45 +403,8 @@ fun SettingsScreen(
                         Text("备份不包含账号、密码、缓存与漫画文件；恢复前会再次确认。",
                             style = MaterialTheme.typography.bodySmall, color = secondary)
                     }
-                    SettingsDisclosure("缓存管理", when {
-                        cacheSizes.size == 3 -> settingsBytes(cacheSizes.values.sum())
-                        cacheNotice != null -> "暂时无法读取"
-                        else -> if (expandedSetting == "cache") "正在统计…" else "点按查看用量"
-                    },
-                        Icons.Outlined.Storage, expandedSetting == "cache", { toggleSetting("cache") }) {
-                        Column {
-                            listOf("browse" to "推荐与热榜", "metadata" to "目录、评分与评论", "images" to "图片与头像").forEach { (key, label) ->
-                                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    SettingsRowIcon(when (key) {
-                                        "browse" -> Icons.Outlined.Explore
-                                        "metadata" -> Icons.Outlined.Forum
-                                        else -> Icons.Outlined.Image
-                                    })
-                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                        Text(label, style = MaterialTheme.typography.bodyLarge, color = foreground)
-                                        Text(cacheSizes[key]?.let(::settingsBytes) ?: "正在统计…",
-                                            style = MaterialTheme.typography.bodySmall, color = secondary)
-                                    }
-                                    val showBusy = rememberDelayedBusy(clearingCache == key)
-                                    MotionIconButton(enabled = clearingCache == null && cacheSizes[key] != null,
-                                        modifier = Modifier.size(44.dp).semantics { contentDescription = "清理$label" },
-                                        onClick = { clearCache(key, label) }) {
-                                        MotionSwap(showBusy, Modifier.size(20.dp)) { busy ->
-                                            if (busy) CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.5.dp)
-                                            else Icon(Icons.Outlined.DeleteOutline, null, Modifier.size(20.dp), tint = secondary)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Text("图片缓存实际容量 " + (experienceUsage.diskLimit?.let(::experienceCacheSize) ?: "读取中") +
-                            "，目标 " + experienceCacheSize(experienceBudget.diskCacheBytes) +
-                            if (experienceUsage.diskResizePending) "。等待正在使用的原图释放后调整。" else "。离线章节独立保存。",
-                            style = MaterialTheme.typography.bodySmall, color = secondary)
-                        cacheNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary) }
-                    }
+                    SettingsLinkRow("存储管理", "阅读缓存、离线下载与模型", Icons.Outlined.Storage,
+                        inlineDetail = true) { showStorage = true }
                     backupNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
                         modifier = Modifier.padding(vertical = 6.dp)) }
                     webDavNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = secondary,
@@ -633,6 +554,19 @@ fun SettingsScreen(
     NetworkDownloadDialog(showNetworkDownloads, sourceBackdrop, onDismiss = { showNetworkDownloads = false },
         repository = sourceRepository, registry = sourceRegistry)
     ExperienceSettingsDialog(showExperience, sourceBackdrop, onDismiss = { showExperience = false })
+
+    StorageManagementDialog(showStorage, storageBackdrop, libraryStore, repository = sourceRepository,
+        clearBrowse = clearBrowseCache, clearMetadata = clearMetadataCache,
+        onDismiss = { showStorage = false },
+        onDownloads = { storageDestination = "downloads"; showStorage = false },
+        onModels = { storageDestination = "models"; showStorage = false },
+        onClosed = {
+            val target = storageDestination
+            storageDestination = null
+            if (target == "downloads") onOpenDownloads()
+            if (target == "models") showStorageModels = true
+        })
+    dev.mangaflow.reader.panels.PanelModelsDialog(showStorageModels, storageBackdrop) { showStorageModels = false }
 
     BackupRestoreDialog(
         pending = pendingRestore,

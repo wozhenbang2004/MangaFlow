@@ -47,6 +47,9 @@ internal class PortablePanelRepository(private val context: PlatformContext) {
         check(!closed) { "分镜阅读已关闭" }
         if (engine == PanelEngine.OFF) return@withLock PanelDetection(listOf(PanelBox.FULL), engine.name)
         val key = withContext(Dispatchers.IO) { cacheKey(page, headers, sourceId, engine, direction, useLearnedOrder) }
+        val releaseCache = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
+            dev.mangaflow.storage.CacheBackend.PANEL, StorageFile(cache, "$key.json"), source = sourceId, pageIndex = page.index)
+        try {
         if (!force) withContext(Dispatchers.IO) { readCache(key) }?.let { return@withLock it }
         val resource = resolvePage(page)
         val imageContext = imagePlatformContext(context)
@@ -77,6 +80,7 @@ internal class PortablePanelRepository(private val context: PlatformContext) {
         val detection = PanelDetection(boxes, PanelEngine.CLASSIC.name, notices.takeIf { it.isNotEmpty() }?.joinToString("；"))
         withContext(Dispatchers.IO) { writeCache(key, detection) }
         detection
+        } finally { releaseCache() }
     }
     suspend fun close() = gate.withLock { closed = true }
 
@@ -113,9 +117,6 @@ internal class PortablePanelRepository(private val context: PlatformContext) {
             val output = atomic.startWrite()
             try { output.write(json.toString().encodeToByteArray()); atomic.finishWrite(output) }
             catch (error: Exception) { atomic.failWrite(output); throw error }
-            var bytes = 0L
-            cache.listFiles()?.filter { it.name.endsWith(".json") }?.sortedByDescending { it.lastModified() }
-                ?.forEachIndexed { index, file -> bytes += file.length(); if (index >= 128 || bytes > 8L * 1024 * 1024) file.delete() }
         }
     }
 }

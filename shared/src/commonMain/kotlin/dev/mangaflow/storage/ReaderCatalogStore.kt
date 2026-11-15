@@ -17,12 +17,13 @@ import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
 
 /** A saved directory lets local images participate in the ordinary reader after a restart. */
-class ReaderCatalogStore(context: Context) {
+class ReaderCatalogStore(private val context: Context) {
     private val root = File(context.applicationContext.filesDir, "reader-catalogs")
     // Repository and ViewModel instances target the same AtomicFile siblings.
     private val state = synchronized(statesLock) { states.getOrPut(root.path) { CatalogState() } }
 
     suspend fun read(mangaId: String): MangaDetail? {
+        StorageCacheStore.get(context).noteCatalog(mangaId)
         val generation = state.epoch.get()
         cached(mangaId, generation)?.let { return it }
         return withContext(Dispatchers.IO) {
@@ -52,6 +53,7 @@ class ReaderCatalogStore(context: Context) {
 
     suspend fun save(detail: MangaDetail, isCurrent: () -> Boolean = { true }) {
         if (detail.chapters.isEmpty() || !isCurrent()) return
+        StorageCacheStore.get(context).noteCatalog(detail.manga.id)
         val generation = state.epoch.get()
         val token = state.sequence.incrementAndGet()
         synchronized(state.memoryLock) { state.writes[detail.manga.id] = token }
@@ -102,20 +104,50 @@ class ReaderCatalogStore(context: Context) {
     }
 
     suspend fun clear() {
-        invalidateMemory()
-        withContext(Dispatchers.IO) {
-            state.files.withLock {
-                try {
-                    root.listFiles()?.forEach { file ->
-                        check(file.delete() || !file.exists()) { "目录缓存未完全清除，请重试" }
-                    }
-                } finally {
-                    // Also reject writers queued while the clear itself was waiting for IO.
-                    invalidateMemory()
-                }
-            }
+        trimToSize(0L, StorageCacheStore.get(context)::protectedCatalog)
+    }
+
+    /** Parse only bounded catalogue metadata under the same gate as readers and writers. */
+    internal suspend fun cacheUsage(protect: (String) -> Boolean): Pair<Long, Long> = withContext(Dispatchers.IO) {
+        state.files.withLock {
+            val files = root.listFiles().orEmpty()
+            val reclaimable = files.filter { file -> catalogOwner(file)?.let { !protect(it) } == true }.sumOf { it.length() }
+            files.sumOf { it.length() } to reclaimable
         }
     }
+
+    internal suspend fun trimToSize(maxBytes: Long, protect: (String) -> Boolean): Long = withContext(Dispatchers.IO) {
+        state.files.withLock {
+            var total = root.listFiles().orEmpty().sumOf { it.length() }
+            if (total <= maxBytes) return@withLock 0L
+            var freed = 0L
+            try {
+                root.listFiles().orEmpty().sortedBy { file ->
+                    catalogOwner(file)?.let { StorageCacheStore.get(context).catalogAccess(it) }?.takeIf { it > 0L } ?: file.lastModified()
+                }.forEach { file ->
+                    if (total <= maxBytes) return@forEach
+                    val owner = catalogOwner(file) ?: return@forEach
+                    // Re-evaluate dependencies immediately before removing this AtomicFile family.
+                    if (protect(owner)) return@forEach
+                    val bytes = file.length()
+                    AtomicFile(file).delete()
+                    if (!file.exists()) { total -= bytes; freed += bytes; state.diskOwners.remove(file.path) }
+                }
+            } finally { if (freed > 0L) invalidateMemory() }
+            freed
+        }
+    }
+
+    private fun catalogOwner(file: File): String? = runCatching {
+        if (file.extension != "json" || file.length() !in 1..MAX_FILE_BYTES ||
+            File(file.path + ".new").exists() || File(file.path + ".bak").exists()) return@runCatching null
+        val bytes = file.length()
+        val modified = file.lastModified()
+        state.diskOwners[file.path]?.takeIf { it.first == bytes && it.second == modified }?.let { return@runCatching it.third }
+        JSONObject(file.readText()).getJSONObject("manga").getString("id").takeIf { it.isNotBlank() }?.also {
+            state.diskOwners[file.path] = Triple(bytes, modified, it)
+        }
+    }.getOrNull()
 
     private fun invalidateMemory() {
         state.epoch.incrementAndGet()
@@ -157,6 +189,7 @@ class ReaderCatalogStore(context: Context) {
         val sequence = AtomicLong()
         val memory = LinkedHashMap<String, CachedCatalog>()
         val writes = mutableMapOf<String, Long>()
+        val diskOwners = mutableMapOf<String, Triple<Long, Long, String>>()
     }
 
     private companion object {

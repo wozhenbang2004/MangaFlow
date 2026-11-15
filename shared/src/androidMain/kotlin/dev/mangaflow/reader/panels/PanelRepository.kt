@@ -49,6 +49,10 @@ actual class PanelRepository actual constructor(context: Context) {
         check(!closed) { "分镜阅读已关闭" }
         if (engine == PanelEngine.OFF) return@withLock PanelDetection(listOf(PanelBox.FULL), engine.name)
         val key = withContext(Dispatchers.IO) { cacheKey(page, headers, sourceId, engine, direction, useLearnedOrder) }
+        val releaseCache = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
+            dev.mangaflow.storage.CacheBackend.PANEL,
+            dev.mangaflow.platform.storage.StorageFile(File(cache, "$key.json").path), source = sourceId, pageIndex = page.index)
+        try {
         if (!force) withContext(Dispatchers.IO) { readCache(key) }?.let { return@withLock it }
         currentCoroutineContext().ensureActive()
         val resolved = resolvePage(page)
@@ -103,6 +107,7 @@ actual class PanelRepository actual constructor(context: Context) {
             if (cacheable) withContext(Dispatchers.IO) { writeCache(key, detection) }
             detection
         } finally { bitmap.recycle() }
+        } finally { releaseCache() }
     }
 
     actual suspend fun close() = gate.withLock {
@@ -155,20 +160,12 @@ actual class PanelRepository actual constructor(context: Context) {
                 temporary.writeText(json.toString())
                 if (!temporary.renameTo(destination)) return@runCatching
             } finally { temporary.delete() }
-            val files = cache.listFiles()?.filter { it.name.endsWith(".json") }?.sortedByDescending { it.lastModified() }.orEmpty()
-            var bytes = 0L
-            files.forEachIndexed { index, file ->
-                bytes += file.length()
-                if (index >= MAX_CACHED_PAGES || bytes > MAX_CACHE_BYTES) file.delete()
-            }
         }
     }
 
     private companion object {
         const val SCHEMA = 1
         const val MAX_BOXES = 64
-        const val MAX_CACHED_PAGES = 128
-        const val MAX_CACHE_BYTES = 8L * 1024 * 1024
         const val MAX_FILE_BYTES = 64L * 1024
         const val MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000
     }
