@@ -98,7 +98,7 @@ internal fun CloudAccountHeader(
     var pendingAction by remember(profile?.username) { mutableStateOf<PendingCopyAccountAction?>(null) }
     LaunchedEffect(active) { if (!active) { pendingAction = null; info = false; confirmLogout = false } }
     val accountName = profile?.let { it.nickname.ifBlank { it.username } }.orEmpty()
-    val title = if (profile == null) "连接拷贝" else "拷贝书架"
+    val title = if (profile == null) "连接拷贝" else "拷贝账号"
     val requestLogout: () -> Unit = {
         profile?.username?.let { pendingAction = PendingCopyAccountAction(CopyAccountAction.LOGOUT, it) }
         info = false

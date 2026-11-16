@@ -66,6 +66,10 @@ import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.Sort
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.BookmarkAdd
+import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.Icon
@@ -112,6 +116,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import dev.mangaflow.LibraryOpenState
 import dev.mangaflow.account.CopyShelfSyncState
+import dev.mangaflow.account.CopyShelfMetadata
+import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaRepository
 import dev.mangaflow.storage.ReadingProgress
@@ -136,6 +142,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private enum class LibraryToolDestination { COLLECTIONS, STATS, COPY_SYNC }
+private enum class UnifiedShelfScope(val title: String) { ALL("全部"), LOCAL("本机"), COPY("拷贝") }
+private enum class UnifiedShelfSort(val title: String) {
+    RECENT("最近阅读"), COPY_JOINED("加入拷贝"), LOCAL_ADDED("加入本机"), HEAT("热度"), TITLE("名称")
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -155,6 +165,15 @@ fun LibraryScreen(
     onCopySync: (() -> Unit)? = null,
     onImportCopy: (() -> Unit)? = null,
     preferredResumeTargets: Map<String, SavedResumeTarget> = emptyMap(),
+    cloudFavorites: List<Manga> = emptyList(),
+    cloudMetadata: Map<String, CopyShelfMetadata> = emptyMap(),
+    cloudLoading: Boolean = false,
+    cloudHasMore: Boolean = false,
+    cloudError: String? = null,
+    cloudComplete: Boolean = true,
+    onAddCloudFavorite: ((Manga) -> Unit)? = null,
+    onMoreCloudFavorites: (() -> Unit)? = null,
+    onRefreshCloudFavorites: (() -> Unit)? = null,
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -174,6 +193,11 @@ fun LibraryScreen(
     var headerHeightPx by remember(density, topInset) { mutableIntStateOf(with(density) { (48.dp + topInset).roundToPx() }) }
     val headerPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     var showHistory by rememberSaveable { mutableStateOf(false) }
+    var scopeName by rememberSaveable { mutableStateOf(UnifiedShelfScope.ALL.name) }
+    var sortName by rememberSaveable { mutableStateOf(UnifiedShelfSort.RECENT.name) }
+    var sortMenu by remember { mutableStateOf(false) }
+    val shelfScope = UnifiedShelfScope.entries.firstOrNull { it.name == scopeName } ?: UnifiedShelfScope.ALL
+    val shelfSort = UnifiedShelfSort.entries.firstOrNull { it.name == sortName } ?: UnifiedShelfSort.RECENT
     var showCollections by rememberSaveable { mutableStateOf(false) }
     var showStats by rememberSaveable { mutableStateOf(false) }
     var shelfMenuExpanded by remember { mutableStateOf(false) }
@@ -216,20 +240,64 @@ fun LibraryScreen(
     val removalScope = rememberCoroutineScope()
     var pendingFavorites by remember { mutableStateOf<Set<String>>(emptySet()) }
     var pendingHistory by remember { mutableStateOf<Set<String>>(emptySet()) }
-    val visibleFavorites = remember(scopedFavorites, pendingFavorites) { scopedFavorites.filterNot { it.id in pendingFavorites } }
+    // Projection, not an import: cloud-only titles remain remote and never gain local delete authority.
+    // Same title is not proof of the same work. Only identical source-qualified IDs collapse.
+    val localKeys = remember(scopedFavorites, pendingFavorites) {
+        scopedFavorites.filterNot { it.id in pendingFavorites }.map { it.sourceId to it.id }.toSet()
+    }
+    val cloudKeys = remember(cloudFavorites) {
+        cloudFavorites.asSequence().filter { it.sourceId == "copy" && !SourceKeys.isEncoded(it.id) }
+            .map { it.sourceId to it.id }.toSet()
+    }
+    val unifiedBooks = remember(scopedFavorites, pendingFavorites, cloudFavorites, includedSourceIds, excludedSourceIds) {
+        (scopedFavorites.filterNot { it.id in pendingFavorites } +
+            cloudFavorites.filter { it.sourceId == "copy" && !SourceKeys.isEncoded(it.id) &&
+                sourceIncluded(it.sourceId) }).distinctBy { it.sourceId to it.id }
+    }
+    val visibleFavorites = remember(unifiedBooks, shelfScope, shelfSort, scopedHistory, cloudMetadata, libraryStore) {
+        val filtered = unifiedBooks.filter { book ->
+            when (shelfScope) {
+                UnifiedShelfScope.ALL -> true
+                UnifiedShelfScope.LOCAL -> (book.sourceId to book.id) in localKeys
+                UnifiedShelfScope.COPY -> (book.sourceId to book.id) in cloudKeys
+            }
+        }
+        val stable = unifiedBooks.withIndex().associate { (index, manga) -> (manga.sourceId to manga.id) to index }
+        fun stableIndex(manga: Manga) = stable[manga.sourceId to manga.id] ?: Int.MAX_VALUE
+        when (shelfSort) {
+            UnifiedShelfSort.RECENT -> filtered.sortedWith(compareByDescending<Manga> {
+                maxOf(progressById[it.id]?.updatedAt ?: 0L, cloudMetadata[it.id]?.readAt ?: 0L)
+            }.thenBy(::stableIndex))
+            UnifiedShelfSort.COPY_JOINED -> filtered.sortedWith(compareBy<Manga> {
+                cloudMetadata[it.id]?.joinedOrder == null && cloudMetadata[it.id]?.joinedAt == null
+            }.thenBy { cloudMetadata[it.id]?.joinedOrder ?: Int.MAX_VALUE }
+                .thenByDescending { cloudMetadata[it.id]?.joinedAt ?: 0L }.thenBy(::stableIndex))
+            UnifiedShelfSort.LOCAL_ADDED -> filtered.sortedWith(compareByDescending<Manga> {
+                libraryStore.favoriteAddedAt(it.id) ?: 0L
+            }.thenBy(::stableIndex))
+            UnifiedShelfSort.HEAT -> filtered.sortedWith(compareByDescending<Manga> {
+                it.totalPopularity ?: it.popularity ?: Long.MIN_VALUE
+            }.thenBy(::stableIndex))
+            UnifiedShelfSort.TITLE -> filtered.sortedWith(compareBy<Manga> { it.title.lowercase() }
+                .thenBy(::stableIndex))
+        }
+    }
     val visibleHistory = remember(scopedHistory, pendingHistory) { scopedHistory.filterNot { it.manga.id in pendingHistory } }
     val copyNotice = copySyncState?.takeIf {
         it.owner != null && (it.differences.isNotEmpty() || it.favoritesError != null || it.progressError != null)
     }
     val importCopy = onImportCopy ?: onCopySync
     fun removeFavoriteWithUndo(manga: Manga) {
-        if (!sourceIncluded(manga.sourceId) || manga.id in pendingFavorites) return
+        if (!sourceIncluded(manga.sourceId) || (manga.sourceId to manga.id) !in localKeys ||
+            manga.id in pendingFavorites) return
         pendingFavorites = pendingFavorites + manga.id
         snackbar.currentSnackbarData?.dismiss()
         removalScope.launch {
             var undone = false
             try {
-                undone = snackbar.showSnackbar("已移出书架", actionLabel = "撤销",
+                undone = snackbar.showSnackbar(
+                    if (cloudKeys.contains(manga.sourceId to manga.id)) "已移出本机 · 拷贝仍保留" else "已移出书架",
+                    actionLabel = "撤销",
                     withDismissAction = true, duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed
                 if (undone) haptics.perform(dev.mangaflow.ui.motion.FeelEvent.Undo)
             } finally {
@@ -255,7 +323,7 @@ fun LibraryScreen(
         }
     }
     LaunchedEffect(active, showHistory) {
-        if (!active) { shelfMenuExpanded = false; libraryActionsOpen = false; pendingLibraryTool = null }
+        if (!active) { shelfMenuExpanded = false; libraryActionsOpen = false; pendingLibraryTool = null; sortMenu = false }
         managedId = null
         draggedFavorite = null
         dragPoint = Offset.Unspecified
@@ -349,15 +417,83 @@ fun LibraryScreen(
                             horizontalArrangement = Arrangement.spacedBy(gap),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            if (copyNotice != null && importCopy != null) item(key = "copy-new-favorites", span = {
+                            item(key = "unified-shelf-controls", span = {
                                 androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                             }) {
-                                CopyShelfImportHint(copyNotice, active, importCopy)
+                                Row(Modifier.fillMaxWidth().heightIn(min = 40.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    UnifiedShelfScope.entries.forEach { option ->
+                                        val selected = shelfScope == option
+                                        Surface(shape = RoundedCornerShape(10.dp),
+                                            color = if (selected) MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)
+                                                else Color.Transparent) {
+                                            MotionIconButton(onClick = { scopeName = option.name },
+                                                modifier = Modifier.size(36.dp), enabled = active,
+                                                tooltip = "显示" + option.title + "书架") {
+                                                Icon(when (option) {
+                                                    UnifiedShelfScope.ALL -> Icons.Outlined.ViewModule
+                                                    UnifiedShelfScope.LOCAL -> Icons.Outlined.Bookmarks
+                                                    UnifiedShelfScope.COPY -> Icons.Outlined.Sync
+                                                }, option.title, Modifier.size(17.dp))
+                                            }
+                                        }
+                                    }
+                                    Spacer(Modifier.weight(1f))
+                                    Text(visibleFavorites.size.toString(), style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Box {
+                                        MotionIconButton(onClick = { sortMenu = !sortMenu },
+                                            modifier = Modifier.size(36.dp), enabled = active,
+                                            tooltip = "书架排序：" + shelfSort.title) {
+                                            Icon(Icons.Outlined.Sort, "排序", Modifier.size(17.dp))
+                                        }
+                                        CompactGlassPopover(sortMenu, backdrop, onDismiss = { sortMenu = false },
+                                            maximumWidth = 180.dp) {
+                                            UnifiedShelfSort.entries.forEach { candidate ->
+                                                TextButton(onClick = { sortName = candidate.name; sortMenu = false },
+                                                    modifier = Modifier.fillMaxWidth().heightIn(min = 42.dp),
+                                                    contentPadding = PaddingValues(horizontal = 10.dp)) {
+                                                    Text(candidate.title, Modifier.weight(1f),
+                                                        style = MaterialTheme.typography.bodySmall)
+                                                    if (shelfSort == candidate) Icon(Icons.Outlined.Check,
+                                                        null, Modifier.size(15.dp))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            if (visibleFavorites.isEmpty()) item(key = "empty-collection", span = {
+                            if (copyNotice != null && importCopy != null) item(key = "copy-new-favorites", span = {
+                                androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                            }) { CopyShelfImportHint(copyNotice, active, importCopy) }
+                            if (!cloudComplete && (cloudLoading || cloudError != null || cloudHasMore)) item(
+                                key = "cloud-shelf-status", span = {
+                                    androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                                }) {
+                                TextButton(onClick = {
+                                    if (cloudError != null) onRefreshCloudFavorites?.invoke()
+                                    else if (cloudHasMore) onMoreCloudFavorites?.invoke()
+                                }, enabled = active && !cloudLoading &&
+                                    (cloudError != null || cloudHasMore),
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 36.dp)) {
+                                    if (cloudLoading) dev.mangaflow.ui.motion.MotionBusyIndicator(
+                                        Modifier.size(13.dp), strokeWidth = 1.4.dp)
+                                    else Icon(Icons.Outlined.Sync, null, Modifier.size(14.dp))
+                                    Text(when {
+                                        cloudError != null -> "拷贝收藏暂未读取 · 重试"
+                                        cloudLoading -> "正在接入拷贝书架"
+                                        else -> "继续读取拷贝收藏"
+                                    }, Modifier.padding(start = 7.dp), style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                            if (visibleFavorites.isEmpty() && !cloudLoading) item(key = "empty-collection", span = {
                                 androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                             }) { EmptyBookshelf(onDiscover) }
-                            gridItems(visibleFavorites, key = Manga::id, contentType = { "shelf-book" }) { manga ->
+                            gridItems(visibleFavorites, key = { it.sourceId + ":" + it.id },
+                                contentType = { "shelf-book" }) { manga ->
+                                val local = (manga.sourceId to manga.id) in localKeys
+                                val fromCopy = (manga.sourceId to manga.id) in cloudKeys
                                 val saved = progressById[manga.id]
                                 val preferred = preferredResumeTargets[manga.id]?.takeIf { it.mangaId == manga.id }
                                 val hasContinuation = preferred != null || saved != null
@@ -370,7 +506,8 @@ fun LibraryScreen(
                                     DesktopMenuAction(if (hasContinuation) "继续阅读" else "开始阅读") { onOpen(manga) },
                                     DesktopMenuAction("详情与目录") { onCancelOpen(); onDetails(manga) },
                                     DesktopMenuAction("章节记录") { onCancelOpen(); chapterHistoryManga = manga },
-                                    DesktopMenuAction("移出书架") { removeFavoriteWithUndo(manga) })
+                                    if (local) DesktopMenuAction("移出本机收藏") { removeFavoriteWithUndo(manga) }
+                                    else DesktopMenuAction("加入本机收藏") { onAddCloudFavorite?.invoke(manga) })
                                 DesktopContextMenuArea(bookActions) {
                                 Column(Modifier.fillMaxWidth().then(if (desktop) Modifier
                                     .hoverable(interaction).onFocusChanged { cardFocused = it.hasFocus }.focusGroup()
@@ -380,26 +517,25 @@ fun LibraryScreen(
                                     fadeOutSpec = if (motion) tween(MangaMotion.Quick) else null).zIndex(if (dragged) 8f else 0f)) {
                                     Box(Modifier.fillMaxWidth()) {
                                     SwipeToRemove(onRemove = { removeFavoriteWithUndo(manga) },
-                                        label = "删除收藏", enabled = !dragged && !desktop) {
+                                        label = "移出本机收藏", enabled = local && !dragged && !desktop) {
                                         BookshelfBook(
                                             manga, repository, saved,
                                             resumeTarget = preferred,
                                             opening = opening?.let { it.manga.id == manga.id && it.loading } == true,
                                             onOpen = { onOpen(manga) },
-                                            dragging = dragged,
+                                            dragging = dragged, dragEnabled = local,
                                             deleteArmed = dragged && trashArmed,
                                             onDragStart = { point ->
                                                 onCancelOpen()
                                                 managedId = null
-                                                draggedFavorite = manga
-                                                dragPoint = point
+                                                if (local) { draggedFavorite = manga; dragPoint = point }
                                             },
                                             onDragMove = { dragPoint = it },
                                             onDragEnd = { point ->
                                                 val shouldRemove = draggedFavorite?.id == manga.id && isTrashDrop(point)
                                                 draggedFavorite = null
                                                 dragPoint = Offset.Unspecified
-                                                if (shouldRemove) removeFavoriteWithUndo(manga)
+                                                if (shouldRemove && local) removeFavoriteWithUndo(manga)
                                             },
                                             onDragCancel = {
                                                 draggedFavorite = null
@@ -407,6 +543,26 @@ fun LibraryScreen(
                                             },
                                             modifier = Modifier.fillMaxWidth().height(bookHeight),
                                         )
+                                    }
+                                    if (fromCopy) Row(Modifier.align(Alignment.TopStart).padding(6.dp)
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(MaterialTheme.colorScheme.surface.copy(alpha = .86f))
+                                        .padding(horizontal = 5.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        if (local) Icon(Icons.Outlined.Bookmarks, "本机与拷贝", Modifier.size(13.dp))
+                                        ChapterSourceLogo("copy", "拷贝", Modifier.size(15.dp))
+                                    }
+                                    if (fromCopy && !local && onAddCloudFavorite != null) {
+                                        Surface(Modifier.align(Alignment.TopEnd).padding(6.dp),
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = MaterialTheme.colorScheme.surface.copy(alpha = .9f)) {
+                                            MotionIconButton(onClick = { onAddCloudFavorite(manga) },
+                                                enabled = active, modifier = Modifier.size(30.dp),
+                                                tooltip = "加入本机书架") {
+                                                Icon(Icons.Outlined.BookmarkAdd, "加入本机书架", Modifier.size(16.dp))
+                                            }
+                                        }
                                     }
                                     if (desktop && (hovered || cardFocused || bookMenuOpen)) Row(Modifier.align(Alignment.TopEnd).padding(4.dp),
                                         verticalAlignment = Alignment.CenterVertically) {
@@ -439,7 +595,8 @@ fun LibraryScreen(
                                             val progressText = preferred?.chapterTitle?.ifBlank { "继续阅读" } ?: saved?.let {
                                                 it.chapterTitle.ifBlank { "继续阅读" } +
                                                     if (it.pageCount > 0) " · ${it.pageIndex + 1}/${it.pageCount}" else ""
-                                            } ?: "未读"
+                                            } ?: cloudMetadata[manga.id]?.chapterTitle
+                                                ?.takeIf { fromCopy && it.isNotBlank() }?.let { "拷贝 · $it" } ?: "未读"
                                             Text(mangaNumberText(progressText), modifier = Modifier.padding(top = 2.dp),
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                 fontSize = 11.sp, lineHeight = 15.sp,
