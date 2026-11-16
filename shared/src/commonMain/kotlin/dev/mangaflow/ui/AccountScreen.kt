@@ -176,12 +176,14 @@ fun AccountScreen(
             Text("匿名阅读已启用", Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             Text("连接账号，导入拷贝收藏；阅读进度可在漫画详情中选择采用。", Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
             if (state.savedCredentialPresent) {
-                Text("登录凭据仍保存在设备中，账号验证暂未恢复。重试连接不会重新提交密码。",
+                Text(if (state.autoRestorePending)
+                    "账号凭据已安全保留，客户端会自动重试恢复连接，无需重复登录。"
+                    else "账号凭据已保留，但服务端未接受本次验证。请重新授权或更换账号。",
                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 12.dp))
                 Button(onClick = onRefresh, enabled = active && !busy,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                    shape = RoundedCornerShape(16.dp)) { Text("重试连接") }
+                    shape = RoundedCornerShape(16.dp)) { Text("立即重试（可选）") }
                 TextButton(onClick = { clearInputs(); onLogout() }, enabled = active && !busy) {
                     Text("退出并切换账号", style = MaterialTheme.typography.bodySmall)
                 }
