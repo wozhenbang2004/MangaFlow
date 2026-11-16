@@ -2,7 +2,7 @@ package dev.mangaflow.data
 
 /** Explicit user values; there are no device-profile or business maxima on these settings. */
 data class SourceCheckPreferences(
-    val enabled: Boolean = true,
+    val enabled: Boolean = false,
     val intervalMinutes: Int = 30,
     val concurrency: Int = 8,
     val timeoutSeconds: Int = 25,

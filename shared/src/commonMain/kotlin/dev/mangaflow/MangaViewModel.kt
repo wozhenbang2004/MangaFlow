@@ -227,6 +227,7 @@ data class AccountUiState(
     val busy: Boolean = true,
     val error: String? = null,
     val canRetryConnection: Boolean = false,
+    val savedCredentialPresent: Boolean = false,
     val favorites: List<Manga> = emptyList(),
     val favoritesLoading: Boolean = false,
     val favoritesRefreshing: Boolean = false,
@@ -3027,9 +3028,14 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 throw cancel
             } catch (failure: Exception) {
                 if (requestId == accountRequestId) {
+                    val saved = if (restoring) try { accountRepository.hasSavedLogin() }
+                        catch (cancel: CancellationException) { throw cancel }
+                        catch (_: Exception) { false } else false
+                    if (requestId != accountRequestId) return@launch
                     _account.value = AccountUiState(profile = accountRepository.profile.value, busy = false,
                         error = accountError(failure, "登录暂时未完成，请稍后重试。"),
-                        canRetryConnection = accountRepository.canRetryLogin || (restoring && !accountRepository.hasPendingLogin))
+                        savedCredentialPresent = saved,
+                        canRetryConnection = accountRepository.canRetryLogin || (restoring && saved))
                 }
             }
         }

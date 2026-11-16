@@ -271,7 +271,8 @@ class SourceCheckController(
         val json = atomic.openRead().bufferedReader().use { JSONObject(it.readText()) }
         require(json.optString("format") == "source-checks-v1") { "来源检查记录格式不兼容。" }
         val settings = json.getJSONObject("preferences")
-        val selected = SourceCheckPreferences(settings.optBoolean("enabled", true),
+        val selected = SourceCheckPreferences(
+            json.optBoolean("directoryTimerOptIn", false) && settings.optBoolean("enabled", false),
             settings.optInt("intervalMinutes", 30), settings.optInt("concurrency", 8),
             settings.optInt("timeoutSeconds", 25), settings.optInt("retries", 1)).checked()
         val stamps = json.optJSONArray("stamps") ?: JSONArray()
@@ -285,7 +286,8 @@ class SourceCheckController(
 
     private fun write(record: Record) {
         val settings = record.preferences
-        val json = JSONObject().put("format", "source-checks-v1").put("preferences", JSONObject()
+        val json = JSONObject().put("format", "source-checks-v1")
+            .put("directoryTimerOptIn", settings.enabled).put("preferences", JSONObject()
             .put("enabled", settings.enabled).put("intervalMinutes", settings.intervalMinutes)
             .put("concurrency", settings.concurrency).put("timeoutSeconds", settings.timeoutSeconds)
             .put("retries", settings.retries)).put("lastCompletedAt", record.lastCompletedAt)

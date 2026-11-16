@@ -168,7 +168,17 @@ fun AccountScreen(
         ) {
             Text("匿名阅读已启用", Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
             Text("连接账号，导入拷贝收藏；阅读进度可在漫画详情中选择采用。", Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
-            MotionTabContent(cookieMode, modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp), contentKey = { it }, order = { if (it) 1 else 0 }, fillContent = false, soft = true) { cookieScene ->
+            if (state.savedCredentialPresent) {
+                Text("登录凭据仍保存在设备中，账号验证暂未恢复。重试连接不会重新提交密码。",
+                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 12.dp))
+                Button(onClick = onRefresh, enabled = active && !busy,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(16.dp)) { Text("重试连接") }
+                TextButton(onClick = { clearInputs(); onLogout() }, enabled = active && !busy) {
+                    Text("退出并切换账号", style = MaterialTheme.typography.bodySmall)
+                }
+            } else MotionTabContent(cookieMode, modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp), contentKey = { it }, order = { if (it) 1 else 0 }, fillContent = false, soft = true) { cookieScene ->
             val formActive = active && cookieScene == cookieMode
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (cookieScene) {
@@ -225,10 +235,10 @@ fun AccountScreen(
             }
             CopyShelfValue(state.error) { message ->
                 Box(Modifier.fillMaxWidth().padding(bottom = 12.dp).heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
-                    AccountError(message, state.busy, onRetry = if (state.canRetryConnection) onRefresh else null)
+                    AccountError(message, state.busy, onRetry = if (state.canRetryConnection && !state.savedCredentialPresent) onRefresh else null)
                 }
             }
-            TextButton(
+            if (!state.savedCredentialPresent) TextButton(
                 onClick = { clearInputs(); cookieMode = !cookieMode }, enabled = active && !busy,
                 modifier = Modifier.heightIn(min = 48.dp),
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),

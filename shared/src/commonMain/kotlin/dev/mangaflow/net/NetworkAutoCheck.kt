@@ -26,6 +26,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
@@ -98,6 +103,123 @@ data class NetworkAutoCheckState(
     val applyMessage: String? = null,
 )
 
+
+/** An OS wake is opportunistic; foreground process ticks honor shorter user intervals. */
+data class NetworkAutoScheduleState(
+    val enabled: Boolean = true,
+    val intervalMinutes: Int = 30,
+    val concurrency: Int = 12,
+    val autoApply: Boolean = true,
+    val lastAttemptAtMillis: Long = 0L,
+    val lastCompletedAtMillis: Long = 0L,
+    val lastApplied: Int = 0,
+    val message: String? = null,
+) {
+    val intervalMillis: Long get() = intervalMinutes.toLong() * 60_000L
+    fun checked(): NetworkAutoScheduleState = apply {
+        require(intervalMinutes > 0 && concurrency > 0) { "检查周期和并发必须大于零。" }
+    }
+}
+
+private class NetworkAutoScheduleStore(context: PlatformContext) {
+    private val prefs = preferences(applicationContext(context), "mangaflow_network_auto")
+    private val mutable = MutableStateFlow(NetworkAutoScheduleState(
+        enabled = prefs.getBoolean("enabled", true),
+        intervalMinutes = prefs.getInt("intervalMinutes", 30).takeIf { it > 0 } ?: 30,
+        concurrency = prefs.getInt("concurrency", 12).takeIf { it > 0 } ?: 12,
+        autoApply = prefs.getBoolean("autoApply", true),
+        lastAttemptAtMillis = prefs.getLong("lastAttemptAt", 0L),
+        lastCompletedAtMillis = prefs.getLong("lastCompletedAt", 0L),
+        lastApplied = prefs.getInt("lastApplied", 0),
+    ))
+    val state: StateFlow<NetworkAutoScheduleState> = mutable.asStateFlow()
+    fun update(next: NetworkAutoScheduleState): Boolean {
+        next.checked()
+        if (!prefs.edit().putBoolean("enabled", next.enabled)
+                .putInt("intervalMinutes", next.intervalMinutes)
+                .putInt("concurrency", next.concurrency)
+                .putBoolean("autoApply", next.autoApply).commit()) return false
+        mutable.update { previous -> next.copy(
+            lastAttemptAtMillis = previous.lastAttemptAtMillis,
+            lastCompletedAtMillis = previous.lastCompletedAtMillis,
+            lastApplied = previous.lastApplied, message = previous.message) }
+        return true
+    }
+    fun started(now: Long) {
+        prefs.edit().putLong("lastAttemptAt", now).apply()
+        mutable.update { it.copy(lastAttemptAtMillis = now, message = "检测中") }
+    }
+    fun finished(now: Long, applied: Int, message: String) {
+        prefs.edit().putLong("lastCompletedAt", now).putInt("lastApplied", applied).apply()
+        mutable.update { it.copy(lastCompletedAtMillis = now, lastApplied = applied, message = message) }
+    }
+}
+
+private class NetworkAutoScheduler(
+    private val context: PlatformContext,
+    private val operations: ApplicationOperations,
+    private val engine: NetworkAutoCheckEngine,
+    private val schedule: NetworkAutoScheduleStore,
+) {
+    private val lock = Mutex()
+
+    init {
+        operations.scope.launch(Dispatchers.IO) {
+            operations.ready.first { it }
+            schedule.state.map { it.enabled to it.intervalMinutes }.distinctUntilChanged().collectLatest { (enabled, minutes) ->
+                try {
+                    if (enabled) scheduleNetworkAutoWake(context, minutes) else cancelNetworkAutoWake(context)
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* The live scheduler is still available. */ }
+                if (enabled) while (true) {
+                    try { checkDue() }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { /* Retry on the next due tick; keep the last verified route. */ }
+                    delay(minOf(minutes.toLong() * 60_000L, 60_000L))
+                }
+            }
+        }
+    }
+
+    fun resume() {
+        operations.scope.launch(Dispatchers.IO) {
+            try { checkDue() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { /* Never block app startup for a network probe. */ }
+        }
+    }
+
+    /** Shared by the Android OS worker, in-process scheduler and app resume. */
+    suspend fun checkDue() = lock.withLock {
+        val settings = schedule.state.value
+        val now = wallTimeMillis()
+        if (!settings.enabled || (settings.lastAttemptAtMillis > 0L &&
+                now >= settings.lastAttemptAtMillis &&
+                now - settings.lastAttemptAtMillis < settings.intervalMillis)) return@withLock
+        if (!engine.start()) return@withLock
+        val runId = engine.state.value.runId
+        schedule.started(now)
+        val finished = withTimeoutOrNull(270_000L) {
+            engine.state.first { it.runId == runId && !it.running && !it.restoring }
+        }
+        var applied = 0
+        var message = when {
+            finished == null -> "本轮检测超时，线路保持不变"
+            !finished.complete -> "部分检查未完成，线路保持不变"
+            else -> "检测完成，线路保持不变"
+        }
+        if (finished?.complete == true && schedule.state.value.enabled && schedule.state.value.autoApply &&
+            finished.selection.isNotEmpty()) {
+            val result = engine.apply(finished.selection)
+            if (result.success) {
+                applied = result.applied
+                message = if (applied > 0) "已自动调整 $applied 项线路" else "线路无需调整"
+            } else message = "配置或网络变化，未自动修改线路"
+        }
+        schedule.finished(wallTimeMillis(), applied, message)
+    }
+}
+
 data class NetworkAutoApplyResult(val applied: Int, val message: String, val success: Boolean, val stale: Boolean = false)
 
 /** One application operation owns execution; views only subscribe, stage and explicitly confirm. */
@@ -108,8 +230,14 @@ class NetworkAutoCheckController internal constructor(
     operations: ApplicationOperations = ApplicationOperations.get(context),
     prepareSources: suspend () -> Unit = {},
 ) {
-    private val engine = NetworkAutoCheckEngine(context, repository, registry, operations, prepareSources)
+    private val settings = NetworkAutoScheduleStore(context)
+    private val engine = NetworkAutoCheckEngine(context, repository, registry, operations, prepareSources, settings.state)
+    private val scheduler = NetworkAutoScheduler(context, operations, engine, settings)
     val state: StateFlow<NetworkAutoCheckState> get() = engine.state
+    val schedule: StateFlow<NetworkAutoScheduleState> get() = settings.state
+    fun updateSchedule(next: NetworkAutoScheduleState): Boolean = settings.update(next)
+    suspend fun checkDue() = scheduler.checkDue()
+    fun resume() = scheduler.resume()
     fun start(): Boolean = engine.start()
     suspend fun run() { start() }
     fun cancel() = engine.cancel()
@@ -136,7 +264,8 @@ private class OwnedCheckRun(val generation: Long, val id: String, val startedAt:
 
 private class NetworkAutoCheckEngine(context: PlatformContext, private val repository: UnifiedMangaRepository?,
     private val registry: BodySourceRegistry?, private val operations: ApplicationOperations,
-    private val prepareSources: suspend () -> Unit) {
+    private val prepareSources: suspend () -> Unit,
+    private val schedule: StateFlow<NetworkAutoScheduleState>) {
     private val app = applicationContext(context)
     private val store = DownloadRoutingStore.get(app)
     private val relay = RelayLinkController.get(app)
@@ -240,7 +369,7 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                         coverage = target.coverage, category = target.category, sourceId = target.sourceId,
                         group = target.group, ratingId = target.ratingId, canApply = target.unsupported == null) },
                     total = targets.size) else previous }
-                val gate = Semaphore(6)
+                val gate = Semaphore(schedule.value.concurrency)
                 val mutableSources = targets.filterNot { it.parallelRoutes }.associate { it.id to Mutex() }
                 val mangaTargets = targets.filter { it.group == NetworkAutoGroup.MANGA_SOURCES }
                 val ratingTargets = targets.filter { it.group == NetworkAutoGroup.RATING_SITES }

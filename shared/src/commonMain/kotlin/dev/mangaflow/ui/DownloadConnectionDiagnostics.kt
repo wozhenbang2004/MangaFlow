@@ -50,6 +50,83 @@ import dev.mangaflow.ui.motion.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
+
+@Composable
+private fun NetworkAutoScheduleControls(controller: NetworkAutoCheckController, active: Boolean) {
+    val schedule by controller.schedule.collectAsStateWithLifecycle()
+    val colors = MaterialTheme.colorScheme
+    var expanded by remember(controller) { mutableStateOf(false) }
+    var minutes by remember(expanded, schedule.intervalMinutes) { mutableStateOf(schedule.intervalMinutes.toString()) }
+    var workers by remember(expanded, schedule.concurrency) { mutableStateOf(schedule.concurrency.toString()) }
+    var applyAutomatically by remember(expanded, schedule.autoApply) { mutableStateOf(schedule.autoApply) }
+    var notice by remember(controller) { mutableStateOf<String?>(null) }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+            MotionIconButton(onClick = {
+                if (!controller.updateSchedule(schedule.copy(enabled = !schedule.enabled)))
+                    notice = "设置未能保存"
+                else notice = null
+            }, enabled = active, modifier = Modifier.size(44.dp),
+                tooltip = if (schedule.enabled) "暂停自动线路检测" else "开启自动线路检测") {
+                Icon(if (schedule.enabled) Icons.Outlined.Check else Icons.Outlined.Close,
+                    null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("自动线路检测", style = MaterialTheme.typography.bodySmall)
+                Text(if (schedule.enabled) "每 ${schedule.intervalMinutes} 分钟 · ${schedule.concurrency} 并发 · ${if (schedule.autoApply) "自动择优" else "只记录"}"
+                    else "已暂停 · 手动检测仍可用",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
+            MotionIconButton(onClick = { expanded = !expanded }, enabled = active,
+                modifier = Modifier.size(44.dp), tooltip = "配置自动检测") {
+                Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    null, Modifier.size(17.dp), tint = colors.onSurfaceVariant)
+            }
+        }
+        CopyShelfReveal(expanded) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    androidx.compose.material3.OutlinedTextField(value = minutes,
+                        onValueChange = { minutes = it.filter(Char::isDigit) },
+                        modifier = Modifier.weight(1f), singleLine = true, enabled = active,
+                        label = { Text("周期 · 分钟") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                    androidx.compose.material3.OutlinedTextField(value = workers,
+                        onValueChange = { workers = it.filter(Char::isDigit) },
+                        modifier = Modifier.weight(1f), singleLine = true, enabled = active,
+                        label = { Text("并发 · 个") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    MotionTextButton(onClick = { applyAutomatically = !applyAutomatically }, enabled = active) {
+                        Icon(if (applyAutomatically) Icons.Outlined.CheckBox else Icons.Outlined.CheckBoxOutlineBlank,
+                            null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("自动应用验证结果")
+                    }
+                    Spacer(Modifier.weight(1f))
+                    MotionTextButton(onClick = {
+                        val interval = minutes.toIntOrNull()
+                        val parallel = workers.toIntOrNull()
+                        if (interval == null || interval <= 0 || parallel == null || parallel <= 0)
+                            notice = "周期与并发须为正整数"
+                        else if (controller.updateSchedule(schedule.copy(intervalMinutes = interval,
+                                concurrency = parallel, autoApply = applyAutomatically))) {
+                            notice = null; expanded = false
+                        } else notice = "设置未能保存"
+                    }, enabled = active) { Text("保存") }
+                }
+                Text("Android 由系统后台唤醒；系统省电策略可能延后。可用线路需两次验证，网络变化时不自动修改。",
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            }
+        }
+        (notice ?: schedule.message)?.let { Text(it, style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp)) }
+    }
+}
+
 /** Retain the real review and its authority; the result scene has no second settings navigation. */
 @Composable
 internal fun NetworkAutoCheckWorkspace(
@@ -96,6 +173,7 @@ internal fun NetworkAutoCheckWorkspace(
         notice = null
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        NetworkAutoScheduleControls(controller, active)
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             if (state.running || state.restoring) MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)

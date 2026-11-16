@@ -203,6 +203,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     }
 
     fun resumePending() {
+        networkChecks.resume()
         sourceChecks.resume()
         downloads.resumePendingDownloads()
         preparations.resumePending()

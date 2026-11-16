@@ -90,6 +90,11 @@ class CopyAccountRepository(context: Context) {
     private val relayProfileUrl = apiUrl("member/info")
     private val publicConfig = CopyMangaConfig()
 
+    /** A transient verification failure never deletes the protected credential. */
+    suspend fun hasSavedLogin(): Boolean = withContext(Dispatchers.IO) {
+        !restorationControl.getBoolean("logout_pending", false) && store.read() != null
+    }
+
     suspend fun restore(): AccountProfile? {
         val expected = synchronized(sessionLock) {
             if (logoutRequested && pendingLogin?.lease?.version != version) return null

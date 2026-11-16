@@ -501,7 +501,7 @@ private fun SourceCheckSettings(preferences: SourceCheckPreferences, state: Sour
     val colors = MaterialTheme.colorScheme
     val defaults = SourceCheckPreferences()
     Column(Modifier.fillMaxWidth().motionInputGate(active), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        SettingsToggle("自动检查并更新", preferences.enabled, Icons.Outlined.Sync) {
+        SettingsToggle("定时匹配（可选）", preferences.enabled, Icons.Outlined.Sync) {
             onChange(preferences.copy(enabled = it))
         }
         ExperienceNumber("检查周期", preferences.intervalMinutes, defaults.intervalMinutes, 1..120, "分钟",
@@ -520,7 +520,7 @@ private fun SourceCheckSettings(preferences: SourceCheckPreferences, state: Sour
             editor, active, automaticLabel = "默认") {
             onChange(preferences.copy(retries = it ?: defaults.retries))
         }
-        Text("书架、阅读记录与当前普通作品。按身份核对更新来源及章节，保留手动关联、排除和阅读位置。",
+        Text("作品来源、章节关联默认手动检查，避免无意义的全库周期扫描。可单独启用定时匹配。",
             fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant,
             modifier = Modifier.padding(top = 8.dp))
         Text(if (platformKind == PlatformKind.ANDROID)
