@@ -113,7 +113,7 @@ import dev.mangaflow.storage.SteamWallpaperKind
 import dev.mangaflow.storage.SteamWallpaperLibrary
 import dev.mangaflow.storage.SteamWallpaperTransferPhase
 import dev.mangaflow.storage.SteamWallpaperState
-import dev.mangaflow.storage.createSteamWallpaperClient
+import dev.mangaflow.MangaApplicationServices
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -130,7 +130,7 @@ private enum class WorkshopPane { LOGIN, ACCOUNT, BROWSE, PREVIEW, UNSUPPORTED }
 
 /** The activity owner retains a pending challenge across host recreation; secrets stay in the view. */
 private class SteamWorkshopOwner(context: PlatformContext) : ViewModel() {
-    val client = createSteamWallpaperClient(context)
+    val client = MangaApplicationServices.get(context).steamWallpaperClient
     val query = mutableStateOf("")
     var committedQuery = ""
     var acknowledgedImports = 0
@@ -164,7 +164,8 @@ private class SteamWorkshopOwner(context: PlatformContext) : ViewModel() {
         }
     }
 
-    override fun onCleared() { client.close() }
+    // The account session belongs to the application. Closing this presentation cannot log it out.
+    override fun onCleared() { client.setForeground(false) }
 }
 
 private data class SteamBrowserSnapshot(
