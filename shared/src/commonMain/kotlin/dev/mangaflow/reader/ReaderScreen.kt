@@ -1191,6 +1191,7 @@ fun ReaderScreen(
                         Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title,
+                            pageRepairs[pageIndex]?.let { "补页 · " + it.variant.sourceName + " " + (it.nativeIndex + 1) },
                             currentSourceName.takeIf { chapter.variants.size > 1 }).joinToString(" · "),
                             color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
@@ -1203,6 +1204,16 @@ fun ReaderScreen(
                         }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                             Text(if (preferences.doublePage) "双页" else "单页", color = colors.onSurface, fontSize = 12.sp)
                         }
+                    }
+                    if (pageRepairs.containsKey(pageIndex)) {
+                        ReaderIcon(Icons.Rounded.Refresh, "恢复本页原图", interactive = controlsVisible,
+                            onClick = {
+                                pageRepairs.remove(pageIndex)
+                                currentPageRetryIndex = pageIndex
+                                currentPageRetrySerial++
+                            })
+                        ReaderIcon(Icons.Rounded.Tune, "调整本页备用来源与对齐", interactive = controlsVisible,
+                            onClick = { repairTarget = pageIndex })
                     }
                     if (desktop) ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook,
                         if (showChapters) "收起章节目录" else "章节目录", interactive = controlsVisible,
