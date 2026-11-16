@@ -360,7 +360,8 @@ internal fun ReaderExperienceStatus(
             }
         }
     }
-    ExperienceSettingsDialog(visible = showPolicy && visible, backdrop = backdrop) { showPolicy = false }
+    ExperienceSettingsDialog(visible = showPolicy && visible, backdrop = backdrop,
+        onDismiss = { showPolicy = false })
 }
 
 private enum class ReaderStatusSection { PREPARATION, SOURCES, CACHE }

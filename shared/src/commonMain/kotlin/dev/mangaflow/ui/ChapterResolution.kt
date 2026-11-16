@@ -20,6 +20,7 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.experience.readerPageCacheKey
 import dev.mangaflow.experience.readerPageRequest
+import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.data.plugins.resolveScriptPage
 import dev.mangaflow.data.plugins.materializeScriptPage
 import dev.mangaflow.platform.LocalMangaContext
@@ -66,6 +67,8 @@ internal fun rememberChapterResolution(
     active: Boolean = true,
 ): ChapterResolutionState {
     val context = LocalMangaContext.current
+    val experience = remember(context) { ExperiencePolicyStore.get(context) }
+    val experienceBudget by experience.state.collectAsStateWithLifecycle()
     val downloads = remember(context) { DownloadStore.get(context) }
     val loader = remember(context) { SingletonImageLoader.get(imagePlatformContext(context)) }
     val sourceId = remember(mangaId, chapterId) {
@@ -107,13 +110,14 @@ internal fun rememberChapterResolution(
             if (owner == null) return@LaunchedEffect
             // At most three cached-file headers; no request, pixel decoding or chapter scan.
             val samples = pages.take(3)
-            for (page in samples) readerImageDimensions(loader, page, owner.identity(page))
+            for (page in samples) readerImageDimensions(loader, page, owner.identity(page),
+                runtime = experienceBudget.runtime)
             if (exactEntry != null && samples.isNotEmpty()) {
                 val cover = downloads.coverPage(exactEntry.manga.id, chapterId)
                 val original = samples.first()
                 if (cover != null && cover.index == original.index && readerFilePath(cover.url) != null && original.transform.isBlank()) {
                     readerImageDimensions(loader, cover, owner.identity(cover), originalPage = original,
-                        originalCacheIdentity = owner.identity(original))
+                        originalCacheIdentity = owner.identity(original), runtime = experienceBudget.runtime)
                 }
             }
         } catch (cancelled: CancellationException) { throw cancelled }
@@ -183,12 +187,13 @@ internal fun rememberChapterResolution(
                     val page = loaded.asSequence().take(CHAPTER_DIMENSION_SAMPLE_LIMIT)
                         .firstOrNull { ReaderDimensionCache.get(owner.identity(it)) == null }
                         ?: loaded.first()
-                    var size = readerImageDimensions(loader, page, owner.identity(page))
+                    var size = readerImageDimensions(loader, page, owner.identity(page),
+                        runtime = experienceBudget.runtime)
                     if (size == null && exactEntry != null && page.index == loaded.first().index) {
                         val local = downloads.coverPage(exactEntry.manga.id, chapterId)
                         if (local != null && local.index == page.index && readerFilePath(local.url) != null && page.transform.isBlank())
                             size = readerImageDimensions(loader, local, owner.identity(local), originalPage = page,
-                                originalCacheIdentity = owner.identity(page))
+                                originalCacheIdentity = owner.identity(page), runtime = experienceBudget.runtime)
                     }
                     if (size == null) {
                         val acquired = resolveScriptPage(context, mangaId, chapterId, page)
@@ -206,7 +211,7 @@ internal fun rememberChapterResolution(
                         val original = page.takeIf { it.transform.isBlank() && acquired.transform.isBlank() }
                         val resolvedIdentity = result.diskCacheKey ?: readerPageCacheKey(resolved, headers, owner.sourceId)
                         size = readerImageDimensions(loader, resolved, resolvedIdentity, originalPage = original,
-                            originalCacheIdentity = original?.let(owner::identity))
+                            originalCacheIdentity = original?.let(owner::identity), runtime = experienceBudget.runtime)
                     }
                     if (size == null) throw IllegalStateException()
                 }

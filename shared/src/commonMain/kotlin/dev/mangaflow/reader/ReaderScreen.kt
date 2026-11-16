@@ -2753,7 +2753,7 @@ private fun ReaderPage(
             )
         }
         if (replacement != null && repair != null) {
-            MotionTextButton(onClick = { repair.controller.select(page.index, replacement.variant) },
+            TextButton(onClick = { repair.controller.select(page.index, replacement.variant) },
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).heightIn(min = 44.dp)) {
                 ChapterSourceLogo(replacement.variant.sourceId, replacement.variant.sourceName, Modifier.size(16.dp))
                 Spacer(Modifier.width(5.dp))
