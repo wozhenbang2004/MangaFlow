@@ -44,6 +44,8 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name="dev.mangaflow.update.UpdateInstallActivity" android:exported="false"
+            android:launchMode="singleTop" android:excludeFromRecents="true" />
         <activity android:name=".RelayLinkAuthorizationActivity" android:exported="false"
             android:excludeFromRecents="true" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <activity android:name=".WallpaperImportActivity"
@@ -73,6 +75,7 @@
         <service android:name="androidx.work.impl.foreground.SystemForegroundService" android:foregroundServiceType="dataSync" tools:node="merge" />
         <service android:name="dev.mangaflow.storage.ChapterDownloadJobService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="false" />
         <receiver android:name="dev.mangaflow.storage.ChapterDownloadActionReceiver" android:exported="false" />
+        <receiver android:name="dev.mangaflow.update.UpdateInstallReceiver" android:exported="false" />
         <receiver android:name="dev.mangaflow.update.ApplicationTransferActionReceiver" android:exported="false" />
         <service android:name=".update.UpdateJobService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" />
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.updates" android:exported="false" android:grantUriPermissions="true">

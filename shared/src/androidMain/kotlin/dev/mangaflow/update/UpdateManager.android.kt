@@ -11,6 +11,7 @@ import android.app.job.JobScheduler
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInstaller
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -20,7 +21,6 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.AtomicFile
 import android.util.Base64
-import androidx.core.content.FileProvider
 import dev.mangaflow.reader.panels.PanelRuntimeId
 import dev.mangaflow.reader.panels.PanelRuntimeStore
 import dev.mangaflow.net.DownloadCategory
@@ -75,6 +75,10 @@ actual class UpdateManager private constructor(private val context: Context) {
     @Volatile private var queuedWork: String? = null
     @Volatile private var checkToken: String? = null
     @Volatile private var checkJob: Job? = null
+    private val installLock = Any()
+    private var installationNotice: Pair<Int, String>? = null
+    private var heldInstallConfirmation: Triple<Int, String, PendingIntent>? = null
+    internal val installationEvents = MutableStateFlow(0L)
 
     actual val automatic: Boolean get() = preferences.getBoolean("automatic", true)
 
@@ -131,7 +135,7 @@ actual class UpdateManager private constructor(private val context: Context) {
                 val now = System.currentTimeMillis()
                 if (release.versionCode <= versionCode(installed())) {
                     metadata.delete()
-                    _state.value = UpdateState(UpdatePhase.CURRENT, message = "已是最新版本", lastChecked = now)
+                    _state.value = UpdateState(UpdatePhase.CURRENT, message = installationMessage(versionCode(installed()), "已是最新版本"), lastChecked = now)
                 } else {
                     if (release.minSdk > Build.VERSION.SDK_INT) throw IOException("新版本需要 Android API ${release.minSdk} 或更新系统")
                     val output = metadata.startWrite()
@@ -149,7 +153,7 @@ actual class UpdateManager private constructor(private val context: Context) {
                         release = release,
                         downloaded = if (cached) release.bytes else 0,
                         total = release.bytes,
-                        message = if (cached) "新版本已下载，可继续安装" else "发现新版本 ${release.versionName}",
+                        message = if (cached) installationMessage(release.versionCode, "新版本已下载，可继续安装") else "发现新版本 ${release.versionName}",
                         lastChecked = now,
                     )
                     if (!manual && automatic) notifyAvailable(release)
@@ -393,6 +397,19 @@ actual class UpdateManager private constructor(private val context: Context) {
         if (_state.value.phase != UpdatePhase.READY || !operation.compareAndSet(false, true)) return
         scope.launch {
             try {
+                val previous = preferences.getInt("install_session", -1)
+                if (previous >= 0 && preferences.getLong("install_version", -1) != expected.versionCode &&
+                    context.packageManager.packageInstaller.getSessionInfo(previous) != null) {
+                    withContext(Dispatchers.Main) {
+                        if (!activity.isFinishing && !activity.isDestroyed) {
+                            activity.startActivity(Intent(activity, UpdateInstallActivity::class.java)
+                                .putExtra("session_id", previous)
+                                .putExtra("install_token", preferences.getString("install_token", ""))
+                                .putExtra("recover_only", true))
+                        }
+                    }
+                    return@launch
+                }
                 val release = verifyManifest(envelopeFor(expected))
                 val apk = readyFile(release)
                 validateApk(apk, release)
@@ -402,12 +419,16 @@ actual class UpdateManager private constructor(private val context: Context) {
                         _state.value = _state.value.copy(message = "请允许漫流安装应用，返回后再次点击安装")
                         activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
                     } else {
-                        val uri = FileProvider.getUriForFile(context, context.packageName + ".updates", apk)
-                        activity.startActivity(
-                            Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
-                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                        )
-                        _state.value = _state.value.copy(message = "请在系统界面确认安装，取消后仍可继续")
+                        // Session owns its copy; cache cleanup cannot revoke the installer's APK.
+                        val sessionId = withContext(Dispatchers.IO) { prepareInstallSession(apk, release) }
+                        if (activity.isFinishing || activity.isDestroyed) {
+                            _state.value = _state.value.copy(message = "安装包已准备好，请返回应用后继续安装")
+                            return@withContext
+                        }
+                        activity.startActivity(Intent(activity, UpdateInstallActivity::class.java)
+                            .putExtra("session_id", sessionId)
+                            .putExtra("install_token", preferences.getString("install_token", "")))
+                        _state.value = _state.value.copy(message = "等待系统安装确认；安装结果将在此保留")
                     }
                 }
             } catch (failure: Exception) {
@@ -418,9 +439,231 @@ actual class UpdateManager private constructor(private val context: Context) {
         }
     }
 
+    private fun prepareInstallSession(apk: File, release: AppRelease): Int {
+        val installer = context.packageManager.packageInstaller
+        val previousIdentity = synchronized(installLock) {
+            preferences.getInt("install_session", -1) to preferences.getString("install_token", "").orEmpty()
+        }
+        val previous = previousIdentity.first
+        if (previous >= 0 && installer.getSessionInfo(previous) != null) {
+            require(preferences.getLong("install_version", -1) == release.versionCode) {
+                "另一个版本仍在系统安装器中，请先完成或取消它"
+            }
+            return previous
+        }
+        if (previous >= 0) clearInstallConfirmation(previous, previousIdentity.second)
+        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
+            setAppPackageName(context.packageName)
+            setSize(apk.length())
+            if (Build.VERSION.SDK_INT >= 31) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_REQUIRED)
+        }
+        val id = installer.createSession(params)
+        try {
+            installer.openSession(id).use { session ->
+                session.openWrite("base.apk", 0, apk.length()).use { output ->
+                    apk.inputStream().use { it.copyTo(output) }
+                    session.fsync(output)
+                }
+            }
+            synchronized(installLock) {
+                check(preferences.getInt("install_session", -1) == previousIdentity.first &&
+                    preferences.getString("install_token", "").orEmpty() == previousIdentity.second) {
+                    "安装请求已变化，请返回软件更新重试"
+                }
+                check(preferences.edit().putInt("install_session", id)
+                    .putString("install_token", UUID.randomUUID().toString())
+                    .putLong("install_version", release.versionCode).remove("install_status")
+                    .putString("install_result", "等待系统安装确认")
+                    .putLong("install_result_version", release.versionCode).commit()) { "无法保存安装会话，请重试" }
+                installationNotice = null
+            }
+            return id
+        } catch (failure: Exception) {
+            runCatching { installer.abandonSession(id) }
+            throw failure
+        }
+    }
+
+    internal fun ownsInstallSession(id: Int, token: String): Boolean = synchronized(installLock) {
+        id >= 0 && token.isNotBlank() && preferences.getInt("install_session", -1) == id &&
+            preferences.getString("install_token", null) == token
+    }
+
+    internal fun installationResult(id: Int, token: String, status: Int, detail: String?): String? = synchronized(installLock) {
+        if (!ownsInstallSession(id, token)) return@synchronized null
+        installedUpdateMessage(id, token)?.let { return@synchronized it }
+        // Terminal receipts are idempotent. Delayed callbacks cannot reverse a completed request.
+        if (preferences.getInt("install_status", -1) >= 0) return@synchronized installationDisplayMessage(id, token)
+        if (status < 0 && status != PackageInstaller.STATUS_PENDING_USER_ACTION) return@synchronized null
+        val code = preferences.getLong("install_version", -1)
+        val label = when (status) {
+            PackageInstaller.STATUS_PENDING_USER_ACTION -> "请在系统界面确认安装"
+            PackageInstaller.STATUS_SUCCESS -> "系统已确认安装成功"
+            PackageInstaller.STATUS_FAILURE_ABORTED -> "安装已取消或被系统中止；安装包已保留，可重试"
+            PackageInstaller.STATUS_FAILURE_STORAGE -> "存储空间不足，安装包已保留；请腾出空间后重试"
+            PackageInstaller.STATUS_FAILURE_CONFLICT -> "安装与已有应用冲突，旧应用和数据未删除"
+            PackageInstaller.STATUS_FAILURE_INCOMPATIBLE -> "系统报告安装包与此设备不兼容"
+            PackageInstaller.STATUS_FAILURE_INVALID -> "系统报告安装包无效，请重新下载"
+            PackageInstaller.STATUS_FAILURE_BLOCKED -> "安装被系统策略或安全检查阻止"
+            else -> "系统安装失败，安装包和原有数据已保留"
+        }
+        val safeDetail = detail.orEmpty().filter { !it.isISOControl() }.take(500)
+        val message = if (status == PackageInstaller.STATUS_PENDING_USER_ACTION || status == PackageInstaller.STATUS_SUCCESS) label
+            else "$label（状态 $status）" + safeDetail.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
+        val editor = preferences.edit().putString("install_result", message).putLong("install_result_version", code)
+            .putInt("install_status", status)
+        // Keep ownership even if disk persistence fails, so a later receipt/retry can recover.
+        val saved = editor.commit()
+        val visible = if (saved) message else "$message\n安装结果未能保存，关闭应用后可能无法恢复此提示"
+        installationNotice = id to visible
+        _state.value = if (status == PackageInstaller.STATUS_SUCCESS) UpdateState(UpdatePhase.CURRENT, message = visible,
+            lastChecked = _state.value.lastChecked) else _state.value.copy(message = visible)
+        installationEvents.value += 1
+        return@synchronized visible
+    }
+
+    internal fun installationLaunchFailed(id: Int, token: String, detail: String): String? = synchronized(installLock) {
+        if (!ownsInstallSession(id, token)) return@synchronized null
+        installedUpdateMessage(id, token)?.let { return@synchronized it }
+        if (preferences.getInt("install_status", -1) >= 0) return@synchronized installationDisplayMessage(id, token)
+        // Never call an uncertain handoff a cancellation or installation failure.
+        val message = "未能继续系统安装确认：${detail.take(300)}。安装结果未知，请返回软件更新重试"
+        val saved = preferences.edit().putString("install_result", message)
+            .putLong("install_result_version", preferences.getLong("install_version", -1)).commit()
+        val visible = if (saved) message else "$message\n此提示未能保存；会话身份仍保留，可再次查看"
+        installationNotice = id to visible
+        _state.value = _state.value.copy(message = visible)
+        installationEvents.value += 1
+        return@synchronized visible
+    }
+
+    internal fun installedUpdateMessage(id: Int, token: String): String? = synchronized(installLock) {
+        if (!ownsInstallSession(id, token)) return@synchronized null
+        val requested = preferences.getLong("install_version", -1)
+        val current = installed()
+        if (requested <= 0 || versionCode(current) < requested) return@synchronized null
+        clearInstallConfirmation(id, token)
+        val message = "当前已安装 ${current.versionName}，无需重新安装"
+        installationNotice = id to message
+        _state.value = UpdateState(UpdatePhase.CURRENT, message = message, lastChecked = _state.value.lastChecked)
+        return@synchronized message
+    }
+
+    internal fun installationDisplayMessage(id: Int, token: String): String? = synchronized(installLock) {
+        if (!ownsInstallSession(id, token)) return@synchronized null
+        installedUpdateMessage(id, token)?.let { return@synchronized it }
+        return@synchronized installationNotice?.takeIf { it.first == id }?.second
+            ?: preferences.getString("install_result", "等待系统安装结果")
+    }
+
+    internal fun installRequestTerminal(id: Int, token: String): Boolean = synchronized(installLock) {
+        !ownsInstallSession(id, token) || installedUpdateMessage(id, token) != null ||
+            preferences.getInt("install_status", -1) >= 0
+    }
+
+    internal fun receiveInstallationStatus(result: Intent): Unit = synchronized(installLock) {
+        val id = result.getIntExtra("session_id", -1)
+        val token = result.getStringExtra("install_token").orEmpty()
+        if (!ownsInstallSession(id, token) || result.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1) != id ||
+            !result.hasExtra(PackageInstaller.EXTRA_STATUS)) return@synchronized
+        if (installRequestTerminal(id, token)) {
+            clearInstallConfirmation(id, token)
+            installationEvents.value += 1
+            return@synchronized
+        }
+        val status = result.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
+        if (status < 0 && status != PackageInstaller.STATUS_PENDING_USER_ACTION) return@synchronized
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            @Suppress("DEPRECATION")
+            val confirmation = if (Build.VERSION.SDK_INT >= 33)
+                result.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+            else result.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+            if (confirmation == null) {
+                installationLaunchFailed(id, token, "系统未返回安装确认界面")
+                return@synchronized
+            }
+            // Held by the OS, not persisted as an unsafe parcel. Only a foreground user action
+            // or the resumed installer activity can consume this one-shot capability.
+            val pending = PendingIntent.getActivity(context, id,
+                UpdateInstallActivity.confirmationIntent(context, id, token).putExtra(Intent.EXTRA_INTENT, confirmation),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE)
+            heldInstallConfirmation = Triple(id, token, pending)
+            runCatching { notifyInstallConfirmation(pending) }
+        } else {
+            clearInstallConfirmation(id, token)
+        }
+        installationResult(id, token, status, result.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE))
+    }
+
+    internal fun pendingInstallConfirmation(id: Int, token: String): PendingIntent? = synchronized(installLock) {
+        if (installRequestTerminal(id, token)) return@synchronized null
+        return@synchronized heldInstallConfirmation?.takeIf { it.first == id && it.second == token }?.third
+            ?: PendingIntent.getActivity(context, id, UpdateInstallActivity.confirmationIntent(context, id, token),
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    internal fun releaseInstallConfirmation(id: Int, token: String): Unit = synchronized(installLock) {
+        if (heldInstallConfirmation?.let { it.first == id && it.second == token } == true) heldInstallConfirmation = null
+    }
+
+    private fun clearInstallConfirmation(id: Int, token: String): Unit = synchronized(installLock) {
+        if (!ownsInstallSession(id, token)) return@synchronized
+        heldInstallConfirmation?.takeIf { it.first == id && it.second == token }?.third?.cancel()
+        releaseInstallConfirmation(id, token)
+        PendingIntent.getActivity(context, id, UpdateInstallActivity.confirmationIntent(context, id, token),
+            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE)?.cancel()
+        context.getSystemService(NotificationManager::class.java)?.cancel(JOB_ID + 1)
+    }
+
+    private fun notifyInstallConfirmation(pending: PendingIntent) {
+        if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        if (!manager.areNotificationsEnabled()) return
+        manager.createNotificationChannel(NotificationChannel(CHANNEL, "应用更新", NotificationManager.IMPORTANCE_DEFAULT))
+        manager.notify(JOB_ID + 1, Notification.Builder(context, CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle("继续确认漫流更新")
+            .setContentText("轻触打开系统安装确认；不会自动安装")
+            .setContentIntent(pending).setAutoCancel(true).build())
+    }
+
+    internal fun cancelInstallRequest(id: Int, token: String): String? {
+        synchronized(installLock) {
+            if (!ownsInstallSession(id, token)) return null
+            installedUpdateMessage(id, token)?.let { return it }
+            if (preferences.getInt("install_status", -1) >= 0) return installationDisplayMessage(id, token)
+        }
+        // This binder operation touches only the captured old session, never a replacement.
+        context.packageManager.packageInstaller.abandonSession(id)
+        synchronized(installLock) {
+            if (!ownsInstallSession(id, token)) return null
+            clearInstallConfirmation(id, token)
+            return installationResult(id, token, PackageInstaller.STATUS_FAILURE_ABORTED,
+                "用户取消此次安装请求，可返回软件更新重新安装")
+        }
+    }
+
+    private fun installationMessage(code: Long, fallback: String): String = synchronized(installLock) {
+        if (preferences.getLong("install_result_version", -1) != code) return@synchronized fallback
+        val current = installed()
+        // Self-update may kill the process before its callback. PackageManager is authoritative.
+        if (versionCode(current) >= code) return@synchronized "当前已安装 ${current.versionName}"
+        return@synchronized preferences.getString("install_result", null) ?: fallback
+    }
+
+
     private suspend fun recover() {
         if (!operation.compareAndSet(false, true)) return
         try {
+            installedUpdateMessage(preferences.getInt("install_session", -1),
+                preferences.getString("install_token", "").orEmpty())
+            val requested = preferences.getLong("install_result_version", -1)
+            val currentVersion = versionCode(installed())
+            if (requested > 0 && currentVersion >= requested) {
+                _state.value = UpdateState(UpdatePhase.CURRENT,
+                    message = "已确认当前安装版本 $currentVersion 达到此次更新版本",
+                    lastChecked = _state.value.lastChecked)
+            }
             val task = AndroidTransferIntents.read(context, ApplicationTransferKind.UPDATE, "apk")
             val accepted = task?.let { Base64.decode(it.payload.getString("envelope"), Base64.DEFAULT) }
             val acceptedRelease = accepted?.let(::verifyManifest)
@@ -431,6 +674,7 @@ actual class UpdateManager private constructor(private val context: Context) {
             val envelope = ownedEnvelope ?: if (metadata.baseFile.exists()) metadata.readFully() else return
             val release = verifyManifest(envelope)
             if (release.versionCode <= versionCode(installed())) {
+                _state.value = UpdateState(UpdatePhase.CURRENT, message = installationMessage(versionCode(installed()), "已是最新版本"), lastChecked = _state.value.lastChecked)
                 metadata.delete()
                 root.listFiles()?.forEach { it.delete() }
                 return
@@ -443,7 +687,7 @@ actual class UpdateManager private constructor(private val context: Context) {
                 release = release,
                 total = release.bytes,
                 downloaded = if (valid) release.bytes else 0,
-                message = if (valid) "新版本已下载，可继续安装" else ownedTask?.message?.takeIf { it.isNotBlank() }
+                message = if (valid) installationMessage(release.versionCode, "新版本已下载，可继续安装") else ownedTask?.message?.takeIf { it.isNotBlank() }
                     ?: if (ownedTask?.resumable == true) "等待系统恢复后台下载" else "发现新版本 ${release.versionName}",
             )
         } catch (_: Exception) {

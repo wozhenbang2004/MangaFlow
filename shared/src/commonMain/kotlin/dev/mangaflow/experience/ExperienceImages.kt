@@ -50,6 +50,7 @@ import kotlinx.coroutines.IO
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okio.*
 
 internal class ExperienceNetworkTransport(val client: NetworkClient, val close: () -> Unit)
@@ -143,8 +144,12 @@ internal class PrefetchWork(private val promoted: () -> Unit = {},
         return try { block().also { success = true } }
         finally { update { it.copy(stage = stage, admitted = false, wait = null, settled = true, succeeded = success) } }
     }
-    fun imageArtifact(diskCacheKey: String?, memoryCacheKey: MemoryCache.Key?) = update {
-        it.copy(diskCacheKey = diskCacheKey, memoryCacheKey = memoryCacheKey)
+    fun imageArtifact(diskCacheKey: String?, memoryCacheKey: MemoryCache.Key?, ready: Boolean = false) = update {
+        val artifact = it.copy(diskCacheKey = diskCacheKey, memoryCacheKey = memoryCacheKey)
+        // Coil can satisfy this exact request from memory without invoking a decoder.
+        // This settles the image preparation task, not a claim of newly executed decode work.
+        if (ready) artifact.copy(stage = PrefetchStage.CHECKING, admitted = false,
+            wait = null, settled = true, succeeded = true) else artifact
     }
     fun beginBody(expectedBytes: Long?) = update {
         it.copy(receivedBytes = 0L, expectedBytes = expectedBytes?.takeIf { count -> count >= 0L })
@@ -381,7 +386,11 @@ internal suspend fun preflightReaderPage(
         warmPreviews[key] ?: WarmPreviewFlight(work).also { warmPreviews[key] = it; owner = true }
     }
     if (!owner) {
-        if (work.isForeground) flight.work.promote()
+        if (work.isForeground) {
+            flight.work.promote()
+            return withTimeoutOrNull(readerPreviewJoinMillis(ExperiencePolicyStore.get(context))) { flight.done.await() }
+                ?: ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED)
+        }
         return flight.done.await()
     }
     try {
@@ -394,12 +403,19 @@ internal suspend fun preflightReaderPage(
     }
 }
 
-private suspend fun awaitWarmReaderPreview(request: ImageRequest, size: Size) {
+private fun readerPreviewJoinMillis(policy: ExperiencePolicyStore): Long =
+    policy.state.value.recovery.slowLoadSeconds.coerceAtLeast(1).toLong() * 1_000L
+
+private suspend fun awaitWarmReaderPreview(request: ImageRequest, size: Size, policy: ExperiencePolicyStore) {
     if (request.extras[workKey] != ExperienceImageWork.READER || !request.memoryCachePolicy.readEnabled) return
     val identity = request.memoryCacheKey ?: return
     val flight = synchronized(warmPreviewLock) { warmPreviews[WarmPreviewKey(identity, size)] } ?: return
     flight.work.promote()
-    flight.done.await()
+    // Sharing is an optimization, not an unbounded prerequisite for displaying the page.
+    // Only this wait times out: its owner keeps its exact flight and decode permit. The
+    // foreground then uses Coil's normal caches/admission; warm flights are cache-only,
+    // so proceeding cannot duplicate a warm network fetch.
+    withTimeoutOrNull(readerPreviewJoinMillis(policy)) { flight.done.await() }
 }
 
 /**
@@ -505,7 +521,7 @@ internal fun initializeExperienceImages(context: PlatformContext) {
                     if (remote && request.extras[cacheOnlyKey] != true)
                         storage.noteCoil(cacheKey, false)
                     // Neither a memory hit nor a local file waits behind network admission.
-                    if (request.extras[cacheOnlyKey] != true) awaitWarmReaderPreview(request, chain.size)
+                    if (request.extras[cacheOnlyKey] != true) awaitWarmReaderPreview(request, chain.size, policy)
                     val result = chain.proceed()
                     if (remote && request.extras[cacheOnlyKey] != true && result is SuccessResult)
                         storage.noteCoil(result.diskCacheKey ?: cacheKey, work != ExperienceImageWork.PREFETCH)
@@ -575,7 +591,10 @@ private class ExperienceImageEvents(
         bytes = runCatching { source.fileOrNull()?.let { source.fileSystem.metadata(it).size } }.getOrNull()
     }
     override fun onSuccess(request: ImageRequest, result: SuccessResult) {
-        work?.imageArtifact(result.diskCacheKey, result.memoryCacheKey)
+        val preparedImage = (request.extras[workKey] == ExperienceImageWork.READER ||
+            request.extras[cacheOnlyKey] == true) && result.image.width > 0 && result.image.height > 0
+        // Original-only prefetch uses BlackholeDecoder: its success is not a ready preview.
+        work?.imageArtifact(result.diskCacheKey, result.memoryCacheKey, ready = preparedImage)
         if (request.extras[cacheOnlyKey] == true) return
         policy.recordImage(monotonicTimeMillis() - started, result.dataSource == DataSource.MEMORY_CACHE,
             result.dataSource == DataSource.DISK, prefetch && work?.isForeground != true, key, bytes)
