@@ -254,7 +254,8 @@ fun LibraryScreen(
             cloudFavorites.filter { it.sourceId == "copy" && !SourceKeys.isEncoded(it.id) &&
                 sourceIncluded(it.sourceId) }).distinctBy { it.sourceId to it.id }
     }
-    val visibleFavorites = remember(unifiedBooks, shelfScope, shelfSort, scopedHistory, cloudMetadata, libraryStore) {
+    val visibleFavorites = remember(unifiedBooks, localKeys, cloudKeys,
+        shelfScope, shelfSort, scopedHistory, cloudMetadata, libraryStore) {
         val filtered = unifiedBooks.filter { book ->
             when (shelfScope) {
                 UnifiedShelfScope.ALL -> true
