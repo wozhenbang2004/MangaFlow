@@ -7,6 +7,7 @@ import dev.mangaflow.data.plugins.JavascriptHttpSession
 import dev.mangaflow.data.plugins.prepareJavascriptEngine
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.PlatformContext
@@ -65,7 +66,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 prepareJavascriptEngine(context)
                 val operationContext = currentCoroutineContext()
                 operationContext.ensureActive()
-                val route = DownloadRoutingStore.get(context).sourceSnapshot(bundle.id)
+                val route = DownloadRoutingStore.get(context).sourceSnapshot(bundle.id, DownloadCategory.ANIME)
                 val js = QuickJs.create(Dispatchers.Default)
                 val network = JavascriptHttpSession(networkAllowed, route, 8 * 1024 * 1024)
                 var hostFailure: Exception? = null
@@ -73,7 +74,7 @@ internal class LanercScriptRuntime(private val context: PlatformContext, private
                 var changed = false
                 fun checkCurrent() {
                     operationContext.ensureActive()
-                    if (networkAllowed && (!store.isCurrent(bundle) || DownloadRoutingStore.get(context).sourceSnapshot(bundle.id) != route)) {
+                    if (networkAllowed && (!store.isCurrent(bundle) || DownloadRoutingStore.get(context).sourceSnapshot(bundle.id, DownloadCategory.ANIME) != route)) {
                         changed = true
                         throw LanercCapabilityException("来源或网络路由已改变，请刷新后重试。")
                     }
