@@ -4,6 +4,8 @@ import com.dokar.quickjs.QuickJs
 import com.dokar.quickjs.binding.AsyncFunctionBinding
 import com.dokar.quickjs.binding.FunctionBinding
 import dev.mangaflow.data.ChapterDownloadTransport
+import dev.mangaflow.data.ConnectionProbeBudget
+import kotlinx.coroutines.sync.withPermit
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -81,6 +83,7 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                 try {
                     checkPackage()
                     val probeResponse = currentCoroutineContext()[ChapterDownloadTransport]?.onProbeResponse
+                    val connectionCheck = currentCoroutineContext()[ChapterDownloadTransport]?.connectionCheck == true
                     val route = if (allowNetwork) currentCoroutineContext()[ChapterDownloadTransport]?.route
                         ?: DownloadRoutingStore.get(application).sourceSnapshot(bundle.sourceId) else null
                     val network = JavascriptHttpSession(allowNetwork, route, MAX_RESPONSE_BYTES, allowRedirects,
@@ -90,7 +93,9 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                     js.maxStackSize = 256L * 1024
                     js.evaluationTimeoutMillis = 2_000L
                     js.defineBinding("__mfHttp", AsyncFunctionBinding<String> { values ->
-                        try { checkPackage(); network.request(argument(values)).also { result ->
+                        try { checkPackage(); (if (connectionCheck) ConnectionProbeBudget.requests.withPermit {
+                            network.request(argument(values))
+                        } else network.request(argument(values))).also { result ->
                             val status = JSONObject(result).optInt("statusCode", 0)
                             responseStatus = status.takeIf { it in 400..599 }
                             if (status in 200..299) probeResponse?.invoke()

@@ -411,8 +411,9 @@ private class AndroidRelayLink(private val app: Context) : RelayPlatformLink {
         }
         add("default", settings.defaultMode, settings.proxy)
         settings.categoryOverrides.forEach { (category, mode) -> add("category." + category.name, mode, settings.proxy) }
+        val reviewOwners = dev.mangaflow.data.ReviewProviders.ids.map(dev.mangaflow.data.ReviewProviders::routingId).toSet()
         settings.sourceOverrides.forEach { (id, source) ->
-            if (!sourcesKnown || id in sourceUrls) add("source." + digest(id.toByteArray()).take(40), source.mode, source.proxy)
+            if (!sourcesKnown || id in sourceUrls || id in reviewOwners) add("source." + digest(id.toByteArray()).take(40), source.mode, source.proxy)
         }
         check(rules.size <= 256) { "Relay link rule limit" }
         return JSONArray().apply {

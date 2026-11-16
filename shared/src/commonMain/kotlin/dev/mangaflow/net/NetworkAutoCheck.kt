@@ -1,6 +1,7 @@
 package dev.mangaflow.net
 
 import dev.mangaflow.data.UnifiedMangaRepository
+import dev.mangaflow.data.ReviewProviders
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.data.plugins.scriptSourceImageEpoch
 import dev.mangaflow.platform.PlatformContext
@@ -26,11 +27,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 enum class NetworkAutoRouteStatus { AVAILABLE, FAILED, NOT_CONFIGURED, LOGIN_REQUIRED, UNSUPPORTED, CANCELLED, PARTIAL }
+enum class NetworkAutoGroup { MANGA_SOURCES, RATING_SITES, DOWNLOADS }
 
 data class NetworkAutoRouteResult(
     val status: NetworkAutoRouteStatus,
@@ -38,6 +42,7 @@ data class NetworkAutoRouteResult(
     val samples: Int = 0,
     val message: String,
     val httpStatus: Int? = null,
+    val confirming: Boolean = false,
 ) {
     val usable: Boolean get() = status == NetworkAutoRouteStatus.AVAILABLE
 }
@@ -53,6 +58,9 @@ data class NetworkAutoRow(
     val coverage: String,
     val category: DownloadCategory? = null,
     val sourceId: String? = null,
+    val group: NetworkAutoGroup = NetworkAutoGroup.DOWNLOADS,
+    val ratingId: String? = null,
+    val canApply: Boolean = true,
 )
 
 data class NetworkAutoCheckState(
@@ -140,38 +148,56 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                 synchronized(lock) { if (generation == run) plan = frozen }
                 mutableState.update { previous -> if (current(run)) previous.copy(
                     rows = targets.map { target -> NetworkAutoRow(target.id, target.label, autoCurrentRoute(captured, target),
-                        coverage = target.coverage, category = target.category, sourceId = target.sourceId) },
+                        coverage = target.coverage, category = target.category, sourceId = target.sourceId,
+                        group = target.group, ratingId = target.ratingId, canApply = target.unsupported == null) },
                     total = targets.size) else previous }
-                val gate = Semaphore(4)
+                val gate = Semaphore(6)
+                val mutableSources = targets.filterNot { it.parallelRoutes }.associate { it.id to Mutex() }
+                val mangaTargets = targets.filter { it.group == NetworkAutoGroup.MANGA_SOURCES }
+                val ratingTargets = targets.filter { it.group == NetworkAutoGroup.RATING_SITES }
+                val ordered = buildList {
+                    repeat(maxOf(mangaTargets.size, ratingTargets.size)) { index ->
+                        mangaTargets.getOrNull(index)?.let { add(it) }
+                        ratingTargets.getOrNull(index)?.let { add(it) }
+                    }
+                    addAll(targets.filter { it.group == NetworkAutoGroup.DOWNLOADS })
+                }
                 try {
                     withTimeout(240_000L) {
                         coroutineScope {
-                            targets.filterNot { it.aggregate }.map { target -> async {
-                                gate.withPermit {
-                                    if (!checkCurrent(run, frozen)) return@withPermit
-                                    for (mode in MODES) {
+                            ordered.flatMap { target -> MODES.map { mode -> async {
+                                val inspect: suspend () -> Unit = {
+                                    gate.withPermit {
                                         if (!checkCurrent(run, frozen)) return@withPermit
                                         val key = target.id + ":" + mode.name
                                         updateRun(run) { it.copy(activeProbeIds = it.activeProbeIds + key) }
                                         val candidate = candidates.getValue(target.id to mode)
-                                        val measured = try { sample(target, candidate) }
+                                        fun qualified(result: NetworkAutoRouteResult): NetworkAutoRouteResult =
+                                            if (mode == DownloadRouteMode.DIRECT && candidate.route?.relayBinding == null &&
+                                                frozen.fence.environment?.defaultNetworkUsesVpn == true) result.copy(
+                                                message = result.message + "；应用直连仍受系统 VPN 规则影响") else result
+                                        val measured = try { sample(target, candidate) { first ->
+                                            publish(run, target.id) { row -> if (mode == DownloadRouteMode.DIRECT)
+                                                row.copy(direct = qualified(first)) else row.copy(proxy = qualified(first)) }
+                                        } }
                                         finally { updateRun(run) { it.copy(activeProbeIds = it.activeProbeIds - key) } }
-                                        val result = if (mode == DownloadRouteMode.DIRECT && candidate.route?.relayBinding == null &&
-                                            frozen.fence.environment?.defaultNetworkUsesVpn == true) measured.copy(
-                                                message = measured.message + "；应用直连仍受系统 VPN 规则影响") else measured
+                                        val result = qualified(measured)
                                         publish(run, target.id) { row -> if (mode == DownloadRouteMode.DIRECT) row.copy(direct = result)
                                             else row.copy(proxy = result) }
                                         if (!checkCurrent(run, frozen)) return@withPermit
+                                        publish(run, target.id) { row ->
+                                            if (!finished(row)) row
+                                            else if (frozen.fence.environment?.defaultNetworkUsesVpn == true &&
+                                                candidates[target.id to DownloadRouteMode.DIRECT]?.route?.relayBinding == null)
+                                                row.copy(reason = "外部 VPN 仍控制应用直连，未证明独立出口，本轮不自动推荐")
+                                            else recommended(row)
+                                        }
+                                        updateRun(run) { it.copy(completed = it.rows.count(::finished)) }
                                     }
-                                    publish(run, target.id) { row ->
-                                        if (frozen.fence.environment?.defaultNetworkUsesVpn == true &&
-                                            candidates[target.id to DownloadRouteMode.DIRECT]?.route?.relayBinding == null)
-                                            row.copy(reason = "外部 VPN 仍控制应用直连，未证明独立出口，本轮不自动推荐")
-                                        else recommended(row)
-                                    }
-                                    updateRun(run) { it.copy(completed = it.rows.count(::finished)) }
                                 }
-                            } }.awaitAll()
+                                val sessionLock = mutableSources[target.id]
+                                if (sessionLock == null) inspect() else sessionLock.withLock { inspect() }
+                            } } }.awaitAll()
                         }
                     }
                 } catch (_: TimeoutCancellationException) {
@@ -179,19 +205,6 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                     return@withContext
                 }
                 if (!checkCurrent(run, frozen)) return@withContext
-                targets.filter { it.aggregate }.forEach { target ->
-                    val dependent = state.value.rows.filter { it.id != target.id &&
-                        (target.category == null && it.category != DownloadCategory.CHAPTERS || target.category == DownloadCategory.CHAPTERS && it.sourceId != null) }
-                    fun aggregate(mode: DownloadRouteMode): NetworkAutoRouteResult {
-                        val measured = dependent.mapNotNull { if (mode == DownloadRouteMode.DIRECT) it.direct else it.proxy }
-                        val good = measured.count { it.usable && it.samples == 2 }
-                        return NetworkAutoRouteResult(NetworkAutoRouteStatus.PARTIAL, samples = 0,
-                            message = if (target.category == DownloadCategory.CHAPTERS) "${good} 个来源目录可用；章节图片尚未验证"
-                            else "${good} 项已验证，可能使用各自代理；全局覆盖不足，保留默认")
-                    }
-                    publish(run, target.id) { it.copy(direct = aggregate(DownloadRouteMode.DIRECT),
-                        proxy = aggregate(DownloadRouteMode.PROXY), reason = "覆盖范围不足以修改这一整类，保留当前设置") }
-                }
                 updateRun(run) { it.copy(completed = it.rows.count(::finished), running = false,
                     complete = it.rows.all(::finished), activeProbeIds = emptySet()) }
             }
@@ -248,13 +261,14 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                 val row = state.value.rows.singleOrNull { it.id == id }
                     ?: return@withContext NetworkAutoApplyResult(0, "检测结果已失效，未保存", false, true)
                 val result = when (mode) { DownloadRouteMode.DIRECT -> row.direct; DownloadRouteMode.PROXY -> row.proxy; else -> null }
-                if (target.aggregate || result?.usable != true || result.samples != 2)
+                if (target.unsupported != null || result?.usable != true || result.samples != 2 || result.confirming)
                     return@withContext NetworkAutoApplyResult(0, "只能应用完整验证的可用线路，未保存", false)
                 val route = frozen.candidates[id to mode]?.route
                     ?: return@withContext NetworkAutoApplyResult(0, "选中的线路已不可用，未保存", false, true)
                 if (row.currentRoute == route) continue
                 when {
                     target.sourceId != null -> sources[target.sourceId] = SourceNetworkSettings(mode, route.proxy)
+                    target.ratingId != null -> sources[ReviewProviders.routingId(target.ratingId)] = SourceNetworkSettings(mode, route.proxy)
                     target.category != null -> categories[target.category] = mode
                     else -> default = mode
                 }
@@ -282,7 +296,8 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
         } finally { mutableState.update { it.copy(applying = false) } }
     }
 
-    private suspend fun sample(target: AutoTarget, candidate: AutoCandidate): NetworkAutoRouteResult {
+    private suspend fun sample(target: AutoTarget, candidate: AutoCandidate,
+        onSample: (NetworkAutoRouteResult) -> Unit): NetworkAutoRouteResult {
         target.unsupported?.let { return it }
         candidate.unavailable?.let { return it }
         val route = candidate.route ?: return NetworkAutoRouteResult(NetworkAutoRouteStatus.NOT_CONFIGURED, message = "线路未配置")
@@ -294,15 +309,17 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                 repeat(2) {
                     val began = monotonicTimeMillis()
                     last = target.probe(route)
-                    elapsed += (monotonicTimeMillis() - began).coerceAtLeast(0)
+                    elapsed += last.responseMillis ?: (monotonicTimeMillis() - began).coerceAtLeast(0)
                     samples++
+                    if (samples == 1) onSample(NetworkAutoRouteResult(NetworkAutoRouteStatus.PARTIAL,
+                        elapsed, 1, last.message + "；等待第二次确认", last.code, confirming = true))
                 }
             }
             return NetworkAutoRouteResult(NetworkAutoRouteStatus.AVAILABLE, elapsed / 2, 2, last.message, last.code)
         } catch (_: TimeoutCancellationException) {
             return NetworkAutoRouteResult(NetworkAutoRouteStatus.FAILED, samples = samples, message = "本项检查超时，不能据此确认可用")
         } catch (cancel: CancellationException) { throw cancel }
-        catch (error: Exception) { return autoFailure(error).copy(samples = samples) }
+        catch (error: Exception) { return autoFailure(error).copy(samples = samples, millis = elapsed.takeIf { samples > 0 }?.div(samples)) }
     }
 
     private fun markApplyStale(reason: String) {
@@ -392,12 +409,19 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
     private fun current(run: Long): Boolean = synchronized(lock) { !closed && generation == run }
     private fun stopUnfinished(reason: String, stale: Boolean, run: Long) {
         val stopped = NetworkAutoRouteResult(NetworkAutoRouteStatus.CANCELLED, message = "本项尚未完成")
+        fun stoppedResult(result: NetworkAutoRouteResult?): NetworkAutoRouteResult = when {
+            result == null -> stopped
+            result.confirming -> result.copy(status = NetworkAutoRouteStatus.CANCELLED, confirming = false,
+                message = result.message.replace("；等待第二次确认", "") + "；本轮检查未完成")
+            else -> result
+        }
         mutableState.update { previous -> if (synchronized(lock) { generation != run }) previous else previous.copy(running = false, complete = false, stale = stale,
             staleReason = reason.takeIf { stale }, error = reason.takeUnless { stale }, activeProbeIds = emptySet(),
-            rows = previous.rows.map { it.copy(direct = it.direct ?: stopped, proxy = it.proxy ?: stopped,
+            rows = previous.rows.map { it.copy(direct = stoppedResult(it.direct), proxy = stoppedResult(it.proxy),
                 recommendation = null, reason = if (finished(it)) it.reason else reason) }) }
     }
-    private fun finished(row: NetworkAutoRow): Boolean = row.direct != null && row.proxy != null
+    private fun finished(row: NetworkAutoRow): Boolean = row.direct != null && row.proxy != null &&
+        !row.direct.confirming && !row.proxy.confirming
     private fun hash(value: String): String = sha256(value.encodeToByteArray()).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
     companion object { private val MODES = listOf(DownloadRouteMode.DIRECT, DownloadRouteMode.PROXY) }
 }

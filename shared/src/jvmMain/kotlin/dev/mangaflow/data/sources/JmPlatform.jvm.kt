@@ -2,6 +2,7 @@ package dev.mangaflow.data.sources
 
 import dev.mangaflow.data.Chapter
 import dev.mangaflow.data.ChapterDownloadTransport
+import dev.mangaflow.data.ConnectionProbeBudget
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.MangaDetail
@@ -39,6 +40,9 @@ import io.github.jukomu.jmcomic.core.client.impl.JmApiClient
 import io.github.jukomu.jmcomic.core.config.JmConfiguration
 import io.github.jukomu.jmcomic.core.net.OkHttpBuilder
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
+import okio.buffer
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -125,7 +129,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             .cacheSize(24 * 1024 * 1024).closeTimeoutMs(1_000).build()
         val bundle = OkHttpBuilder.build(config)
         val http = bundle.client.newBuilder().applyDownloadRoute(route, observeTraffic = observeRelayTraffic)
-            .addNetworkInterceptor { chain -> chain.proceed(chain.request()).also { response ->
+            .addNetworkInterceptor { chain -> probeResponse(chain, limited = !observeRelayTraffic).also { response ->
                 if (response.isSuccessful) probeResponse?.invoke()
             } }.retryOnConnectionFailure(false).build()
         val created = JmApiClient(config, http, bundle.cookieManager, bundle.domainManager)
@@ -135,6 +139,34 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         }
         catch (failure: Exception) { created.close(); throw failure }
         return created to config
+    }
+
+    /** OkHttp invokes this only on its network worker. The permit covers body consumption as well. */
+    private fun probeResponse(chain: okhttp3.Interceptor.Chain, limited: Boolean): okhttp3.Response {
+        if (!limited) return chain.proceed(chain.request())
+        runBlocking {
+            while (!ConnectionProbeBudget.requests.tryAcquire()) {
+                if (chain.call().isCanceled()) throw java.io.IOException("Connection check cancelled")
+                delay(10)
+            }
+        }
+        val held = java.util.concurrent.atomic.AtomicBoolean(true)
+        fun release() { if (held.compareAndSet(true, false)) ConnectionProbeBudget.requests.release() }
+        try {
+            val response = chain.proceed(chain.request())
+            val body = response.body ?: return response.also { release() }
+            val input = object : okio.ForwardingSource(body.source()) {
+                override fun read(sink: okio.Buffer, byteCount: Long): Long = try {
+                    super.read(sink, byteCount).also { if (it < 0) release() }
+                } catch (failure: Exception) { release(); throw failure }
+                override fun close() { try { super.close() } finally { release() } }
+            }.buffer()
+            return response.newBuilder().body(object : okhttp3.ResponseBody() {
+                override fun contentType() = body.contentType()
+                override fun contentLength() = body.contentLength()
+                override fun source(): okio.BufferedSource = input
+            }).build()
+        } catch (failure: Exception) { release(); throw failure }
     }
 
     override suspend fun capabilities() = SourceCapabilities(setOf(SourceFeature.DISCOVERY, SourceFeature.SEARCH,

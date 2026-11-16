@@ -115,6 +115,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                         continue
                     }
                     var invalid = false
+                    var retainedPrevious = false
                     for (candidate in runtimeDirectories(id)) {
                         try {
                             val envelope = readLocalReceipt(candidate)
@@ -122,7 +123,14 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                                 it.id == id && it.abi == abi
                             }
                             require(candidate.name == entry.directoryName) { "运行库目录身份不匹配" }
-                            verifyLibraries(candidate, entry, seal = true)
+                            // Authenticity and complete bytes are independent of the APK release.
+                            // A real component update must not erase the previous verified install
+                            // before its replacement has even downloaded successfully.
+                            verifyLibraries(candidate, entry, seal = true, requireCurrentVersion = false)
+                            if (entry.version != spec(id).version) {
+                                retainedPrevious = true
+                                continue
+                            }
                             synchronized(control) { installed[id] = Installation(candidate, entry) }
                             mutableStates.update { old -> old + (id to PanelRuntimeState(
                                 installed = true, bytes = entry.archiveBytes, totalBytes = entry.archiveBytes,
@@ -130,10 +138,14 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                             break
                         } catch (_: Exception) {
                             invalid = true
-                            deleteTree(candidate)
+                            // Startup is discovery, not removal. Keep unknown/incompatible bytes
+                            // for explicit management; never turn a transient read into deletion.
                         }
                     }
-                    if (invalid && states.value.getValue(id).installed.not() && abi != null) updateError(id, "运行库校验失败，请重新下载")
+                    if (states.value.getValue(id).installed.not() && abi != null) {
+                        if (retainedPrevious) updateError(id, "组件需要更新，已保留验证通过的旧版本", requiresUpdate = true)
+                        else if (invalid) updateError(id, "运行库校验未完成，原文件已保留，请重新准备组件")
+                    }
                 }
             } catch (_: Exception) {
                 PanelRuntimeId.entries.forEach { updateError(it, "运行库存储暂不可用，请检查可用空间") }
@@ -146,11 +158,18 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                         transferTokens[id] = current.workId
                         if (states.value.getValue(id).installed) AndroidTransferIntents.update(context, current) {
                             it.copy(status = ApplicationTransferStatus.COMPLETED)
-                        } else if (current.resumable && !states.value.getValue(id).pendingRemoval) {
+                        } else if (current.resumable && !states.value.getValue(id).pendingRemoval &&
+                            compatibleTransfer(id, current.payload)) {
                             val denial = hostDenials[id]?.takeIf { it.workId == current.workId }
                                 ?: current.message.takeIf { it.isNotBlank() }?.let { HostDenial(current.workId, it, false) }
                             mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = denial?.terminal != true, error = denial?.reason)) }
                             schedule = true
+                        } else if (current.resumable && !states.value.getValue(id).pendingRemoval) {
+                            val message = "组件版本或架构已更新，请重新准备；原文件已保留"
+                            AndroidTransferIntents.update(context, current) {
+                                it.copy(status = ApplicationTransferStatus.FAILED, message = message)
+                            }
+                            mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = false, error = message)) }
                         } else if (current.message.isNotBlank()) {
                             mutableStates.update { old -> old + (id to old.getValue(id).copy(downloading = false, error = current.message)) }
                         }
@@ -181,13 +200,14 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             }
             if (!allowed) return@withLock
             val previous = AndroidTransferIntents.read(context, ApplicationTransferKind.RUNTIME, id.name)
-            val task = if (previous?.resumable == true) previous else {
+            val task = if (previous?.resumable == true && compatibleTransfer(id, previous.payload)) previous else {
                 val matching = previous?.takeIf { it.status == ApplicationTransferStatus.PAUSED &&
-                    it.payload.optLong("versionCode") == appVersionCode && it.payload.optString("abi") == abi }
+                    compatibleTransfer(id, it.payload) }
                 val category = if (id == PanelRuntimeId.STEAM) DownloadCategory.STEAM_COMPONENT else DownloadCategory.COMPONENTS
                 AndroidTransferIntents.create(context, ApplicationTransferKind.RUNTIME, id.name,
                     matching?.route ?: DownloadRoutingStore.get(context).snapshot(category),
-                    matching?.payload ?: JSONObject().put("versionCode", appVersionCode).put("versionName", appVersionName).put("abi", abi))
+                    matching?.payload ?: JSONObject().put("versionCode", appVersionCode).put("versionName", appVersionName)
+                        .put("abi", abi).put("runtimeVersion", spec(id).version))
             }
             synchronized(control) { transferTokens[id] = task.workId }
             synchronized(control) {
@@ -363,8 +383,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             }
             if (states.value.getValue(id).pendingRemoval) throw RuntimeFailure("运行库正在等待删除，请完全退出应用后重试")
             synchronized(control) { installed[id] }?.let { success = it; return ApplicationTransferResult.COMPLETED }
-            require(task.payload.getLong("versionCode") == appVersionCode && task.payload.getString("versionName") == appVersionName &&
-                task.payload.getString("abi") == abi) { "应用或运行库架构已更新，请重新发起下载" }
+            require(compatibleTransfer(id, task.payload)) { "组件版本或架构已更新，请重新准备；原文件已保留" }
             val route = task.route
             val client = OkHttpClient.Builder().applyDownloadRoute(route)
                 .connectTimeout(20, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
@@ -372,11 +391,16 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                 .followRedirects(false).followSslRedirects(false).build()
             taskClient = client
             if (!directory.isDirectory && !directory.mkdirs()) throw RuntimeFailure("无法创建运行库目录")
-            val envelope = task.payload.optString("envelope").takeIf { it.isNotBlank() }
-                ?.let { Base64.decode(it, Base64.DEFAULT) } ?: readRemoteCatalog(id, client)
-            val entry = verifyCatalog(envelope, currentRelease = true).single { it.id == id && it.abi == abi }
+            val savedEnvelope = transferEnvelope(task.payload)
+            val envelope = savedEnvelope ?: readRemoteCatalog(id, client)
+            // A signed catalog is release provenance. The selected version/ABI and
+            // exact archive/library hashes are the durable component identity.
+            val entry = verifyCatalog(envelope, currentRelease = savedEnvelope == null)
+                .single { it.id == id && it.abi == abi && it.version == spec(id).version }
+            task.payload.put("runtimeVersion", entry.version)
             task.payload.put("envelope", Base64.encodeToString(envelope, Base64.NO_WRAP))
-            AndroidTransferIntents.update(context, task) { it.copy(payload = task.payload) }
+            if (AndroidTransferIntents.update(context, task) { it.copy(payload = task.payload) } == null)
+                throw CancellationException("后台任务已更新")
             mutableStates.update { old -> old + (id to old.getValue(id).copy(totalBytes = entry.archiveBytes)) }
             val unpacked = entry.libraries.sumOf { it.bytes }
             if (directory.usableSpace < entry.archiveBytes + unpacked + 16L * 1024 * 1024) throw RuntimeFailure("存储空间不足，无法下载并展开运行库")
@@ -391,14 +415,30 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             writeSynced(File(stage, RECEIPT), envelope)
             verifyLibraries(stage, entry, seal = true)
             val destination = File(directory, entry.directoryName)
-            transferContext.ensureActive()
-            synchronized(control) {
+            loadGate.withLock {
                 transferContext.ensureActive()
-                if (id in touched || id in removing) throw RuntimeFailure("运行库正在使用或删除，请完全退出应用后重试")
-                if (destination.exists()) throw RuntimeFailure("已有运行库目录，请先删除后重新下载")
-                if (!stage.renameTo(destination)) throw RuntimeFailure("运行库保存失败，请重试")
-                success = Installation(destination, entry)
-                installed[id] = requireNotNull(success)
+                val existing = reusableInstallation(destination, entry)
+                synchronized(control) {
+                    transferContext.ensureActive()
+                    if (id in touched || id in removing) throw RuntimeFailure("运行库正在使用或删除，请完全退出应用后重试")
+                    if (existing != null) success = existing else {
+                        if (destination.exists() || java.nio.file.Files.isSymbolicLink(destination.toPath())) {
+                            requireOwnedRuntimeDirectory(destination, entry)
+                            // The fully verified new stage is ready before touching an old install.
+                            // Keep the old directory intact and discoverable by explicit removal.
+                            val retained = File(directory, destination.name + ".retained-" + java.util.UUID.randomUUID())
+                            if (retained.exists() || java.nio.file.Files.isSymbolicLink(retained.toPath()) || !destination.renameTo(retained))
+                                throw RuntimeFailure("原组件暂时无法隔离，文件已保留，请重试")
+                            if (!stage.renameTo(destination)) {
+                                if (destination.exists() || java.nio.file.Files.isSymbolicLink(destination.toPath()) || !retained.renameTo(destination))
+                                    throw RuntimeFailure("组件保存未完成，原组件仍保留在本机，请重试")
+                                throw RuntimeFailure("组件保存未完成，已恢复原文件，请重试")
+                            }
+                        } else if (!stage.renameTo(destination)) throw RuntimeFailure("运行库保存失败，请重试")
+                        success = Installation(destination, entry)
+                    }
+                    installed[id] = requireNotNull(success)
+                }
             }
         } catch (cancelled: CancellationException) {
             // The isolated archive is never executable; exact intent records whether this was a user pause.
@@ -433,6 +473,7 @@ actual class PanelRuntimeStore private constructor(context: Context) {
                         bytes = item?.entry?.archiveBytes ?: 0,
                         totalBytes = item?.entry?.archiveBytes ?: old.getValue(id).totalBytes,
                         error = error,
+                        requiresUpdate = item == null && old.getValue(id).requiresUpdate,
                     )) }
                 }
             } }
@@ -458,6 +499,32 @@ actual class PanelRuntimeStore private constructor(context: Context) {
             }
         }
     }
+
+    /** An already signed archive identity survives ordinary APK upgrades. */
+    private fun transferEnvelope(payload: JSONObject): ByteArray? {
+        val encoded = payload.optString("envelope").takeIf { it.isNotBlank() } ?: return null
+        require(encoded.length <= MAX_CATALOG_BYTES * 2) { "运行库安装凭据过大" }
+        return Base64.decode(encoded, Base64.DEFAULT).also {
+            require(it.size in 1..MAX_CATALOG_BYTES) { "运行库安装凭据大小无效" }
+        }
+    }
+
+    private fun compatibleTransfer(id: PanelRuntimeId, payload: JSONObject): Boolean = runCatching {
+        if (abi == null || payload.optString("abi") != abi) return@runCatching false
+        val version = payload.optString("runtimeVersion")
+        if (version.isNotBlank() && version != spec(id).version) return@runCatching false
+        val envelope = transferEnvelope(payload)
+        if (envelope != null) {
+            verifyCatalog(envelope, currentRelease = false).single {
+                it.id == id && it.abi == abi
+            }.version == spec(id).version
+        } else {
+            // New intents freeze the component version before fetching release metadata.
+            // Legacy intents without either identity can only be migrated in their original APK.
+            version == spec(id).version || payload.optLong("versionCode") == appVersionCode &&
+                payload.optString("versionName") == appVersionName
+        }
+    }.getOrDefault(false)
 
     private suspend fun downloadArchive(id: PanelRuntimeId, entry: Entry, destination: File, client: OkHttpClient) {
         val validator = File(destination.parentFile, "download.validator")
@@ -671,8 +738,9 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         require(found == expected.keys) { "运行库归档缺少必要组件" }
     }
 
-    private suspend fun verifyLibraries(root: File, entry: Entry, seal: Boolean) {
-        require(entry.abi == abi && entry.version == spec(entry.id).version && isDirectChild(root, directory)) { "运行库目录或架构无效" }
+    private suspend fun verifyLibraries(root: File, entry: Entry, seal: Boolean, requireCurrentVersion: Boolean = true) {
+        require(entry.abi == abi && (!requireCurrentVersion || entry.version == spec(entry.id).version) &&
+            isDirectChild(root, directory)) { "运行库目录或架构无效" }
         val expected = entry.libraries.map { it.name }.toSet() + RECEIPT
         require(root.isDirectory && root.listFiles()?.map { it.name }?.toSet() == expected) { "运行库目录文件不完整" }
         for (library in entry.libraries) {
@@ -686,6 +754,36 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         val receipt = File(root, RECEIPT)
         require(isDirectChild(receipt, root) && receipt.isFile) { "运行库安装凭据无效" }
         if (seal) require(receipt.setReadOnly()) { "无法保护运行库安装凭据" }
+    }
+
+    private suspend fun reusableInstallation(root: File, expected: Entry): Installation? {
+        if (!root.exists()) return null
+        return try {
+            val existing = verifyCatalog(readLocalReceipt(root), currentRelease = false).single {
+                it.id == expected.id && it.abi == expected.abi
+            }
+            require(root.name == existing.directoryName && existing.version == expected.version &&
+                existing.archiveHash == expected.archiveHash && existing.archiveBytes == expected.archiveBytes &&
+                existing.libraries.toSet() == expected.libraries.toSet())
+            verifyLibraries(root, existing, seal = true)
+            Installation(root, existing)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Only this exact, signed component's plain one-level installation can be repaired. */
+    private fun requireOwnedRuntimeDirectory(root: File, entry: Entry) {
+        require(root.name == entry.directoryName && isDirectChild(root, directory) && root.isDirectory &&
+            !java.nio.file.Files.isSymbolicLink(root.toPath())) { "现有组件目录不可信，原文件已保留" }
+        val expected = entry.libraries.map { it.name }.toSet() + RECEIPT
+        val members = root.listFiles() ?: throw RuntimeFailure("原组件目录暂时无法读取，文件已保留")
+        require(members.size <= expected.size && members.all { file ->
+            file.name in expected && isDirectChild(file, root) && file.isFile &&
+                !java.nio.file.Files.isSymbolicLink(file.toPath())
+        }) { "现有组件含未识别文件，已保留原目录" }
     }
 
     private fun requireElf(file: File, targetAbi: String) {
@@ -759,8 +857,9 @@ actual class PanelRuntimeStore private constructor(context: Context) {
         FileOutputStream(file).use { output -> output.write(bytes); output.fd.sync() }
     }
 
-    private fun updateError(id: PanelRuntimeId, message: String) {
-        mutableStates.update { old -> old + (id to old.getValue(id).copy(error = message)) }
+    private fun updateError(id: PanelRuntimeId, message: String, requiresUpdate: Boolean? = null) {
+        mutableStates.update { old -> old + (id to old.getValue(id).copy(error = message,
+            requiresUpdate = requiresUpdate ?: old.getValue(id).requiresUpdate)) }
     }
 
     private fun ByteArray.hex() = joinToString("") { "%02x".format(it.toInt() and 255) }

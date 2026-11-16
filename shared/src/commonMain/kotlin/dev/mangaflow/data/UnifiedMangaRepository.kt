@@ -294,6 +294,9 @@ class UnifiedMangaRepository(
     internal fun sourceProbeIdentity(id: String): String = if (id == "copy") "anonymous-catalogue"
         else (adapter(id) as? dev.mangaflow.data.sources.BodySourceProbeIdentity)?.connectionProbeIdentity().orEmpty()
 
+    /** Script preferences and authenticated native clients share mutable sessions; keep their lanes serialized. */
+    internal fun sourceProbeParallelRoutes(id: String): Boolean = !id.startsWith("js_") && id !in setOf("picacg", "jmcomic")
+
     suspend fun sourceProbe(id: String, route: DownloadRouteSnapshot? = null) {
         check(sourceProbeObserved(id, route)) { "来源仅返回了缓存目录，尚未验证真实响应。" }
     }

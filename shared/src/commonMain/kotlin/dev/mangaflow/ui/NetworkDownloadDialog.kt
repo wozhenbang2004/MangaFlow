@@ -77,7 +77,8 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     var scene by remember { mutableStateOf(initialScene) }
     var showInfo by remember { mutableStateOf(false) }
     var proxyEditing by remember { mutableStateOf(false) }
-    var checkReview by remember(autoCheck) { mutableStateOf(false) }
+    var autoInfoRow by remember(autoCheck) { mutableStateOf<String?>(null) }
+    var autoReceipt by remember(autoCheck) { mutableStateOf<String?>(null) }
     var pendingReportedProxy by remember { mutableStateOf<DownloadProxyEndpoint?>(null) }
     var environment by remember { mutableStateOf<DownloadNetworkEnvironment?>(null) }
     var environmentLoading by remember { mutableStateOf(false) }
@@ -91,20 +92,16 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     DisposableEffect(autoCheck) { onDispose { autoCheck.close() } }
     LaunchedEffect(active, scene) {
         if ((!active || scene != NetworkDownloadScene.CHECK) && autoCheck.state.value.running) autoCheck.cancel()
-        if (scene != NetworkDownloadScene.CHECK) checkReview = false
     }
-    LaunchedEffect(active, scene, autoState.running, autoState.complete, autoState.applied) {
-        if (autoState.running) checkReview = false
-        else if (active && scene == NetworkDownloadScene.CHECK && (autoState.complete || autoState.applied)) {
-            showInfo = false
-            checkReview = true
-        }
+    LaunchedEffect(active, scene, autoState.complete, autoState.applied) {
+        if (active && scene == NetworkDownloadScene.CHECK && (autoState.complete || autoState.applied)) showInfo = false
     }
     fun startCheck() {
         if (!active || autoCheck.state.value.running || autoCheck.state.value.applying) return
         proxyEditing = false
         scene = NetworkDownloadScene.CHECK
-        checkReview = false
+        autoInfoRow = null
+        autoReceipt = null
         scope.launch { autoCheck.run() }
     }
     fun useReportedProxy(endpoint: DownloadProxyEndpoint) {
@@ -143,12 +140,12 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     }
     MotionDialog(visible, onDismissRequest = {
         if (scene == NetworkDownloadScene.CONNECTION && proxyEditing) proxyEditing = false
-        else if (checkReview) { checkReview = false; scene = NetworkDownloadScene.CONNECTION }
+        else if (scene == NetworkDownloadScene.CHECK) scene = NetworkDownloadScene.CONNECTION
         else onDismiss()
     }, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp,
         onClosed = {
             proxyEditing = false
-            checkReview = false
+            autoInfoRow = null
             showInfo = false
             pendingReportedProxy = null
             suggestedProxy = null
@@ -168,17 +165,18 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (checkReview) MotionIconButton(onClick = {
-                            checkReview = false
+                        if (scene == NetworkDownloadScene.CHECK) MotionIconButton(onClick = {
                             scene = NetworkDownloadScene.CONNECTION
                         }, enabled = active, modifier = Modifier.size(44.dp), tooltip = "返回网络设置") {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回网络设置", Modifier.size(18.dp))
                         }
-                        MotionSwap(if (checkReview) "检测结果" else "网络与下载", Modifier.weight(1f)) { title ->
-                            Text(title, style = MaterialTheme.typography.titleMedium,
+                        val title = if (scene == NetworkDownloadScene.CHECK)
+                            if (autoState.complete || autoState.applied) "检测结果" else "网络检测" else "网络与下载"
+                        MotionSwap(title, Modifier.weight(1f)) { heading ->
+                            Text(heading, style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        MotionIconButton(onClick = { showInfo = !showInfo }, enabled = active,
+                        MotionIconButton(onClick = { autoInfoRow = null; showInfo = !showInfo }, enabled = active,
                             modifier = Modifier.size(44.dp), tooltip = "连接与识别说明") {
                             Icon(Icons.Outlined.Info, "连接与识别说明", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
                         }
@@ -186,10 +184,13 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                             Icon(Icons.Outlined.Close, "关闭网络与下载", Modifier.size(20.dp))
                         }
                     }
-                    MotionTabs(scene.ordinal, NetworkDownloadScene.entries.map { it.label },
-                        onSelect = { scene = NetworkDownloadScene.entries[it] }, modifier = Modifier.fillMaxWidth(),
-                        treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 40.dp,
-                        track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
+                    if (scene != NetworkDownloadScene.CHECK) {
+                        val settingsScenes = listOf(NetworkDownloadScene.CONNECTION, NetworkDownloadScene.CATEGORIES)
+                        MotionTabs(settingsScenes.indexOf(scene), settingsScenes.map { it.label },
+                            onSelect = { scene = settingsScenes[it] }, modifier = Modifier.fillMaxWidth(),
+                            treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 40.dp,
+                            track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
+                    }
                     NetworkSceneContent(scene, NetworkDownloadScene.entries,
                         Modifier.weight(1f, fill = false).fillMaxWidth()) { shown ->
                         val contentModifier = if (shown == NetworkDownloadScene.CHECK) Modifier.fillMaxWidth()
@@ -200,6 +201,9 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                                 suggestionRevision = suggestionRevision,
                                 onSuggestionConsumed = { suggestedProxy = null },
                                 autoCheck = autoCheck, onStartCheck = ::startCheck,
+                                onCheckEvidence = { autoInfoRow = it; showInfo = true },
+                                onCheckSettings = { scene = NetworkDownloadScene.CONNECTION },
+                                onCheckReceipt = { autoReceipt = it.takeIf(String::isNotBlank) },
                                 proxyEditing = proxyEditing, onProxyEditing = { proxyEditing = it },
                                 connectionSummary = {
                                     RelayLinkSummary(relayState, relay, enabled = active && shown == scene,
@@ -228,20 +232,25 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
             Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)
                 .padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("网络信息", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    Text(if (scene == NetworkDownloadScene.CHECK) "检测依据" else "网络信息",
+                        Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                     MotionIconButton(onClick = { showInfo = false }, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.Outlined.Close, "关闭网络信息", Modifier.size(20.dp))
                     }
                 }
                 Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    RelayLinkDetails(relayState, relay, enabled = active && showInfo)
-                    NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
-                        enabled = active && showInfo, onRefresh = { environmentRevision++ }, onUse = { endpoint ->
-                            pendingReportedProxy = endpoint
-                            showInfo = false
-                        })
-                    NetworkConnectionHelp(relayState.installed)
+                    if (scene == NetworkDownloadScene.CHECK) {
+                        NetworkAutoEvidenceDetails(autoState, autoInfoRow, autoReceipt)
+                    } else {
+                        RelayLinkDetails(relayState, relay, enabled = active && showInfo)
+                        NetworkEnvironmentSummary(environment, environmentLoading, environmentError,
+                            enabled = active && showInfo, onRefresh = { environmentRevision++ }, onUse = { endpoint ->
+                                pendingReportedProxy = endpoint
+                                showInfo = false
+                            })
+                        NetworkConnectionHelp(relayState.installed)
+                    }
                 }
             }
         }

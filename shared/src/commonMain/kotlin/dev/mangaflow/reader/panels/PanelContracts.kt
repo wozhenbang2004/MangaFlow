@@ -42,6 +42,7 @@ data class PanelRuntimeState(
     val totalBytes: Long = 0,
     val loaded: Boolean = false,
     val pendingRemoval: Boolean = false,
+    val requiresUpdate: Boolean = false,
 )
 
 data class PanelRuntimeSpec(

@@ -14,6 +14,7 @@ import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.sync.withPermit
 import kotlin.math.ceil
 
 internal data class SourceResponse(val text: String, val retryAfterSeconds: Long, val statusCode: Int = 200)
@@ -52,13 +53,16 @@ internal class SourceHttp(
         }
         val frozen = currentCoroutineContext()[ChapterDownloadTransport]
         val route = if (frozen == null) {
-            sourceId?.let { DownloadRoutingStore.activeSourceSnapshot(it) }
+            (sourceId ?: ReviewProviders.routingOwner(request.url.host))?.let { DownloadRoutingStore.activeSourceSnapshot(it) }
                 ?: DownloadRoutingStore.activeDefaultSnapshot()
         } else null
         val owned = route?.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let { NetworkClient(http1Only = http1Only, route = it) }
         if (owned != null) synchronized(transportLock) { routedClients.add(owned) }
         val transport = frozen?.client ?: owned ?: ordinaryClient
-        val response = try { transport.execute(request, MAX_TEXT_BYTES) }
+        val response = try {
+            if (frozen?.connectionCheck == true) ConnectionProbeBudget.requests.withPermit { transport.execute(request, MAX_TEXT_BYTES) }
+            else transport.execute(request, MAX_TEXT_BYTES)
+        }
         catch (cancel: CancellationException) { throw cancel }
         catch (failure: DownloadRouteException) { throw failure }
         catch (failure: Exception) { throw SourceException("$operation 连接或数据读取失败，请检查网络后重试。", publicUrl, cause = failure) }

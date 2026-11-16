@@ -89,6 +89,9 @@ internal fun NetworkDownloadSettings(
     onSuggestionConsumed: () -> Unit = {},
     autoCheck: NetworkAutoCheckController,
     onStartCheck: () -> Unit,
+    onCheckEvidence: (String?) -> Unit,
+    onCheckSettings: () -> Unit,
+    onCheckReceipt: (String) -> Unit,
     proxyEditing: Boolean = false,
     onProxyEditing: (Boolean) -> Unit = {},
     connectionSummary: @Composable () -> Unit = {},
@@ -120,7 +123,8 @@ internal fun NetworkDownloadSettings(
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        NetworkDownloadScene.CHECK -> NetworkAutoCheckWorkspace(autoCheck, active)
+        NetworkDownloadScene.CHECK -> NetworkAutoCheckWorkspace(autoCheck, active,
+            onCheckEvidence, onCheckSettings, onCheckReceipt)
     }
 }
 
