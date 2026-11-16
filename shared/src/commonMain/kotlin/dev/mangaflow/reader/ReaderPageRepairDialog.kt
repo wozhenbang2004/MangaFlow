@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
+import coil3.request.CachePolicy
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.MangaRepository
@@ -103,7 +104,7 @@ internal fun ReaderPageRepairDialog(
         finally { imageBusy = false }
     }
     val request = remember(prepared, variant) {
-        prepared?.let { readerPageRequest(context, it, emptyMap(), variant.sourceId).size(520, 780).build() }
+        prepared?.let { readerPageRequest(context, it, emptyMap(), variant.sourceId).size(520, 780).memoryCachePolicy(CachePolicy.DISABLED).build() }
     }
     MotionDialog(visible = true, onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
