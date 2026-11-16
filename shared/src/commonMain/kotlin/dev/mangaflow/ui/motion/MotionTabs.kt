@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.mangaflow.ui.DesktopIconTooltip
 import kotlinx.coroutines.launch
 
 internal enum class MotionTabTreatment { Capsule, Soft, Underline }
@@ -144,6 +145,8 @@ internal fun MotionTabs(
     selectedFontWeight: FontWeight = FontWeight.Medium,
     unselectedFontWeight: FontWeight = FontWeight.Medium,
     role: Role = Role.Tab,
+    selectionVisible: Boolean = true,
+    tooltips: List<String>? = null,
     itemContent: (@Composable (index: Int, selected: Boolean, color: Color) -> Unit)? = null,
 ) {
     if (labels.isEmpty()) return
@@ -152,6 +155,8 @@ internal fun MotionTabs(
     val left = remember { Animatable(index.toFloat()) }
     val right = remember { Animatable(index + 1f) }
     val motion = LocalMotionEnabled.current
+    val selectionAlpha by animateFloatAsState(if (selectionVisible) 1f else 0f,
+        if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-selection-presence")
     val feedback = rememberFeelFeedback()
     // Capsule treatment owns its restrained optical indicator; no user-selectable glass skin.
     val liquid = treatment == MotionTabTreatment.Capsule
@@ -238,7 +243,7 @@ internal fun MotionTabs(
                 MotionTabTreatment.Capsule -> if (underline || compact) foreground.copy(alpha = .065f) else indicator
             }
             drawRoundRect(tint,
-                topLeft = topLeft, size = pillSize, cornerRadius = radius)
+                topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = selectionAlpha)
             // A small glass rim on the flat navigation surface; text stays outside the material.
             // Backdrop blur/refraction remains in the existing floating controls over artwork.
             if (liquid && treatment == MotionTabTreatment.Capsule) {
@@ -246,20 +251,21 @@ internal fun MotionTabs(
                     listOf(Color.White.copy(alpha = if (light) .52f else .10f), Color.Transparent,
                         foreground.copy(alpha = .025f)),
                     start = topLeft, end = topLeft + Offset(width * .35f, h)),
-                    topLeft = topLeft, size = pillSize, cornerRadius = radius)
+                    topLeft = topLeft, size = pillSize, cornerRadius = radius, alpha = selectionAlpha)
             }
             if (treatment == MotionTabTreatment.Capsule) drawRoundRect(foreground.copy(alpha = if (liquid) .07f else .04f),
-                topLeft = topLeft, size = pillSize, cornerRadius = radius, style = Stroke(.6.dp.toPx()))
+                topLeft = topLeft, size = pillSize, cornerRadius = radius, style = Stroke(.6.dp.toPx()), alpha = selectionAlpha)
         }.padding(horizontal = if (compact) 10.dp else 0.dp).selectableGroup(),
         horizontalArrangement = if (compact) Arrangement.spacedBy(22.dp) else Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         labels.forEachIndexed { i, label ->
+            val isSelected = selectionVisible && i == index
             val interaction = remember { MutableInteractionSource() }
             val pressed by interaction.collectIsPressedAsState()
             val pressAlpha = animateFloatAsState(if (pressed) .06f else 0f,
                 if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-press")
-            val labelColor by animateColorAsState(if (i == index) foreground else muted,
+            val labelColor by animateColorAsState(if (isSelected) foreground else muted,
                 if (motion) tween(MangaMotion.Quick) else snap(), label = "tab-label")
             // Reserve both weights so selecting a compact tab cannot shift its neighbours.
             val labelWidth = if (compact && itemContent == null) with(density) {
@@ -271,19 +277,20 @@ internal fun MotionTabs(
             val tab = if (compact) Modifier.onSizeChanged { tabWidths[i] = it.width }
                 else Modifier.weight(1f)
             Box(tab.height(height).selectable(
-                selected = i == index, role = role, interactionSource = interaction, indication = null,
-                onClick = { if (i != index) feedback.perform(FeelEvent.Selection); onSelect(i) },
+                selected = isSelected, role = role, interactionSource = interaction, indication = null,
+                onClick = { if (!isSelected) feedback.perform(FeelEvent.Selection); onSelect(i) },
             ).motionPress(interaction).drawBehind {
                 drawRoundRect(foreground.copy(alpha = pressAlpha.value), cornerRadius = CornerRadius(10.dp.toPx()))
             }.then(if (compact) Modifier.widthIn(min = labelWidth + 6.dp).padding(horizontal = 3.dp) else Modifier),
                 contentAlignment = Alignment.Center) {
-                if (itemContent != null) itemContent(i, i == index, labelColor)
+                if (itemContent != null) itemContent(i, isSelected, labelColor)
                 else Text(label, color = labelColor, fontSize = fontSize,
                         modifier = if (controlHeight != null) Modifier.padding(
                             horizontal = if (treatment == MotionTabTreatment.Capsule) 8.dp else 2.dp) else Modifier,
                         textAlign = TextAlign.Center,
-                        fontWeight = if (i == index) selectedFontWeight else unselectedFontWeight,
+                        fontWeight = if (isSelected) selectedFontWeight else unselectedFontWeight,
                         maxLines = if (wrapLabels) 2 else 1, overflow = TextOverflow.Ellipsis)
+                DesktopIconTooltip(tooltips?.getOrNull(i), interaction, tooltips != null)
             }
         }
     }

@@ -68,7 +68,7 @@ internal fun mangaStatusColors(): MangaStatusColors {
     val dark = colors.surface.luminance() < .5f
     return MangaStatusColors(
         success = if (dark) Color(0xFF8FD1A8) else Color(0xFF32754F),
-        activity = colors.primary,
+        activity = if (dark) Color(0xFF79CAD0) else Color(0xFF246D7B),
         waiting = if (dark) Color(0xFFE2BB78) else Color(0xFF8D641F),
         error = colors.error,
         neutral = colors.onSurfaceVariant,

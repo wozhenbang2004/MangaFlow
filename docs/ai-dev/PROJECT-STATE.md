@@ -1,5 +1,17 @@
 # MangaFlow · current work
 
+## Reader selection and cache meaning · source checkpoint 2026-11-17
+
+The user asks whether decoded memory expires by idle time or is evicted when a16-page prefetch/review window moves, and requests clearer selection, richer meaningful accent and less document-like details. Exact wording and six requirements are DESIGN READER-DETAIL-01–06. Route DELIVERY with a read-only cache-lifecycle diagnosis; stage SOURCE_COMPLETE. This is a bounded refinement of the broadly liked READBAR/STATUSCOLOR layout, not a cache-policy rewrite or whole-application redesign.
+
+Current-source findings: out-of-window unfinished optional work is cancelled except foreground-promoted ownership; completed reusable decoded entries are not removed simply for leaving that window. Cache set/get defines idle lifetime, capacity LRU is independent, default/missing retention is2minutes and explicit0 remains capacity-only. Original-window size and decoded warmup are separate. Application-owned expiry runs independently of visible panels; cache-reference removal does not establish an immediate RSS drop. Effective user-device values and runtime behavior were not observed.
+
+The implemented slice reuses the actual Ovio MotionTabs capsule for strip/popover selection, preserves names/44dp hit regions and numeric width, separates front/review expansion and uses current-scope Info. Compact facts and three aligned cumulative removal metrics replace the long cache field list. Admitted activity cyan is separate from selected blue, readiness/reclaimed green, wait amber, error and unknown. All original cache, sampling, clear, source identity and presence-complete action ownership is retained.
+
+Root and independent integrated source/interface reviewers completed the three-source-file review with no confirmed in-scope blocker; the shared control's48 prior calls and latest changed callers were checked for API compatibility. Source work began at21bb47f and incorporates main84f70591495190e5ced620fbc52e790158d76c98's concurrent network/anime/account updates and reader global recovery wording, followed by the non-overlapping3cc50ac anime-provider batch. Relevant requirements, raw-message batch and remaining visual-evidence gaps are in DESIGN. No tests/local builds/compiles/probes/UI automation were performed.
+
+Publication belongs to this single reviewed batch with expected-head protection and ordinary Android/native CI activation. Do not make a status-only follow-up push or wait for builds/artifacts. If this source is already in main, the next useful step is actual CI failure evidence or installed user feedback, not replaying this checkpoint's publication. Real color/geometry/font/touch/motion acceptance remains open. Raw feedback is covered through the latest cache-window/reader-details message, recorded2026-11-17 Asia/Shanghai.
+
 ## Independent anime navigation and focused UI · source checkpoint 2026-11-17
 
 Current user rejects the anime UI as cluttered and explicitly wants Manga/Anime switched directly in the sidebar, with manga unaffected. Exact wording, supersession and eight design requirements are DESIGN ANIME-UX-01–08. Route DELIVERY after bounded source/IA review; stage SOURCE_COMPLETE. Baseline main b97f1895d7d70410e17aac742353335f75b22b52 already includes separate root routes, the content-rich discovery batch and subsequent compilation/status fixes; do not recreate these owners or repeat completed research.
