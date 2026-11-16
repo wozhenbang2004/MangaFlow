@@ -36,7 +36,10 @@ class AnimeSourceRepository(context: PlatformContext) {
     private val nativeProviders: List<AnimeProvider> = listOf(TvtFunProvider(), AgeProvider(), GiriGiriProvider(), LmmProvider())
     val providers: List<AnimeProvider> get() = nativeProviders + extensions.state.value
         .filter { it.installed && it.enabled && it.kind == dev.mangaflow.anime.sources.lanerc.LanercSourceKind.VIDEO }
-        .map { dev.mangaflow.anime.sources.lanerc.LanercProvider(extensions, extensions.descriptor(it.id)) }
+        .map { listing ->
+            if (listing.id in BUNDLED_HTML_ANIME_IDS) BundledHtmlAnimeProvider(listing.id, requireNotNull(listing.revision))
+            else dev.mangaflow.anime.sources.lanerc.LanercProvider(extensions, extensions.descriptor(listing.id))
+        }
     fun provider(id: String): AnimeProvider? = providers.firstOrNull { it.id == id }
 }
 

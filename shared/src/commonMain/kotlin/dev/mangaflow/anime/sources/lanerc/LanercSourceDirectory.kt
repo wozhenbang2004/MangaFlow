@@ -50,6 +50,9 @@ internal data class LanercInstalledPackage(
 
 /** Only public script URLs and semantic metadata are packaged; third-party script code is not bundled. */
 val LANERC_SOURCE_DIRECTORY: List<LanercSourceDescriptor> = listOf(
+    // Original native adapters. Distinct IDs retain legacy script title/group/episode ownership.
+    LanercSourceDescriptor("anime-native-akianime", "AkiAnime · 内建", LanercSourceKind.VIDEO, "https://www.akianime.com/", "https://www.akianime.com/", emptyList(), setOf("search", "detail", "play"), "", "仅第一页关键词搜索；匿名公开线路，验证或加密线路不保证可用"),
+    LanercSourceDescriptor("anime-native-dmbus", "动漫巴士 · 内建", LanercSourceKind.VIDEO, "https://dmbus.cc/", "https://dmbus.cc/", emptyList(), setOf("search", "detail", "play"), "", "关键词 page 分页；匿名公开线路，动态加密线路不保证可用"),
     LanercSourceDescriptor("anime-lanerc-douban", "豆瓣发现", LanercSourceKind.BROWSE, "https://js.z1i.cn/js/douban.js", "https://m.douban.com/", listOf("AuvFun"), setOf("config","categories","homeSections","search","searchFiltered","detail","play"), "c9ab5e9fe51147ceae6d0811cef52c359b21df1908405ac262a0a6ddb263c7d7", "主列表start/count分页；仅第一页空回退旧API；关键词按tag查询"),
     LanercSourceDescriptor("anime-lanerc-lanerc", "Lanerc", LanercSourceKind.VIDEO, "https://js.z1i.cn/js/lanerc.js", "https://v3.yyghk.com/", listOf("lanerc","Auv源1"), setOf("config","homeSections","search","categories","searchFiltered","detail","related","danmu","play","guestCaptcha","guestBind","login"), "5a039992049d974a1e3c197475a1f301d18f0d9d2b4defa6c204601347b986b5", "关键词page未传给HTTP；分类page参数；真实翻页未请求"),
     LanercSourceDescriptor("anime-lanerc-jinpai", "金牌", LanercSourceKind.VIDEO, "https://js.z1i.cn/js/jinpaiapp.js", "https://y2s52n7.com/", listOf("Auv源2"), setOf("config","categories","search","searchFiltered","homeSections","detail","play"), "6f924a30e23fac63681e3d4d23ee5adb5ad76c10459b2e063d442a7a96286dfe", "关键词固定pageNum=1/pageSize=8；列表pageNum参数"),

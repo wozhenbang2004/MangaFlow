@@ -1,5 +1,7 @@
 package dev.mangaflow.anime.sources.lanerc
 
+import dev.mangaflow.anime.sources.BUNDLED_HTML_ANIME_IDS
+import dev.mangaflow.anime.sources.BUNDLED_HTML_ANIME_VERSION
 import dev.mangaflow.anime.sources.animeHash
 import dev.mangaflow.data.plugins.fetchPluginText
 import dev.mangaflow.json.JSONArray
@@ -36,6 +38,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     private val writer = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val packages = MutableStateFlow<Map<String, LanercInstalledPackage>>(emptyMap())
+    private var builtIns: Map<String, BuiltInChoice> = emptyMap()
     private val mutableState = MutableStateFlow(project(emptyMap()))
     val state = mutableState.asStateFlow()
     private var loadFailure: Boolean = false
@@ -61,7 +64,18 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                         }.decodeToString()
                     }
                     val root = JSONObject(text)
-                    require(root.getInt("version") in 1..2)
+                    require(root.getInt("version") in 1..3)
+                    val choices = root.optJSONArray("builtIns") ?: JSONArray()
+                    require(choices.length() <= BUNDLED_HTML_ANIME_IDS.size)
+                    builtIns = (0 until choices.length()).associate { index ->
+                        val item = choices.getJSONObject(index)
+                        val id = item.getString("id")
+                        require(id in BUNDLED_HTML_ANIME_IDS)
+                        val revision = item.getString("revision")
+                        require(revision.matches(Regex("[A-Za-z0-9-]{1,100}")))
+                        id to BuiltInChoice(item.getBoolean("enabled"), item.getBoolean("removed"), revision)
+                    }
+                    require(builtIns.size == choices.length())
                     val array = root.getJSONArray("packages")
                     require(array.length() <= LANERC_SOURCE_DIRECTORY.size)
                     val restored = (0 until array.length()).map { decode(array.getJSONObject(it)) }
@@ -73,7 +87,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                             installed.copy(optionsKey = key)
                         } else installed
                     }.associateBy { it.id }
-                    if (root.getInt("version") == 1 || restored.any { it.optionsKey.isEmpty() && it.optionsJson != "{}" }) commit(migrated)
+                    if (root.getInt("version") < 3 || restored.any { it.optionsKey.isEmpty() && it.optionsJson != "{}" }) commit(migrated)
                     else { packages.value = migrated; mutableState.value = project(migrated) }
                 }
             } catch (cancel: CancellationException) { throw cancel }
@@ -100,8 +114,14 @@ class LanercSourceStore private constructor(context: PlatformContext) {
      * downloads; opening anime must never turn a remote directory into executable bootstrap code.
      * A known URL is not an integrity guarantee: pin downloaded bytes before validation executes JS.
      */
-    suspend fun install(id: String) = download(id, update = false)
-    suspend fun update(id: String) = download(id, update = true)
+    suspend fun install(id: String) {
+        if (id in BUNDLED_HTML_ANIME_IDS) editBuiltIn(id, enabled = true, removed = false)
+        else download(id, update = false)
+    }
+    suspend fun update(id: String) {
+        check(id !in BUNDLED_HTML_ANIME_IDS) { "此来源已内置，随应用版本更新，无需下载脚本。" }
+        download(id, update = true)
+    }
 
     suspend fun installAllVideo(): Map<String, String> {
         val failures = linkedMapOf<String, String>()
@@ -156,8 +176,20 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         }
     }
 
-    suspend fun setEnabled(id: String, enabled: Boolean) = edit(id) { it.copy(enabled = enabled, revision = randomUuid()) }
+    suspend fun setEnabled(id: String, enabled: Boolean) {
+        if (id in BUNDLED_HTML_ANIME_IDS) editBuiltIn(id, enabled, removed = false)
+        else edit(id) { it.copy(enabled = enabled, revision = randomUuid()) }
+    }
+
+    private suspend fun editBuiltIn(id: String, enabled: Boolean, removed: Boolean) {
+        ready.await()
+        withContext(Dispatchers.IO) { writer.withLock {
+            check(!loadFailure) { "来源存储未能读取，不能覆盖原文件。" }
+            commit(packages.value, builtIns + (id to BuiltInChoice(enabled, removed, randomUuid())))
+        } }
+    }
     suspend fun setOptions(id: String, optionsJson: String) {
+        check(id !in BUNDLED_HTML_ANIME_IDS) { "此内建来源仅使用匿名接口，不需要私密参数。" }
         require(optionsJson.encodeToByteArray().size <= 65_536) { "来源参数过大。" }
         val options = JSONObject(optionsJson).toString()
         ready.await()
@@ -172,6 +204,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         } }
     }
     suspend fun rollback(id: String) = edit(id) { installed ->
+        check(id !in BUNDLED_HTML_ANIME_IDS) { "此来源已内置，随应用版本更新。" }
         val code = installed.previousCode ?: error("该来源没有可回退的版本。")
         val digest = installed.previousDigest ?: error("旧版本记录不完整。")
         check(animeHash(code) == digest) { "旧版本完整性校验失败。" }
@@ -180,6 +213,11 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             previousVersion = installed.version)
     }
     suspend fun remove(id: String) {
+        if (id in BUNDLED_HTML_ANIME_IDS) {
+            // A durable tombstone prevents automatic registration from undoing the user's removal.
+            editBuiltIn(id, enabled = false, removed = true)
+            return
+        }
         ready.await()
         withContext(Dispatchers.IO) { writer.withLock {
             check(!loadFailure) { "来源存储未能读取，不能覆盖原文件。" }
@@ -192,10 +230,18 @@ class LanercSourceStore private constructor(context: PlatformContext) {
     /** Private user backup of installed bytes; no Ext, cookies, credentials or session state. */
     suspend fun exportBackup(): JSONArray {
         ready.await()
-        check(!loadFailure) { "来源存储未能读取，不能导出不完整的来源备份。" }
-        return withContext(Dispatchers.IO) { JSONArray(packages.value.values.map { item ->
-            encode(item).also { it.remove("optionsKey") }
-        }) }
+        return withContext(Dispatchers.IO) { writer.withLock {
+            check(!loadFailure) { "来源存储未能读取，不能导出不完整的来源备份。" }
+            val installed = packages.value
+            val choices = BUNDLED_HTML_ANIME_IDS.map { id ->
+                val choice = builtIns[id] ?: BuiltInChoice(
+                    enabled = installed[id.replace("anime-native-", "anime-lanerc-")] == null,
+                    removed = false, revision = "bundled")
+                JSONObject().put("id", id).put("builtIn", true).put("enabled", choice.enabled)
+                    .put("removed", choice.removed)
+            }
+            JSONArray(installed.values.map { item -> encode(item).also { it.remove("optionsKey") } } + choices)
+        } }
     }
 
     fun validateBackup(value: JSONArray) {
@@ -203,9 +249,14 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         val items = (0 until value.length()).map { index ->
             val item = value.getJSONObject(index)
             require(!item.has("options") && !item.has("optionsKey")) { "来源备份不能包含私密参数。" }
-            decode(item, loadPrivateOptions = false)
+            if (item.optBoolean("builtIn", false)) {
+                require(item.getString("id") in BUNDLED_HTML_ANIME_IDS && !item.has("code"))
+                item.getBoolean("enabled")
+                item.getBoolean("removed")
+                item.getString("id")
+            } else decode(item, loadPrivateOptions = false).id
         }
-        require(items.map { it.id }.distinct().size == items.size) { "来源备份包含重复来源。" }
+        require(items.distinct().size == items.size) { "来源备份包含重复来源。" }
     }
 
     /** Restore is the user's explicit grant for these known packages; no code is evaluated here. */
@@ -214,10 +265,15 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         validateBackup(snapshot)
         ready.await()
         withContext(Dispatchers.IO) { writer.withLock {
-            val next = (0 until snapshot.length()).map { decode(snapshot.getJSONObject(it), loadPrivateOptions = false)
-                .copy(revision = randomUuid()) }.associateBy { it.id }
+            val entries = (0 until snapshot.length()).map { snapshot.getJSONObject(it) }
+            val next = entries.filterNot { it.optBoolean("builtIn", false) }
+                .map { decode(it, loadPrivateOptions = false).copy(revision = randomUuid()) }.associateBy { it.id }
+            val restoredChoices = entries.filter { it.optBoolean("builtIn", false) }.associate { item ->
+                item.getString("id") to BuiltInChoice(item.getBoolean("enabled"), item.getBoolean("removed"), randomUuid())
+            }
             val old = packages.value
-            commit(next)
+            // Legacy backups lack native choices; do not erase this device's explicit choices.
+            commit(next, builtIns + restoredChoices)
             loadFailure = false
             old.values.filter { it.optionsKey.isNotEmpty() }.forEach { installed ->
                 runCatching { deleteSecret(application, optionsSecret(installed.id, installed.optionsKey)) }
@@ -227,7 +283,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
 
     private fun optionsSecret(id: String, key: String): String = "anime-lanerc-options:" + animeHash(id + "\n" + key)
 
-    internal fun snapshot(id: String): LanercInstalledPackage? = packages.value[id]?.takeIf { it.enabled }
+    internal fun snapshot(id: String): LanercInstalledPackage? = packages.value[id]?.takeIf { it.enabled && id !in BUNDLED_HTML_ANIME_IDS }
     internal fun isCurrent(value: LanercInstalledPackage): Boolean =
         packages.value[value.id]?.let { it.enabled && it.revision == value.revision && it.digest == value.digest } == true
     internal fun descriptor(id: String): LanercSourceDescriptor =
@@ -242,8 +298,15 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         } }
     }
 
-    private suspend fun commit(next: Map<String, LanercInstalledPackage>) = withContext(NonCancellable) {
-        val bytes = JSONObject().put("version", 2).put("packages", JSONArray(next.values.map(::encode)))
+    private suspend fun commit(next: Map<String, LanercInstalledPackage>, choices: Map<String, BuiltInChoice> = builtIns) = withContext(NonCancellable) {
+        // Persist the legacy-owner preference, so subsequently deleting that old source cannot
+        // silently activate a different adapter or change playback identity.
+        val effectiveChoices = BUNDLED_HTML_ANIME_IDS.filter { id ->
+            id !in choices && next[id.replace("anime-native-", "anime-lanerc-")] != null
+        }.associateWith { BuiltInChoice(enabled = false, removed = false, revision = randomUuid()) } + choices
+        val bytes = JSONObject().put("version", 3).put("packages", JSONArray(next.values.map(::encode)))
+            .put("builtIns", JSONArray(effectiveChoices.map { (id, choice) -> JSONObject().put("id", id)
+                .put("enabled", choice.enabled).put("removed", choice.removed).put("revision", choice.revision) }))
             .toString().encodeToByteArray()
         require(bytes.size <= MAX_STORE_BYTES) { "来源包总容量超出安全存储范围。" }
         check(file.baseFile.parentFile?.let { it.isDirectory || it.mkdirs() } == true) { "无法创建来源目录。" }
@@ -252,6 +315,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         catch (failure: Exception) { file.failWrite(output); throw failure }
         val previous = packages.value
         packages.value = next
+        builtIns = effectiveChoices
         mutableState.value = project(next)
         previous.values.filter { next[it.id]?.revision != it.revision }.forEach { runtime.invalidate(it.id) }
     }
@@ -265,7 +329,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
 
     private fun decode(value: JSONObject, loadPrivateOptions: Boolean = true): LanercInstalledPackage {
         val id = value.getString("id")
-        require(installable(descriptor(id)))
+        require(id !in BUNDLED_HTML_ANIME_IDS && installable(descriptor(id)))
         val code = value.getString("code")
         val digest = value.getString("digest")
         require(code.encodeToByteArray().size in 1..MAX_CODE_BYTES && animeHash(code) == digest)
@@ -288,6 +352,25 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             if (value.isNull("previousVersion")) null else value.getString("previousVersion"), optionsKey)
     }
 
+    private fun project(packages: Map<String, LanercInstalledPackage>, loadError: String? = null) = LANERC_SOURCE_DIRECTORY.map { item ->
+            val installed = packages[item.id]
+            if (item.id in BUNDLED_HTML_ANIME_IDS) {
+                val choice = builtIns[item.id]
+                return@map LanercSourceListing(item.id, item.name, item.kind, item.scriptUrl,
+                    installed = choice?.removed != true, enabled = loadError == null && choice?.removed != true &&
+                        (choice?.enabled ?: (packages[item.id.replace("anime-native-", "anime-lanerc-")] == null)),
+                    version = BUNDLED_HTML_ANIME_VERSION,
+                    error = loadError, aliases = item.aliases, capabilities = setOf("search", "detail", "play"),
+                    revision = BUNDLED_HTML_ANIME_VERSION + "-" + (choice?.revision ?: installed?.revision ?: "bundled"))
+            }
+            LanercSourceListing(item.id, item.name, item.kind, item.scriptUrl,
+                installed != null, installed?.enabled == true, installed?.version.orEmpty(), installed?.digest.orEmpty(),
+                installed?.previousVersion, loadError ?: unsupported(item), item.aliases, item.functions,
+                "{}", installable(item), installed?.revision, installed?.optionsJson?.let { it != "{}" } == true)
+        }
+
+    private data class BuiltInChoice(val enabled: Boolean, val removed: Boolean, val revision: String)
+
     companion object {
         private const val MAX_CODE_BYTES = 5 * 1024 * 1024
         private const val MAX_STORE_BYTES = 64 * 1024 * 1024
@@ -298,13 +381,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             LanercSourceKind.UNKNOWN -> "此脚本的导出协议尚未确认，暂不能启用。"
             else -> null
         }
-        private fun project(packages: Map<String, LanercInstalledPackage>, loadError: String? = null) = LANERC_SOURCE_DIRECTORY.map { item ->
-            val installed = packages[item.id]
-            LanercSourceListing(item.id, item.name, item.kind, item.scriptUrl,
-                installed != null, installed?.enabled == true, installed?.version.orEmpty(), installed?.digest.orEmpty(),
-                installed?.previousVersion, loadError ?: unsupported(item), item.aliases, item.functions,
-                "{}", installable(item), installed?.revision, installed?.optionsJson?.let { it != "{}" } == true)
-        }
+
 
         private val lock = SynchronizedObject()
         private val instances = mutableMapOf<String, LanercSourceStore>()

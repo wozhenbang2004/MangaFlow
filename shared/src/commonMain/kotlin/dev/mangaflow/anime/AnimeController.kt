@@ -1082,7 +1082,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         choice.localMedia != null || sources.provider(choice.option.sourceId) != null && sourceRevision(choice.option.sourceId) == choice.sourceRevision &&
             (choice.sourceRevision == null || choice.asset.sourceRevision == choice.sourceRevision) &&
             (choice.asset.expiresAt == null || choice.asset.expiresAt > wallTimeMillis()) &&
-            choice.asset.route == DownloadRoutingStore.activeSourceSnapshot(choice.option.sourceId) &&
+            choice.asset.route == DownloadRoutingStore.activeSourceSnapshot(choice.option.sourceId, DownloadCategory.ANIME) &&
             mutableState.value.episodeOptions[choice.episode.id].orEmpty().any { it == choice.option && it.confirmed }
 
     private suspend fun startPlayback(choice: PendingPlayback, rememberPrevious: Boolean = true) {
