@@ -123,6 +123,7 @@ internal fun GuidedPanelReader(
     readySourceVariants: Map<String, ReaderSourceStandby>,
     onPrefetchFailure: (Page) -> Unit,
     onQuickSwitch: (Int, ChapterVariant) -> Unit,
+    onRepairPage: (Int) -> Unit,
     onMoreSources: (Rect?) -> Unit,
     onNext: (() -> Unit)?,
     onDisable: () -> Unit,
@@ -351,7 +352,8 @@ internal fun GuidedPanelReader(
             val detected = if (skipDetection) PanelDetection(listOf(PanelBox.FULL), PanelEngine.CLASSIC.name, bypassNotice)
             else withTimeoutOrNull(READER_PAGE_WAIT_MILLIS) {
                 repository.detect(page, headers, { resolved }, preferences.panelEngine,
-                    preferences.panelDirection, preferences.panelLearnedOrder, force = forceDetection, sourceId = sourceId)
+                    preferences.panelDirection, preferences.panelLearnedOrder, force = forceDetection,
+                    sourceId = page.sourceRouteId.ifBlank { sourceId })
             }
             val result = detected ?: PanelDetection(listOf(PanelBox.FULL), PanelEngine.CLASSIC.name,
                 "分镜识别超时，已保留整页，可继续翻页")
@@ -479,6 +481,7 @@ internal fun GuidedPanelReader(
                         forceDetection = true; imageRetry++
                     },
                     onSwitch = { onQuickSwitch(pageIndex, it) }, onMore = onMoreSources,
+                    onRepairPage = { onRepairPage(pageIndex) },
                     onControls = onShowControls,
                     onStop = { attempt.stopped = true; error = "已停止等待"; loading = false },
                 )
