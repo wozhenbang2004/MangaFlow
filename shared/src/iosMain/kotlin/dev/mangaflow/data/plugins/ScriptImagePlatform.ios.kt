@@ -11,7 +11,7 @@ import platform.ImageIO.*
 import platform.UIKit.*
 
 /** The JM v1.1.12 strip algorithm on CoreGraphics; this does not install a native JM API adapter. */
-internal actual fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, filename: String, url: String, index: Int): ByteArray {
+internal actual fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, filename: String, url: String, index: Int, maxPixels: Long, maxEncodedBytes: Long): ByteArray {
     val photoId = chapterId.toLong()
     if (photoId < 220980L || filename.endsWith(".gif", true)) return bytes
     val count = if (photoId < 268850L) 10 else {
@@ -31,7 +31,7 @@ internal actual fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, fil
             width = properties.imageNumber(kCGImagePropertyPixelWidth).toInt()
             height = properties.imageNumber(kCGImagePropertyPixelHeight).toInt()
         } finally { CFRelease(properties) }
-        require(width > 0 && height > 0 && width.toLong() * height <= 16_777_216L) { "图片解码尺寸超过安全内存范围。" }
+        require(width > 0 && height > 0 && width.toLong() * height <= maxPixels) { "图片解码尺寸超过配置的像素预算。" }
         if (height < count) return bytes
         val image = CGImageSourceCreateImageAtIndex(source, 0u, null) ?: error("图片暂时无法解码。")
         try {
@@ -53,7 +53,8 @@ internal actual fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, fil
                 }
                 UIImagePNGRepresentation(requireNotNull(UIGraphicsGetImageFromCurrentImageContext()))
             } finally { UIGraphicsEndImageContext() } ?: error("图片解码结果无法编码。")
-            require(encoded.length <= 96uL * 1024uL * 1024uL) { "图片解码结果超过限制。" }
+            require(encoded.length <= maxEncodedBytes.toULong()) { "图片解码结果超过配置的单图限制。" }
+            require(encoded.length <= Int.MAX_VALUE.toULong()) { "图片解码结果超过平台数组容量。" }
             return requireNotNull(encoded.bytes).reinterpret<ByteVar>().readBytes(encoded.length.toInt())
         } finally { CGImageRelease(image) }
     } finally { CFRelease(source) }

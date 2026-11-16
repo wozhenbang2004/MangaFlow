@@ -51,7 +51,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -87,7 +86,6 @@ class ChapterPreparationStore(
     private val localRuns = mutableMapOf<String, Job>()
     private val executing = mutableMapOf<String, Job>()
     private val gates = Array(16) { Mutex() }
-    private val slots = Semaphore(2)
     private var sequence = 0L
     private val mutableState = MutableStateFlow<List<ChapterPreparationState>>(emptyList())
     val state = mutableState.asStateFlow()
@@ -259,11 +257,14 @@ class ChapterPreparationStore(
             val experience = ExperiencePolicyStore.get(app)
             val releaseResources = experience.startObserving()
             var endLease: () -> Unit = {}
-            var slotAcquired = false
+            var releaseSlot: () -> Unit = {}
+            val sourceTimeoutSeconds = experience.state.value.runtime.chapterPreparationTimeoutSeconds
             var sourceTimedOut = false
             try {
                 endLease = beginDownloadExecution { job.cancel(CancellationException("等待系统允许继续准备")) }
-                withTimeout(30_000L) { slots.acquire(); slotAcquired = true }
+                releaseSlot = experience.acquirePreparationPermit(30_000L) { wait ->
+                    if (wait != null) presentation(task, waitText(wait))
+                }
                 downloads.awaitReady()
                 val existing = downloads.entryFor(task.state.manga.id, task.state.chapter.id)
                 if (existing?.status in SETTLED_DOWNLOADS) {
@@ -288,7 +289,7 @@ class ChapterPreparationStore(
                         onWaiting = { wait -> if (wait != null) presentation(task, waitText(wait)) }) {
                         update(task) { it.copy(state = it.state.copy(phase = ChapterPreparationPhase.PREPARING, error = ""),
                             attempts = it.attempts + 1) }
-                        val prepared = try { withTimeout(25_000L) {
+                        val prepared = try { withTimeout(sourceTimeoutSeconds.toLong() * 1_000L) {
                             foregroundRequest("下载章节图片") {
                                 repository.prepareDownload(app, chapterSourceMangaId(task.state.manga.id, task.state.chapter),
                                     task.state.chapter.id, route, forceRefresh = target != null)
@@ -324,7 +325,7 @@ class ChapterPreparationStore(
             } catch (timeout: TimeoutCancellationException) {
                 currentCoroutineContext().ensureActive()
                 if (sourceTimedOut) {
-                    fail(task, "来源未在 25 秒内返回章节信息，可重试或更换下载线路。")
+                    fail(task, "来源未在 ${sourceTimeoutSeconds} 秒内返回章节信息，可重试或更换下载线路。")
                     ChapterPreparationOutcome.FAILURE
                 } else {
                     waiting(task, "等待下载准备资源", 30_000L)
@@ -345,7 +346,7 @@ class ChapterPreparationStore(
                     ChapterPreparationOutcome.FAILURE
                 }
             } finally {
-                if (slotAcquired) slots.release()
+                releaseSlot()
                 endLease()
                 releaseResources()
                 synchronized(lock) { if (executing[workId] === job) executing.remove(workId) }

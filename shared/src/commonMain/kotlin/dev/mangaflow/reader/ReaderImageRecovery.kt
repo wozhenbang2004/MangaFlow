@@ -49,6 +49,13 @@ import dev.mangaflow.data.approximateReaderPage
 import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.experience.PrefetchPromoted
 import dev.mangaflow.experience.ExperienceAdmissionDeferred
+import dev.mangaflow.experience.PrefetchWorkSnapshot
+import dev.mangaflow.experience.PrefetchStage
+import dev.mangaflow.experience.PrefetchImageInactivityException
+import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.data.plugins.ScriptImageRefreshRequired
+import dev.mangaflow.storage.DownloadStorageException
+import dev.mangaflow.storage.DownloadPhase
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.storage.StorageLock
@@ -66,9 +73,6 @@ import kotlinx.coroutines.flow.collect
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
-internal const val READER_SLOW_LOAD_MILLIS = 8_000L
-internal const val READER_PAGE_WAIT_MILLIS = 45_000L
-
 internal typealias ReaderPageResolver = suspend (Page, ((Long) -> Unit)?) -> Page
 
 /** An optional budget, cancellation or foreground promotion says nothing about source health. */
@@ -77,10 +81,21 @@ internal fun isReaderPrefetchFailure(failure: Throwable): Boolean {
     repeat(8) {
         val current = cause ?: return true
         if (current is CancellationException || current is PrefetchBudgetExceeded || current is PrefetchPromoted ||
-            current is ExperienceAdmissionDeferred || current is OutOfMemoryError) return false
+            current is ExperienceAdmissionDeferred || current is OutOfMemoryError || current is DownloadRouteException ||
+            current is ScriptImageRefreshRequired || current is DownloadStorageException) return false
+        if (current is PrefetchImageInactivityException && !current.sourceFailure) return false
+        if (Regex("(?i)ENOSPC|no space left|disk full|磁盘空间不足|存储空间不足").containsMatchIn(current.message.orEmpty())) return false
         cause = current.cause
     }
     return true
+}
+
+/** Local lookup, decode and an existing download's queue are not evidence of a failing source. */
+internal fun readerTimeoutIsSource(work: PrefetchWorkSnapshot?, shared: DownloadProgress?): Boolean {
+    if (work?.stage == PrefetchStage.CHECKING) return false
+    if (shared != null) return shared.phase in setOf(DownloadPhase.CONNECTING,
+        DownloadPhase.FIRST_BYTE_WAIT, DownloadPhase.TRANSFERRING) && shared.waitingReason == null
+    return work?.admitted == true && work.stage == PrefetchStage.DOWNLOADING
 }
 
 /** Keep local optional-work stops distinct from a failed image or unreachable source. */
@@ -97,6 +112,11 @@ internal fun readerPrefetchErrorLabel(failure: Throwable): String {
         chain.any { it is ExperienceAdmissionDeferred } -> "资源保护暂缓"
         chain.any { it is PrefetchPromoted } -> "交由当前页继续"
         chain.any { it is OutOfMemoryError } -> "内存保护暂缓"
+        chain.any { it is DownloadRouteException } -> "线路配置暂不可用"
+        chain.any { it is ScriptImageRefreshRequired } -> "来源版本已变化，请重新读取"
+        chain.any { it is DownloadStorageException } -> "本机存储暂不可用"
+        chain.filterIsInstance<PrefetchImageInactivityException>().firstOrNull()?.sourceFailure == false -> "准备资源等待超时"
+        chain.any { it is PrefetchImageInactivityException } -> "等待图片新数据超时"
         chain.any { it is CancellationException } -> "预读已取消"
         else -> chain.asReversed().map { readerPageErrorLabel(it.message.orEmpty()) }
             .firstOrNull { it != "暂时无法加载" } ?: "图片预读未完成"
@@ -153,6 +173,8 @@ internal fun rememberReaderPageTransfer(attempt: ReaderLoadAttempt, page: Page,
 /** Do not present transport URLs, request keys or raw exception chains as reading UI. */
 internal fun readerPageErrorLabel(raw: String): String = when {
     raw == "已停止等待" -> raw
+    raw.contains("准备等待超时") || raw.contains("准备资源等待超时") -> "准备资源等待超时"
+    raw.contains("等待下载资源") || raw.contains("资源保护暂缓") || raw.contains("内存保护暂缓") -> "资源暂缓"
     raw.contains("timeout", true) || raw.contains("timed out", true) || raw.contains("超时") -> "连接超时"
     raw.contains("UnknownHost", true) || raw.contains("resolve host", true) || raw.contains("DNS", true) -> "暂时无法连接来源"
     raw.contains("429") || raw.contains("限流") -> "来源暂时限制访问"
@@ -207,7 +229,10 @@ internal fun ReaderImageRecovery(
 ) {
     // Multiple editions from one provider must be selected explicitly, not guessed.
     val sourceGroups = remember(alternatives) { alternatives.groupBy { it.sourceId }.values }
-    val direct = remember(sourceGroups) { sourceGroups.mapNotNull { it.singleOrNull() }.take(2) }
+    val direct = remember(sourceGroups, index) {
+        if (index == null) sourceGroups.mapNotNull { it.singleOrNull() }.take(2)
+        else alternatives.take(2) // Opens explicit artwork confirmation; it does not choose a whole-source edition.
+    }
     val hasMore = alternatives.size > direct.size
     val expanded = !pending || slow
     var moreAnchor by remember { mutableStateOf<Rect?>(null) }
@@ -241,6 +266,7 @@ internal fun ReaderImageRecovery(
             if (index != null && expanded && alternatives.isNotEmpty() && onRepairPage != null)
                 MotionTextButton(onClick = onRepairPage) {
                     Icon(Icons.Outlined.Check, null, Modifier.size(15.dp), tint = foreground)
+                    Spacer(Modifier.width(5.dp))
                     Text("补此页", fontSize = 12.sp, color = foreground)
                 }
             MotionTextButton(onClick = onControls) {
@@ -267,28 +293,28 @@ internal fun ReaderImageRecovery(
                             val target = standby.targetPageIndex
                             Spacer(Modifier.width(3.dp))
                             Icon(Icons.Outlined.Check, "备用已预热" +
-                                (target?.let { "，约第 ${it + 1} 页" } ?: "") + "；切换整章版本",
+                                (target?.let { "，约第 ${it + 1} 页" } ?: "") + "；确认相同画面后补当前页",
                                 Modifier.size(12.dp), tint = foreground.copy(alpha = .65f))
                         }
                     }
                 }
-                if (hasMore) MotionTextButton(onClick = { onMore(moreAnchor) },
+                if (hasMore || index != null) MotionTextButton(onClick = { onMore(moreAnchor) },
                     modifier = Modifier.onGloballyPositioned { coordinates ->
                         val point = coordinates.localToScreen(Offset.Zero)
                         if (point.isSpecified) moreAnchor = Rect(point,
                             Size(coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
                     }) {
                     Icon(Icons.Outlined.MoreHoriz, null, Modifier.size(17.dp), tint = foreground)
-                    Text("更多源", fontSize = 11.sp, color = foreground)
+                    Text(if (index == null) "更多源" else "整章来源", fontSize = 11.sp, color = foreground)
                 }
             }
-            Text("换源按相近进度续读，分图可能不同", fontSize = 10.sp,
+            Text(if (index == null) "换源按相近进度续读，分图可能不同" else "点来源对齐单页 · 附近位置仅为估算", fontSize = 10.sp,
                 color = foreground.copy(alpha = .55f), maxLines = 2)
         }
     }
 }
 
 private fun readerTransferBytes(bytes: Long): String = if (bytes >= 1_048_576L) {
-    val tenths = bytes * 10L / 1_048_576L
+    val tenths = bytes / 1_048_576L * 10L + bytes % 1_048_576L * 10L / 1_048_576L
     "${tenths / 10}.${tenths % 10} MB"
 } else "${(bytes / 1024L).coerceAtLeast(1L)} KB"

@@ -8,6 +8,8 @@ actual fun createJmBodySource(context: PlatformContext): BodySource? = null
 
 actual suspend fun materializeJmPage(
     context: PlatformContext, mangaId: String, chapterId: String, page: Page,
+    onBytes: ((Long) -> Unit)?,
+    retry: Boolean,
 ): Page? = null
 
 actual suspend fun decryptedJmPageBytes(

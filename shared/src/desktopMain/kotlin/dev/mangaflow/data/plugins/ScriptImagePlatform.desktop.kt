@@ -5,7 +5,7 @@ import io.github.jukomu.jmcomic.core.crypto.JmImageTool
 import java.io.ByteArrayInputStream
 import javax.imageio.ImageIO
 
-internal actual fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, filename: String, url: String, index: Int): ByteArray {
+internal actual fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, filename: String, url: String, index: Int, maxPixels: Long, maxEncodedBytes: Long): ByteArray {
     ImageIO.createImageInputStream(ByteArrayInputStream(bytes)).use { input ->
         requireNotNull(input) { "图片格式暂不支持。" }
         val readers = ImageIO.getImageReaders(input)
@@ -14,7 +14,7 @@ internal actual fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, fil
         try {
             reader.input = input
             val width = reader.getWidth(0); val height = reader.getHeight(0)
-            require(width > 0 && height > 0 && width.toLong() * height <= 16_777_216L) { "图片解码尺寸超过安全内存范围。" }
+            require(width > 0 && height > 0 && width.toLong() * height <= maxPixels) { "图片解码尺寸超过配置的像素预算。" }
         } finally { reader.dispose() }
     }
     return JmImageTool.decryptImage(bytes, JmImage(chapterId, "220980", filename,

@@ -16,6 +16,7 @@ import okio.SYSTEM
 
 /** Coil 3.2 has a read-only maximum. Enforce a live maximum around its existing LRU. */
 internal class ExperienceMemoryCache(private val cache: MemoryCache, private val automaticTotal: Long) : MemoryCache {
+    internal val automaticBasisBytes: Long get() = automaticTotal
     private val lock = StorageLock()
     private var limit = (automaticTotal * .18).toLong().coerceAtLeast(0L)
     private var revision = -1L

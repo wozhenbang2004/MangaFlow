@@ -18,6 +18,7 @@ import dev.mangaflow.platform.storage.StorageFile as File
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.AtomicLong
 import dev.mangaflow.experience.contentCachePreferences
+import dev.mangaflow.experience.ExperiencePolicyStore
 
 data class BrowseSnapshot(
     val key: String,
@@ -40,11 +41,53 @@ class BrowseCache(context: Context) {
     private val memoryLock = StorageLock()
     private val diskLock = Mutex()
     private val epoch = AtomicLong()
+    private val memoryRevisions = mutableMapOf<String, Long>()
+    private var nextMemoryRevision = 0L
+    private val ownedFiles = AuxiliaryCacheFiles(directory) { CACHE_FILE.matches(it) }
+    private val automaticCleanup get() = ExperiencePolicyStore.get(application).state.value.runtime.automaticCleanup
+
+    internal val cacheOwner: AuxiliaryDiskCacheOwner = object : AuxiliaryDiskCacheOwner {
+        override val ownerId = "browse"
+        override suspend fun snapshot(): List<AuxiliaryCacheEntry> = withContext(Dispatchers.IO) {
+            diskLock.withLock {
+                val versions = synchronized(memoryLock) {
+                    memory.keys.associate { fileFor(it).name to (memoryRevisions[it] ?: 0L) }
+                }
+                ownedFiles.snapshot { versions[it] ?: 0L }
+            }
+        }
+        override suspend fun remove(expected: AuxiliaryCacheEntry): Long? = withContext(Dispatchers.IO) {
+            var changed = false
+            try {
+                diskLock.withLock {
+                    val version = synchronized(memoryLock) { memoryRevisionForFile(expected.key) }
+                    if (ownedFiles.entry(expected.key, version, verifyBytes = true) != expected) return@withLock null
+                    val accepted = synchronized(memoryLock) {
+                        if (memoryRevisionForFile(expected.key) != version) false else {
+                            // Do not cancel unrelated visible lists: generation also guards their UI.
+                            // A queued writer must still own this exact memory snapshot below.
+                            memory.keys.firstOrNull { fileFor(it).name == expected.key }?.let { key ->
+                                memory.remove(key)
+                                memoryRevisions.remove(key)
+                            }
+                            true
+                        }
+                    }
+                    if (!accepted) null else {
+                        changed = true
+                        ownedFiles.removeReviewed(expected)
+                    }
+                }
+            } finally {
+                if (changed) StorageCacheStore.get(application).cacheWorkFinished()
+            }
+        }
+    }
 
     val generation: Long get() = epoch.get()
 
     fun cached(key: String): BrowseSnapshot? = synchronized(memoryLock) {
-        if (!policy.enabled) { memory.clear(); return@synchronized null }
+        if (!policy.enabled) { memory.clear(); memoryRevisions.clear(); return@synchronized null }
         memory.remove(key)?.takeIf { usableTime(it.updatedAt) }?.also { memory[key] = it }
     }
 
@@ -57,6 +100,7 @@ class BrowseCache(context: Context) {
                 val file = fileFor(key)
                 val snapshot = runCatching {
                     if (!file.isFile || file.length() !in 1..MAX_FILE_BYTES) return@runCatching null
+                    if (File(file.path + ".bak").isFile) ownedFiles.changed(file.name)
                     val json = JSONObject(AtomicFile(file).openRead().bufferedReader().use { it.readText() })
                     if (json.optInt("version") != VERSION || json.getString("key") != key) return@runCatching null
                     val updatedAt = json.getLong("updatedAt")
@@ -119,7 +163,7 @@ class BrowseCache(context: Context) {
                         matches, nextPages, choices, searchSources).takeIf(::withinBounds)
                 }.getOrNull()
                 if (snapshot == null) {
-                    AtomicFile(file).delete()
+                    if (automaticCleanup) { AtomicFile(file).delete(); ownedFiles.changed(file.name) }
                     null
                 } else {
                     remember(snapshot, generation)
@@ -135,11 +179,13 @@ class BrowseCache(context: Context) {
         if (!withinBounds(snapshot)) return
         synchronized(memoryLock) {
             if (generation != epoch.get()) return
+            if (memory[snapshot.key] !== snapshot) memoryRevisions[snapshot.key] = ++nextMemoryRevision
             memory.remove(snapshot.key)
             memory[snapshot.key] = snapshot
             while (memory.size > policy.snapshotMemoryEntries) {
                 memory.remove(memory.keys.first())
             }
+            memoryRevisions.keys.retainAll(memory.keys)
         }
     }
 
@@ -148,7 +194,7 @@ class BrowseCache(context: Context) {
         // Keep the last complete cached page range rather than truncating and skipping manga.
         if (!withinBounds(snapshot) || generation != epoch.get()) return@withContext
         // Superseded requests should not encode a large range merely to be rejected after IO.
-        if (synchronized(memoryLock) { memory[snapshot.key]?.let { it !== snapshot } == true }) return@withContext
+        if (synchronized(memoryLock) { memory[snapshot.key] !== snapshot }) return@withContext
         val encoded = JSONObject().apply {
             put("version", VERSION)
             put("key", snapshot.key)
@@ -177,10 +223,11 @@ class BrowseCache(context: Context) {
         diskLock.withLock {
             if (generation != epoch.get() || !policy.storeOnDisk) return@withLock
             // A later page or refresh can finish while this write is waiting for IO.
-            if (synchronized(memoryLock) { memory[snapshot.key]?.let { it !== snapshot } == true }) return@withLock
+            if (synchronized(memoryLock) { memory[snapshot.key] !== snapshot }) return@withLock
             runCatching {
                 if (!directory.isDirectory && !directory.mkdirs()) return@runCatching
                 val atomic = AtomicFile(fileFor(snapshot.key))
+                ownedFiles.changed(atomic.baseFile.name)
                 val output = atomic.startWrite()
                 try {
                     output.write(encoded)
@@ -189,7 +236,7 @@ class BrowseCache(context: Context) {
                     atomic.failWrite(output)
                     throw failure
                 }
-                trimDisk()
+                try { trimDisk() } finally { StorageCacheStore.get(application).cacheWorkFinished() }
             }
             // A full/unavailable cache disk must not turn a successful source response into an error.
             Unit
@@ -201,25 +248,36 @@ class BrowseCache(context: Context) {
     }
 
     suspend fun clear() {
-        epoch.incrementAndGet()
-        synchronized(memoryLock) { memory.clear() }
         withContext(Dispatchers.IO) {
-            diskLock.withLock {
-                val failures = directory.listFiles().orEmpty().count { file -> file.isFile && !file.delete() }
-                if (failures > 0) throw IllegalStateException("部分浏览缓存未能清理，请重试。")
-            }
+            try {
+                diskLock.withLock {
+                    synchronized(memoryLock) { epoch.incrementAndGet(); memory.clear(); memoryRevisions.clear() }
+                    val failures = directory.listFiles().orEmpty().count { file ->
+                        if (!file.isFile) false else {
+                            ownedFiles.keyForFile(file.name)?.let(ownedFiles::changed)
+                            !file.delete()
+                        }
+                    }
+                    if (failures > 0) throw IllegalStateException("部分浏览缓存未能清理，请重试。")
+                }
+            } finally { StorageCacheStore.get(application).cacheWorkFinished() }
         }
     }
 
     private fun trimDisk() {
-        val files = directory.listFiles().orEmpty().filter(File::isFile).sortedByDescending(File::lastModified)
+        if (!automaticCleanup) return
+        val files = ownedFiles.snapshot().sortedByDescending { it.modifiedAt }
         var bytes = 0L
-        files.forEachIndexed { index, file ->
-            bytes += file.length()
-            if (index >= policy.snapshotMemoryEntries || bytes > policy.snapshotDiskMiB * 1_048_576L ||
-                wallTimeMillis() - file.lastModified() > policy.retentionMillis) file.delete()
+        files.forEach { file ->
+            bytes += file.bytes
+            if (bytes > policy.snapshotDiskMiB * 1_048_576L ||
+                wallTimeMillis() - file.modifiedAt > policy.retentionMillis) ownedFiles.removeReviewed(file)
         }
     }
+
+    /** Caller holds memoryLock; file identities are private digest names, never public manga IDs. */
+    private fun memoryRevisionForFile(key: String): Long = memory.keys.firstOrNull { fileFor(it).name == key }
+        ?.let { memoryRevisions[it] ?: 0L } ?: 0L
 
     private fun fileFor(key: String): File {
         val digest = sha256(key.encodeToByteArray())
@@ -251,6 +309,7 @@ class BrowseCache(context: Context) {
         const val MAX_SOURCE_NAME_LENGTH = 120
         const val MAX_SOURCE_ERROR_LENGTH = 300
         val SOURCE_ID_PATTERN = Regex("[a-z][a-z0-9_-]{0,39}")
+        val CACHE_FILE = Regex("[a-f0-9]{64}\\.json")
         const val MAX_PAGE = 100_000
         const val MAX_FILE_BYTES = 1024L * 1024
         const val CLOCK_SKEW_MS = 5L * 60_000

@@ -258,6 +258,7 @@ internal suspend fun materializeScriptPage(
     prefetched: Boolean = false,
     promoted: () -> Boolean = { false },
     work: PrefetchWork? = null,
+    retry: Boolean = false,
 ): Page {
     if (page.url.startsWith("file://")) return page.copy(headers = emptyMap())
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
@@ -289,6 +290,8 @@ internal suspend fun materializeScriptPage(
         page.url + "|" + page.transform + "|" + encodedHeaders)
     val target = StorageFile(StorageFile(cacheDirectory(context), "script-decoded"), "$fingerprint.img")
     val policy = ExperiencePolicyStore.get(context)
+    val runtime = policy.state.value.runtime
+    val maxImageBytes = runtime.maxImageBytes
     val releaseCache = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
         dev.mangaflow.storage.CacheBackend.SCRIPT, target, mangaId, chapterId, ref.sourceId, page.index, !prefetched)
     val stage = if (page.transform == "jm") "decode" else "image"
@@ -298,7 +301,7 @@ internal suspend fun materializeScriptPage(
     return try { decodeGates[(fingerprint.hashCode() and Int.MAX_VALUE) % decodeGates.size].withLock {
         withContext(Dispatchers.IO) {
             if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
-            if (target.isFile && target.length() in 128L..MAX_IMAGE_BYTES && storageImageBounds(target) != null)
+            if (!retry && target.isFile && target.length() in 128L..maxImageBytes && storageImageBounds(target) != null)
                 return@withContext page.copy(url = target.toURI(), headers = emptyMap(), transform = "", sourceSessionEpoch = epoch)
             val transport = currentCoroutineContext()[ChapterDownloadTransport]
             val selectedRoute = route ?: transport?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(ref.sourceId)
@@ -365,17 +368,18 @@ internal suspend fun materializeScriptPage(
                     else -> policy.withImageAdmission(reader = true, source = ref.sourceId, onWaiting = waiting) { fetch() }
                 } }
                 val bytes = if (work != null) work.during(PrefetchStage.DOWNLOADING) { admittedFetch() } else admittedFetch()
-                require(bytes.size.toLong() in 128L..MAX_IMAGE_BYTES) { "来源原图为空或超过大小限制。" }
+                require(bytes.size.toLong() in 128L..maxImageBytes) { "来源原图为空或超过大小限制。" }
                 currentCoroutineContext().ensureActive()
                 if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
                 val outputBytes = if (page.transform == "jm") {
                     val decode: suspend () -> ByteArray = { policy.withDecodeAdmission(optional = prefetched, promoted = promoted,
                         onWaiting = { work?.admission(PrefetchStage.CHECKING, it) }) {
-                        withContext(Dispatchers.Default) { decodeScriptJmImage(bytes, ref.chapterId, filename, page.url, page.index) }
+                        withContext(Dispatchers.Default) { decodeScriptJmImage(bytes, ref.chapterId, filename, page.url, page.index,
+                            runtime.scriptDecodeMiPixels.toLong() * 1_048_576L, maxImageBytes) }
                     } }
                     if (work != null) work.during(PrefetchStage.CHECKING) { decode() } else decode()
                 } else bytes
-                require(outputBytes.size.toLong() in 128L..MAX_IMAGE_BYTES) { "来源图片处理结果无效。" }
+                require(outputBytes.size.toLong() in 128L..maxImageBytes) { "来源图片处理结果无效。" }
                 currentCoroutineContext().ensureActive()
                 if (!current()) throw ScriptImageRefreshRequired("图片来源或账号已变化，请刷新本章。")
                 val atomic = StorageAtomicFile(target)
@@ -507,6 +511,5 @@ private fun headerBinding(secret: String, url: String): String = hmacSha256(secr
 
 private fun digest(value: String): String = sha256(value.encodeToByteArray())
     .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
-private const val MAX_IMAGE_BYTES = 96L * 1024 * 1024
 
-internal expect fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, filename: String, url: String, index: Int): ByteArray
+internal expect fun decodeScriptJmImage(bytes: ByteArray, chapterId: String, filename: String, url: String, index: Int, maxPixels: Long, maxEncodedBytes: Long): ByteArray

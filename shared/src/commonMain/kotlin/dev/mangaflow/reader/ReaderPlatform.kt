@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
+import dev.mangaflow.experience.ExperienceRuntimePreferences
 import me.saket.telephoto.zoomable.ZoomableState
 import me.saket.telephoto.zoomable.rememberZoomableState
 
@@ -63,8 +64,10 @@ internal expect fun VerticalReaderTiles(
 )
 
 /** Native decoding reports additional budget sampling explicitly; original files are never rewritten. */
-internal expect suspend fun readNativeReaderSize(path: String): IntSize?
-internal expect suspend fun decodeNativeReaderRegion(path: String, bounds: IntRect, sampleSize: Int): ReaderRegion
+internal expect suspend fun readNativeReaderSize(path: String, runtime: ExperienceRuntimePreferences): IntSize?
+internal expect suspend fun decodeNativeReaderRegion(
+    path: String, bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences,
+): ReaderRegion
 internal expect fun readerFilePath(uri: String): String?
 
 @Composable

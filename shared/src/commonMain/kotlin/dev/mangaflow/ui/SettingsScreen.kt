@@ -584,10 +584,11 @@ fun SettingsScreen(
 
     NetworkDownloadDialog(showNetworkDownloads, sourceBackdrop, onDismiss = { showNetworkDownloads = false },
         repository = sourceRepository, registry = sourceRegistry)
-    ExperienceSettingsDialog(showExperience, sourceBackdrop, onDismiss = { showExperience = false })
+    ExperienceSettingsDialog(showExperience, sourceBackdrop, onDismiss = { showExperience = false },
+        onOpenStorage = { showStorage = true }, onOpenNetwork = { showNetworkDownloads = true },
+        onOpenSourceChecks = if (sourceRegistry != null) ({ showBodySources = true }) else null)
 
     StorageManagementDialog(showStorage, storageBackdrop, libraryStore, repository = sourceRepository, active = screenActive,
-        clearBrowse = clearBrowseCache, clearMetadata = clearMetadataCache,
         onDismiss = { showStorage = false },
         onDownloads = { storageDestination = "downloads"; showStorage = false },
         onModels = { storageDestination = "models"; showStorage = false },

@@ -14,6 +14,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import dev.mangaflow.data.Page
+import dev.mangaflow.experience.ExperienceRuntimePreferences
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -37,32 +38,8 @@ internal actual fun VerticalReaderTiles(page: Page, diskCacheKey: String?, image
 internal actual fun readerFilePath(uri: String): String? =
     if (uri.startsWith("file:")) runCatching { File(URI(uri)).absolutePath }.getOrNull() else null
 
-internal actual suspend fun readNativeReaderSize(path: String): IntSize? {
-    try {
-        ImageIO.createImageInputStream(File(path))?.use { input ->
-            val readers = ImageIO.getImageReaders(input)
-            if (readers.hasNext()) {
-                val reader = readers.next()
-                try {
-                    reader.setInput(input, true, true)
-                    if (reader.javaClass.name == "com.luciad.imageio.webp.WebPReader") {
-                        check(File(path).length() <= 67_108_864L) { "WebP 原图压缩文件过大" }
-                    }
-                    val width = reader.getWidth(0)
-                    val height = reader.getHeight(0)
-                    return if (jpegOrientation(path) in 5..8) IntSize(height, width) else IntSize(width, height)
-                } finally { reader.dispose() }
-            }
-        }
-    } catch (_: LinkageError) { /* The native codec is unavailable on this CPU; use the bounded Skia path. */ }
-    // Skia handles native formats absent from the installed ImageIO readers; size is header-only.
-    val file = File(path)
-    if (!file.isFile || file.length() !in 1..67_108_864L) return null
-    return runCatching { org.jetbrains.skia.Image.makeFromEncoded(file.readBytes()).use { IntSize(it.width, it.height) } }.getOrNull()
-}
-
-internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRect, sampleSize: Int): ReaderRegion {
-    val file = File(path)
+internal actual suspend fun readNativeReaderSize(path: String, runtime: ExperienceRuntimePreferences): IntSize? {
+    val file = checkedReaderFile(path, runtime)
     try {
         ImageIO.createImageInputStream(file)?.use { input ->
             val readers = ImageIO.getImageReaders(input)
@@ -71,7 +48,36 @@ internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRe
                 try {
                     reader.setInput(input, true, true)
                     if (reader.javaClass.name == "com.luciad.imageio.webp.WebPReader") {
-                        check(file.length() <= 67_108_864L) { "WebP 原图压缩文件过大" }
+                        check(file.length() <= Int.MAX_VALUE.toLong()) { "WebP原图超过平台单次字节数组范围，当前显示预览" }
+                    }
+                    val width = reader.getWidth(0)
+                    val height = reader.getHeight(0)
+                    if (width <= 0 || height <= 0) return null
+                    return if (jpegOrientation(path) in 5..8) IntSize(height, width) else IntSize(width, height)
+                } finally { reader.dispose() }
+            }
+        }
+    } catch (_: LinkageError) { /* The native codec is unavailable on this CPU; use the bounded Skia path. */ }
+    // Skia handles native formats absent from the installed ImageIO readers; size is header-only.
+    return runCatching {
+        org.jetbrains.skia.Image.makeFromEncoded(file.readReaderBytes(runtime.maxImageBytes))
+            .use { IntSize(it.width, it.height) }
+    }.getOrNull()
+}
+
+internal actual suspend fun decodeNativeReaderRegion(
+    path: String, bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences,
+): ReaderRegion {
+    val file = checkedReaderFile(path, runtime)
+    try {
+        ImageIO.createImageInputStream(file)?.use { input ->
+            val readers = ImageIO.getImageReaders(input)
+            if (readers.hasNext()) {
+                val reader = readers.next()
+                try {
+                    reader.setInput(input, true, true)
+                    if (reader.javaClass.name == "com.luciad.imageio.webp.WebPReader") {
+                        check(file.length() <= Int.MAX_VALUE.toLong()) { "WebP原图超过平台单次字节数组范围，当前显示预览" }
                     }
                     val width = reader.getWidth(0)
                     val height = reader.getHeight(0)
@@ -79,7 +85,6 @@ internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRe
                     val source = inverseOrientationBounds(bounds, width, height, orientation)
                     val params = reader.defaultReadParam.apply {
                         if (this is WebPReadParam) {
-                            check(file.length() <= 67_108_864L) { "WebP 原图压缩文件过大" }
                             // This provider ignores ImageReadParam.sourceRegion; use libwebp's real
                             // crop/scaling options so long WebP strips never allocate the full image.
                             isUseCropping = true
@@ -96,15 +101,19 @@ internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRe
                         }
                     }
                     val decoded = reader.read(0, params) ?: error("原图区域暂时无法读取")
-                    return ReaderRegion(orient(decoded, orientation).composeBitmap())
+                    return ReaderRegion(orient(decoded, orientation).composeBitmap(runtime.maxImageBytes))
                 } finally { reader.dispose() }
             }
         }
     } catch (_: LinkageError) { /* A missing optional ImageIO native binary cannot crash the reader. */ }
     // Explicitly bound the non-region fallback; never decode an unbounded long image in memory.
-    check(file.length() in 1..67_108_864L) { "此格式的原图过大，暂时无法读取细节" }
-    org.jetbrains.skia.Image.makeFromEncoded(file.readBytes()).use { source ->
-        check(source.width.toLong() * source.height <= 16_777_216L) { "此格式尚无区域解码器，无法安全读取大图细节" }
+    val fallbackPixels = (runtime.fallbackDecodeMiPixels ?: 16).toLong() * 1_048_576L
+    org.jetbrains.skia.Image.makeFromEncoded(file.readReaderBytes(runtime.maxImageBytes)).use { source ->
+        check(source.width > 0 && source.height > 0 && source.width.toLong() * source.height <= fallbackPixels) {
+            "此格式尚无区域解码器，原图超过整图解码配置，当前显示预览"
+        }
+        require(bounds.left >= 0 && bounds.top >= 0 && bounds.right <= source.width &&
+            bounds.bottom <= source.height && bounds.width > 0 && bounds.height > 0) { "原图区域无效" }
         org.jetbrains.skia.Bitmap().use { bitmap ->
             check(bitmap.allocN32Pixels(bounds.width, bounds.height)) { "原图区域无法分配" }
             check(source.readPixels(bitmap, bounds.left, bounds.top)) { "原图区域暂时无法读取" }
@@ -120,15 +129,52 @@ internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRe
     }
 }
 
-private fun BufferedImage.composeBitmap(): ImageBitmap {
+private fun BufferedImage.composeBitmap(maxEncodedBytes: Long): ImageBitmap {
     // The official Compose converter copies ordinary sRGB pixels without a PNG encode/decode.
     // Keep the existing codec path for higher bit depth and other color spaces.
     if (colorModel.colorSpace.isCS_sRGB && colorModel.componentSize.all { it <= 8 }) {
         return toComposeImageBitmap()
     }
-    val output = ByteArrayOutputStream()
+    val output = ReaderEncodedOutput(maxEncodedBytes)
     check(ImageIO.write(this, "png", output)) { "原图区域无法转换" }
     return org.jetbrains.skia.Image.makeFromEncoded(output.toByteArray()).toComposeImageBitmap()
+}
+
+private fun checkedReaderFile(path: String, runtime: ExperienceRuntimePreferences): File = File(path).also { file ->
+    check(file.isFile && file.length() > 0L) { "原图文件暂不可用，当前显示预览" }
+    check(file.length() <= runtime.maxImageBytes) { "原图压缩数据超过单图配置，当前显示预览" }
+}
+
+/** Read the checked immutable snapshot without an unbounded growth allocation. */
+private fun File.readReaderBytes(maximum: Long): ByteArray {
+    val length = length()
+    check(length in 1L..maximum) { "原图压缩数据超过单图配置，当前显示预览" }
+    check(length <= Int.MAX_VALUE.toLong()) { "原图超过平台单次字节数组范围，当前显示预览" }
+    val bytes = ByteArray(length.toInt())
+    inputStream().use { input ->
+        var offset = 0
+        while (offset < bytes.size) {
+            val read = input.read(bytes, offset, bytes.size - offset)
+            check(read > 0) { "原图文件已变化，请重新打开此页" }
+            offset += read
+        }
+        check(input.read() == -1) { "原图文件已变化，请重新打开此页" }
+    }
+    return bytes
+}
+
+/** The color-space fallback also obeys the encoded-data limit while it writes. */
+private class ReaderEncodedOutput(private val maximum: Long) : ByteArrayOutputStream() {
+    private fun allow(bytes: Int) {
+        val next = size().toLong() + bytes.toLong()
+        check(bytes >= 0 && next <= maximum && next <= Int.MAX_VALUE.toLong()) {
+            "原图转换数据超过单图配置或平台数组范围，当前显示预览"
+        }
+    }
+    @Synchronized override fun write(value: Int) { allow(1); super.write(value) }
+    @Synchronized override fun write(bytes: ByteArray, offset: Int, length: Int) {
+        allow(length); super.write(bytes, offset, length)
+    }
 }
 
 private fun inverseOrientationBounds(rect: IntRect, width: Int, height: Int, orientation: Int): IntRect = when (orientation) {

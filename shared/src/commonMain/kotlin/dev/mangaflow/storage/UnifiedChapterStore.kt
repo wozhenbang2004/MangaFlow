@@ -164,7 +164,8 @@ class UnifiedChapterStore(context: Context) {
     }
 
     fun choose(workId: String, logicalId: String, variantStorageId: String,
-        expectedSettings: UnifiedWorkSettings? = null) = mutate(workId) { old ->
+        expectedSettings: UnifiedWorkSettings? = null, isCurrent: () -> Boolean = { true }) = mutate(workId) { old ->
+        check(isCurrent()) { "来源选择已失效，请重新选择。" }
         require(logicalId.isNotBlank() && variantStorageId.isNotBlank())
         if (expectedSettings != null) require(old.links == expectedSettings.links &&
             old.manualLinks == expectedSettings.manualLinks && old.separated == expectedSettings.separated &&

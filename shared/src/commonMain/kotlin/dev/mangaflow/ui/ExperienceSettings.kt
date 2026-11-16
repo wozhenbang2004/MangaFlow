@@ -54,38 +54,179 @@ import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-/** A compact settings entry opens one retained workspace, rather than expanding the page. */
+/** One retained workspace owns its draft, numeric editor and exit-bound storage handoff. */
 @Composable
-internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, onDismiss: () -> Unit) {
+internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, onDismiss: () -> Unit,
+    onOpenStorage: (() -> Unit)? = null, onOpenNetwork: (() -> Unit)? = null,
+    onOpenSourceChecks: (() -> Unit)? = null) {
+    val context = LocalMangaContext.current
+    val store = remember(context) { ExperiencePolicyStore.get(context) }
+    val savedBudget by store.state.collectAsStateWithLifecycle()
+    val savedCustom by store.overrides.collectAsStateWithLifecycle()
+    val liveUsage by store.usage.collectAsStateWithLifecycle()
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
-    val active = visible && lifecycle.isAtLeast(Lifecycle.State.RESUMED)
+    var applying by remember { mutableStateOf(false) }
+    val applyScope = rememberCoroutineScope()
+    val active = visible && lifecycle.isAtLeast(Lifecycle.State.RESUMED) && !applying
+    var baseline by remember(store) { mutableStateOf(store.overrides.value) }
+    var baselineMode by remember(store) { mutableStateOf(store.state.value.mode) }
+    var draft by remember(store) { mutableStateOf(store.overrides.value) }
+    var draftMode by remember(store) { mutableStateOf(store.state.value.mode) }
     var expanded by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingExit by remember { mutableStateOf<String?>(null) }
+    var handoff by remember { mutableStateOf<String?>(null) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    val editor = remember { ExperienceEditor() }
+    val dirty = draft != baseline || draftMode != baselineMode || editor.pending
+    val conflict = savedCustom != baseline || savedBudget.mode != baselineMode
+    val preview = remember(draft, draftMode, savedBudget) { store.previewBudget(draft, draftMode) }
     val overviewScroll = rememberScrollState()
     val detailScroll = rememberScrollState()
+    val focus = LocalFocusManager.current
     val scroll = if (expanded == null) overviewScroll else detailScroll
-    LaunchedEffect(expanded) { if (expanded != null) detailScroll.scrollTo(0) }
     val colors = MaterialTheme.colorScheme
+    fun reload() {
+        baseline = store.overrides.value
+        baselineMode = store.state.value.mode
+        draft = baseline
+        draftMode = baselineMode
+        notice = null
+        pendingExit = null
+        editor.clear()
+        focus.clearFocus(force = true)
+    }
+    fun settleEditor(): Boolean {
+        if (editor.pending && editor.accept?.invoke() != true) {
+            notice = "请修正当前数值，或点 × 取消该项编辑"
+            return false
+        }
+        editor.clear()
+        return true
+    }
+    fun finishExit(destination: String?) {
+        handoff = destination?.takeIf { it != "close" }
+        pendingExit = null
+        focus.clearFocus(force = true)
+        onDismiss()
+    }
+    fun requestExit(destination: String = "close") {
+        if (!active || !settleEditor()) return
+        focus.clearFocus(force = true)
+        if (draft != baseline || draftMode != baselineMode) pendingExit = destination else finishExit(destination)
+    }
+    fun apply() {
+        if (!active || !dirty || !settleEditor()) return
+        // Recheck the actual preference owner immediately before saving this draft.
+        if (store.overrides.value != baseline || store.state.value.mode != baselineMode) {
+            notice = "设置已在其他入口改变，请重新载入"
+            return
+        }
+        val candidateMode = draftMode
+        val candidate = draft
+        val expectedMode = baselineMode
+        val expected = baseline
+        applying = true
+        applyScope.launch {
+            try {
+                val saved = store.applyConfiguration(candidateMode, candidate,
+                    expectedMode = expectedMode, expectedOverrides = expected)
+                if (!saved) { notice = "设置已在其他入口改变，请重新载入"; return@launch }
+                baseline = store.overrides.value
+                baselineMode = store.state.value.mode
+                draft = baseline
+                draftMode = baselineMode
+                notice = null
+                focus.clearFocus(force = true)
+                pendingExit?.let(::finishExit)
+            } catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { notice = "设置未保存，请重试" }
+            finally { applying = false }
+        }
+    }
+    LaunchedEffect(visible) {
+        if (visible) { reload(); expanded = null; overviewScroll.scrollTo(0) }
+    }
+    LaunchedEffect(savedCustom, savedBudget.mode) {
+        if (visible && !dirty) reload()
+    }
+    LaunchedEffect(expanded) { if (expanded != null) detailScroll.scrollTo(0) }
     MotionDialog(visible, onDismissRequest = {
-        if (expanded != null) expanded = null else onDismiss()
-    }, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp) {
+        if (!applying) {
+            if (pendingExit != null) pendingExit = null
+            else if (expanded != null) { if (settleEditor()) expanded = null }
+            else requestExit()
+        }
+    }, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 560.dp,
+        onClosed = {
+            val destination = handoff
+            handoff = null
+            when (destination) {
+                "storage" -> onOpenStorage?.invoke()
+                "network" -> onOpenNetwork?.invoke()
+                "source-checks" -> onOpenSourceChecks?.invoke()
+            }
+        }) {
         val maximumHeight = minOf(LocalMangaWindow.current.height * .9f, 640.dp)
         val panel: @Composable () -> Unit = {
-            // One stable panel size: navigation changes its content, never its outer window.
-            Column(Modifier.fillMaxWidth().height(minOf(maximumHeight, 480.dp).coerceAtLeast(1.dp))
+            Column(Modifier.fillMaxWidth().height(minOf(maximumHeight, 560.dp).coerceAtLeast(1.dp))
                 .padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("体验策略", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
+                    if (expanded != null) MotionIconButton(onClick = { if (settleEditor()) expanded = null }, enabled = active,
+                        modifier = Modifier.size(44.dp), tooltip = "返回资源总览") {
+                        Icon(Icons.Outlined.ArrowBack, "返回资源总览", Modifier.size(20.dp))
+                    }
+                    Text("体验与资源", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭体验策略") {
-                        Icon(Icons.Outlined.Close, "关闭体验策略", Modifier.size(20.dp))
+                    if (onOpenStorage != null) MotionIconButton(onClick = { requestExit("storage") }, enabled = active,
+                        modifier = Modifier.size(44.dp), tooltip = "管理与清理缓存") {
+                        Icon(Icons.Outlined.CleaningServices, "管理与清理缓存", Modifier.size(20.dp))
+                    }
+                    MotionIconButton(onClick = { requestExit() }, enabled = active,
+                        modifier = Modifier.size(44.dp), tooltip = "关闭体验与资源") {
+                        Icon(Icons.Outlined.Close, "关闭体验与资源", Modifier.size(20.dp))
                     }
                 }
-                Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(scroll)
+                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll)
                     .padding(top = 6.dp, bottom = 8.dp)) {
-                    ExperienceSettings(active, expanded) { expanded = it }
+                    ExperienceSettings(active && pendingExit == null, expanded, { expanded = it },
+                        store, preview, savedBudget, editor, draft, { draft = it; notice = null },
+                        draftMode, { draftMode = it; notice = null }, dirty,
+                        onOpenNetwork = onOpenNetwork?.let { { requestExit("network") } },
+                        onOpenSourceChecks = onOpenSourceChecks?.let { { requestExit("source-checks") } })
+                }
+                if (dirty && expanded != null) ExperienceDraftImpact(liveUsage, preview)
+                if (notice != null || conflict) Text(notice ?: "设置已在其他入口改变，请重新载入",
+                    Modifier.fillMaxWidth().padding(vertical = 4.dp), style = MaterialTheme.typography.labelSmall,
+                    color = colors.error)
+                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(if (dirty) Icons.Outlined.Edit else Icons.Outlined.CheckCircle,
+                        null, Modifier.size(15.dp), tint = if (dirty) colors.primary else colors.onSurfaceVariant)
+                    Text(when { applying -> "正在应用"; pendingExit != null -> "尚未应用"; editor.pending -> "数值待确认"; dirty -> "草稿预览"; else -> "已应用" },
+                        Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
+                        color = if (dirty) colors.primary else colors.onSurfaceVariant)
+                    if (pendingExit != null) MotionIconButton(onClick = { pendingExit = null }, enabled = active,
+                        modifier = Modifier.size(44.dp), tooltip = "继续编辑") {
+                        Icon(Icons.Outlined.Edit, "继续编辑", Modifier.size(18.dp))
+                    }
+                    if (dirty || conflict) MotionIconButton(onClick = {
+                        val destination = pendingExit
+                        reload()
+                        if (destination != null) finishExit(destination)
+                    }, enabled = active, modifier = Modifier.size(44.dp),
+                        tooltip = if (pendingExit != null) "放弃草稿并关闭" else if (conflict) "重新载入设置" else "撤销所有未应用修改") {
+                        Icon(Icons.Outlined.Undo, if (pendingExit != null) "放弃草稿并关闭" else "撤销草稿", Modifier.size(18.dp))
+                    }
+                    MotionIconButton(onClick = { apply() }, enabled = active && dirty && !conflict,
+                        modifier = Modifier.size(44.dp), tooltip = if (pendingExit != null) "应用设置后关闭" else "应用全部设置") {
+                        Icon(Icons.Outlined.Check, "应用全部设置", Modifier.size(20.dp),
+                            tint = if (dirty && !conflict) colors.primary else colors.onSurfaceVariant.copy(alpha = .45f))
+                    }
                 }
             }
         }
@@ -101,36 +242,45 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
 /** Existing Ovio selection and retained rows keep one reading-first workspace. */
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedChange: (String?) -> Unit) {
+private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedChange: (String?) -> Unit,
+    store: ExperiencePolicyStore, budget: ExperienceBudget, appliedBudget: ExperienceBudget, editor: ExperienceEditor, custom: ExperienceOverrides,
+    onChange: (ExperienceOverrides) -> Unit, mode: ExperienceMode, onModeChange: (ExperienceMode) -> Unit,
+    draft: Boolean, onOpenNetwork: (() -> Unit)?, onOpenSourceChecks: (() -> Unit)?) {
     val context = LocalMangaContext.current
-    val store = remember(context) { ExperiencePolicyStore.get(context) }
-    val budget by store.state.collectAsStateWithLifecycle()
-    val custom by store.overrides.collectAsStateWithLifecycle()
     val usage by store.usage.collectAsStateWithLifecycle()
-    val editor = remember { ExperienceEditor() }
+    val appliedCustom by store.overrides.collectAsStateWithLifecycle()
+    val automaticMemoryBudget = remember(custom, mode, appliedBudget) {
+        store.previewBudget(custom.copy(memoryMiB = null), mode)
+    }
+    val automaticMemoryBytes = estimateExperienceResources(automaticMemoryBudget, usage).imageMemoryBudgetBytes
+    val uiScope = rememberCoroutineScope()
+    var clearingMemory by remember { mutableStateOf(false) }
+    var cacheNotice by remember { mutableStateOf<String?>(null) }
     val focus = LocalFocusManager.current
     var detail by rememberSaveable { mutableStateOf<String?>(null) }
-    var notice by remember { mutableStateOf<String?>(null) }
     var cacheTab by rememberSaveable { mutableStateOf("images") }
     var cacheKind by rememberSaveable { mutableStateOf(ContentCacheKind.SEARCH) }
+    var deviceTab by rememberSaveable { mutableStateOf("device") }
     val colors = MaterialTheme.colorScheme
+    val cacheSampleSeconds by rememberUpdatedState(appliedBudget.runtime.cacheSampleSeconds)
     fun closeEditor() {
-        editor.field = null
+        editor.clear()
         focus.clearFocus(force = true)
     }
     fun change(value: ExperienceOverrides) {
         if (!active) return
-        try { store.setOverrides(value); notice = null }
-        catch (_: Exception) { notice = "设置未保存，请重试" }
+        onChange(value)
     }
     fun toggle(key: String) {
         if (!active) return
+        if (editor.pending && editor.accept?.invoke() != true) return
         closeEditor()
         detail = null
         onExpandedChange(if (expanded == key) null else key)
     }
     fun toggleDetail(key: String) {
         if (!active) return
+        if (editor.pending && editor.accept?.invoke() != true) return
         closeEditor()
         detail = if (detail == key) null else key
     }
@@ -138,18 +288,18 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
         closeEditor()
         if (!active) return@LaunchedEffect
         store.refreshResources()
-        if (expanded == "cache" || expanded == "resources") {
-            while (true) { store.refreshCacheUsage(); delay(2_000L) }
+        if (expanded == null || expanded == "cache" || expanded == "resources") {
+            while (true) { store.refreshCacheUsage(); delay(cacheSampleSeconds.toLong() * 1_000L) }
         }
     }
     Column(Modifier.fillMaxWidth().motionInputGate(active)) {
         if (expanded == null) {
-            SettingsChoices(ExperienceMode.entries.map { it to experienceModeLabel(it) }, budget.mode) { mode ->
-                if (active) {
-                    closeEditor()
-                    try { store.setMode(mode); notice = null }
-                    catch (_: Exception) { notice = "模式未保存，请重试" }
-                }
+            SettingsChoices(ExperienceMode.entries.map { it to experienceModeLabel(it) }, mode) { selected ->
+                if (active) { closeEditor(); onModeChange(selected) }
+            }
+            ExperienceResourceOverview(usage, budget, draft, active) { group ->
+                if (group == "resources") deviceTab = "forecast"
+                toggle(group)
             }
             if (budget.protections.isNotEmpty()) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 36.dp),
@@ -161,22 +311,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-        } else {
-            MotionTextButton(onClick = { toggle(expanded) }, enabled = active,
-                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
-                modifier = Modifier.heightIn(min = 44.dp)) {
-                Icon(Icons.Outlined.ArrowBack, null, Modifier.size(18.dp), tint = colors.onSurface)
-                Spacer(Modifier.width(6.dp))
-                Text("全部策略", style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
-            }
         }
         Spacer(Modifier.height(4.dp))
-        notice?.let {
-            Text(it, Modifier.fillMaxWidth().padding(bottom = 6.dp),
-                style = MaterialTheme.typography.bodySmall, color = colors.error)
-        }
 
-        if (expanded == null || expanded == "reading") SettingsDisclosure("阅读与预取",
+        if (expanded == null || expanded == "reading") SettingsDisclosure("阅读",
             if (custom.prefetchMode == PrefetchMode.OFF) "已关闭"
             else budget.prefetchAhead.toString() + " 待读 · " + budget.prefetchBehind + " 回看",
             Icons.Outlined.AutoStories, expanded == "reading", { toggle("reading") },
@@ -189,9 +327,9 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
             ExperienceReveal(custom.prefetchMode == PrefetchMode.MANUAL) {
                 ExperienceNumber("待读窗口", custom.ahead, budget.goal.prefetchAhead, 0..40, "页",
-                    editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = budget.prefetchAhead) { change(custom.copy(ahead = it)) }
+                    editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = appliedBudget.prefetchAhead) { change(custom.copy(ahead = it)) }
                 ExperienceNumber("回看窗口", custom.behind, budget.goal.prefetchBehind, 0..8, "页",
-                    editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = budget.prefetchBehind) { change(custom.copy(behind = it)) }
+                    editor, active && expanded == "reading" && custom.prefetchMode == PrefetchMode.MANUAL, effective = appliedBudget.prefetchBehind) { change(custom.copy(behind = it)) }
             }
             ExperienceReveal(custom.prefetchMode != PrefetchMode.OFF) {
                 SettingsToggle("提前准备下一章", custom.crossChapter, Icons.Outlined.SkipNext) { change(custom.copy(crossChapter = it)) }
@@ -203,25 +341,18 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 experienceReadingCustom(custom), onRestore = {
                     closeEditor()
                     change(custom.copy(prefetchMode = PrefetchMode.SMART, ahead = null, behind = null,
-                        prefetchRequests = null, prefetchMiB = null, resolveRequests = null, crossChapter = true,
-                        readerRequests = null, browseWarmup = true))
+                        crossChapter = true, browseWarmup = true, decodedPrefetchPages = null, readerStatusPlacement = ReaderStatusPlacement.BOTTOM,
+                        runtime = resetExperienceRuntime(custom.runtime, ExperienceRuntimeGroup.READING)))
                 }, extra = {
-                    ExperienceReveal(custom.prefetchMode != PrefetchMode.OFF) {
-                        ExperienceNumber("传输并发", custom.prefetchRequests, budget.goal.prefetchRequests, 1..12, "个",
-                            editor, active && expanded == "reading" && detail == "reading-advanced" && custom.prefetchMode != PrefetchMode.OFF,
-                            effective = budget.prefetchRequests) { change(custom.copy(prefetchRequests = it)) }
-                        ExperienceNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 1..512, "MB",
-                            editor, active && expanded == "reading" && detail == "reading-advanced" && custom.prefetchMode != PrefetchMode.OFF,
-                            effective = (budget.prefetchBytes / EXPERIENCE_MIB).toInt()) { change(custom.copy(prefetchMiB = it)) }
-                        ExperienceBudgetRow("邻页 / 跨章", experienceCacheSize(budget.adjacentPrefetchBytes) + " / " +
-                            experienceCacheSize(budget.nextChapterPrefetchBytes))
+                    ExperienceNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
+                        editor, active && expanded == "reading" && detail == "reading-advanced", effective = appliedBudget.decodedPrefetchPages) {
+                        change(custom.copy(decodedPrefetchPages = it))
                     }
-                    ExperienceNumber("解析并发", custom.resolveRequests, budget.goal.resolveRequests, 1..8, "个",
-                        editor, active && expanded == "reading" && detail == "reading-advanced",
-                        effective = budget.resolveRequests) { change(custom.copy(resolveRequests = it)) }
-                    ExperienceNumber("当前页请求", custom.readerRequests, budget.goal.readerRequests, 1..4, "个",
-                        editor, active && expanded == "reading" && detail == "reading-advanced",
-                        effective = budget.readerRequests) { change(custom.copy(readerRequests = it)) }
+                    ExperienceRuntimeSettings(ExperienceRuntimeGroup.READING, custom, budget, appliedBudget, usage, store,
+                        editor, active && expanded == "reading" && detail == "reading-advanced", ::change)
+                    Text("阅读状态栏", style = MaterialTheme.typography.bodyMedium)
+                    SettingsChoices(listOf(ReaderStatusPlacement.TOP to "顶部", ReaderStatusPlacement.BOTTOM to "底部",
+                        ReaderStatusPlacement.HIDDEN to "隐藏"), custom.readerStatusPlacement) { change(custom.copy(readerStatusPlacement = it)) }
                 }) {
                 ExperienceBudgetRow("窗口目标", budget.goal.prefetchAhead.toString() + " 待读 · " + budget.goal.prefetchBehind + " 回看")
                 ExperienceHint("待读和回看跟随实际翻页方向，不固定为屏幕左右。窗口是候选页数，解析、传输、解码各有并发上限；原图存磁盘，临近预览进内存。")
@@ -229,50 +360,65 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        if (expanded == null || expanded == "rendering") SettingsDisclosure("图像质量与渲染", "预解码 " + budget.decodedPrefetchPages + " 页",
-            Icons.Outlined.Image, expanded == "rendering", { toggle("rendering") },
-            compact = true, modified = custom.decodedPrefetchPages != null || custom.decodeRequests != null) {
-            ExperienceNumber("临近页预解码", custom.decodedPrefetchPages, budget.goal.decodedPrefetchPages, 0..8, "页",
-                editor, active && expanded == "rendering", effective = budget.decodedPrefetchPages) {
-                change(custom.copy(decodedPrefetchPages = it))
-            }
-            ExperienceNumber("解码并发", custom.decodeRequests, budget.goal.decodeRequests, 1..4, "个",
-                editor, active && expanded == "rendering", effective = budget.decodeRequests) {
-                change(custom.copy(decodeRequests = it))
-            }
-            ExperienceTools("rendering", "图像质量与渲染", active && expanded == "rendering", detail, ::toggleDetail,
-                custom.decodedPrefetchPages != null || custom.decodeRequests != null, onRestore = {
-                    closeEditor(); change(custom.copy(decodedPrefetchPages = null, decodeRequests = null))
+        if (expanded == null || expanded == "parallel") SettingsDisclosure("并行",
+            usage.activeReaderImages.toString() + " 读 · " + usage.activePrefetch + " 取 · " + usage.activeDecodes + " 解",
+            Icons.Outlined.AccountTree, expanded == "parallel", { toggle("parallel") },
+            compact = true, modified = experienceParallelCustom(custom)) {
+            ExperienceNumber("当前页请求", custom.readerRequests, budget.goal.readerRequests, 1..4, "个",
+                editor, active && expanded == "parallel", effective = appliedBudget.readerRequests) { change(custom.copy(readerRequests = it)) }
+            ExperienceNumber("图址解析", custom.resolveRequests, budget.goal.resolveRequests, 1..8, "个",
+                editor, active && expanded == "parallel", effective = appliedBudget.resolveRequests) { change(custom.copy(resolveRequests = it)) }
+            ExperienceNumber("原图预取", custom.prefetchRequests, budget.goal.prefetchRequests, 1..12, "个",
+                editor, active && expanded == "parallel", effective = appliedBudget.prefetchRequests) { change(custom.copy(prefetchRequests = it)) }
+            ExperienceNumber("图片解码", custom.decodeRequests, budget.goal.decodeRequests, 1..4, "个",
+                editor, active && expanded == "parallel", effective = appliedBudget.decodeRequests) { change(custom.copy(decodeRequests = it)) }
+            ExperienceNumber("下载页面", custom.downloadPages, budget.goal.backgroundPages, 1..maximumBackgroundPageParallelism, "个",
+                editor, active && expanded == "parallel", effective = appliedBudget.backgroundPages) { change(custom.copy(downloadPages = it)) }
+            ExperienceNumber("每源请求", custom.sourcePages, budget.goal.sourceParallelism, 1..8, "个",
+                editor, active && expanded == "parallel", effective = appliedBudget.sourceParallelism) { change(custom.copy(sourcePages = it)) }
+            ExperienceNumber("下载章节", custom.chapters, budget.goal.chapterParallelism, 1..4, "章",
+                editor, active && expanded == "parallel", effective = appliedBudget.chapterParallelism) { change(custom.copy(chapters = it)) }
+            ExperienceTools("parallel", "并行", active && expanded == "parallel", detail, ::toggleDetail,
+                experienceParallelCustom(custom), onRestore = {
+                    closeEditor(); change(custom.copy(readerRequests = null, resolveRequests = null, prefetchRequests = null,
+                        decodeRequests = null, downloadPages = null, sourcePages = null, chapters = null,
+                        runtime = resetExperienceRuntime(custom.runtime, ExperienceRuntimeGroup.PARALLEL)))
+                }, extra = {
+                    ExperienceRuntimeSettings(ExperienceRuntimeGroup.PARALLEL, custom, budget, appliedBudget, usage, store,
+                        editor, active && expanded == "parallel" && detail == "parallel-advanced", ::change)
                 }) {
-                ExperienceHint("保留来源原图；预解码只准备显示尺寸，不压缩或替换原图。超大图与放大细节仍受解码内存保护；关闭预解码也可正常阅读。")
-                ExperienceHint("双页、阅读方向和阅读模式在阅读控制台调整。")
+                ExperienceHint("数字是各阶段允许同时执行的任务数。一个请求不等于一条系统线程，也不保证占满一个CPU核心。")
+                ExperienceBudgetRow("当前 · 请求 / 排队", usage.activeReaderImages.toString() + " / " + usage.queuedTasks)
+                ExperienceBudgetRow("当前 · 解析 / 解码", usage.activeResolves.toString() + " / " + usage.activeDecodes)
+                ExperienceBudgetRow("当前 · 预取 / 下载", usage.activePrefetch.toString() + " / " + usage.activeBackgroundPages)
+                ExperienceHint("自动项按设备与来源反馈调整；手动值保留。限流、系统暂停和存储故障会显示真实等待原因。")
             }
         }
 
-        if (expanded == null || expanded == "sources") SettingsDisclosure("多源与补页", when {
+        if (expanded == null || expanded == "sources") SettingsDisclosure("多源", when {
             budget.sourceRecovery == SourceRecoveryMode.OFF -> "按需切源"
             budget.standbySources == 0 -> "预热暂停"
             else -> "备用 " + budget.standbySources + " 源"
         }, Icons.Outlined.Layers, expanded == "sources", { toggle("sources") },
-            compact = true, modified = custom.sourceRecovery != null || custom.standbySources != null || custom.standbyMiB != null || custom.standbyPages != 3 || !custom.standbyMemoryWarmup) {
+            compact = true, modified = experienceSourceCustom(custom)) {
             SettingsChoices(listOf<Pair<SourceRecoveryMode?, String>>(
                 null to "跟随", SourceRecoveryMode.OFF to "关闭",
                 SourceRecoveryMode.BALANCED to "稳健", SourceRecoveryMode.AGGRESSIVE to "积极"), custom.sourceRecovery) {
                 change(custom.copy(sourceRecovery = it))
             }
-            if (custom.sourceRecovery == null) ExperienceBudgetRow("当前", sourceRecoveryLabel(budget.sourceRecovery))
-            ExperienceBudgetRow("备用预热", budget.standbySources.toString() + " 源 · " + experienceCacheSize(budget.standbyPrefetchBytes))
+            if (custom.sourceRecovery == null) ExperienceBudgetRow("预览", sourceRecoveryLabel(budget.sourceRecovery))
+            ExperienceBudgetRow("预热预算", budget.standbySources.toString() + " 源 · " + experienceCacheSize(budget.standbyPrefetchBytes))
             budget.standbyPauseReason?.let { ExperienceHint(it) }
             ExperienceNumber("同时备用来源", custom.standbySources,
                 if (budget.sourceRecovery == SourceRecoveryMode.AGGRESSIVE) 2 else 1, 1..4, "源",
-                editor, active && expanded == "sources", effective = budget.standbySources, automaticLabel = "预热模式") {
+                editor, active && expanded == "sources", effective = appliedBudget.standbySources, automaticLabel = "预热模式") {
                 change(custom.copy(standbySources = it))
             }
             ExperienceNumber("每源附近预热", custom.standbyPages, 3, 1..12, "页",
-                editor, active && expanded == "sources", effective = budget.standbyPages) { change(custom.copy(standbyPages = it ?: 3)) }
+                editor, active && expanded == "sources", effective = appliedBudget.standbyPages) { change(custom.copy(standbyPages = it ?: 3)) }
             ExperienceNumber("备用原图窗口", custom.standbyMiB,
                 (budget.goal.prefetchBytes / 4L / EXPERIENCE_MIB).toInt(), 1..128, "MB",
-                editor, active && expanded == "sources", effective = (budget.standbyPrefetchBytes / EXPERIENCE_MIB).toInt()) {
+                editor, active && expanded == "sources", effective = (appliedBudget.standbyPrefetchBytes / EXPERIENCE_MIB).toInt()) {
                 change(custom.copy(standbyMiB = it))
             }
             SettingsToggle("备用小图存入内存", custom.standbyMemoryWarmup, Icons.Outlined.Memory) {
@@ -280,41 +426,64 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
             ExperienceHint(if (custom.standbyMemoryWarmup) "原图 → 磁盘 · 小图 → 内存；受实际解码预算限制"
                 else "原图 → 磁盘；切换时再解码，不预先占用解码内存")
-            SettingsToggle("允许计费或未知网络预热", custom.allowMeteredPrefetch, Icons.Outlined.NetworkCheck) {
-                change(custom.copy(allowMeteredPrefetch = it))
+            SettingsToggle("先补坏页", custom.recovery.autoRepair, Icons.Outlined.Healing) {
+                change(custom.copy(recovery = custom.recovery.copy(autoRepair = it)))
+            }
+            SettingsToggle("连续失败切整章", custom.recovery.autoSwitch, Icons.Outlined.SwapHoriz) {
+                change(custom.copy(recovery = custom.recovery.copy(autoSwitch = it)))
+            }
+            SettingsToggle("锁定当前来源", custom.recovery.sourceLocked, Icons.Outlined.Lock) {
+                change(custom.copy(recovery = custom.recovery.copy(sourceLocked = it)))
             }
             if (usage.throttledSources > 0) ExperienceHint("限流 · " + usage.throttledSources + " 源")
             ExperienceTools("sources", "多源与补页", active && expanded == "sources", detail, ::toggleDetail,
-                custom.sourceRecovery != null || custom.standbySources != null || custom.standbyMiB != null || custom.standbyPages != 3 || !custom.standbyMemoryWarmup, onRestore = {
-                    closeEditor(); change(custom.copy(sourceRecovery = null, standbySources = null, standbyMiB = null, standbyPages = 3, standbyMemoryWarmup = true))
+                experienceSourceCustom(custom), onRestore = {
+                    closeEditor(); change(custom.copy(sourceRecovery = null, standbySources = null, standbyMiB = null,
+                        standbyPages = 3, standbyMemoryWarmup = true,
+                        runtime = resetExperienceRuntime(custom.runtime, ExperienceRuntimeGroup.SOURCES),
+                        recovery = dev.mangaflow.reader.ReaderRecoveryPreferences()))
+                }, extra = {
+                    ExperienceRuntimeSettings(ExperienceRuntimeGroup.SOURCES, custom, budget, appliedBudget, usage, store,
+                        editor, active && expanded == "sources" && detail == "sources-advanced", ::change)
+                    ExperienceRecoverySettings(custom, appliedBudget, editor,
+                        active && expanded == "sources" && detail == "sources-advanced", ::change)
                 }) {
                 ExperienceBudgetRow("模式目标", "备用至多 " + budget.goal.standbySources + " 源")
-                ExperienceHint("提前准备已关联的同章备用来源，预取可发现请求和图片错误。章节对齐不代表每一页相同，不会仅按页码替换图片；切换版本保留独立位置。")
+                ExperienceHint("备用源先准备附近原图。坏页只使用已确认的同页关系替换；页数比例只帮助定位，不能证明画面相同。人工对齐与撤销在阅读器中完成。")
                 ExperienceHint("不同来源并行准备，当前位置优先；限流或预算用尽会显示原因。磁盘原图与内存预览遵循“缓存与离线”的独立保留策略。")
                 ExperienceHint("未指定容量时自动分配备用窗口；手动容量按输入独立保留。翻页后只释放已退出窗口且结束的任务额度；磁盘旧原图仍按缓存策略回收。")
             }
         }
 
-        if (expanded == null || expanded == "downloads") SettingsDisclosure("下载与后台",
+        if (expanded == null || expanded == "downloads") SettingsDisclosure("后台",
             if (budget.backgroundPages == 0) "暂缓新请求"
             else budget.backgroundPages.toString() + " 页 · " + budget.chapterParallelism + " 章",
             Icons.Outlined.Download, expanded == "downloads", { toggle("downloads") },
             compact = true, modified = experienceDownloadCustom(custom)) {
-            ExperienceNumber("总页面请求", custom.downloadPages, budget.goal.backgroundPages, 1..maximumBackgroundPageParallelism, "个",
-                editor, active && expanded == "downloads", effective = budget.backgroundPages) { change(custom.copy(downloadPages = it)) }
-            ExperienceNumber("每个来源", custom.sourcePages, budget.goal.sourceParallelism, 1..8, "个",
-                editor, active && expanded == "downloads", effective = budget.sourceParallelism) { change(custom.copy(sourcePages = it)) }
-            ExperienceNumber("同时下载章节", custom.chapters, budget.goal.chapterParallelism, 1..4, "章",
-                editor, active && expanded == "downloads", effective = budget.chapterParallelism) { change(custom.copy(chapters = it)) }
             SettingsToggle("阅读时下载让路", custom.yieldToReading, Icons.Outlined.AutoStories) { change(custom.copy(yieldToReading = it)) }
             SettingsToggle("允许后台下载", custom.allowBackgroundDownloads, Icons.Outlined.Download) { change(custom.copy(allowBackgroundDownloads = it)) }
+            if (onOpenNetwork != null || onOpenSourceChecks != null) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (onOpenNetwork != null) MotionTextButton(onClick = onOpenNetwork, enabled = active && expanded == "downloads",
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp)) {
+                    Icon(Icons.Outlined.NetworkCheck, null, Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp)); Text("线路检查", style = MaterialTheme.typography.labelLarge)
+                }
+                if (onOpenSourceChecks != null) MotionTextButton(onClick = onOpenSourceChecks, enabled = active && expanded == "downloads",
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp)) {
+                    Icon(Icons.Outlined.Sync, null, Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp)); Text("来源检查", style = MaterialTheme.typography.labelLarge)
+                }
+            }
             if (usage.activeBackgroundPages > 0 || usage.activeChapters > 0)
                 ExperienceBudgetRow("正在下载", usage.activeBackgroundPages.toString() + " 页 · " + usage.activeChapters + " 章")
             ExperienceTools("downloads", "下载与后台", active && expanded == "downloads", detail, ::toggleDetail,
                 experienceDownloadCustom(custom), onRestore = {
                     closeEditor()
-                    change(custom.copy(downloadPages = null, sourcePages = null, chapters = null,
-                        yieldToReading = true, allowBackgroundDownloads = true))
+                    change(custom.copy(yieldToReading = true, allowBackgroundDownloads = true,
+                        runtime = resetExperienceRuntime(custom.runtime, ExperienceRuntimeGroup.BACKGROUND)))
+                }, extra = {
+                    ExperienceRuntimeSettings(ExperienceRuntimeGroup.BACKGROUND, custom, budget, appliedBudget, usage, store,
+                        editor, active && expanded == "downloads" && detail == "downloads-advanced", ::change)
                 }) {
                 ExperienceHint("未指定每源并发时按真实反馈调整；手动并发直接生效。服务端限流时按实际回执等待，正在传输的页面继续完成。")
                 ExperienceHint(when (platformKind) {
@@ -325,23 +494,56 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        if (expanded == null || expanded == "cache") SettingsDisclosure("缓存与离线", usage.diskBytes?.let { "已用 " + experienceCacheSize(it) } ?: "用量未知",
+        if (expanded == null || expanded == "cache") SettingsDisclosure("缓存", usage.diskBytes?.let { "已用 " + experienceCacheSize(it) } ?: "用量未知",
             Icons.Outlined.Storage, expanded == "cache", { toggle("cache") },
-            compact = true, modified = custom.memoryMiB != null || custom.diskMiB != null || custom.contentCache != ContentCachePreferences()) {
-            SettingsChoices(listOf("images" to "图片", "data" to "页面与资料"), cacheTab) {
+            compact = true, modified = experienceCacheCustom(custom)) {
+            SettingsToggle("磁盘自动回收", custom.runtime.automaticCleanup, Icons.Outlined.CleaningServices) {
+                change(custom.copy(runtime = custom.runtime.copy(automaticCleanup = it)))
+            }
+            if (!custom.runtime.automaticCleanup) ExperienceHint("磁盘保留至手动清理；内存仍按容量回收。")
+            SettingsChoices(listOf(CacheEvictionOrder.UNUSED_FIRST to "未使用优先",
+                CacheEvictionOrder.LEAST_RECENT to "最久未用", CacheEvictionOrder.LARGEST_FIRST to "较大优先"), custom.runtime.evictionOrder) {
+                change(custom.copy(runtime = custom.runtime.copy(evictionOrder = it)))
+            }
+            SettingsChoices(listOf("images" to "容量", "data" to "时效", "areas" to "组成"), cacheTab) {
                 closeEditor(); cacheTab = it
             }
             if (cacheTab == "images") {
-            ExperienceBudgetRow("解码内存", cacheUsage(usage.memoryBytes, usage.memoryLimit))
-            ExperienceNumber("内存缓存上限", custom.memoryMiB, usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, 1..512, "MB",
-                editor, active && expanded == "cache", effective = usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, automaticLabel = "当前可用上限") {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) { ExperienceBudgetRow("解码内存", cacheUsage(usage.memoryBytes, usage.memoryLimit)) }
+                MotionIconButton(onClick = {
+                    if (active && !clearingMemory) uiScope.launch {
+                        clearingMemory = true
+                        cacheNotice = null
+                        try {
+                            val released = store.clearDecodedMemory().await()
+                            cacheNotice = "已释放 " + experienceCacheSize(released) + " 缓存引用"
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { cacheNotice = "清理未完成，请重试" }
+                        finally { clearingMemory = false }
+                    }
+                }, enabled = active && expanded == "cache" && !clearingMemory,
+                    modifier = Modifier.size(44.dp), tooltip = "释放可复用的解码图片内存") {
+                    Icon(if (clearingMemory) Icons.Outlined.HourglassEmpty else Icons.Outlined.CleaningServices,
+                        "释放解码缓存", Modifier.size(18.dp))
+                }
+            }
+            cacheNotice?.let { ExperienceHint(it) }
+            ExperienceNumber("内存缓存上限", custom.memoryMiB, automaticMemoryBytes?.let { (it / EXPERIENCE_MIB).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() }, 1..512, "MB",
+                editor, active && expanded == "cache", effective = usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, automaticLabel = "模式预算") {
                 change(custom.copy(memoryMiB = it))
             }
-            ExperienceBudgetRow("图片磁盘", cacheUsage(usage.diskBytes, usage.diskLimit))
-            ExperienceNumber("磁盘缓存上限", custom.diskMiB, (budget.goal.diskCacheBytes / EXPERIENCE_MIB).toInt(), 1..8192, "MB",
-                editor, active && expanded == "cache", effective = (budget.diskCacheBytes / EXPERIENCE_MIB).toInt()) {
+            ExperienceBudgetRow("共享磁盘", cacheUsage(usage.diskBytes, usage.diskLimit))
+            ExperienceNumber("磁盘缓存预算", custom.diskMiB, (budget.goal.diskCacheBytes / EXPERIENCE_MIB).toInt(), 1..8192, "MB",
+                editor, active && expanded == "cache", effective = (appliedBudget.diskCacheBytes / EXPERIENCE_MIB).toInt()) {
                 change(custom.copy(diskMiB = it))
             }
+            ExperienceNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 1..512, "MB",
+                editor, active && expanded == "cache", effective = (appliedBudget.prefetchBytes / EXPERIENCE_MIB).toInt()) {
+                change(custom.copy(prefetchMiB = it))
+            }
+            ExperienceBudgetRow("邻页 / 跨章 / 备用", experienceCacheSize(budget.adjacentPrefetchBytes) + " / " +
+                experienceCacheSize(budget.nextChapterPrefetchBytes) + " / " + experienceCacheSize(budget.standbyPrefetchBytes))
             if (active && expanded == "cache") {
                 val downloads = remember(context) { DownloadStore.get(context) }
                 val entries by downloads.entries.collectAsStateWithLifecycle()
@@ -350,10 +552,14 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             if (usage.diskResizePending) ExperienceHint("等待在用原图释放后应用容量")
             usage.cacheError?.let { ExperienceHint(it) }
             ExperienceNumber("解码内存闲置回收", custom.contentCache.memoryIdleMinutes, 0, 0..120, "分钟",
-                editor, active && expanded == "cache") { change(custom.copy(contentCache = custom.contentCache.copy(memoryIdleMinutes = it ?: 0))) }
+                editor, active && expanded == "cache", effective = appliedCustom.contentCache.memoryIdleMinutes,
+                automaticLabel = "默认值") { change(custom.copy(contentCache = custom.contentCache.copy(memoryIdleMinutes = it ?: 0))) }
             ExperienceNumber("磁盘图片保留", custom.contentCache.imageRetentionHours, 0, 0..720, "小时",
-                editor, active && expanded == "cache") { change(custom.copy(contentCache = custom.contentCache.copy(imageRetentionHours = it ?: 0))) }
+                editor, active && expanded == "cache", effective = appliedCustom.contentCache.imageRetentionHours,
+                automaticLabel = "默认值") { change(custom.copy(contentCache = custom.contentCache.copy(imageRetentionHours = it ?: 0))) }
             ExperienceHint("0＝只按空间与最近使用淘汰。闲置回收只释放缓存引用；当前显示图像仍可持有内存。磁盘保留从最近访问起算，在前台约每分钟检查，并始终保护正在阅读、传输和离线文件。")
+            } else if (cacheTab == "areas") {
+                ExperienceCacheBreakdown(usage)
             } else {
                 val cache = custom.contentCache
                 SettingsChoices(listOf(ContentCacheStorage.MEMORY_AND_DISK to "内存＋磁盘",
@@ -380,8 +586,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                     ContentCacheKind.POPULARITY -> cache.popularityMinutes; ContentCacheKind.COMMENTS -> cache.commentMinutes
                 }
                 val defaultMinutes = (ContentCachePreferences().freshMillis(cacheKind) / 60_000L).toInt()
+                val currentMinutes = (appliedCustom.contentCache.freshMillis(cacheKind) / 60_000L).toInt()
                 ExperienceNumber(if (cacheKind == ContentCacheKind.POPULARITY) "热度资料时效上限" else "重新请求间隔",
-                    minutes, defaultMinutes, 0..10_080, "分钟", editor, active && expanded == "cache") { value ->
+                    minutes, defaultMinutes, 0..10_080, "分钟", editor, active && expanded == "cache",
+                    effective = currentMinutes, automaticLabel = "默认值") { value ->
                     val next = value ?: defaultMinutes
                     change(custom.copy(contentCache = when (cacheKind) {
                         ContentCacheKind.SEARCH -> cache.copy(searchMinutes = next); ContentCacheKind.DISCOVERY -> cache.copy(discoveryMinutes = next)
@@ -391,41 +599,73 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                     }))
                 }
                 val effectiveMinutes = cache.freshMillis(cacheKind) / 60_000L
-                ExperienceBudgetRow("当前更新规则", if (effectiveMinutes == 0L) "每次请求更新" else "访问时超过 $effectiveMinutes 分钟再更新")
+                ExperienceBudgetRow("预览更新规则", if (effectiveMinutes == 0L) "每次请求更新" else "访问时超过 $effectiveMinutes 分钟再更新")
                 if (cacheKind == ContentCacheKind.POPULARITY) ExperienceHint("热度随列表与详情返回，此上限同时约束这些资料的复用时间；不为每张卡单独请求热度。")
                 else if (effectiveMinutes < minutes && cache.enabled && !cache.refreshOnOpen)
-                    ExperienceHint("当前同时受热度资料时效上限约束。")
-                ExperienceNumber("失败结果重试间隔", cache.failureMinutes, 1, 0..60, "分钟", editor, active && expanded == "cache") {
+                    ExperienceHint("同时受热度资料时效上限约束。")
+                ExperienceNumber("失败结果重试间隔", cache.failureMinutes, 1, 0..60, "分钟", editor, active && expanded == "cache",
+                    effective = appliedCustom.contentCache.failureMinutes, automaticLabel = "默认值") {
                     change(custom.copy(contentCache = cache.copy(failureMinutes = it ?: 1)))
                 }
-                ExperienceNumber("快照最长保留", cache.retentionHours, 168, 1..720, "小时", editor, active && expanded == "cache") {
+                ExperienceNumber("快照最长保留", cache.retentionHours, 168, 1..720, "小时", editor, active && expanded == "cache",
+                    effective = appliedCustom.contentCache.retentionHours, automaticLabel = "默认值") {
                     change(custom.copy(contentCache = cache.copy(retentionHours = it ?: 168)))
                 }
-                ExperienceNumber("列表快照上限", cache.snapshotMemoryEntries, 24, 1..64, "份", editor, active && expanded == "cache") {
+                ExperienceNumber("列表快照上限", cache.snapshotMemoryEntries, 24, 1..64, "份", editor, active && expanded == "cache",
+                    effective = appliedCustom.contentCache.snapshotMemoryEntries, automaticLabel = "默认值") {
                     change(custom.copy(contentCache = cache.copy(snapshotMemoryEntries = it ?: 24)))
                 }
-                ExperienceNumber("列表磁盘上限", cache.snapshotDiskMiB, 8, 1..128, "MB", editor, active && expanded == "cache") {
+                ExperienceNumber("列表磁盘上限", cache.snapshotDiskMiB, 8, 1..128, "MB", editor, active && expanded == "cache",
+                    effective = appliedCustom.contentCache.snapshotDiskMiB, automaticLabel = "默认值") {
                     change(custom.copy(contentCache = cache.copy(snapshotDiskMiB = it ?: 8)))
                 }
                 ExperienceHint("0 分钟＝不复用已完成结果。同次正在进行的请求仍合并。开启缓存时，可先显示旧快照再更新；更新失败保留旧内容并显示原因。关闭后停止复用页面资料；旧文件可在缓存管理中清理。历史、收藏和离线章节单独保存。")
             }
             ExperienceTools("cache", "缓存与离线", active && expanded == "cache", detail, ::toggleDetail,
-                custom.memoryMiB != null || custom.diskMiB != null || custom.contentCache != ContentCachePreferences(), onRestore = {
-                    closeEditor(); change(custom.copy(memoryMiB = null, diskMiB = null, contentCache = ContentCachePreferences()))
+                experienceCacheCustom(custom), onRestore = {
+                    closeEditor(); change(custom.copy(memoryMiB = null, diskMiB = null, prefetchMiB = null, contentCache = ContentCachePreferences(),
+                        runtime = resetExperienceRuntime(custom.runtime, ExperienceRuntimeGroup.CACHE)
+                            .copy(automaticCleanup = true, evictionOrder = CacheEvictionOrder.UNUSED_FIRST)))
+                }, extra = {
+                    ExperienceRuntimeSettings(ExperienceRuntimeGroup.CACHE, custom, budget, appliedBudget, usage, store,
+                        editor, active && expanded == "cache" && detail == "cache-advanced", ::change)
                 }) {
                 ExperienceHint("用量 / 上限；— 表示尚未取得。内存缓存只包含可复用的解码图像，手动容量按输入保存。磁盘缓存可自动回收，离线章节独立保存；可回收内容在缓存管理中清理。")
                 ExperienceHint("预读离开窗口会取消未完成任务，完成的图片按内存闲置、磁盘保留与总空间规则回收。列表快照按设置的份数与磁盘容量淘汰；阅读记录、收藏和离线章节独立保存。")
             }
         }
 
-        if (expanded == null || expanded == "display") SettingsDisclosure("显示与交互", when (custom.refresh) {
-            null -> "跟随目标"; RefreshPreference.SYSTEM -> "跟随系统"; RefreshPreference.INTERACTION -> "交互高刷"
-            RefreshPreference.MANUAL -> custom.refreshHz?.let { it.toString() + " Hz 请求" } ?: "指定刷新率"
-        }, Icons.Outlined.Speed, expanded == "display", { toggle("display") },
-            compact = true, modified = custom.refresh != null || custom.refreshHz != null || custom.readerStatusPlacement != ReaderStatusPlacement.BOTTOM) {
-            Text("阅读状态栏", style = MaterialTheme.typography.bodyMedium)
-            SettingsChoices(listOf(ReaderStatusPlacement.TOP to "顶部", ReaderStatusPlacement.BOTTOM to "底部",
-                ReaderStatusPlacement.HIDDEN to "隐藏"), custom.readerStatusPlacement) { change(custom.copy(readerStatusPlacement = it)) }
+        if (expanded == null || expanded == "resources") SettingsDisclosure("设备",
+            (usage.resources.processorCount?.let { "$it 核" } ?: "CPU —") + " · " +
+                (usage.resources.totalMemoryBytes?.let(::experienceCacheSize) ?: "RAM —"),
+            Icons.Outlined.DeveloperBoard, expanded == "resources", { toggle("resources") },
+            compact = true, modified = experienceDeviceCustom(custom)) {
+            SettingsChoices(listOf("device" to "设备", "forecast" to "情景", "live" to "观测", "protect" to "保护"), deviceTab) {
+                closeEditor(); deviceTab = it
+            }
+            when (deviceTab) {
+                "device" -> ExperienceDeviceDetails(usage)
+                "forecast" -> ExperienceForecastDetails(usage, budget)
+                "live" -> {
+                    ExperienceBudgetRow("当前 · 章 / 下载 / 预取", usage.activeChapters.toString() + " / " + usage.activeBackgroundPages + " / " + usage.activePrefetch)
+                    ExperienceBudgetRow("当前 · 页面 / 排队", usage.activeReaderImages.toString() + " / " + usage.queuedTasks)
+                    ExperienceBudgetRow("解析 / 解码执行", usage.activeResolves.toString() + " / " + usage.activeDecodes)
+                    ExperienceBudgetRow("解码 P95 / 排队 P95", (usage.decodeP95Millis?.let { "$it ms" } ?: "—") + " / " +
+                        (usage.decodeQueueP95Millis?.let { "$it ms" } ?: "—"))
+                    ExperienceBudgetRow("解码累计输出", experienceCacheSize(usage.decodedBytes))
+                    ExperienceBudgetRow("限流来源", usage.throttledSources.toString())
+                    ExperienceBudgetRow("内存 / 磁盘命中", usage.memoryHits.toString() + " / " + usage.diskHits)
+                    ExperienceBudgetRow("预取复用 / 新取", usage.prefetchHits.toString() + " 次 / " + usage.prefetchedPages + " 页")
+                    ExperienceBudgetRow("请求 P95", usage.requestP95Millis?.let { "$it ms" } ?: "—")
+                    ExperienceBudgetRow("帧工作 P95 / P99", if (usage.frameP95Millis != null && usage.frameP99Millis != null)
+                        frameMillis(usage.frameP95Millis!!) + " / " + frameMillis(usage.frameP99Millis!!) else "—")
+                    ExperienceBudgetRow("实际传输", experienceCacheSize(usage.transferredBytes))
+                    ExperienceBudgetRow("堆内存 / 上限", cacheUsage(usage.resources.processHeapBytes, usage.resources.processHeapLimitBytes))
+                    ExperienceHint("累计解码量不是驻留内存；帧工作耗时不是屏幕 FPS。")
+                }
+                "protect" -> {
+                    SettingsToggle("计费网络也可预取", custom.allowMeteredPrefetch, Icons.Outlined.NetworkCheck) { change(custom.copy(allowMeteredPrefetch = it)) }
+                    SettingsToggle("低电量减少后台工作", custom.batteryProtection, Icons.Outlined.BatterySaver) { change(custom.copy(batteryProtection = it)) }
             val manualRates = if (platformKind == PlatformKind.ANDROID) usage.resources.supportedRefreshRates else emptyList()
             val choices = listOf<Pair<RefreshPreference?, String>>(
                 null to "自动", RefreshPreference.SYSTEM to "系统", RefreshPreference.INTERACTION to "交互") +
@@ -435,77 +675,117 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 if (manualRates.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     manualRates.forEach { rate ->
                         MotionTextButton(onClick = { change(custom.copy(refreshHz = rate)) },
-                            enabled = active && expanded == "display" && custom.refresh == RefreshPreference.MANUAL,
+                            enabled = active && expanded == "resources" && deviceTab == "protect" && custom.refresh == RefreshPreference.MANUAL,
                             modifier = Modifier.heightIn(min = 44.dp)) {
                             Text(rate.toString() + " Hz" + if (custom.refreshHz == rate) " ✓" else "")
                         }
                     }
                 } else ExperienceHint("设备暂未提供可选刷新率，已保留指定请求")
             }
-            ExperienceBudgetRow("当前刷新请求", budget.refreshHz?.let { it.toString() + " Hz" }
+            ExperienceBudgetRow("预览刷新请求", budget.refreshHz?.let { it.toString() + " Hz" }
                 ?: if (budget.preferHighRefresh) "优先高刷" else "跟随系统")
-            ExperienceTools("display", "显示与交互", active && expanded == "display", detail, ::toggleDetail,
-                custom.refresh != null || custom.refreshHz != null || custom.readerStatusPlacement != ReaderStatusPlacement.BOTTOM, onRestore = {
-                    closeEditor(); change(custom.copy(refresh = null, refreshHz = null, readerStatusPlacement = ReaderStatusPlacement.BOTTOM))
-                }) {
-                ExperienceHint(if (platformKind == PlatformKind.ANDROID)
-                    "交互结束后释放高刷请求；系统温度、省电和显示能力决定最终刷新率。"
-                    else "屏幕刷新由系统调度；应用减少后台工作以优先交互，当前平台不提供精确刷新率控制。")
-                ExperienceHint("动效遵循应用与系统的减少动态效果设置。帧工作耗时不等于屏幕 FPS。")
-            }
-        }
 
-        if (expanded == null || expanded == "resources") SettingsDisclosure("设备与资源保护", if (budget.protections.isEmpty()) "按需" else budget.protections.size.toString() + " 项保护",
-            Icons.Outlined.Tune, expanded == "resources", { toggle("resources") },
-            compact = true, modified = custom.allowMeteredPrefetch || !custom.batteryProtection) {
-            SettingsToggle("计费网络也可预取", custom.allowMeteredPrefetch, Icons.Outlined.NetworkCheck) { change(custom.copy(allowMeteredPrefetch = it)) }
-            SettingsToggle("低电量减少后台工作", custom.batteryProtection, Icons.Outlined.BatterySaver) { change(custom.copy(batteryProtection = it)) }
-            ExperienceTools("resources", "设备与资源保护", active && expanded == "resources", detail, ::toggleDetail,
-                custom.allowMeteredPrefetch || !custom.batteryProtection, onRestore = {
-                    closeEditor(); change(custom.copy(allowMeteredPrefetch = false, batteryProtection = true))
-                }, extraLabel = "运行详情", extraIcon = Icons.Outlined.Speed, extra = {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("本次实际观测", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        MotionIconButton(onClick = store::refreshResources, enabled = active,
-                            modifier = Modifier.size(44.dp), tooltip = "重新读取设备状态") {
-                            Icon(Icons.Outlined.Refresh, "重新读取设备状态", Modifier.size(18.dp))
-                        }
-                    }
-                    ExperienceBudgetRow("执行", usage.activeChapters.toString() + " 章 · " + usage.activeBackgroundPages + " 下载 · " + usage.activePrefetch + " 预取")
-                    ExperienceBudgetRow("当前页 / 排队", usage.activeReaderImages.toString() + " / " + usage.queuedTasks)
-                    ExperienceBudgetRow("解析 / 解码执行", usage.activeResolves.toString() + " / " + usage.activeDecodes)
-                    ExperienceBudgetRow("页面解码 P95", usage.decodeP95Millis?.let { it.toString() + " ms" } ?: "—")
-                    ExperienceBudgetRow("解码排队 P95", usage.decodeQueueP95Millis?.let { it.toString() + " ms" } ?: "—")
-                    ExperienceBudgetRow("解码累计输出", experienceCacheSize(usage.decodedBytes))
-                    ExperienceBudgetRow("限流来源", usage.throttledSources.toString())
-                    ExperienceBudgetRow("内存 / 磁盘命中", usage.memoryHits.toString() + " / " + usage.diskHits)
-                    ExperienceBudgetRow("预取复用 / 新取", usage.prefetchHits.toString() + " 次 / " + usage.prefetchedPages + " 页")
-                    ExperienceBudgetRow("请求 P95", usage.requestP95Millis?.let { it.toString() + " ms" } ?: "—")
-                    ExperienceBudgetRow("帧工作 P95 / P99", if (usage.frameP95Millis != null && usage.frameP99Millis != null)
-                        frameMillis(usage.frameP95Millis!!) + " / " + frameMillis(usage.frameP99Millis!!)
-                        else if (platformKind == PlatformKind.ANDROID) "尚无样本" else "平台未提供")
-                    ExperienceBudgetRow("实际传输", experienceCacheSize(usage.transferredBytes))
-                    ExperienceBudgetRow("脚本缓冲上限", experienceCacheSize(budget.materializationBytes))
-                    ExperienceBudgetRow("应用堆内存", cacheUsage(usage.resources.processHeapBytes, usage.resources.processHeapLimitBytes))
-                    ExperienceBudgetRow("物理内存 / 核心", (usage.resources.totalMemoryBytes?.let(::experienceCacheSize) ?: "—") + " / " + (usage.resources.processorCount?.toString() ?: "—"))
-                    ExperienceBudgetRow("可用系统内存", usage.resources.availableMemoryBytes?.let(::experienceCacheSize) ?: "—")
-                    ExperienceBudgetRow("可用磁盘", usage.resources.freeDiskBytes?.let(::experienceCacheSize) ?: "—")
-                    ExperienceBudgetRow("处理器负载", usage.resources.cpuLoad?.let { (it * 100).roundToInt().toString() + "%" } ?: "—")
-                    ExperienceBudgetRow("网络计费", when (usage.resources.metered) { true -> "计费"; false -> "非计费"; null -> "未知" })
-                    ExperienceBudgetRow("电量 / 温度", (usage.resources.batteryPercent?.let { it.toString() + "%" } ?: "未知") + " / " +
-                        when (usage.resources.thermalPressure) { 0 -> "正常"; 1 -> "升高"; 2 -> "较高"; 3 -> "严重"; else -> "未知" })
-                    ExperienceHint("请求耗时包含排队与解码。解码累计输出不是驻留内存；分块有独立开销。帧工作耗时不等于屏幕 FPS，未知不代表正常。")
+                    ExperienceHint(if (platformKind == PlatformKind.ANDROID) "刷新率是应用请求，最终由屏幕与系统决定。" else "刷新率由系统调度；保留请求，不承诺强制高刷。")
+                }
+            }
+            ExperienceTools("resources", "设备与资源", active && expanded == "resources", detail, ::toggleDetail,
+                experienceDeviceCustom(custom), onRestore = {
+                    closeEditor(); change(custom.copy(allowMeteredPrefetch = false, batteryProtection = true, refresh = null, refreshHz = null,
+                        runtime = resetExperienceRuntime(custom.runtime, ExperienceRuntimeGroup.DEVICE)))
+                }, extra = {
+                    ExperienceRuntimeSettings(ExperienceRuntimeGroup.DEVICE, custom, budget, appliedBudget, usage, store,
+                        editor, active && expanded == "resources" && detail == "resources-advanced", ::change)
                 }) {
                 ExperienceHint(budget.reason)
                 if (budget.protections.isNotEmpty()) ExperienceHint(budget.protections.joinToString(" · "))
-                ExperienceHint("自动项按实际资源调整；手动值保留。断网、系统暂停或存储失败会显示真实原因；计费网络按你选择的开关执行。")
+                ExperienceHint("自动项按实际资源调整；手动值保留。应用仅显示当前运行设备实际提供的指标，未知不会当作0。")
             }
         }
     }
 }
 
+@Composable
+private fun ExperienceRuntimeSettings(group: ExperienceRuntimeGroup, custom: ExperienceOverrides,
+    budget: ExperienceBudget, currentBudget: ExperienceBudget, usage: ExperienceUsage, store: ExperiencePolicyStore,
+    editor: ExperienceEditor, active: Boolean, onChange: (ExperienceOverrides) -> Unit) {
+    ExperienceRuntimeField.entries.filter { it.group == group }.forEach { field ->
+        key(field) {
+            val supported = platformKind != PlatformKind.ANDROID ||
+                field != ExperienceRuntimeField.TILE_DECODES && field != ExperienceRuntimeField.FALLBACK_PIXELS
+            val automaticBudget = remember(custom, budget, field) {
+                store.previewBudget(custom.copy(runtime = field.withValue(custom.runtime, null)), budget.mode)
+            }
+            val default = field.effectiveValue(automaticBudget, usage)
+            val shortcut = field.semanticMaximum ?: when (field.unit) {
+                "px" -> 2048; "MiB" -> 1024; "Mpx" -> 64; "秒" -> 120; "页" -> 24; else -> 16
+            }
+            ExperienceNumber(field.label, field.value(custom.runtime), default,
+                field.minimum..maxOf(field.minimum, shortcut), field.unit, editor, active && supported,
+                effective = field.effectiveValue(currentBudget, usage), automaticLabel = if (field.followsAutomatic) "自动预算" else "默认值",
+                semanticMaximum = field.semanticMaximum) { value ->
+                onChange(custom.copy(runtime = field.withValue(custom.runtime, value)))
+            }
+            if (!supported) ExperienceHint("Android由原生图片引擎管理；保留其他平台的配置。")
+            if (editor.field == field.label) ExperienceHint(field.help)
+            when (field) {
+                ExperienceRuntimeField.IMAGE_CONNECT -> ExperienceTransportLimit(custom.runtime.imageConnectSeconds.toLong() * 1_000L)
+                ExperienceRuntimeField.IMAGE_TOTAL -> ExperienceTransportLimit(custom.runtime.imageTotalMinutes.toLong() * 60_000L)
+                else -> Unit
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExperienceRecoverySettings(custom: ExperienceOverrides, currentBudget: ExperienceBudget,
+    editor: ExperienceEditor, active: Boolean, onChange: (ExperienceOverrides) -> Unit) {
+    val p = custom.recovery
+    val actual = currentBudget.recovery
+    fun update(value: dev.mangaflow.reader.ReaderRecoveryPreferences) = onChange(custom.copy(recovery = value))
+    ExperienceNumber("连续失败", p.consecutiveFailures, 3, 1..12, "页", editor, active,
+        effective = actual.consecutiveFailures) { update(p.copy(consecutiveFailures = it ?: 3)) }
+    ExperienceNumber("失败观察窗口", p.failureWindow, 6, 1..24, "页", editor, active,
+        effective = actual.failureWindow) { update(p.copy(failureWindow = it ?: 6)) }
+    ExperienceNumber("窗口内失败", p.failuresInWindow, 3, 1..12, "页", editor, active,
+        effective = actual.failuresInWindow) { update(p.copy(failuresInWindow = it ?: 3)) }
+    if (p.failuresInWindow > p.failureWindow) ExperienceHint("窗口阈值大于窗口页数，此条件不会触发；连续失败条件仍独立生效。")
+    ExperienceNumber("切源冷却", p.switchCooldownSeconds, 60, 0..300, "秒", editor, active,
+        effective = actual.switchCooldownSeconds) { update(p.copy(switchCooldownSeconds = it ?: 60)) }
+    ExperienceNumber("备用重试", p.standbyRetryCount, 2, 0..8, "次", editor, active,
+        effective = actual.standbyRetryCount) { update(p.copy(standbyRetryCount = it ?: 2)) }
+    ExperienceNumber("备用重试间隔", p.standbyRetryDelaySeconds, 30, 0..120, "秒", editor, active,
+        effective = actual.standbyRetryDelaySeconds) { update(p.copy(standbyRetryDelaySeconds = it ?: 30)) }
+    ExperienceNumber("备用目录等待", p.manifestTimeoutSeconds, 25, 1..120, "秒", editor, active,
+        effective = actual.manifestTimeoutSeconds) { update(p.copy(manifestTimeoutSeconds = it ?: 25)) }
+    ExperienceNumber("图片无新字节等待", p.imageTimeoutSeconds, 45, 1..180, "秒", editor, active,
+        effective = (effectiveImageTransportTimeoutMillis(actual.imageTimeoutSeconds.toLong() * 1_000L) / 1_000L).toInt()) {
+        update(p.copy(imageTimeoutSeconds = it ?: 45))
+    }
+    ExperienceTransportLimit(p.imageTimeoutSeconds.toLong() * 1_000L)
+    ExperienceNumber("慢加载提示", p.slowLoadSeconds, 8, 1..60, "秒", editor, active,
+        effective = actual.slowLoadSeconds) { update(p.copy(slowLoadSeconds = it ?: 8)) }
+    ExperienceHint("自动补页使用已经确认的同页关系。排队、取消和资源暂停不计坏页；未对齐的版本先手动确认。整章自动切源还要求目标图可显示。")
+}
+
+@Composable
+private fun ExperienceTransportLimit(requestedMillis: Long) {
+    val limit = imageTransportTimeoutLimitMillis
+    if (limit != null && requestedMillis > limit)
+        ExperienceHint("保留输入值；此平台图片网络接口实际使用上限 ${limit}ms（约24.9天）。")
+}
+
+private fun resetExperienceRuntime(value: ExperienceRuntimePreferences, group: ExperienceRuntimeGroup): ExperienceRuntimePreferences =
+    ExperienceRuntimeField.entries.filter { it.group == group }.fold(value) { current, field -> field.withValue(current, null) }
+
+private fun runtimeModified(value: ExperienceRuntimePreferences, group: ExperienceRuntimeGroup): Boolean =
+    ExperienceRuntimeField.entries.any { it.group == group && it.value(value) != it.value(ExperienceRuntimePreferences()) }
+
+
 internal class ExperienceEditor {
     var field by mutableStateOf<String?>(null)
+    var pending by mutableStateOf(false)
+    var accept: (() -> Boolean)? = null
+    fun clear() { field = null; pending = false; accept = null }
 }
 
 /** The same retained reveal/measurement owner used by SettingsDisclosure. */
@@ -528,7 +808,8 @@ private fun ExperienceReveal(expanded: Boolean, content: @Composable ColumnScope
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range: IntRange, unit: String,
-    editor: ExperienceEditor, active: Boolean, effective: Int? = null, automaticLabel: String = "模式目标", onChange: (Int?) -> Unit) {
+    editor: ExperienceEditor, active: Boolean, effective: Int? = null, automaticLabel: String = "模式目标",
+    semanticMaximum: Int? = null, onChange: (Int?) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val selected = value ?: automatic
     val current = (selected ?: range.first).coerceAtLeast(range.first)
@@ -540,28 +821,32 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
     var sliding by remember { mutableFloatStateOf(current.toFloat()) }
     var invalid by remember { mutableStateOf(false) }
     fun acceptsInput() = active && editor.field == title
-    fun commit() {
-        if (!acceptsInput()) return
+    fun commit(): Boolean {
+        if (!acceptsInput()) return false
         val parsed = draft.toIntOrNull()
-        if (parsed == null || parsed < range.first) { invalid = true; return }
+        if (parsed == null || parsed < range.first || (semanticMaximum != null && parsed > semanticMaximum)) { invalid = true; return false }
         val accepted = parsed
         draft = accepted.toString()
         sliding = accepted.toFloat()
         invalid = false
         onChange(accepted)
+        editor.clear()
         focus.clearFocus(force = true)
+        return true
     }
+    SideEffect { if (editing) editor.accept = { commit() } }
     Column(Modifier.fillMaxWidth()) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val stacked = maxWidth < 300.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f)
             val valueControl: @Composable () -> Unit = {
                 MotionTextButton(onClick = {
-                    if (active) {
+                    if (active && (editing || !editor.pending || editor.accept?.invoke() == true)) {
                         focus.clearFocus(force = true)
-                        if (editing) editor.field = null else {
+                        if (editing) editor.clear() else {
                             draft = selected?.toString().orEmpty()
                             sliding = current.toFloat()
                             invalid = false
+                            editor.clear()
                             editor.field = title
                         }
                     }
@@ -601,7 +886,9 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 BasicTextField(draft, onValueChange = {
-                    if (acceptsInput() && it.length <= Int.MAX_VALUE.toString().length && it.all(Char::isDigit)) { draft = it; invalid = false }
+                    if (acceptsInput() && it.length <= Int.MAX_VALUE.toString().length && it.all(Char::isDigit)) {
+                        draft = it; invalid = false; editor.pending = draft != selected?.toString().orEmpty()
+                    }
                 }, singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
                     cursorBrush = SolidColor(colors.onSurface),
@@ -622,14 +909,15 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                     Icon(Icons.Outlined.Check, "应用" + title, Modifier.size(18.dp))
                 }
                 MotionIconButton(onClick = {
-                    if (acceptsInput()) { editor.field = null; focus.clearFocus(force = true) }
+                    if (acceptsInput()) { editor.clear(); focus.clearFocus(force = true) }
                 }, enabled = editing, modifier = Modifier.size(44.dp), tooltip = "取消未应用的" + title + "编辑") {
                     Icon(Icons.Outlined.Close, "取消编辑", Modifier.size(18.dp))
                 }
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(if (value == null) "跟随" + automaticLabel else "手动值 · 直接输入不设业务上限",
+                    Text(if (value == null) "跟随" + automaticLabel else if (semanticMaximum != null)
+                        "手动值 · " + range.first + "–" + semanticMaximum + " " + unit else "手动值 · 直接输入不设业务上限",
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     Text(automaticLabel + " " + (automatic?.toString()?.plus(" " + unit) ?: "尚未取得"),
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
@@ -638,7 +926,7 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                 }
                 MotionIconButton(onClick = {
                     if (acceptsInput()) {
-                        editor.field = null
+                        editor.clear()
                         focus.clearFocus(force = true)
                         onChange(null)
                     }
@@ -646,14 +934,16 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                     Icon(Icons.Outlined.Sync, "恢复" + title + "跟随" + automaticLabel, Modifier.size(18.dp))
                 }
             }
-            if (invalid) Text("请输入不小于 " + range.first + " 的有效整数", style = MaterialTheme.typography.labelSmall, color = colors.error)
+            if (invalid) Text(if (semanticMaximum != null) "请输入 " + range.first + "–" + semanticMaximum + " 的整数"
+                else "请输入不小于 " + range.first + " 的有效整数", style = MaterialTheme.typography.labelSmall, color = colors.error)
             MotionSlider(sliding, onValueChange = {
-                if (acceptsInput()) { sliding = it; draft = it.roundToInt().toString(); invalid = false }
+                if (acceptsInput()) { sliding = it; draft = it.roundToInt().toString(); invalid = false; editor.pending = true }
             }, valueRange = range.first.toFloat()..sliderMaximum.toFloat(), onValueChangeFinished = {
                 if (acceptsInput()) {
                     val accepted = sliding.roundToInt().coerceAtLeast(range.first)
                     draft = accepted.toString()
-                    onChange(accepted)
+                    invalid = false
+                    editor.pending = draft != selected?.toString().orEmpty()
                 }
             }, formatValue = { it.roundToInt().toString() + " " + unit },
                 modifier = Modifier.fillMaxWidth().semantics { contentDescription = title + "滑块" })
@@ -700,12 +990,25 @@ private fun ExperienceTools(key: String, title: String, active: Boolean, detail:
 
 private fun experienceReadingCustom(value: ExperienceOverrides) =
     value.prefetchMode != PrefetchMode.SMART || value.ahead != null || value.behind != null ||
-        value.prefetchRequests != null || value.prefetchMiB != null || !value.crossChapter ||
-        value.readerRequests != null || value.resolveRequests != null || !value.browseWarmup
+        !value.crossChapter || !value.browseWarmup || value.decodedPrefetchPages != null || value.readerStatusPlacement != ReaderStatusPlacement.BOTTOM || runtimeModified(value.runtime, ExperienceRuntimeGroup.READING)
 
-private fun experienceDownloadCustom(value: ExperienceOverrides) =
-    value.downloadPages != null || value.sourcePages != null || value.chapters != null ||
-        !value.yieldToReading || !value.allowBackgroundDownloads
+private fun experienceParallelCustom(value: ExperienceOverrides) =
+    value.readerRequests != null || value.resolveRequests != null || value.prefetchRequests != null ||
+        value.decodeRequests != null || value.downloadPages != null || value.sourcePages != null || value.chapters != null || runtimeModified(value.runtime, ExperienceRuntimeGroup.PARALLEL)
+
+private fun experienceDownloadCustom(value: ExperienceOverrides) = !value.yieldToReading || !value.allowBackgroundDownloads ||
+    runtimeModified(value.runtime, ExperienceRuntimeGroup.BACKGROUND)
+
+private fun experienceCacheCustom(value: ExperienceOverrides) = value.memoryMiB != null || value.diskMiB != null || value.prefetchMiB != null ||
+    value.contentCache != ContentCachePreferences() || !value.runtime.automaticCleanup || value.runtime.evictionOrder != CacheEvictionOrder.UNUSED_FIRST ||
+    runtimeModified(value.runtime, ExperienceRuntimeGroup.CACHE)
+
+private fun experienceSourceCustom(value: ExperienceOverrides) = value.sourceRecovery != null || value.standbySources != null ||
+    value.standbyMiB != null || value.standbyPages != 3 || !value.standbyMemoryWarmup ||
+    value.recovery != dev.mangaflow.reader.ReaderRecoveryPreferences() || runtimeModified(value.runtime, ExperienceRuntimeGroup.SOURCES)
+
+private fun experienceDeviceCustom(value: ExperienceOverrides) = value.allowMeteredPrefetch || !value.batteryProtection || value.refresh != null ||
+    value.refreshHz != null || runtimeModified(value.runtime, ExperienceRuntimeGroup.DEVICE)
 
 private fun sourceRecoveryLabel(value: SourceRecoveryMode) = when (value) {
     SourceRecoveryMode.OFF -> "按需切源"

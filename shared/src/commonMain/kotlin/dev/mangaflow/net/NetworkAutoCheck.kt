@@ -199,7 +199,7 @@ private class NetworkAutoScheduler(
         if (!engine.start()) return@withLock
         val runId = engine.state.value.runId
         schedule.started(now)
-        val finished = withTimeoutOrNull(270_000L) {
+        val finished = withTimeoutOrNull(dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.runtime.networkCheckTimeoutSeconds.toLong() * 1_000L + 30_000L) {
             engine.state.first { it.runId == runId && !it.running && !it.restoring }
         }
         var applied = 0
@@ -381,7 +381,7 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                     addAll(targets.filter { it.group == NetworkAutoGroup.DOWNLOADS })
                 }
                 try {
-                    withTimeout(240_000L) {
+                    withTimeout(dev.mangaflow.experience.ExperiencePolicyStore.get(app).state.value.runtime.networkCheckTimeoutSeconds.toLong() * 1_000L) {
                         coroutineScope {
                             ordered.flatMap { target -> MODES.map { mode -> async {
                                 val inspect: suspend () -> Unit = {

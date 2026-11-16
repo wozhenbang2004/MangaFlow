@@ -121,6 +121,11 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val preparations = ChapterPreparationStore(application, repository, downloads, scope, ::awaitSourcesReady)
 
     init {
+        dev.mangaflow.storage.StorageCacheStore.get(application).apply {
+            registerAuxiliaryOwner(browseCache.cacheOwner)
+            registerAuxiliaryOwner(metricsRepository.cacheOwner)
+            registerAuxiliaryOwner(siteRankingsRepository.cacheOwner)
+        }
         relayLink.start(scope)
         repository.setEnabledSources(bodySources.enabledSourceIds)
         scope.launch {

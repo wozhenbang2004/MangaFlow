@@ -54,6 +54,8 @@ import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
@@ -77,9 +79,18 @@ internal fun ReaderExperienceStatus(
     onOpenSources: (() -> Unit)? = null,
     onRetryStandby: ((String) -> Unit)? = null,
     onUseStandby: ((String) -> Unit)? = null,
+    repairedPages: Int = 0,
+    repairBusy: Boolean = false,
+    repairReason: String? = null,
+    onAlignPage: (() -> Unit)? = null,
+    onUndoPage: (() -> Unit)? = null,
+    onUndoSourceSwitch: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val custom by store.overrides.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    var changingSourceLock by remember(sessionKey) { mutableStateOf(false) }
+    var sourceLockError by remember(sessionKey) { mutableStateOf<String?>(null) }
     val motion = LocalMotionEnabled.current
     val placement = custom.readerStatusPlacement
     val shown = visible && placement != ReaderStatusPlacement.HIDDEN
@@ -96,6 +107,9 @@ internal fun ReaderExperienceStatus(
     val openSources by rememberUpdatedState(onOpenSources)
     val retryStandby by rememberUpdatedState(onRetryStandby)
     val useStandby by rememberUpdatedState(onUseStandby)
+    val alignPage by rememberUpdatedState(onAlignPage)
+    val undoPage by rememberUpdatedState(onUndoPage)
+    val undoSourceSwitch by rememberUpdatedState(onUndoSourceSwitch)
     SideEffect { reportInspection(popoverPresent || selected != null || showPolicy || pendingPolicy || pendingSources || pendingStandby != null) }
     DisposableEffect(Unit) { onDispose { reportInspection(false) } }
     LaunchedEffect(visible) {
@@ -121,13 +135,16 @@ internal fun ReaderExperienceStatus(
             action?.let { (kind, id) -> when (kind) {
                 StandbyAction.RETRY -> retryStandby?.invoke(id)
                 StandbyAction.USE -> useStandby?.invoke(id)
+                StandbyAction.ALIGN -> alignPage?.invoke()
+                StandbyAction.UNDO_PAGE -> undoPage?.invoke()
+                StandbyAction.UNDO_SOURCE -> undoSourceSwitch?.invoke()
             } }
         }
     }
     // Local cache sampling follows this indicator's presence; hidden readers do not poll it.
     LaunchedEffect(shown) {
         if (!shown) return@LaunchedEffect
-        while (true) { store.refreshCacheUsage(); delay(2_000L) }
+        while (true) { store.refreshCacheUsage(); delay(store.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L) }
     }
     val top = placement == ReaderStatusPlacement.TOP
     val clearance by animateDpAsState(
@@ -249,11 +266,54 @@ internal fun ReaderExperienceStatus(
                         standbys.any { it.failedPages > 0 || it.phase == ReaderSourceStandbyPhase.FAILED }) { toggle(ReaderWork.SOURCES) }
                     if (expandedWork == ReaderWork.SOURCES) {
                             StatusExplanation(sourceStatus.detail, error = sourceStatus.mark == ReaderStatusMark.ERROR)
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                if (onAlignPage != null) MotionTextButton(onClick = {
+                                    selected = null; pendingStandby = StandbyAction.ALIGN to ""
+                                }, enabled = selected != null, modifier = Modifier.heightIn(min = 44.dp)) {
+                                    Icon(Icons.Outlined.CropFree, null, Modifier.size(16.dp))
+                                    Text("对齐", Modifier.padding(start = 5.dp), style = MaterialTheme.typography.labelSmall)
+                                }
+                                if (repairBusy) MotionBusyIndicator(Modifier.padding(horizontal = 6.dp).size(14.dp), strokeWidth = 1.5.dp)
+                                if (repairedPages > 0) Text("补 $repairedPages", Modifier.weight(1f),
+                                    color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
+                                else Spacer(Modifier.weight(1f))
+                                if (onUndoPage != null) MotionIconButton(onClick = {
+                                    selected = null; pendingStandby = StandbyAction.UNDO_PAGE to ""
+                                }, enabled = selected != null, tooltip = "撤回当前单页替换") {
+                                    Icon(Icons.Outlined.RestorePage, "撤回当前单页替换", Modifier.size(18.dp))
+                                }
+                                if (onUndoSourceSwitch != null) MotionIconButton(onClick = {
+                                    selected = null; pendingStandby = StandbyAction.UNDO_SOURCE to ""
+                                }, enabled = selected != null, tooltip = "撤销整章切源，回到原来源原页") {
+                                    Icon(Icons.Outlined.Undo, "撤销整章切源", Modifier.size(18.dp))
+                                }
+                                MotionIconButton(onClick = {
+                                    if (!changingSourceLock) {
+                                        changingSourceLock = true; sourceLockError = null
+                                        val locked = !store.overrides.value.recovery.sourceLocked
+                                        scope.launch {
+                                            try { if (!store.setSourceLocked(locked)) sourceLockError = "来源锁定未保存，请重试" }
+                                            catch (cancel: CancellationException) { throw cancel }
+                                            catch (_: Exception) { sourceLockError = "来源锁定未保存，请重试" }
+                                            finally { changingSourceLock = false }
+                                        }
+                                    }
+                                }, enabled = selected != null && !changingSourceLock, tooltip = if (custom.recovery.sourceLocked)
+                                    "解除来源锁定，允许按策略自动补页和切源" else "锁定来源，暂停自动补页和切源") {
+                                    if (changingSourceLock) MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                                    else Icon(if (custom.recovery.sourceLocked) Icons.Outlined.Lock else Icons.Outlined.LockOpen,
+                                        if (custom.recovery.sourceLocked) "已锁定来源" else "来源未锁定", Modifier.size(18.dp),
+                                        tint = if (custom.recovery.sourceLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            sourceLockError?.let { StatusExplanation(it, error = true) }
+                            repairReason?.let { StatusExplanation(it) }
                             standbys.forEach { row ->
                                 StandbyDetails(row, expandedSource == row.variantId, selected != null,
                                     onToggle = { expandedSource = if (expandedSource == row.variantId) null else row.variantId },
                                     onRetry = if (onRetryStandby != null && !row.manifestQueued && !row.manifestActive &&
-                                        (row.phase == ReaderSourceStandbyPhase.FAILED || row.failedPages > 0)) ({
+                                        (row.phase in setOf(ReaderSourceStandbyPhase.FAILED, ReaderSourceStandbyPhase.DEFERRED) ||
+                                            row.failedPages > 0 || row.deferredPages > 0)) ({
                                         selected = null; pendingStandby = StandbyAction.RETRY to row.variantId
                                     }) else null,
                                     onUse = if (onUseStandby != null && row.targetOriginalPresent &&
@@ -268,7 +328,7 @@ internal fun ReaderExperienceStatus(
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
                                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 6.dp)) {
                                 Icon(Icons.Outlined.Layers, null, Modifier.size(16.dp))
-                                Text("选择备用来源", Modifier.padding(start = 6.dp).weight(1f),
+                                Text("整章来源", Modifier.padding(start = 6.dp).weight(1f),
                                     style = MaterialTheme.typography.labelSmall)
                                 Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp))
                             }
@@ -291,7 +351,7 @@ internal fun ReaderExperienceStatus(
                     }
                     if (showScope) {
                         StatusExplanation("并发数是本次阅读工作实际进入处理的任务或请求数，不是系统线程数。各项共享资源名额；小图准备含解码与本地核验。")
-                        StatusExplanation("缓存行统计共享解码内存与网络图片磁盘用量，不是进程总内存，也不代表整章离线。备用来源按相近位置准备，切换会进入整章来源，不会拼补同一页。")
+                        StatusExplanation("缓存行统计共享解码内存与网络图片磁盘用量。备用页按附近位置准备；确认画面后只替换这一页。自动补页只复用仍有效的精确对齐，多页真实失败后才按配置考虑整章切源。")
                         StatusValue("配置窗口", "前 ${budget.prefetchAhead} · 后 ${budget.prefetchBehind} 页")
                         StatusValue("备用配置", "${budget.standbySources} 源 · 每源 ${budget.standbyPages} 页")
                         StatusExplanation(budget.reason)
@@ -304,7 +364,7 @@ internal fun ReaderExperienceStatus(
 }
 
 private enum class ReaderStatusSection { PREPARATION, SOURCES, CACHE }
-private enum class StandbyAction { RETRY, USE }
+private enum class StandbyAction { RETRY, USE, ALIGN, UNDO_PAGE, UNDO_SOURCE }
 private enum class ReaderWork(val title: String, val icon: ImageVector) {
     RESOLVE("地址解析", Icons.Outlined.Link), ORIGINAL("原图准备", Icons.Outlined.Download),
     PREVIEW("小图准备", Icons.Outlined.Memory), SOURCES("多源备用", Icons.Outlined.Layers),
@@ -621,13 +681,13 @@ private fun StandbyDetails(row: ReaderSourceStandby, expanded: Boolean, enabled:
             Text("重试此来源", Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelSmall)
         }
         if (onUse != null) MotionTextButton(onUse, enabled = enabled, modifier = Modifier.heightIn(min = 44.dp)
-            .semantics { contentDescription = "切换到${row.sourceName}整章来源，按估算的相近位置续读，不是仅替换当前页" },
+            .semantics { contentDescription = "与${row.sourceName}的附近备用页对齐，确认后仅替换当前页" },
             contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)) {
             Icon(Icons.Outlined.Layers, null, Modifier.size(15.dp))
-            Text("切换整章来源", Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelSmall)
+            Text("对齐补页", Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelSmall)
         }
     }
-    if (onUse != null) StatusExplanation("按相近位置续读，不会只替换当前页")
+    if (onUse != null) StatusExplanation("附近位置是估算，先确认画面")
     if (expanded) {
         StatusValue(if (row.approximate) "估算位置" else "来源位置", row.targetPageIndex?.let {
             "${it + 1} / ${row.totalPages ?: "?"} 页"

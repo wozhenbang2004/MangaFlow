@@ -3,6 +3,8 @@ package dev.mangaflow.data.plugins
 import dev.mangaflow.net.observeRelayRoute
 
 import dev.mangaflow.data.SourceException
+import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.experience.imageTimeouts
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.net.DownloadRouteMode
@@ -40,12 +42,17 @@ import kotlin.math.ceil
 internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url: String,
     headers: Map<String, String>, route: DownloadRouteSnapshot?, onBytes: ((Long) -> Unit)?,
     onResponse: ((Int, Map<String, String>) -> Unit)?): ByteArray {
+    val configuration = ExperiencePolicyStore.get(context).state.value
+    val runtime = configuration.runtime
+    val timeouts = configuration.imageTimeouts()
+    val maxImageBytes = runtime.maxImageBytes
     var current = publicPluginUrl(url).toString().toHttpUrlOrNull() ?: error("来源图片地址无效。")
     val responseObserver = onResponse
     var actualHeaders = JvmScriptNetwork.checkedHeaders(JSONObject(headers)).filterKeys { !it.equals("Accept-Encoding", true) }
     val sockets = route?.let { publicSourceSocketFactory(it, JvmScriptNetwork::isPublic) }
     val client = JvmScriptNetwork.defaultClient.newBuilder().connectionPool(ConnectionPool()).dispatcher(Dispatcher())
-        .readTimeout(45, TimeUnit.SECONDS).callTimeout(30, TimeUnit.MINUTES)
+        .connectTimeout(timeouts.connectMillis, TimeUnit.MILLISECONDS)
+        .readTimeout(timeouts.idleMillis, TimeUnit.MILLISECONDS).callTimeout(timeouts.totalMillis, TimeUnit.MILLISECONDS)
         .apply { if (sockets != null) socketFactory(sockets) }.observeRelayRoute(route).build()
     try {
         repeat(4) { redirects ->
@@ -64,7 +71,7 @@ internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url:
                 // One winner between response headers and their deadline: waiting/received/expired.
                 val headerState = AtomicInteger(0)
                 val responseDeadline = CoroutineScope(requestContext).launch {
-                    delay(45_000L)
+                    delay(timeouts.idleMillis)
                     if (headerState.compareAndSet(0, 2)) call.cancel()
                 }
                 continuation.invokeOnCancellation { responseDeadline.cancel(); call.cancel() }
@@ -104,7 +111,8 @@ internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url:
                                     }, retryAfterSeconds = seconds, httpStatus = currentResponse.code)
                                 }
                                 val body = currentResponse.body ?: error("来源图片为空。")
-                                require(body.contentLength() <= MAX_SCRIPT_IMAGE_BYTES) { "来源图片超过 96 MiB。" }
+                                require(body.contentLength() <= maxImageBytes) { "来源图片超过配置的 ${runtime.maxImageMiB} MiB。" }
+                                require(body.contentLength() <= Int.MAX_VALUE.toLong()) { "来源图片超过平台数组容量。" }
                                 val output = ByteArrayOutputStream()
                                 body.byteStream().use { input ->
                                     val chunk = ByteArray(16_384)
@@ -112,7 +120,8 @@ internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url:
                                         val count = input.read(chunk)
                                         if (count < 0) break
                                         if (count == 0) continue
-                                        require(output.size().toLong() + count <= MAX_SCRIPT_IMAGE_BYTES) { "来源图片超过 96 MiB。" }
+                                        require(output.size().toLong() + count <= maxImageBytes) { "来源图片超过配置的 ${runtime.maxImageMiB} MiB。" }
+                                        require(output.size().toLong() + count <= Int.MAX_VALUE.toLong()) { "来源图片超过平台数组容量。" }
                                         onBytes?.invoke(count.toLong())
                                         output.write(chunk, 0, count)
                                     }
@@ -137,6 +146,5 @@ internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url:
     } finally { client.dispatcher.cancelAll(); client.connectionPool.evictAll(); client.dispatcher.executorService.shutdown() }
 }
 
-private const val MAX_SCRIPT_IMAGE_BYTES = 96L * 1024 * 1024
 private data class ScriptImageHttpResult(val code: Int, val location: String?, val bytes: ByteArray)
 private fun origin(url: HttpUrl) = "${url.scheme}://${url.host}:${url.port}"

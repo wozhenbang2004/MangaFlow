@@ -244,6 +244,40 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## OSHI device resource information
+
+Desktop resource information uses OSHI 6.12.0 (`com.github.oshi:oshi-core:6.12.0`),
+https://github.com/oshi/oshi/tree/oshi-parent-6.12.0 . OSHI is used for local CPU,
+memory and process observations; no device serial number or hardware identifier is
+stored or transmitted by this resource feature. Android and iOS use platform APIs.
+
+OSHI core/common are MIT licensed. Their normal JNA/JNA-platform 5.18.1 and SLF4J
+2.0.17 runtime dependencies retain the licenses/notices included in their artifacts;
+OSHI's optional jLibreHardwareMonitor dependency is not enabled. OSHI's original
+license at the pinned tag is reproduced below.
+
+MIT License
+
+Copyright (c) 2010-2023 The OSHI Project Contributors: https://github.com/oshi/oshi/graphs/contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## beUI motion roles and panel presence
 
 Shared press, icon-swap and panel motion in `ui/motion/MangaMotion.kt` is adapted from

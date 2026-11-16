@@ -10,6 +10,11 @@ import dev.mangaflow.platform.storage.*
 import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.experience.ContentCachePreferences
 import dev.mangaflow.experience.contentCachePreferences
+import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.storage.AuxiliaryCacheEntry
+import dev.mangaflow.storage.AuxiliaryCacheFiles
+import dev.mangaflow.storage.AuxiliaryDiskCacheOwner
+import dev.mangaflow.storage.StorageCacheStore
 import dev.mangaflow.storage.readManga
 import dev.mangaflow.storage.toJson
 import kotlinx.coroutines.Dispatchers
@@ -129,6 +134,29 @@ class SiteRankingsRepository(context: PlatformContext) {
     private val identityLock = Mutex()
     private val identityCache = linkedMapOf<String, RankedIdentity>()
     private var cacheEpoch = 0L
+    private val ownedFiles = AuxiliaryCacheFiles(directory) { CACHE_FILE.matches(it) }
+    private val automaticCleanup get() = ExperiencePolicyStore.get(cacheContext).state.value.runtime.automaticCleanup
+
+    internal val cacheOwner: AuxiliaryDiskCacheOwner = object : AuxiliaryDiskCacheOwner {
+        override val ownerId = "rankings"
+        override suspend fun snapshot(): List<AuxiliaryCacheEntry> = withContext(Dispatchers.IO) {
+            diskLock.withLock { ownedFiles.snapshot() }
+        }
+        override suspend fun remove(expected: AuxiliaryCacheEntry): Long? = withContext(Dispatchers.IO) {
+            var changed = false
+            try {
+                diskLock.withLock {
+                    if (ownedFiles.entry(expected.key, 0L, verifyBytes = true) != expected) return@withLock null
+                    cacheEpoch++
+                    changed = true
+                    // User-selected source associations and view-state preferences are not cache files.
+                    ownedFiles.removeReviewed(expected)
+                }
+            } finally {
+                if (changed) StorageCacheStore.get(cacheContext).cacheWorkFinished()
+            }
+        }
+    }
 
     private data class RankedIdentity(
         val titles: List<String>, val authors: List<String>, val ids: Map<String, String>, val fetchedAt: Long,
@@ -485,6 +513,7 @@ class SiteRankingsRepository(context: PlatformContext) {
             runCatching {
                 val file = cacheFile(selection)
                 if (!file.isFile || file.length() !in 1..MAX_CACHE_BYTES) return@runCatching null
+                if (StorageFile(file.path + ".bak").isFile) ownedFiles.changed(file.name)
                 val root = JSONObject(StorageAtomicFile(file).openRead().bufferedReader().use { it.readText() })
                 if (root.optInt("version") != 1 || root.getString("key") != selection.key) return@runCatching null
                 val fetchedAt = root.getLong("fetchedAt")
@@ -532,6 +561,7 @@ class SiteRankingsRepository(context: PlatformContext) {
             if (bytes.size > MAX_CACHE_BYTES) return@withLock
             directory.mkdirs()
             val file = StorageAtomicFile(cacheFile(snapshot.selection))
+            ownedFiles.changed(file.baseFile.name)
             val output = file.startWrite()
             try {
                 output.write(bytes)
@@ -544,12 +574,17 @@ class SiteRankingsRepository(context: PlatformContext) {
                 file.failWrite(output)
                 throw failure
             }
-            var total = 0L
-            directory.listFiles().orEmpty().filter { it.isFile }.sortedByDescending { it.lastModified() }
-                .forEachIndexed { index, item ->
-                    total += item.length()
-                    if (index >= 24 || total > 8L * 1024 * 1024) item.delete()
+            try {
+                if (automaticCleanup) {
+                    val policy = contentCachePolicy()
+                    var total = 0L
+                    ownedFiles.snapshot().sortedByDescending { it.modifiedAt }.forEach { item ->
+                        total += item.bytes
+                        if (total > policy.snapshotDiskMiB * 1_048_576L ||
+                            wallTimeMillis() - item.modifiedAt > policy.retentionMillis) ownedFiles.removeReviewed(item)
+                    }
                 }
+            } finally { StorageCacheStore.get(cacheContext).cacheWorkFinished() }
         }
     }
 
@@ -559,11 +594,18 @@ class SiteRankingsRepository(context: PlatformContext) {
     suspend fun cacheGeneration(): Long = diskLock.withLock { cacheEpoch }
     suspend fun clearCache() = withContext(Dispatchers.IO) {
         identityLock.withLock { identityCache.clear() }
-        diskLock.withLock {
-            cacheEpoch++
-            val failures = directory.listFiles().orEmpty().count { it.isFile && !it.delete() }
-            check(failures == 0) { "部分榜单缓存未能清理，请重试。" }
-        }
+        try {
+            diskLock.withLock {
+                cacheEpoch++
+                val failures = directory.listFiles().orEmpty().count {
+                    if (!it.isFile) false else {
+                        ownedFiles.keyForFile(it.name)?.let(ownedFiles::changed)
+                        !it.delete()
+                    }
+                }
+                check(failures == 0) { "部分榜单缓存未能清理，请重试。" }
+            }
+        } finally { StorageCacheStore.get(cacheContext).cacheWorkFinished() }
     }
 
     private fun cacheFile(selection: SiteRankingSelection): StorageFile =
@@ -587,6 +629,7 @@ class SiteRankingsRepository(context: PlatformContext) {
         throw SourceException(site.title + " 榜单数据格式已变化，请重试。", site.home)
 
     private companion object {
+        val CACHE_FILE = Regex("[a-f0-9]{64}\\.json")
         const val MAX_CACHE_BYTES = 1024L * 1024
         const val ANILIST_IDENTITY_QUERY = """
             query MangaFlowRankingIdentity(${'$'}mal: Int!) {

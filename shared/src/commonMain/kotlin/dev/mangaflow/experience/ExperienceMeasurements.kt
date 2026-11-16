@@ -3,6 +3,7 @@ package dev.mangaflow.experience
 import kotlinx.serialization.json.*
 import kotlin.math.ceil
 import dev.mangaflow.net.retryAfterMillis
+import dev.mangaflow.reader.ReaderRecoveryPreferences
 
 internal fun encodeExperienceOverrides(o: ExperienceOverrides) = buildJsonObject {
     put("prefetch", o.prefetchMode.name)
@@ -23,6 +24,16 @@ internal fun encodeExperienceOverrides(o: ExperienceOverrides) = buildJsonObject
     put("standbyPages", o.standbyPages); put("standbyMemory", o.standbyMemoryWarmup)
     o.standbyMiB?.let { put("standbyMiB", it) }
     put("readerStatus", o.readerStatusPlacement.name)
+    put("runtime", o.runtime.toJson())
+    put("recovery", buildJsonObject {
+        val r = o.recovery
+        put("autoRepair", r.autoRepair); put("autoSwitch", r.autoSwitch); put("sourceLocked", r.sourceLocked)
+        put("consecutiveFailures", r.consecutiveFailures); put("failureWindow", r.failureWindow)
+        put("failuresInWindow", r.failuresInWindow); put("switchCooldownSeconds", r.switchCooldownSeconds)
+        put("standbyRetryCount", r.standbyRetryCount); put("standbyRetryDelaySeconds", r.standbyRetryDelaySeconds)
+        put("manifestTimeoutSeconds", r.manifestTimeoutSeconds); put("imageTimeoutSeconds", r.imageTimeoutSeconds)
+        put("slowLoadSeconds", r.slowLoadSeconds)
+    })
     put("contentCache", buildJsonObject {
         val c = o.contentCache
         put("storage", c.storage.name); put("open", c.refreshOnOpen)
@@ -56,6 +67,24 @@ internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = ru
         standbyMemoryWarmup = bool("standbyMemory", true),
         readerStatusPlacement = ReaderStatusPlacement.entries.firstOrNull { it.name == json["readerStatus"]?.jsonPrimitive?.content }
             ?: ReaderStatusPlacement.BOTTOM,
+        runtime = runtimePreferencesFromJson(json["runtime"] as? JsonObject),
+        recovery = (json["recovery"] as? JsonObject)?.let { r ->
+            val d = ReaderRecoveryPreferences()
+            fun number(key: String, default: Int) = r[key]?.jsonPrimitive?.intOrNull ?: default
+            fun flag(key: String, default: Boolean) = r[key]?.jsonPrimitive?.booleanOrNull ?: default
+            ReaderRecoveryPreferences(
+                autoRepair = flag("autoRepair", d.autoRepair), autoSwitch = flag("autoSwitch", d.autoSwitch),
+                sourceLocked = flag("sourceLocked", d.sourceLocked),
+                consecutiveFailures = number("consecutiveFailures", d.consecutiveFailures),
+                failureWindow = number("failureWindow", d.failureWindow), failuresInWindow = number("failuresInWindow", d.failuresInWindow),
+                switchCooldownSeconds = number("switchCooldownSeconds", d.switchCooldownSeconds),
+                standbyRetryCount = number("standbyRetryCount", d.standbyRetryCount),
+                standbyRetryDelaySeconds = number("standbyRetryDelaySeconds", d.standbyRetryDelaySeconds),
+                manifestTimeoutSeconds = number("manifestTimeoutSeconds", d.manifestTimeoutSeconds),
+                imageTimeoutSeconds = number("imageTimeoutSeconds", d.imageTimeoutSeconds),
+                slowLoadSeconds = number("slowLoadSeconds", d.slowLoadSeconds),
+            ).checked()
+        } ?: ReaderRecoveryPreferences(),
         contentCache = json["contentCache"]?.jsonObject?.let { c ->
             val defaults = ContentCachePreferences()
             fun number(key: String, default: Int) = c[key]?.jsonPrimitive?.intOrNull ?: default
@@ -157,6 +186,8 @@ internal class ExperienceMeasurements {
         requestP95Millis = request95, transferredBytes = transferBytes, transferMillis = transferMillis,
         decodeP95Millis = percentile(decodeDurations, .95), decodeQueueP95Millis = percentile(decodeQueues, .95),
         decodedBytes = decodedBytes, optionalDecodes = optionalDecodes,
+        decodedPageP90Bytes = percentile(decodedSizes, .9), decodedPageMaxBytes = decodedSizes.maxOrNull(),
+        decodedSampleCount = decodedSizes.size,
         frameP95Millis = frame95, frameP99Millis = frame99,
     )
     private fun percentile(values: Collection<Long>, fraction: Double): Long? =

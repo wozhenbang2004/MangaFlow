@@ -7,6 +7,7 @@ import dev.mangaflow.experience.readerPageCacheKey
 import dev.mangaflow.experience.readerPreviewSize
 import dev.mangaflow.experience.ReaderTransferObserver
 import dev.mangaflow.experience.readerTransferProgress
+import dev.mangaflow.experience.ExperiencePolicyStore
 
 import androidx.compose.animation.core.SnapSpec
 import androidx.compose.foundation.Canvas
@@ -15,6 +16,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -90,6 +92,8 @@ internal fun PanelCamera(
     onSelectPanel: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
+    val experience = remember(context) { ExperiencePolicyStore.get(context) }
+    val budget by experience.state.collectAsState()
     val cacheIdentity = remember(page, headers, sourceId) { readerPageCacheKey(page, headers, sourceId) }
     val viewportChanged by rememberUpdatedState(onViewportChanged)
     val motion = LocalMotionEnabled.current
@@ -148,8 +152,9 @@ internal fun PanelCamera(
         }
     }
 
-    val request = remember(cacheIdentity, viewport, context, transferObserver) {
-        val preview = readerPreviewSize(viewport.width, viewport.height)
+    val preview = readerPreviewSize(viewport.width, viewport.height,
+        maxWidthPx = budget.runtime.previewWidthPx, maxHeightPx = budget.runtime.previewHeightPx)
+    val request = remember(cacheIdentity, preview, context, transferObserver, bypassFailedCache) {
         readerPageRequest(context, page, headers, sourceId)
             .apply { transferObserver?.let { readerTransferProgress(it) } }
             .apply { if (bypassFailedCache && page.url.startsWith("https:")) {

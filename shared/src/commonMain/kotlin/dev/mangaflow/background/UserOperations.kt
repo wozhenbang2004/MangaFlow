@@ -72,8 +72,7 @@ internal class StorageCleanupFailure(val result: StorageCleanupResult) :
 /** The reviewed exact identities remain authoritative; deletion rechecks their live protection. */
 internal fun ApplicationOperations.clearStorageCache(
     store: StorageCacheStore, imageLoader: ImageLoader, items: List<StoredCacheItem>,
-    clearLegacy: Boolean, clearData: Boolean,
-    clearBrowse: suspend () -> Unit, clearMetadata: suspend () -> Unit,
+    clearLegacy: Boolean, legacyRevision: Long?, legacyStamp: String?,
 ): ApplicationOperationHandle<StorageCleanupResult> {
     val reviewed = items.toList()
     return submit(UserOperationKeys.CACHE, ApplicationOperationKind.CACHE_CLEAR, "清理缓存") {
@@ -82,7 +81,7 @@ internal fun ApplicationOperations.clearStorageCache(
         var failed = 0
         var accountingComplete = false
         try {
-            val result = store.clear(reviewed, clearLegacy)
+            val result = store.clear(reviewed, clearLegacy, legacyRevision, legacyStamp)
             freed += result.freedBytes
             skipped += result.skipped
             failed += result.failed
@@ -94,17 +93,7 @@ internal fun ApplicationOperations.clearStorageCache(
                         it.key.removePrefix("manga-cover:") in result.removedKeys }.forEach { memory.remove(it) }
                 }
             }
-            if (clearData) {
-                val before = store.snapshot()
-                accountingComplete = false
-                try { clearBrowse(); clearMetadata() }
-                finally {
-                    val after = store.snapshot()
-                    freed += ((before.auxiliaryBytes + before.catalogBytes) -
-                        (after.auxiliaryBytes + after.catalogBytes)).coerceAtLeast(0L)
-                    accountingComplete = true
-                }
-            }
+
         } catch (cancel: kotlinx.coroutines.CancellationException) {
             throw cancel
         } catch (_: Exception) {

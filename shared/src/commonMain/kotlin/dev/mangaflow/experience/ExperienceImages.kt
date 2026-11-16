@@ -53,7 +53,8 @@ import kotlinx.coroutines.withContext
 import okio.*
 
 internal class ExperienceNetworkTransport(val client: NetworkClient, val close: () -> Unit)
-internal expect fun createExperienceNetworkClient(route: DownloadRouteSnapshot? = null): ExperienceNetworkTransport
+internal expect fun createExperienceNetworkClient(route: DownloadRouteSnapshot? = null,
+    timeouts: ExperienceImageTimeouts = ExperienceImageTimeouts()): ExperienceNetworkTransport
 internal enum class ExperienceImageWork { VISIBLE, READER, PREFETCH }
 private val workKey = Extras.Key(ExperienceImageWork.VISIBLE)
 private val bytesKey = Extras.Key<PrefetchByteBudget?>(null)
@@ -61,6 +62,12 @@ private val sourceKey = Extras.Key<String?>(null)
 private val workTokenKey = Extras.Key<PrefetchWork?>(null)
 private val readerTransferKey = Extras.Key<ReaderTransferObserver?>(null)
 private val cacheOnlyKey = Extras.Key(false)
+
+/** Includes the transport veto, so an expired disk entry cannot silently fetch a comparison image. */
+internal fun ImageRequest.Builder.readerCacheOnly() = apply {
+    extras[cacheOnlyKey] = true
+    networkCachePolicy(CachePolicy.DISABLED)
+}
 
 /** Only successfully written body bytes advance this monotonic foreground inactivity clock. */
 internal data class ReaderTransferSnapshot(
@@ -256,8 +263,10 @@ internal fun readerPageRequest(
 }
 
 /** Preview-only bound; original-file dimensions and full-detail tiles are never reduced. */
-internal fun readerPreviewSize(widthPx: Int, heightPx: Int): IntSize =
-    IntSize(widthPx.coerceIn(1, 1600), heightPx.coerceIn(1, 4096))
+internal fun readerPreviewSize(widthPx: Int, heightPx: Int, maxWidthPx: Int = 1600,
+    maxHeightPx: Int = 4096): IntSize =
+    IntSize(widthPx.coerceIn(1, maxWidthPx.coerceAtLeast(1)),
+        heightPx.coerceIn(1, maxHeightPx.coerceAtLeast(1)))
 
 internal data class OriginalPagePrefetchResult(
     val received: Boolean,
@@ -338,7 +347,8 @@ internal suspend fun inspectReaderPreparedArtifacts(
             }
         }
         val present = bytes != null && bytes > 0L && readerImageDimensions(loader, page,
-            diskCacheKey ?: readerPageCacheKey(page, headers, source), refresh = true) != null
+            diskCacheKey ?: readerPageCacheKey(page, headers, source), refresh = true,
+            runtime = ExperiencePolicyStore.get(context).state.value.runtime) != null
         ReaderPreparedArtifacts(present, bytes?.takeIf { present }, preview)
     } catch (cancelled: CancellationException) { throw cancelled }
     catch (_: Exception) { ReaderPreparedArtifacts(null, null, preview) }
@@ -357,10 +367,14 @@ internal suspend fun preflightReaderPage(
     context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
     viewportWidthPx: Int, viewportHeightPx: Int, diskCacheKey: String? = null,
     warmMemory: Boolean = true, work: PrefetchWork = PrefetchWork(),
+    maxWidthPx: Int? = null, maxHeightPx: Int? = null,
 ): ReaderPagePreflight {
+    val runtime = ExperiencePolicyStore.get(context).state.value.runtime
+    val previewWidth = maxWidthPx ?: runtime.previewWidthPx
+    val previewHeight = maxHeightPx ?: runtime.previewHeightPx
     if (!warmMemory) return inspectReaderPage(context, page, headers, source,
-        viewportWidthPx, viewportHeightPx, diskCacheKey, false, work)
-    val size = readerPreviewSize(viewportWidthPx, viewportHeightPx)
+        viewportWidthPx, viewportHeightPx, diskCacheKey, false, work, previewWidth, previewHeight)
+    val size = readerPreviewSize(viewportWidthPx, viewportHeightPx, previewWidth, previewHeight)
     val key = WarmPreviewKey(readerPageCacheKey(page, headers, source), Size(size.width, size.height))
     var owner = false
     val flight = synchronized(warmPreviewLock) {
@@ -372,7 +386,7 @@ internal suspend fun preflightReaderPage(
     }
     try {
         return inspectReaderPage(context, page, headers, source, viewportWidthPx, viewportHeightPx,
-            diskCacheKey, true, work).also { flight.done.complete(it) }
+            diskCacheKey, true, work, previewWidth, previewHeight).also { flight.done.complete(it) }
     } finally {
         // Cancellation/missing resources release waiters without poisoning this page or source.
         flight.done.complete(ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED))
@@ -396,7 +410,7 @@ private suspend fun awaitWarmReaderPreview(request: ImageRequest, size: Size) {
 private suspend fun inspectReaderPage(
     context: PlatformContext, page: Page, headers: Map<String, String>, source: String,
     viewportWidthPx: Int, viewportHeightPx: Int, diskCacheKey: String? = null,
-    warmMemory: Boolean = true, work: PrefetchWork = PrefetchWork(),
+    warmMemory: Boolean, work: PrefetchWork, maxWidthPx: Int, maxHeightPx: Int,
 ): ReaderPagePreflight {
     val policy = ExperiencePolicyStore.get(context)
     if (warmMemory && !policy.canDecodePrefetch() && !work.isForeground)
@@ -416,13 +430,13 @@ private suspend fun inspectReaderPage(
     if (retainedBytes == null) return ReaderPagePreflight(ReaderPagePreflightStatus.UNVERIFIED, diskCacheKey = key)
     if (retainedBytes <= 0L) return ReaderPagePreflight(ReaderPagePreflightStatus.FAILED,
         diskCacheKey = key, failure = IOException("预取图片为空"))
-    val dimensions = try { readerImageDimensions(loader, page, key, refresh = true) }
+    val dimensions = try { readerImageDimensions(loader, page, key, refresh = true, runtime = policy.state.value.runtime) }
     catch (_: OutOfMemoryError) { return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, diskCacheKey = key) }
     currentCoroutineContext().ensureActive()
     if (!warmMemory) return ReaderPagePreflight(ReaderPagePreflightStatus.UNVERIFIED, dimensions, key)
     if (!policy.canDecodePrefetch() && !work.isForeground)
         return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, dimensions, key)
-    val size = readerPreviewSize(viewportWidthPx, viewportHeightPx)
+    val size = readerPreviewSize(viewportWidthPx, viewportHeightPx, maxWidthPx, maxHeightPx)
     // Keep room for the visible spread and its detail tiles. Never shrink a warm preview to
     // a different quality/key just to make it fit: the foreground request owns that decision.
     val estimatedPixels = dimensions?.let { original ->
@@ -575,6 +589,32 @@ private class ExperienceImageEvents(
 private class ExperienceImageNetworkClient(
     private val delegate: ExperienceNetworkTransport, private val policy: ExperiencePolicyStore,
 ) : NetworkClient {
+    private class SystemTransport(val value: ExperienceNetworkTransport, val timeouts: ExperienceImageTimeouts) {
+        var users = 0
+        var retired = false
+    }
+    private val transportLock = StorageLock()
+    private var systemTransport = SystemTransport(delegate, ExperienceImageTimeouts())
+
+    private fun acquireSystem(timeouts: ExperienceImageTimeouts): Pair<ExperienceNetworkTransport, () -> Unit> {
+        val slot = synchronized(transportLock) {
+            if (systemTransport.timeouts != timeouts) {
+                val previous = systemTransport
+                val replacement = SystemTransport(createExperienceNetworkClient(timeouts = timeouts), timeouts)
+                previous.retired = true
+                systemTransport = replacement
+                if (previous.users == 0) previous.value.close()
+            }
+            systemTransport.also { it.users++ }
+        }
+        return slot.value to {
+            synchronized(transportLock) {
+                slot.users--
+                if (slot.retired && slot.users == 0) slot.value.close()
+            }
+        }
+    }
+
     override suspend fun <T> executeRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
         // A cache-only inspection must never claim a source slot or start HTTP.
         if (request.extras[cacheOnlyKey] == true) throw PrefetchCacheUnavailable()
@@ -616,9 +656,11 @@ private class ExperienceImageNetworkClient(
         var interrupted = false
         val selectedRoute = request.extras[sourceKey]?.let { DownloadRoutingStore.activeSourceSnapshot(it) }
             ?: DownloadRoutingStore.activeDefaultSnapshot()
-        val owned = selectedRoute.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let(::createExperienceNetworkClient)
+        val timeouts = policy.state.value.imageTimeouts()
+        val owned = selectedRoute.takeIf { it.mode != DownloadRouteMode.SYSTEM }?.let { createExperienceNetworkClient(it, timeouts) }
+        val system = if (owned == null) acquireSystem(timeouts) else null
         try {
-            return (owned?.client ?: delegate.client).executeRequest(request) responseBlock@{ response ->
+            return (owned?.client ?: requireNotNull(system).first.client).executeRequest(request) responseBlock@{ response ->
                 code = response.code
                 retry = response.headers["Retry-After"]
                 val body = response.body
@@ -687,6 +729,7 @@ private class ExperienceImageNetworkClient(
             throw failure
         } finally {
             owned?.close?.invoke()
+            system?.second?.invoke()
             if (accepted > 0L) policy.releasePrefetchBytes(accepted)
             if (!completed) receipt?.close()
             // Cancellations and local budget stops do not count as a slow/failing source.

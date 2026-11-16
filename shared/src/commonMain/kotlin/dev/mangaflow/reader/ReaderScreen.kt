@@ -4,6 +4,7 @@ import dev.mangaflow.typography.MangaFontScene
 import dev.mangaflow.ui.mangaFontFamily
 import dev.mangaflow.ui.chapterGroupLabel
 import dev.mangaflow.ui.mangaNumberText
+import dev.mangaflow.ui.ChapterSourceLogo
 
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.data.ReaderSourceStandby
@@ -251,6 +252,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -294,6 +296,10 @@ fun ReaderScreen(
     nextChapterPreparation: dev.mangaflow.data.ReaderNextChapterPreparation? = null,
     onWarmSourceStandbys: (Chapter, Int, Int) -> Unit = { _, _, _ -> },
     onRetryStandby: (Chapter, String) -> Unit = { _, _ -> },
+    onRescueSourceStandbys: (Chapter, Boolean) -> Unit = { _, _ -> },
+    onVerifiedSourceSwitch: (Chapter, ChapterVariant, Int, String) -> Unit = { _, _, _, _ -> },
+    canUndoSourceSwitch: Boolean = false,
+    onUndoSourceSwitch: () -> Unit = {},
     onPrefetchPageFailed: (Chapter, Page) -> Unit = { _, _ -> },
     onCancelSourceStandbys: () -> Unit = {},
 ) {
@@ -351,11 +357,6 @@ fun ReaderScreen(
     var currentPageRetrySerial by remember(chapterId) { mutableIntStateOf(0) }
     var currentPageRetryIndex by remember(chapterId) { mutableIntStateOf(-1) }
     var pages by remember(chapterId) { mutableStateOf<List<Page>>(emptyList()) }
-    // Backup images change only this displayed session, not the canonical chapter or history.
-    val pageRepairs = remember(chapterId, chapter.sourceId, chapter.sourceMangaId) {
-        mutableStateMapOf<Int, ReaderPageRepair>()
-    }
-    var repairTarget by remember(chapterId) { mutableStateOf<Int?>(null) }
     var loading by remember(chapterId) { mutableStateOf(true) }
     var error by remember(chapterId) { mutableStateOf<String?>(null) }
     val chapterLoadAttempt = remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId,
@@ -441,6 +442,7 @@ fun ReaderScreen(
     val openPreviousChapter: (() -> Unit)? = previousChapter?.let { previous ->
         {
             if (active && !leavingReader && !sourcePickerBlocking && !chapterChangeRequested && chapterId == chapter.id) {
+                onCancelSourceSelection()
                 chapterChangeRequested = true
                 chapterId = previous.id
                 controlsVisible = true
@@ -450,6 +452,7 @@ fun ReaderScreen(
     val openNextChapter: (() -> Unit)? = nextChapter?.let { next ->
         {
             if (active && !leavingReader && !sourcePickerBlocking && !chapterChangeRequested && chapterId == chapter.id) {
+                onCancelSourceSelection()
                 chapterChangeRequested = true
                 chapterId = next.id
                 controlsVisible = true
@@ -486,12 +489,6 @@ fun ReaderScreen(
         warmSourceStandbys(chapter, pageIndex.coerceIn(pages.indices), pages.size)
     }
     val latestReadingIdentity by rememberUpdatedState(manga.id to sourceIdentity)
-    val reportPrefetchFailure = remember(manga.id, sourceIdentity) {
-        { page: Page ->
-            if (latestReadingIdentity == (manga.id to sourceIdentity) && pages.any { it == page })
-                prefetchedPageFailed(chapter, page)
-        }
-    }
     var headers by remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, repository, localImport) {
         mutableStateOf(if (localImport) emptyMap() else
             repository.imageHeaders(chapterSourceMangaId(manga.id, chapter), chapterId).toMap())
@@ -535,11 +532,12 @@ fun ReaderScreen(
                 val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, local, work = work)
                 val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved, onBytes = onBytes, work = work)
                 if (dev.mangaflow.data.SourceKeys.decodeChapter(owner, readingChapterId).sourceId == "jmcomic")
-                    if (work == null) experience.withImageAdmission(reader = true) {
-                        materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
+                    if (work == null) experience.withImageAdmission(reader = true, source = "jmcomic") {
+                        materializeJmPage(adultImageContext, owner, readingChapterId, materialized, onBytes = onBytes) ?: materialized
                     } else work.during(PrefetchStage.DOWNLOADING) {
-                        experience.withImageAdmission(reader = true, onWaiting = { work.admission(PrefetchStage.DOWNLOADING, it) }) {
-                            materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
+                        experience.withImageAdmission(reader = true, source = "jmcomic", onWaiting = { work.admission(PrefetchStage.DOWNLOADING, it) }) {
+                            materializeJmPage(adultImageContext, owner, readingChapterId, materialized,
+                                onBytes = { count -> onBytes?.invoke(count); work.onBytes(count) }) ?: materialized
                         }
                     }
                 else materialized
@@ -589,46 +587,82 @@ fun ReaderScreen(
             if (retried.url.startsWith("file:")) retried else {
                 val owner = chapterSourceMangaId(manga.id, chapter)
                 val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, retried, work = work)
-                val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved, onBytes = onBytes, work = work)
+                val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved,
+                    onBytes = onBytes, work = work, retry = true)
                 if (dev.mangaflow.data.SourceKeys.decodeChapter(owner, readingChapterId).sourceId == "jmcomic")
-                    if (work == null) experience.withImageAdmission(reader = true) {
-                        materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
+                    if (work == null) experience.withImageAdmission(reader = true, source = "jmcomic") {
+                        materializeJmPage(adultImageContext, owner, readingChapterId, materialized, onBytes = onBytes, retry = true) ?: materialized
                     } else work.during(PrefetchStage.DOWNLOADING) {
-                        experience.withImageAdmission(reader = true, onWaiting = { work.admission(PrefetchStage.DOWNLOADING, it) }) {
-                            materializeJmPage(adultImageContext, owner, readingChapterId, materialized) ?: materialized
+                        experience.withImageAdmission(reader = true, source = "jmcomic", onWaiting = { work.admission(PrefetchStage.DOWNLOADING, it) }) {
+                            materializeJmPage(adultImageContext, owner, readingChapterId, materialized,
+                                onBytes = { count -> onBytes?.invoke(count); work.onBytes(count) }, retry = true) ?: materialized
                         }
                     }
                 else materialized
             }
         }
     }
-    val repairSnapshot = pageRepairs.toMap()
-    val displayedPages = remember(pages, repairSnapshot) {
-        pages.mapIndexed { index, page ->
-            repairSnapshot[index]?.page?.takeIf { it.index == page.index } ?: page
+    val latestRepairActive by rememberUpdatedState(readerForeground && !leavingReader && !chapterChangeRequested)
+    val latestPrimaryPages by rememberUpdatedState(pages)
+    val repairDensity = LocalDensity.current
+    val repairViewportWidth = with(repairDensity) { readerWindow.width.roundToPx() }
+    val repairViewportHeight = with(repairDensity) { readerWindow.height.roundToPx() }
+    val repairs = remember(manga.id, sourceIdentity, pages, headers, repository, downloadStore) {
+        val ownedPages = pages
+        ReaderPageRepairController(adultImageContext, manga.id, chapter, ownedPages, headers,
+            repository, downloadStore, scope, repairViewportWidth, repairViewportHeight) {
+            latestReadingIdentity == (manga.id to sourceIdentity) && latestPrimaryPages === ownedPages && latestRepairActive
         }
     }
-    // Keep callbacks stable: AdjacentPagePrefetch observes their identity, and a fresh
-    // lambda on every reader recomposition would repeatedly cancel in-flight warmups.
-    val displayedResolve: ReaderPageResolver = remember(resolvePage) {
-        { page, onBytes -> if (page.sourceRouteId.isNotBlank()) page else resolvePage(page, onBytes) }
+    SideEffect { repairs.updatePresentation(chapter, repairViewportWidth, repairViewportHeight) }
+    val repairState by repairs.state.collectAsStateWithLifecycle()
+    val openPageRepair: (Int) -> Unit = remember(repairs, alternativeSources) {
+        { index ->
+            val variant = repairs.state.value.replacements[index]?.variant
+                ?.takeIf { selected -> alternativeSources.any { it.storageId == selected.storageId } }
+                ?: alternativeSources.firstOrNull()
+            if (variant != null) repairs.select(index, variant)
+        }
     }
-    val displayedRetry: ReaderPageResolver = remember(retryPage) {
-        { page, onBytes -> if (page.sourceRouteId.isNotBlank()) page else retryPage(page, onBytes) }
+    val rescueStandbys by rememberUpdatedState(onRescueSourceStandbys)
+    val rescuePages = remember(sourceIdentity) { mutableStateMapOf<Int, Boolean>() }
+    val verifiedSourceSwitch by rememberUpdatedState(onVerifiedSourceSwitch)
+    DisposableEffect(repairs) { onDispose { repairs.close() } }
+    LaunchedEffect(repairs, readerForeground) { if (!readerForeground) repairs.pause() }
+    LaunchedEffect(repairs, experienceBudget.recovery) {
+        if (experienceBudget.recovery.sourceLocked || !experienceBudget.recovery.autoRepair && !experienceBudget.recovery.autoSwitch)
+            repairs.suspendAutomatic()
     }
-    val displayedPrefetch: suspend (Page) -> Page? = remember(prefetchPage) {
-        { page -> if (page.sourceRouteId.isNotBlank()) page else prefetchPage(page) }
+    LaunchedEffect(repairs, repairState.busy, repairState.selection, pageIndex, readerForeground, experienceBudget.recovery) {
+        if (readerForeground && !repairState.busy && repairState.selection == null) repairs.recover(pageIndex)
     }
-    val displayedScriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page? =
-        remember(scriptPrefetch) {
-            { page, budget, work ->
-                if (page.sourceRouteId.isNotBlank()) page else scriptPrefetch(page, budget, work)
+    LaunchedEffect(repairs, readerForeground) {
+        if (!readerForeground) return@LaunchedEffect
+        while (true) {
+            repairs.inspectOwnership()
+            delay(experience.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L)
+        }
+    }
+    LaunchedEffect(repairState.switchReady, pageIndex, sourceIdentity, readerForeground, sourceLoading, sourcePickerBlocking,
+        leavingReader, chapterChangeRequested, experienceBudget.recovery.sourceLocked, experienceBudget.recovery.autoSwitch) {
+        if (repairState.switchReady == null) return@LaunchedEffect
+        if (readerForeground && !sourceLoading && !sourcePickerBlocking && !leavingReader && !chapterChangeRequested &&
+            !experience.state.value.recovery.sourceLocked && experience.state.value.recovery.autoSwitch) {
+            val ready = repairs.consumeSwitch(pageIndex) ?: return@LaunchedEffect
+            verifiedSourceSwitch(chapter, ready.variant, ready.alignment.targetIndex, ready.alignment.targetManifest)
+        }
+    }
+    LaunchedEffect(rescuePages.keys.toList(), readerForeground, sourceIdentity, standbyAvailability, sourceStandbys.isNotEmpty()) {
+        rescueStandbys(chapter, readerForeground && rescuePages.isNotEmpty())
+    }
+    DisposableEffect(sourceIdentity) { onDispose { rescueStandbys(chapter, false) } }
+    val reportPrefetchFailure = remember(manga.id, sourceIdentity, repairs) {
+        { page: Page ->
+            if (latestReadingIdentity == (manga.id to sourceIdentity) && pages.any { it == page }) {
+                prefetchedPageFailed(chapter, page)
+                repairs.failed(page.index)
+                repairs.recover(pageIndex)
             }
-        }
-    LaunchedEffect(storageCache, repairSnapshot) {
-        repairSnapshot.values.forEach { repair ->
-            storageCache.registerPages(manga.id, chapterId, repair.variant.sourceId,
-                listOf(repair.page), repair.headers)
         }
     }
     val motionEnabled = LocalMotionEnabled.current
@@ -663,9 +697,11 @@ fun ReaderScreen(
         chapterSlowLoading = false
         if (chapterWaitVisible && loading && error == null && chapterLoadAttempt.acceptsResult) {
             chapterWaitClock = TimeSource.Monotonic.markNow()
-            delay(READER_SLOW_LOAD_MILLIS)
+            val slow = experience.state.value.recovery.slowLoadSeconds.coerceAtLeast(1).toLong() * 1000L
+            val limit = experience.state.value.recovery.manifestTimeoutSeconds.coerceAtLeast(1).toLong() * 1000L
+            delay(minOf(slow, limit))
             chapterSlowLoading = true
-            delay(25_000L - READER_SLOW_LOAD_MILLIS)
+            delay((limit - slow).coerceAtLeast(0L))
             if (chapterWaitVisible && loading && error == null && latestChapterLoadAttempt === chapterLoadAttempt &&
                 chapterLoadAttempt.acceptsResult) {
                 chapterLoadAttempt.stopped = true
@@ -680,7 +716,8 @@ fun ReaderScreen(
     val clock = rememberReaderClock(active && !leavingReader)
     val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
         !panelBlocksReading && !showPanelModels && !showComments && !showSpreadAdjustment && !showPageNavigator &&
-        !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !readerStatusInspecting
+        !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !readerStatusInspecting &&
+        repairState.selection == null
     RecordReaderActivity(manga, readingEligible, libraryStore, chapterId) { owner, confirmedChapter ->
         if (owner == manga.id && confirmedChapter == chapterId && readingEligible) {
             recentConfirmed = true
@@ -780,7 +817,8 @@ fun ReaderScreen(
             downloadStore = downloadStore, loading = chaptersLoading, error = chaptersError, onRetry = onRetryChapters,
             embedded = embedded,
             onSelect = {
-                chapterId = it
+                onCancelSourceSelection()
+                if (it != chapterId) { chapterChangeRequested = true; chapterId = it }
                 if (!dockedPanels) showChapters = false
                 controlsVisible = true
                 keyboardFocusRestore++
@@ -789,8 +827,10 @@ fun ReaderScreen(
         )
     }
 
-    if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showPanelModels || showChapters || showSpreadAdjustment || showComments || sourcePickerBlocking, lightChrome)
-    val leaveReader = { leavingReader = true; onBack() }
+    ReaderPageRepairDialog(repairState, pages, headers, chapter.sourceId, alternativeSources, readerBackdrop, repairs)
+
+    if (active) ReaderWindow(preferences.keepScreenOn, controlsVisible || showSettings || showPanelModels || showChapters || showSpreadAdjustment || showComments || sourcePickerBlocking || repairState.selection != null, lightChrome)
+    val leaveReader = { onCancelSourceSelection(); leavingReader = true; onBack() }
     MotionBackHandler(enabled = active, onBack = leaveReader)
     LaunchedEffect(active) { leavingReader = !active }
     LaunchedEffect(initialChapterId) {
@@ -944,7 +984,10 @@ fun ReaderScreen(
         }.focusable(enabled = keyboardReady)
 
     CompositionLocalProvider(LocalReaderActionFinished provides { if (desktop) keyboardFocusRestore++ },
-        LocalReaderPreparationTracker provides preparationTracker) {
+        LocalReaderPreparationTracker provides preparationTracker,
+        LocalReaderPageRepair provides ReaderRepairRenderContext(repairState, repairs) { index, waiting ->
+            if (waiting) rescuePages[index] = true else rescuePages.remove(index)
+        }) {
     ReaderWorkspace(
         panelVisible = dockedPanels && (showSettings || showChapters),
         panelWidth = panelWidth,
@@ -995,19 +1038,16 @@ fun ReaderScreen(
                 pages.isNotEmpty() -> key(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles,
                     preferences.panelLayoutKey) {
                     if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
-                        pages = displayedPages, headers = headers,
-                        resolvePage = displayedResolve, retryPage = displayedRetry,
+                        pages = pages, headers = headers, resolvePage = resolvePage, retryPage = retryPage,
                         observePageTransfer = observePageTransfer,
-                        sourceId = chapter.sourceId, prefetchPage = displayedPrefetch, scriptPrefetch = displayedScriptPrefetch,
+                        sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
                         sourceName = currentSourceName.orEmpty(), sourceAlternatives = alternativeSources,
                         readySourceVariants = readySourceVariants, onPrefetchFailure = reportPrefetchFailure,
                         externalRetrySerial = currentPageRetrySerial,
                         onShowControls = { controlsVisible = true },
                         recoveryForeground = preferences.theme.foreground(),
-                        onQuickSwitch = { failedIndex, variant ->
-                            onQuickReadVariant(chapter, variant, failedIndex, pages.size)
-                        },
-                        onRepairPage = { index -> repairTarget = index },
+                        onQuickSwitch = { failedIndex, variant -> repairs.select(failedIndex, variant) },
+                        onRepairPage = openPageRepair,
                         onMoreSources = { anchor ->
                             sourceTriggerAnchor = anchor
                             sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
@@ -1034,25 +1074,24 @@ fun ReaderScreen(
                         onTap = { controlsVisible = !controlsVisible }, onNext = openNextChapter,
                         onDisable = { updatePreferences(preferences.copy(panelEngine = PanelEngine.OFF)) },
                         active = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
-                            !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking && !chapterChangeRequested,
+                            !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
+                            repairState.selection == null && !chapterChangeRequested,
                         backdrop = readerBackdrop,
                         bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
                     ) else ChapterPages(
-                        pages = displayedPages, sourceId = chapter.sourceId,
-                        prefetchPage = displayedPrefetch, scriptPrefetch = displayedScriptPrefetch,
+                        pages = pages, sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
                         headers = headers,
-                        resolvePage = displayedResolve,
-                        retryPage = displayedRetry,
+                        resolvePage = resolvePage,
+                        retryPage = retryPage,
                         observePageTransfer = observePageTransfer,
                         sourceAlternatives = alternativeSources,
                         readySourceVariants = readySourceVariants, onPrefetchFailure = reportPrefetchFailure,
                         sourceName = currentSourceName.orEmpty(),
                         onShowControls = { controlsVisible = true },
                         retryTargetIndex = currentPageRetryIndex, retryPulse = currentPageRetrySerial,
-                        onQuickSwitch = { failedIndex, variant ->
-                            onQuickReadVariant(chapter, variant, failedIndex, pages.size)
-                        },
-                        onRepairPage = { index -> repairTarget = index },
+                        nextChapterPages = experienceBudget.runtime.nextChapterPages,
+                        onQuickSwitch = { failedIndex, variant -> repairs.select(failedIndex, variant) },
+                        onRepairPage = openPageRepair,
                         onMoreSources = { anchor ->
                             sourceTriggerAnchor = anchor
                             sourceCloseRequested = false
@@ -1091,7 +1130,8 @@ fun ReaderScreen(
                             controlsVisible = !controlsVisible
                         },
                         active = readerForeground && !leavingReader && !panelBlocksReading &&
-                            !showSpreadAdjustment && !showComments && !sourcePickerBlocking && !chapterChangeRequested,
+                            !showSpreadAdjustment && !showComments && !sourcePickerBlocking &&
+                            repairState.selection == null && !chapterChangeRequested,
                         onAtEndChanged = { atChapterEnd = it },
                         onNext = openNextChapter,
                         onPrevious = openPreviousChapter,
@@ -1198,7 +1238,9 @@ fun ReaderScreen(
                         Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title,
-                            pageRepairs[pageIndex]?.let { "补页 · " + it.variant.sourceName + " " + (it.nativeIndex + 1) },
+                            repairState.replacements[pageIndex]?.let {
+                                "补页 · ${it.variant.sourceName} ${it.page.index + 1}"
+                            },
                             currentSourceName.takeIf { chapter.variants.size > 1 }).joinToString(" · "),
                             color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
@@ -1212,15 +1254,11 @@ fun ReaderScreen(
                             Text(if (preferences.doublePage) "双页" else "单页", color = colors.onSurface, fontSize = 12.sp)
                         }
                     }
-                    if (pageRepairs.containsKey(pageIndex)) {
+                    if (repairState.replacements.containsKey(pageIndex)) {
                         ReaderIcon(Icons.Rounded.Refresh, "恢复本页原图", interactive = controlsVisible,
-                            onClick = {
-                                pageRepairs.remove(pageIndex)
-                                currentPageRetryIndex = pageIndex
-                                currentPageRetrySerial++
-                            })
+                            onClick = { repairs.undo(pageIndex) })
                         ReaderIcon(Icons.Rounded.Tune, "调整本页备用来源与对齐", interactive = controlsVisible,
-                            onClick = { repairTarget = pageIndex })
+                            onClick = { openPageRepair(pageIndex) })
                     }
                     if (desktop) ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook,
                         if (showChapters) "收起章节目录" else "章节目录", interactive = controlsVisible,
@@ -1314,7 +1352,7 @@ fun ReaderScreen(
                                 currentPicture?.let { togglePicture(it.firstPage, it.lastPage) }
                             }
                             val openPrevious: () -> Unit = {
-                                siblings.getOrNull(chapterIndex - 1)?.let { chapterId = it.id }
+                                openPreviousChapter?.invoke()
                             }
                             val commentsLabel = if (localImport) "本地章节没有在线评论" else "本章评论"
                             var savingChapter by remember(chapterId) { mutableStateOf(false) }
@@ -1472,10 +1510,16 @@ fun ReaderScreen(
         ReaderExperienceStatus(
             visible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
                 !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
-                !chapterChangeRequested && !showReaderActions && !readerActionsPresent,
+                !chapterChangeRequested && !showReaderActions && !readerActionsPresent && repairState.selection == null,
             sessionKey = sourceIdentity, store = experience, budget = experienceBudget,
             standbys = currentSourceStandbys, alternativeCount = alternativeSources.size, backdrop = readerBackdrop,
             preparation = preparation,
+            repairedPages = repairState.replacements.size, repairBusy = repairState.busy, repairReason = repairState.reason,
+            onAlignPage = alternativeSources.firstOrNull()?.takeIf { pages.isNotEmpty() }?.let { variant ->
+                { repairs.select(pageIndex, repairState.replacements[pageIndex]?.variant ?: variant) }
+            },
+            onUndoPage = repairState.replacements[pageIndex]?.let { { repairs.undo(pageIndex) } },
+            onUndoSourceSwitch = onUndoSourceSwitch.takeIf { canUndoSourceSwitch },
             standbyAvailability = standbyAvailability.takeIf { it.workId == manga.id && it.chapterId == chapter.id }
                 ?: dev.mangaflow.data.ReaderSourceStandbyAvailability(),
             nextChapterPreparation = nextChapterPreparation?.takeIf {
@@ -1498,7 +1542,8 @@ fun ReaderScreen(
             onRetryStandby = { variantId ->
                 val failed = currentSourceStandbys.any { it.variantId == variantId &&
                     !it.manifestQueued && !it.manifestActive &&
-                    (it.phase == dev.mangaflow.data.ReaderSourceStandbyPhase.FAILED || it.failedPages > 0) }
+                    (it.phase in setOf(ReaderSourceStandbyPhase.FAILED, ReaderSourceStandbyPhase.DEFERRED) ||
+                        it.failedPages > 0 || it.deferredPages > 0) }
                 if (latestReadingIdentity == (manga.id to sourceIdentity) && readerForeground &&
                     failed && chapter.variants.any { it.storageId == variantId && it.storageId != chapter.id })
                     onRetryStandby(chapter, variantId)
@@ -1512,7 +1557,7 @@ fun ReaderScreen(
                     }
                     val variant = chapter.variants.firstOrNull { it.storageId == variantId && it.storageId != chapter.id }
                     if (prepared != null && variant != null)
-                        onQuickReadVariant(chapter, variant, pageIndex, pages.size)
+                        repairs.select(pageIndex, variant)
                 }
             },
         )
@@ -1540,19 +1585,6 @@ fun ReaderScreen(
     }
     }
     }
-    ReaderPageRepairDialog(
-        index = repairTarget, mainPageCount = pages.size, alternatives = alternativeSources,
-        repository = repository, backdrop = readerBackdrop,
-        onApply = { repaired ->
-            if (pages.getOrNull(repaired.primaryIndex) != null) {
-                pageRepairs[repaired.primaryIndex] = repaired
-                currentPageRetryIndex = repaired.primaryIndex
-                currentPageRetrySerial++
-            }
-            repairTarget = null
-        },
-        onDismiss = { repairTarget = null },
-    )
     ReaderPageNavigatorDialog(
         visible = showPageNavigator,
         pages = pages,
@@ -1655,12 +1687,12 @@ private fun ChapterPages(
     sourceAlternatives: List<ChapterVariant>,
     readySourceVariants: Map<String, ReaderSourceStandby>,
     onPrefetchFailure: (Page) -> Unit,
-    onRepairPage: (Int) -> Unit,
     sourceName: String,
     onShowControls: () -> Unit,
     retryTargetIndex: Int,
     retryPulse: Int,
     onQuickSwitch: (Int, ChapterVariant) -> Unit,
+    onRepairPage: (Int) -> Unit,
     onMoreSources: (Rect?) -> Unit,
     preferences: ReaderPreferences,
     manualSingles: Set<Int>,
@@ -1677,6 +1709,7 @@ private fun ChapterPages(
     longImagePosition: (Int) -> Float?,
     onVisibleImageChanged: (Boolean) -> Unit,
     onNearEnd: () -> Unit,
+    nextChapterPages: Int = 3,
     onTap: () -> Unit,
     active: Boolean,
     onAtEndChanged: (Boolean) -> Unit,
@@ -1753,7 +1786,7 @@ private fun ChapterPages(
             }
         }
         LaunchedEffect(dragging) { if (dragging) { restoring = false; readingNavigation() } }
-        LaunchedEffect(list, active) {
+        LaunchedEffect(list, active, nextChapterPages) {
             snapshotFlow {
                 val layout = list.layoutInfo
                 if (restoring) -1 else layout.visibleItemsInfo.lastOrNull { item ->
@@ -1764,7 +1797,7 @@ private fun ChapterPages(
             }.distinctUntilChanged().collect { index ->
                 visibleImageChanged(index >= 0)
                 if (index >= 0) {
-                    if (index >= pages.lastIndex - 3) nearEnd()
+                    if (nextChapterPages > 0 && index.toLong() >= pages.lastIndex.toLong() - nextChapterPages.toLong()) nearEnd()
                 }
             }
         }
@@ -1978,7 +2011,7 @@ private fun ChapterPages(
             snapshotFlow { groups.getOrNull(pager.settledPage)?.first ?: pages.lastIndex }
                 .distinctUntilChanged().collect { index -> save(index, 0) }
         }
-        LaunchedEffect(pager, groups, active) {
+        LaunchedEffect(pager, groups, active, nextChapterPages) {
             snapshotFlow {
                 groups.getOrNull(pager.currentPage)?.let { group ->
                     if (loadedPages[group.first] == pages[group.first].url ||
@@ -1988,7 +2021,7 @@ private fun ChapterPages(
             }.distinctUntilChanged().collect { lastVisible ->
                 visibleImageChanged(lastVisible >= 0)
                 if (lastVisible >= 0) {
-                    if (lastVisible >= pages.lastIndex - 3) nearEnd()
+                    if (nextChapterPages > 0 && lastVisible.toLong() >= pages.lastIndex.toLong() - nextChapterPages.toLong()) nearEnd()
                 }
             }
         }
@@ -2103,6 +2136,7 @@ private data class PrefetchWindow(
     val position: Float, val bytes: Long, val parallel: Int, val decoded: Int,
     val viewport: IntSize, val checking: Set<Int>, val resolving: Set<Int>, val resolved: Set<Int>,
     val resolveParallel: Int, val decodeParallel: Int, val decodeEnabled: Boolean, val foregroundActive: Boolean,
+    val runtime: ExperienceRuntimePreferences,
 )
 
 private data class PrefetchedReaderPage(val page: Page, val diskCacheKey: String?)
@@ -2162,7 +2196,7 @@ internal fun AdjacentPagePrefetch(
         val resolutionJobs = mutableStateMapOf<Int, Job>()
         val resolutionTokens = mutableMapOf<Int, PrefetchWork>()
         val originalFinished = mutableSetOf<Int>()
-        val retryAttempts = mutableMapOf<Pair<Int, PrefetchStage>, Int>()
+        val retryAttempts = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
         val retryAfter = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
         val resourceDeferred = mutableSetOf<Pair<Int, PrefetchStage>>()
         var recoveryKey: PrefetchRecoveryKey? = null
@@ -2188,12 +2222,18 @@ internal fun AdjacentPagePrefetch(
             val reason = readerPrefetchErrorLabel(failure)
             end(index, stage, if (sourceFailure) ReaderPreparationPhase.FAILED else ReaderPreparationPhase.DEFERRED, reason)
             if (sourceFailure) { resourceDeferred -= key; pageFailed(index, reason) } else resourceDeferred += key
-            val attempts = (retryAttempts[key] ?: 0) + 1
+            val attempts = (retryAttempts[key] ?: 0L) + 1L
             retryAttempts[key] = attempts
-            // Three attempts per page/stage in this live window. A real resource recovery
-            // may resume local deferrals; ticking alone cannot cause endless requests.
-            if (attempts < 3) retryAfter[key] = monotonicTimeMillis() + if (attempts == 1) 2_000L else 8_000L
-            else retryAfter.remove(key)
+            // Local protection is not a source retry. It resumes only after a real budget change;
+            // real failures have the user's finite extra attempts within this exact live window.
+            val runtime = currentBudget.runtime
+            if (sourceFailure && attempts <= runtime.prefetchRetries.coerceAtLeast(0).toLong()) {
+                val base = runtime.prefetchRetryBaseSeconds.coerceAtLeast(1).toLong()
+                val maximum = runtime.prefetchRetryMaxSeconds.coerceAtLeast(1).toLong()
+                val exponent = (attempts - 1L).coerceIn(0L, 31L).toInt()
+                val scaled = (base * (1L shl exponent)).coerceAtMost(maximum)
+                retryAfter[key] = monotonicTimeMillis() + scaled * 1000L
+            } else retryAfter.remove(key)
         }
         val scriptRequests = mutableStateMapOf<Int, Job>()
         val checks = mutableStateMapOf<Int, Job>()
@@ -2245,7 +2285,7 @@ internal fun AdjacentPagePrefetch(
                     }
                 }
                 val now = monotonicTimeMillis()
-                if (now - cacheAt >= 2_000L) {
+                if (now - cacheAt >= currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L) {
                     cacheAt = now
                     for (index in inspectTargets - inspectVisible) {
                         val retained = retainedPages[index]
@@ -2270,13 +2310,17 @@ internal fun AdjacentPagePrefetch(
                     currentBudget.adjacentPrefetchBytes, currentBudget.prefetchRequests,
                     currentBudget.decodedPrefetchPages, IntSize(currentViewportWidth(), viewportHeight),
                     checks.keys.toSet(), resolutionJobs.keys.toSet(), resolvedPages.keys.toSet(),
-                    currentBudget.resolveRequests, currentBudget.decodeRequests, experience.canDecodePrefetch(), readerActive)
+                    currentBudget.resolveRequests, currentBudget.decodeRequests, experience.canDecodePrefetch(), readerActive,
+                    currentBudget.runtime)
             }.distinctUntilChanged().combine(snapshotFlow {
                 prefetchEnabled && (currentBudget.prefetchBytes > 0L ||
                     currentBudget.decodedPrefetchPages > 0 && experience.canDecodePrefetch())
             }.distinctUntilChanged().flatMapLatest { running -> flow {
                 emit(monotonicTimeMillis())
-                if (running) while (true) { delay(2_000L); emit(monotonicTimeMillis()) }
+                if (running) while (true) {
+                    delay(currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L)
+                    emit(monotonicTimeMillis())
+                }
             } }) { window, _ -> window }.collectLatest { window ->
                 val now = monotonicTimeMillis()
                 val visiblePages = (window.first..window.last).filter { it in pages.indices }.toSet()
@@ -2304,12 +2348,14 @@ internal fun AdjacentPagePrefetch(
                 }
                 if (window.position != previousPosition) previousTime = now
                 previousPosition = window.position
-                val seconds = when (currentBudget.mode) { ExperienceMode.ECO -> 2; ExperienceMode.AUTO -> 5; ExperienceMode.PERFORMANCE -> 8 }
+                val seconds = window.runtime.predictionSeconds ?: when (currentBudget.mode) {
+                    ExperienceMode.ECO -> 2; ExperienceMode.AUTO -> 5; ExperienceMode.PERFORMANCE -> 8 }
                 val readyLead = maxOf(1, window.decoded, window.parallel)
                 val ahead = if (currentOverrides.prefetchMode == PrefetchMode.MANUAL) window.ahead else
-                    minOf(window.ahead, if (now - lastMove > 8_000L) readyLead else
-                        if (speed == 0f) readyLead * 2 else
-                            maxOf(readyLead, kotlin.math.ceil(speed * seconds).toInt()))
+                    minOf(window.ahead.toLong(), if (now - lastMove > window.runtime.idleWindowSeconds.coerceAtLeast(1).toLong() * 1000L)
+                        readyLead.toLong() else if (speed == 0f) readyLead.toLong() * 2L else
+                        maxOf(readyLead.toLong(), kotlin.math.ceil(speed.toDouble() * seconds.toDouble()).toLong()))
+                        .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
                 fun candidates(count: Int, forward: Boolean): List<Int> {
                     if (count <= 0) return emptyList()
                     val step = if (forward) direction else -direction
@@ -2420,7 +2466,7 @@ internal fun AdjacentPagePrefetch(
                             if (resource == null) {
                                 // This is only DownloadStore's local ownership lookup. Revisit it
                                 // after the real download settles, without starting a duplicate.
-                                retryAfter[key] = monotonicTimeMillis() + 2_000L
+                                retryAfter[key] = monotonicTimeMillis() + currentBudget.runtime.prefetchRetryBaseSeconds.coerceAtLeast(1).toLong() * 1000L
                             } else {
                                 retryAttempts.remove(key); retryAfter.remove(key); resourceDeferred.remove(key)
                             }
@@ -2542,7 +2588,8 @@ internal fun AdjacentPagePrefetch(
                     val epoch = originalEpochs[index] ?: 0
                     val size = readerPreviewSize(
                         if (index in pairedPages) window.viewport.width / 2 else window.viewport.width,
-                        window.viewport.height)
+                        window.viewport.height, maxWidthPx = window.runtime.previewWidthPx,
+                        maxHeightPx = window.runtime.previewHeightPx)
                     val warmMemory = index in memoryWindow && window.viewport.width > 0
                     if (index in checks || (!warmMemory && inspected[index] == epoch) ||
                         (warmMemory && previewChecks[index] == (size to epoch)) ||
@@ -2579,7 +2626,8 @@ internal fun AdjacentPagePrefetch(
                                             pageFailed(index, readerPrefetchErrorLabel(it))
                                         }
                                 }
-                                ReaderPagePreflightStatus.DEFERRED -> deferredChecks[index] = monotonicTimeMillis() + 2_000L
+                                ReaderPagePreflightStatus.DEFERRED -> deferredChecks[index] = monotonicTimeMillis() +
+                                    currentBudget.runtime.prefetchRetryBaseSeconds.coerceAtLeast(1).toLong() * 1000L
                             }
                         } catch (cancelled: CancellationException) { throw cancelled }
                         finally { if (checks[index] === owned) { checks.remove(index); checkTokens.remove(index)
@@ -2646,9 +2694,117 @@ private fun ReaderPage(
     onLayoutReady: (Boolean) -> Unit = {},
     onChapterSwipeReadyChanged: (Boolean) -> Unit = {},
 ) {
+    val repair = LocalReaderPageRepair.current
+    val repairController = repair?.controller
+    val replacement = repair?.state?.replacements?.get(page.index)
+    val effectivePage = replacement?.page ?: page
+    val effectiveHeaders = if (effectivePage.sourceRouteId.isNotBlank()) emptyMap() else replacement?.headers ?: headers
+    val effectiveSource = effectivePage.sourceRouteId.ifBlank { replacement?.variant?.sourceId ?: sourceId }
+    // Stable owners keep recomposition from cancelling an existing request or transfer observer.
+    val effectiveResolve: ReaderPageResolver = remember(page, repairController, replacement, resolvePage) {
+        if (replacement == null || repairController == null)
+            { input, bytes -> resolvePage(input, bytes).also { repairController?.primaryResource(page.index, page, it) } }
+        else { _, bytes -> repairController.resolveReplacement(replacement, false, bytes) }
+    }
+    val effectiveRetry: ReaderPageResolver = remember(page, repairController, replacement, retryPage) {
+        if (replacement == null || repairController == null)
+            { input, bytes -> retryPage(input, bytes).also { repairController?.primaryResource(page.index, page, it) } }
+        else { _, bytes -> repairController.resolveReplacement(replacement, true, bytes) }
+    }
+    val effectiveTransfer: (Page) -> Flow<DownloadProgress?> = remember(repairController, replacement, observePageTransfer) {
+        if (replacement == null || repairController == null) observePageTransfer
+        else { _ -> repairController.observeTransfer(replacement) }
+    }
+    DisposableEffect(page.index, repair?.controller, replacement) {
+        val release = repair?.onRescue
+        onDispose { release?.invoke(page.index, false) }
+    }
+    Box(if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
+        // The primary preparation ledger must never report a backup's bytes as primary cache hits.
+        CompositionLocalProvider(LocalReaderPreparationTracker provides
+            if (replacement == null) LocalReaderPreparationTracker.current else null) {
+            ReaderPageImage(effectivePage, effectiveHeaders, effectiveSource, effectiveResolve, effectiveRetry,
+                effectiveTransfer, paged, pagedAlignment, onTap, onShowControls,
+                replacement?.variant?.sourceName ?: sourceName, pageCount, foreground,
+                sourceAlternatives, readySourceVariants, prefetchFailure.takeIf { replacement == null },
+                onQuickSwitch, onMoreSources, onRepairPage, externalRetrySerial,
+                onLoadChanged = { ready ->
+                    if (ready) {
+                        repair?.onRescue?.invoke(page.index, false)
+                        if (replacement == null) repair?.controller?.succeeded(page.index)
+                    }
+                    onLoadChanged(ready)
+                },
+                onHeightMeasured = onHeightMeasured, onComposed = onComposed,
+                prefetch = prefetch.takeIf { replacement == null },
+                knownDimensions = knownDimensions.takeIf { replacement == null },
+                onDimensionsKnown = { dimensions -> if (replacement == null) onDimensionsKnown(dimensions) },
+                deferResize = deferResize, visibleWindow = visibleWindow, isVisible = isVisible,
+                onLayoutReady = onLayoutReady, onChapterSwipeReadyChanged = onChapterSwipeReadyChanged,
+                logicalPageIndex = page.index,
+                onSourceFailure = { failure ->
+                    if (replacement == null && failure != null && isReaderPrefetchFailure(failure)) {
+                        repair?.controller?.failed(page.index)
+                        if (isVisible()) repair?.controller?.recover(page.index)
+                    }
+                    repair?.onRescue?.invoke(page.index, isVisible())
+                },
+                onSlowWaiting = { waiting -> repair?.onRescue?.invoke(page.index, waiting && isVisible()) },
+            )
+        }
+        if (replacement != null && repair != null) {
+            MotionTextButton(onClick = { repair.controller.select(page.index, replacement.variant) },
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).heightIn(min = 44.dp)) {
+                ChapterSourceLogo(replacement.variant.sourceId, replacement.variant.sourceName, Modifier.size(16.dp))
+                Spacer(Modifier.width(5.dp))
+                Text("补 ${page.index + 1}", fontSize = 11.sp, color = foreground)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReaderPageImage(
+    page: Page,
+    headers: Map<String, String>,
+    sourceId: String = "",
+    resolvePage: ReaderPageResolver,
+    retryPage: ReaderPageResolver,
+    observePageTransfer: (Page) -> Flow<DownloadProgress?>,
+    paged: Boolean,
+    pagedAlignment: Alignment = Alignment.Center,
+    onTap: () -> Unit,
+    onShowControls: () -> Unit,
+    sourceName: String,
+    pageCount: Int,
+    foreground: Color,
+    sourceAlternatives: List<ChapterVariant> = emptyList(),
+    readySourceVariants: Map<String, ReaderSourceStandby> = emptyMap(),
+    prefetchFailure: String? = null,
+    onQuickSwitch: (ChapterVariant) -> Unit = {},
+    onMoreSources: (Rect?) -> Unit = {},
+    onRepairPage: () -> Unit = {},
+    externalRetrySerial: Int = 0,
+    onLoadChanged: (Boolean) -> Unit,
+    onHeightMeasured: (Int) -> Unit = {},
+    onComposed: (Boolean) -> Unit = {},
+    prefetch: ReaderPagePrefetch? = null,
+    knownDimensions: IntSize? = null,
+    onDimensionsKnown: (IntSize) -> Unit = {},
+    deferResize: () -> Boolean = { false },
+    visibleWindow: () -> VerticalPageWindow? = { null },
+    isVisible: () -> Boolean,
+    onLayoutReady: (Boolean) -> Unit = {},
+    onChapterSwipeReadyChanged: (Boolean) -> Unit = {},
+    logicalPageIndex: Int = page.index,
+    onSourceFailure: (Throwable?) -> Unit = {},
+    onSlowWaiting: (Boolean) -> Unit = {},
+) {
     val context = LocalContext.current
     val preparationTracker = LocalReaderPreparationTracker.current
     val experience = remember(context) { ExperiencePolicyStore.get(context) }
+    val imageRuntime by remember(experience) { experience.state.map { it.runtime }.distinctUntilChanged() }
+        .collectAsStateWithLifecycle(initialValue = experience.state.value.runtime)
     val density = LocalDensity.current
     val screenHeight = LocalMangaWindow.current.height.coerceAtLeast(1.dp)
     // Request callbacks retain their own page/URL owner even if a later manifest replaces this slot.
@@ -2663,6 +2819,9 @@ private fun ReaderPage(
     val chapterSwipeReadyChanged by rememberUpdatedState(onChapterSwipeReadyChanged)
     val visible by rememberUpdatedState(isVisible)
     val pageVisible by remember { derivedStateOf { visible() } }
+    val sourceFailure by rememberUpdatedState(onSourceFailure)
+    val slowWaiting by rememberUpdatedState(onSlowWaiting)
+    LaunchedEffect(pageVisible) { if (!pageVisible) slowWaiting(false) }
     // Lazy layout recycling must not collapse a measured page back to its placeholder height.
     val originalCacheIdentity = remember(page, headers, sourceId) { readerPageCacheKey(page, headers, sourceId) }
     val cachedDimensions = remember(originalCacheIdentity) { ReaderDimensionCache.get(originalCacheIdentity) }
@@ -2722,6 +2881,9 @@ private fun ReaderPage(
     var error by remember(attempt) { mutableStateOf<String?>(null) }
     var loading by remember(attempt) { mutableStateOf(true) }
     var slowLoading by remember(attempt) { mutableStateOf(false) }
+    LaunchedEffect(attempt, pageVisible, slowLoading) {
+        if (pageVisible && slowLoading) slowWaiting(true)
+    }
     var waitClock by remember(attempt) { mutableStateOf<TimeMark?>(null) }
     var resolvedPage by remember(attempt) { mutableStateOf<Page?>(null) }
     val pageTransfer by rememberReaderPageTransfer(attempt, page, observePageTransfer,
@@ -2775,17 +2937,26 @@ private fun ReaderPage(
                 transportProgress = if (transport.receivedBytes > 0L || inherited == null) transport else inherited
                 val latestByte = listOfNotNull(transport.lastProgressAt, inheritedProgressAt).maxOrNull()
                 val idle = attempt.idleMillis(visibleSince, latestByte)
-                slowLoading = idle >= READER_SLOW_LOAD_MILLIS
-                if (idle >= READER_PAGE_WAIT_MILLIS) {
+                val recovery = experience.state.value.recovery
+                val waitLimit = recovery.imageTimeoutSeconds.coerceAtLeast(1).toLong() * 1000L
+                slowLoading = idle >= recovery.slowLoadSeconds.coerceAtLeast(1).toLong() * 1000L
+                if (idle >= waitLimit) {
                     attempt.stopped = true
-                    error = "本页连接超时"
+                    val observed = if (waitingForPrefetch) attemptPrefetch?.work?.snapshot() else preparationWork.snapshot()
+                    // The native JM call includes its mutex and image processing. Its SDK owns
+                    // actual transport deadlines; this outer wait cannot diagnose source failure.
+                    val sourceTimeout = sourceId != "jmcomic" && readerTimeoutIsSource(observed, pageTransfer)
+                    error = if (sourceTimeout) "本页连接超时" else "本页准备等待超时"
+                    sourceFailure(if (sourceTimeout)
+                        IllegalStateException("本页连接超时") else null)
                     preparationTicket?.let { preparationTracker?.end(page.index, it, preparationWork.snapshot().stage,
-                        ReaderPreparationPhase.FAILED, "本页连接超时") }
+                        if (sourceTimeout) ReaderPreparationPhase.FAILED else ReaderPreparationPhase.DEFERRED,
+                        if (sourceTimeout) "本页连接超时" else "等待可用资源超时") }
                     loading = false
                     loadChanged(false)
                     break
                 }
-                delay(minOf(1_000L, READER_PAGE_WAIT_MILLIS - idle))
+                delay(minOf(1_000L, waitLimit - idle))
             }
         }
     }
@@ -2818,7 +2989,7 @@ private fun ReaderPage(
             readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
                 diskCacheKey = readerPageCacheKey(resource, headers, sourceId),
                 originalPage = page.takeIf { reload == 0 || resource.url == page.url },
-                originalCacheIdentity = originalCacheIdentity)?.let {
+                originalCacheIdentity = originalCacheIdentity, runtime = experience.state.value.runtime)?.let {
                 currentCoroutineContext().ensureActive()
                 if (attempt.acceptsResult) {
                     observedDimensions = it
@@ -2831,8 +3002,10 @@ private fun ReaderPage(
             if (attempt.acceptsResult) {
                 loading = false
                 error = failure.message ?: "图片暂时无法读取"
+                sourceFailure(failure)
                 preparationTicket?.let { preparationTracker?.end(page.index, it, preparationWork.snapshot().stage,
-                    ReaderPreparationPhase.FAILED, readerPageErrorLabel(error.orEmpty())) }
+                    if (isReaderPrefetchFailure(failure)) ReaderPreparationPhase.FAILED else ReaderPreparationPhase.DEFERRED,
+                    readerPrefetchErrorLabel(failure)) }
             }
         }
     }
@@ -2877,7 +3050,8 @@ private fun ReaderPage(
     }
     BoxWithConstraints(if (paged) Modifier.fillMaxSize() else Modifier.fillMaxWidth()) {
         val viewportWidthPx = with(density) { maxWidth.roundToPx() }
-        val previewSize = readerPreviewSize(viewportWidthPx, with(density) { screenHeight.roundToPx() })
+        val previewSize = readerPreviewSize(viewportWidthPx, with(density) { screenHeight.roundToPx() },
+            maxWidthPx = imageRuntime.previewWidthPx, maxHeightPx = imageRuntime.previewHeightPx)
         val previewWidth = previewSize.width
         val previewHeight = previewSize.height
         val resource = resolvedPage
@@ -2926,6 +3100,7 @@ private fun ReaderPage(
                         } else {
                             loading = false
                             error = result.throwable.message ?: "图片暂时无法读取"
+                            sourceFailure(result.throwable)
                         }
                     } },
                 )
@@ -2937,7 +3112,7 @@ private fun ReaderPage(
                 readerImageDimensions(SingletonImageLoader.get(imagePlatformContext(context)), resource,
                     image.diskCacheKey ?: readerPageCacheKey(resource, headers, sourceId),
                     originalPage = page.takeIf { reload == 0 || resource.url == page.url }, refresh = true,
-                    originalCacheIdentity = originalCacheIdentity)?.let { size ->
+                    originalCacheIdentity = originalCacheIdentity, runtime = experience.state.value.runtime)?.let { size ->
                     observedDimensions = size
                     dimensionsMeasured(size)
                 }
@@ -2952,7 +3127,7 @@ private fun ReaderPage(
                     preparationTracker?.artifact(page.index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident)
                     preparationTracker?.sample()
                 }
-                delay(2_000L)
+                delay(experience.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L)
             }
         }
         val imageError = error
@@ -2991,7 +3166,7 @@ private fun ReaderPage(
                         ZoomableAsyncImage(
                             model = request,
                             state = imageState,
-                            contentDescription = "第 ${page.index + 1} 页",
+                            contentDescription = "第 ${logicalPageIndex + 1} 页",
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Fit,
                             alignment = pagedAlignment,
@@ -3019,7 +3194,7 @@ private fun ReaderPage(
                     val tapSource = remember(page.url) { MutableInteractionSource() }
                     AsyncImage(
                         model = request,
-                        contentDescription = "第 ${page.index + 1} 页",
+                        contentDescription = "第 ${logicalPageIndex + 1} 页",
                         modifier = Modifier.fillMaxSize()
                             .alpha(if (hasDimensions) 1f else 0f)
                             .clickable(
@@ -3068,7 +3243,7 @@ private fun ReaderPage(
                     IntOffset(0, top + ((height - feedbackHeight) / 2).coerceAtLeast(0))
                 }
                 ReaderImageRecovery(
-                    index = page.index, pageCount = pageCount, sourceName = sourceName,
+                    index = logicalPageIndex, pageCount = pageCount, sourceName = sourceName,
                     failure = imageError.orEmpty(), pending = pendingRecovery, slow = slowLoading,
                     transferProgress = pageTransfer ?: transportProgress.takeIf { it.receivedBytes > 0L }?.let {
                         DownloadProgress(phase = dev.mangaflow.storage.DownloadPhase.TRANSFERRING,

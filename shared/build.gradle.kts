@@ -194,6 +194,7 @@ kotlin {
             implementation(files(optionalOnnxApi.flatMap { it.archiveFile }))
         }
         desktopMain.dependencies {
+            implementation("com.github.oshi:oshi-core:6.12.0")
             implementation("org.openani.mediamp:mediamp-mpv:$mediampVersion")
             implementation(project.dependencies.platform("com.squareup.okhttp3:okhttp-bom:$okHttpVersion"))
             implementation(compose.desktop.currentOs)

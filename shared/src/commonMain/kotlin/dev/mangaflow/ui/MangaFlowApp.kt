@@ -296,6 +296,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val sourceOperation by model.chapterSourceOperation.collectAsStateWithLifecycle()
     val sourceStandbys by model.readerSourceStandbys.collectAsStateWithLifecycle()
     val standbyAvailability by model.readerSourceStandbyAvailability.collectAsStateWithLifecycle()
+    val sourceSwitchUndoAvailable by model.readerSourceSwitchUndoAvailable.collectAsStateWithLifecycle()
     val nextChapterPreparation by model.nextChapterPreparation.collectAsStateWithLifecycle()
     val sourceResumeChoice by model.sourceResumeChoice.collectAsStateWithLifecycle()
     val sourceResumePolicy by model.sourceResumePolicy.collectAsStateWithLifecycle()
@@ -974,6 +975,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         active = current.key == frame.key && sourceManagement == null && sourceResumeChoice == null,
                         onReadVariant = model::readReaderChapterVariant,
                         onQuickReadVariant = model::quickReadReaderChapterVariant,
+                        onVerifiedSourceSwitch = { chapter, variant, index, fingerprint ->
+                            if (model.reading.value === current.session)
+                                model.verifiedReadReaderChapterVariant(chapter, variant, index, fingerprint)
+                        },
+                        onRescueSourceStandbys = { chapter, enabled ->
+                            if (model.reading.value === current.session) model.rescueReaderSourceStandbys(chapter, enabled)
+                        },
+                        canUndoSourceSwitch = sourceSwitchUndoAvailable,
+                        onUndoSourceSwitch = model::undoReaderSourceSwitch,
                         sourceStandbys = sourceStandbys,
                         standbyAvailability = standbyAvailability,
                         nextChapterPreparation = nextChapterPreparation,

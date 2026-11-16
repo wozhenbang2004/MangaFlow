@@ -10,6 +10,8 @@ import dev.mangaflow.data.MangaPage
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.experience.ExperienceImageTimeouts
+import dev.mangaflow.experience.imageTimeouts
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.applyDownloadRoute
@@ -44,6 +46,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.delay
 import okio.buffer
 import java.security.MessageDigest
+import java.time.Duration
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.currentCoroutineContext
@@ -53,7 +57,43 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runInterruptible
 import okhttp3.Cookie
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+
+private data class JmImageTransfer(
+    val url: HttpUrl,
+    val maximumBytes: Long,
+    val onBytes: ((Long) -> Unit)?,
+)
+
+/** Guard before upstream getContent() can buffer an unbounded response; count consumed body bytes only. */
+private fun guardedJmImageBody(response: okhttp3.Response, maximumBytes: Long,
+    onBytes: ((Long) -> Unit)? = null): okhttp3.Response {
+    val body = response.body ?: return response
+    if (body.contentLength() > maximumBytes) {
+        response.close()
+        throw java.io.IOException("图片响应超过当前单图容量设置。")
+    }
+    val input = object : okio.ForwardingSource(body.source()) {
+        private var received = 0L
+        override fun read(sink: okio.Buffer, byteCount: Long): Long {
+            val remaining = maximumBytes - received
+            val allowed = if (remaining == Long.MAX_VALUE) byteCount else minOf(byteCount, remaining + 1L)
+            val count = super.read(sink, allowed)
+            if (count > 0L) {
+                onBytes?.invoke(count)
+                if (count > remaining) throw java.io.IOException("图片响应超过当前单图容量设置。")
+                received += count
+            }
+            return count
+        }
+    }.buffer()
+    return response.newBuilder().body(object : okhttp3.ResponseBody() {
+        override fun contentType() = body.contentType()
+        override fun contentLength() = body.contentLength()
+        override fun source(): okio.BufferedSource = input
+    }).build()
+}
 
 /**
  * Built-in JM source, reusing the maintained MIT-licensed JVM client for authenticated
@@ -68,8 +108,10 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     private var client: JmApiClient? = null
     private var clientConfig: JmConfiguration? = null
     private var clientRoute: DownloadRouteSnapshot? = null
+    private var clientTimeouts: ExperienceImageTimeouts? = null
     private var clientObservesRelayTraffic = true
     @kotlin.concurrent.Volatile private var probeResponse: (() -> Unit)? = null
+    @kotlin.concurrent.Volatile private var imageTransfer: JmImageTransfer? = null
     @kotlin.concurrent.Volatile private var probeSession = 0L
     override fun connectionProbeIdentity(): String = probeSession.toString()
     private var savedSession: JSONObject? = readSecret(context, SECRET_KEY)?.let {
@@ -85,16 +127,28 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             val route = frozen?.route
                 ?: DownloadRoutingStore.get(context).sourceSnapshot(info.id)
             val observesRelay = frozen?.connectionCheck != true
-            if (client != null && (clientRoute != route || clientObservesRelayTraffic != observesRelay)) {
+            val timeouts = dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.imageTimeouts()
+            var previousHost: String? = null
+            var previousCookies: List<Cookie>? = null
+            if (client != null && (clientRoute != route || clientObservesRelayTraffic != observesRelay || clientTimeouts != timeouts)) {
                 val previous = client
-                client = null; clientConfig = null; clientRoute = null
+                client = null; clientConfig = null; clientRoute = null; clientTimeouts = null
                 photoImages.clear()
-                runInterruptible { previous?.close() }
+                runInterruptible {
+                    previousHost = previous?.usedDomain
+                    previousCookies = previous?.cookies?.toList()
+                    previous?.close()
+                }
             }
             val active = client ?: runInterruptible {
-                val (created, config) = createClient(route = route, observeRelayTraffic = observesRelay)
+                val (created, config) = createClient(route = route, observeRelayTraffic = observesRelay, timeouts = timeouts)
                 try {
-                    savedSession?.let { session -> runCatching {
+                    val liveHost = previousHost
+                    val liveCookies = previousCookies
+                    if (liveHost != null && !liveCookies.isNullOrEmpty() && liveHost in created.domainStates) {
+                        created.useDomain(liveHost)
+                        created.cookies = liveCookies
+                    } else savedSession?.let { session -> runCatching {
                         val host = session.optString("host")
                         val cookies = readCookies(session)
                         if (host in created.domainStates && cookies.isNotEmpty()) {
@@ -104,6 +158,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                     }.onFailure { accountName = "" } }
                     clientConfig = config
                     clientRoute = route
+                    clientTimeouts = timeouts
                     clientObservesRelayTraffic = observesRelay
                     created.also { client = it }
                 } catch (failure: Exception) { created.close(); throw failure }
@@ -117,21 +172,42 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                 if (failure.message.orEmpty().contains("請先登入會員")) accountName = ""
                 throw SourceException("禁漫请求失败：${failure.cause?.message ?: failure.message}", info.homeUrl, cause = failure)
             }
-            finally { probeResponse = null }
+            finally { probeResponse = null; imageTransfer = null }
         }
     }
 
     /** A cookie-only reader never enables the upstream client's cached-password retry. */
     private fun createClient(pinDomain: Boolean = false,
         route: DownloadRouteSnapshot = DownloadRoutingStore.get(context).sourceSnapshot(info.id),
-        observeRelayTraffic: Boolean = true): Pair<JmApiClient, JmConfiguration> {
+        observeRelayTraffic: Boolean = true,
+        timeouts: ExperienceImageTimeouts = dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.imageTimeouts(),
+    ): Pair<JmApiClient, JmConfiguration> {
+        val deadlines = timeouts
         val config = JmConfiguration.Builder().clientType(ClientType.API).retryTimes(0)
-            .cacheSize(24 * 1024 * 1024).closeTimeoutMs(1_000).build()
+            .cacheSize(24 * 1024 * 1024).imageTimeout(Duration.ofMillis(deadlines.idleMillis))
+            .closeTimeoutMs(1_000).build()
         val bundle = OkHttpBuilder.build(config)
         val http = bundle.client.newBuilder().applyDownloadRoute(route, observeTraffic = observeRelayTraffic)
-            .addNetworkInterceptor { chain -> probeResponse(chain, limited = !observeRelayTraffic).also { response ->
+            .connectTimeout(deadlines.connectMillis, TimeUnit.MILLISECONDS)
+            .callTimeout(deadlines.totalMillis, TimeUnit.MILLISECONDS)
+            .addInterceptor { chain ->
+                val transfer = imageTransfer?.takeIf { chain.call().request().url == it.url }
+                val response = chain.proceed(chain.request())
+                // Bound the image payload after transparent HTTP decompression too. Progress is
+                // counted only by the network wrapper below, not again by this allocation guard.
+                if (transfer == null) response else guardedJmImageBody(response, transfer.maximumBytes)
+            }
+            .addNetworkInterceptor { chain ->
+                // v1.1.12 AbstractJmClient.fetchImageBytes uses image.downloadUrl and a
+                // newBuilder().readTimeout() client, which preserves these interceptors.
+                // Match the original Call URL so a redirect keeps this image's ownership.
+                val transfer = imageTransfer?.takeIf { chain.call().request().url == it.url }
+                val response = probeResponse(chain, limited = !observeRelayTraffic)
                 if (response.isSuccessful) probeResponse?.invoke()
-            } }.retryOnConnectionFailure(false).build()
+                if (transfer == null) response else guardedJmImageBody(response, transfer.maximumBytes) { count ->
+                    if (imageTransfer === transfer) transfer.onBytes?.invoke(count)
+                }
+            }.retryOnConnectionFailure(false).build()
         val created = JmApiClient(config, http, bundle.cookieManager, bundle.domainManager)
         try {
             created.initializeAsync().get()
@@ -221,8 +297,9 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
         val caller = currentCoroutineContext()
         val route = caller[ChapterDownloadTransport]?.route ?: DownloadRoutingStore.get(context).sourceSnapshot(info.id)
         mutex.withLock {
+            val timeouts = dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.imageTimeouts()
             runInterruptible {
-                val (loginClient, _) = createClient(pinDomain = true, route = route)
+                val (loginClient, _) = createClient(pinDomain = true, route = route, timeouts = timeouts)
                 try {
                     val user = loginClient.login(username.trim(), password)
                     val owner = user.username()?.takeIf { it.isNotBlank() }
@@ -231,7 +308,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         ?: throw SourceException("禁漫登录未返回会话域名。")
                     val cookies = loginClient.cookies.orEmpty()
                     require(cookies.isNotEmpty()) { "禁漫登录未返回可恢复的会话。" }
-                    val (replacement, config) = createClient(route = route)
+                    val (replacement, config) = createClient(route = route, timeouts = timeouts)
                     try {
                         replacement.useDomain(host)
                         replacement.cookies = cookies
@@ -242,6 +319,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         writeSecret(context, SECRET_KEY, secret.toString())
                         val previous = client
                         client = replacement; clientConfig = config; clientRoute = route
+                        clientTimeouts = timeouts; clientObservesRelayTraffic = true
                         savedSession = secret; accountName = owner; probeSession++
                         previous?.close()
                     } catch (failure: Exception) { replacement.close(); throw failure }
@@ -259,7 +337,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             deleteSecret(context, SECRET_KEY)
             savedSession = null; accountName = ""; probeSession++
             val previous = client
-            client = null; clientConfig = null; clientRoute = null
+            client = null; clientConfig = null; clientRoute = null; clientTimeouts = null
             previous?.let { active -> runInterruptible { active.cookies = emptyList(); active.close() } }
         }
     }
@@ -393,7 +471,8 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     override fun imageHeaders(mangaId: String, chapterId: String): Map<String, String> =
         mapOf("User-Agent" to "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36", "Accept" to "image/webp,image/jpeg,*/*")
 
-    suspend fun decryptedPageFile(mangaId: String, chapterId: String, page: Page): StorageFile = withContext(Dispatchers.IO) {
+    suspend fun decryptedPageFile(mangaId: String, chapterId: String, page: Page,
+        onBytes: ((Long) -> Unit)? = null, retry: Boolean = false): StorageFile = withContext(Dispatchers.IO) {
         val key = validId(chapterId)
         require(page.index in 0..9_999) { "图片序号无效。" }
         clientCall { client ->
@@ -408,20 +487,25 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                 .digest(("$key:${page.index}:" + img.downloadUrl).toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it) }
             val target = StorageFile(root, "$fingerprint.jpg")
+            val maximumBytes = dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.runtime.maxImageBytes
             val releaseCache = dev.mangaflow.storage.StorageCacheStore.get(context).leaseFile(
                 dev.mangaflow.storage.CacheBackend.JM, target, SourceKeys.manga(info.id, mangaId),
                 SourceKeys.chapter(info.id, mangaId, key), info.id, page.index)
             try {
-            if (target.isFile && target.length() in 128L..MAX_IMAGE_BYTES) return@clientCall target
+            if (!retry && target.isFile && target.length() in 128L..maximumBytes) return@clientCall target
             if (!root.mkdirs()) throw SourceException("无法创建禁漫私有图片缓存。")
-            val bytes = client.fetchImageBytes(img)
-            if (bytes.size.toLong() !in 128L..MAX_IMAGE_BYTES)
+            // Metadata above is outside the image observation/size scope. The existing clientCall
+            // mutex owns this slot until the blocking fetch (and upstream decoding) has finished.
+            val transfer = JmImageTransfer(img.downloadUrl.toHttpUrl(), maximumBytes, onBytes)
+            imageTransfer = transfer
+            val bytes = try { client.fetchImageBytes(img) }
+                finally { if (imageTransfer === transfer) imageTransfer = null }
+            if (bytes.size.toLong() !in 128L..maximumBytes)
                 throw SourceException("图片解码结果无效或体积过大。")
             val pending = StorageFile(root, "$fingerprint.part")
             try {
                 pending.writeBytes(bytes)
                 syncStorageFile(pending)
-                if (target.exists() && !target.delete()) throw SourceException("旧图片缓存无法替换。")
                 if (!pending.renameTo(target)) throw SourceException("解码后的图片无法缓存。")
             } finally { pending.delete() }
             target
@@ -472,7 +556,6 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
             SourceChoice("mv", "最多浏览"), SourceChoice("tf", "最多喜欢"), SourceChoice("mp", "图片最多")), "mr")
         private val periodFilter = SourceFilter("period", "时间", listOf(SourceChoice("t", "今日"),
             SourceChoice("w", "本周"), SourceChoice("m", "本月"), SourceChoice("a", "全部")), "a")
-        private const val MAX_IMAGE_BYTES = 96L * 1024 * 1024
     }
 }
 
@@ -486,10 +569,12 @@ actual fun createJmBodySource(context: PlatformContext): BodySource? = JmNativeS
 
 actual suspend fun materializeJmPage(
     context: PlatformContext, mangaId: String, chapterId: String, page: Page,
+    onBytes: ((Long) -> Unit)?,
+    retry: Boolean,
 ): Page? {
     val ref = SourceKeys.decodeChapter(mangaId, chapterId)
     if (ref.sourceId != "jmcomic" || page.url.startsWith("file://")) return null
-    val file = JmNativeSourceProvider.get(context).decryptedPageFile(ref.mangaId, ref.chapterId, page)
+    val file = JmNativeSourceProvider.get(context).decryptedPageFile(ref.mangaId, ref.chapterId, page, onBytes, retry)
     return page.copy(url = file.toURI())
 }
 
@@ -513,20 +598,34 @@ private class RoutedJmDownloadSession(
 ) : JmDownloadSession {
     private val control = Any()
     @Volatile private var closed = false
-    private var client: JmApiClient? = null
+    private class ClientHolder(val client: JmApiClient, val timeouts: ExperienceImageTimeouts,
+        val resumeHost: String?, val resumeCookies: List<Cookie>) {
+        val initialization = Mutex()
+        var ready = false
+        var readers = 0
+        var retired = false
+        var disposed = false
+    }
+    private var client: ClientHolder? = null
+    private val clients = mutableSetOf<ClientHolder>()
     private val metadata = Mutex()
     private var images: List<JmImage>? = null
+    @Volatile private var imageUrls: Set<HttpUrl> = emptySet()
 
     override suspend fun pages(): List<Page> = withContext(Dispatchers.IO) {
-        val active = runInterruptible { activeClient() }
-        val loaded = chapterImages(active)
         currentCoroutineContext().ensureActive()
-        if (closed) throw CancellationException("下载已停止")
-        loaded.mapIndexed { index, image ->
-            val url = image.downloadUrl
-            require(url.startsWith("https://") && url.length <= 4096) { "来源返回的图片地址无效。" }
-            Page(index, url)
-        }
+        val owned = acquireClient()
+        try {
+            val active = initializeClient(owned)
+            val loaded = chapterImages(active)
+            currentCoroutineContext().ensureActive()
+            if (closed) throw CancellationException("下载已停止")
+            loaded.mapIndexed { index, image ->
+                val url = image.downloadUrl
+                require(url.startsWith("https://") && url.length <= 4096) { "来源返回的图片地址无效。" }
+                Page(index, url)
+            }
+        } finally { releaseClient(owned) }
     }
 
     private suspend fun chapterImages(active: JmApiClient): List<JmImage> = metadata.withLock {
@@ -535,7 +634,10 @@ private class RoutedJmDownloadSession(
                 throw SourceException("章节作品编号不一致，已停止下载。")
             photo.images()?.takeIf { it.isNotEmpty() && it.size <= 10_000 }?.toList()
                 ?: throw SourceException("章节没有可下载图片。")
-        }.also { images = it }
+        }.also { loaded ->
+            imageUrls = loaded.map { it.downloadUrl.toHttpUrl() }.toSet()
+            images = loaded
+        }
     }
 
     override suspend fun read(page: Page): ByteArray = withContext(Dispatchers.IO) {
@@ -551,57 +653,134 @@ private class RoutedJmDownloadSession(
             dev.mangaflow.storage.CacheBackend.JM, cached, SourceKeys.manga("jmcomic", mangaId),
             SourceKeys.chapter("jmcomic", mangaId, chapterId), "jmcomic", page.index)
         try {
-            if (cached.isFile && cached.length() in 128L..MAX_IMAGE_BYTES)
+            if (cached.isFile && cached.length() in 128L..dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.runtime.maxImageBytes)
                 return@withContext cached.readBytes()
         } finally { releaseCache() }
-        val active = runInterruptible { activeClient() }
-        currentCoroutineContext().ensureActive()
-        val pages = chapterImages(active)
-        val image = pages.getOrNull(page.index) ?: throw SourceException("图片页码超出范围。")
-        require(image.downloadUrl.startsWith("https://") && image.downloadUrl.length <= 4096) {
-            "来源返回的图片地址无效。"
-        }
-        require(image.downloadUrl == page.url) { "图片清单已变化，请刷新下载任务后重试。" }
-        if (closed) throw CancellationException("下载已停止")
-        val bytes = runInterruptible { active.fetchImageBytes(image) }
-        currentCoroutineContext().ensureActive()
-        if (closed) throw CancellationException("下载已停止")
-        require(bytes.size.toLong() in 128L..MAX_IMAGE_BYTES) { "图片解码结果无效或体积过大。" }
-        bytes
+        val owned = acquireClient()
+        try {
+            val active = initializeClient(owned)
+            currentCoroutineContext().ensureActive()
+            val pages = chapterImages(active)
+            val image = pages.getOrNull(page.index) ?: throw SourceException("图片页码超出范围。")
+            require(image.downloadUrl.startsWith("https://") && image.downloadUrl.length <= 4096) {
+                "来源返回的图片地址无效。"
+            }
+            require(image.downloadUrl == page.url) { "图片清单已变化，请刷新下载任务后重试。" }
+            if (closed) throw CancellationException("下载已停止")
+            val bytes = runInterruptible { active.fetchImageBytes(image) }
+            currentCoroutineContext().ensureActive()
+            if (closed) throw CancellationException("下载已停止")
+            require(bytes.size.toLong() in 128L..dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.runtime.maxImageBytes) { "图片解码结果无效或体积过大。" }
+            bytes
+        } finally { releaseClient(owned) }
     }
 
-    private fun activeClient(): JmApiClient {
-        val active = synchronized(control) {
+    /** New requests use the new tuple; an in-flight page retains and eventually retires its old client. */
+    private fun acquireClient(): ClientHolder {
+        var closeAfter: JmApiClient? = null
+        val owned = synchronized(control) {
             if (closed) throw CancellationException("下载已停止")
-            client ?: run {
-                val config = JmConfiguration.Builder().clientType(ClientType.API)
-                    .retryTimes(2).cacheSize(24 * 1024 * 1024).downloadThreadPoolSize(1)
-                    .closeTimeoutMs(1_000).build()
-                val bundle = OkHttpBuilder.build(config)
-                val http = bundle.client.newBuilder().applyDownloadRoute(route).build()
-                JmApiClient(config, http, bundle.cookieManager, bundle.domainManager).also { client = it }
-            }
+            val timeouts = dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.imageTimeouts()
+            val previous = client
+            val active = if (previous == null || previous.timeouts != timeouts) {
+                ClientHolder(buildClient(timeouts), timeouts, previous?.client?.usedDomain,
+                    previous?.client?.cookies?.toList().orEmpty()).also { created ->
+                    clients += created
+                    client = created
+                    if (previous != null) {
+                        previous.retired = true
+                        if (previous.readers == 0 && !previous.disposed) {
+                            previous.disposed = true
+                            clients.remove(previous)
+                            closeAfter = previous.client
+                        }
+                    }
+                }
+            } else previous
+            active.readers++
+            active
         }
+        runCatching { closeAfter?.close() }
+        return owned
+    }
+
+    private suspend fun initializeClient(owned: ClientHolder): JmApiClient {
         try {
-            active.initializeAsync().get()
-            if (closed) throw CancellationException("下载已停止")
-            return active
+            owned.initialization.withLock {
+                if (closed) throw CancellationException("下载已停止")
+                if (!owned.ready) {
+                    runInterruptible { owned.client.initializeAsync().get() }
+                    currentCoroutineContext().ensureActive()
+                    if (closed) throw CancellationException("下载已停止")
+                    val host = owned.resumeHost
+                    if (host != null && owned.resumeCookies.isNotEmpty() && host in owned.client.domainStates) {
+                        owned.client.useDomain(host)
+                        owned.client.cookies = owned.resumeCookies
+                    }
+                    owned.ready = true
+                }
+            }
+            return owned.client
+        } catch (cancel: CancellationException) {
+            // One waiter leaving must not retire a healthy transport still held by other pages.
+            throw cancel
         } catch (failure: Exception) {
-            synchronized(control) { if (client === active) client = null }
-            runCatching { active.close() }
+            synchronized(control) {
+                if (client === owned) client = null
+                owned.retired = true
+            }
             throw failure
         }
+    }
+
+    private fun releaseClient(owned: ClientHolder) {
+        val closing = synchronized(control) {
+            check(owned.readers > 0)
+            owned.readers--
+            if (owned.retired && owned.readers == 0 && !owned.disposed) {
+                owned.disposed = true
+                clients.remove(owned)
+                owned.client
+            } else null
+        }
+        runCatching { closing?.close() }
+    }
+
+    private fun buildClient(timeouts: ExperienceImageTimeouts): JmApiClient {
+        val deadlines = timeouts
+        val config = JmConfiguration.Builder().clientType(ClientType.API)
+            .retryTimes(2).cacheSize(24 * 1024 * 1024).downloadThreadPoolSize(1)
+            .imageTimeout(Duration.ofMillis(deadlines.idleMillis)).closeTimeoutMs(1_000).build()
+        val bundle = OkHttpBuilder.build(config)
+        val http = bundle.client.newBuilder().applyDownloadRoute(route)
+            .connectTimeout(deadlines.connectMillis, TimeUnit.MILLISECONDS)
+            .callTimeout(deadlines.totalMillis, TimeUnit.MILLISECONDS)
+            .addInterceptor { chain ->
+                val imageRequest = chain.call().request().url in imageUrls
+                val response = chain.proceed(chain.request())
+                if (!imageRequest) response else guardedJmImageBody(response,
+                    dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.runtime.maxImageBytes)
+            }
+            .addNetworkInterceptor { chain ->
+                val imageRequest = chain.call().request().url in imageUrls
+                val response = chain.proceed(chain.request())
+                if (!imageRequest) response else guardedJmImageBody(response,
+                    dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.runtime.maxImageBytes)
+            }.build()
+        return JmApiClient(config, http, bundle.cookieManager, bundle.domainManager)
     }
 
     override fun close() {
         val owned = synchronized(control) {
             closed = true
-            client.also { client = null }
+            client = null
+            clients.mapNotNull { holder ->
+                if (holder.disposed) null else holder.client.also { holder.disposed = true; holder.retired = true }
+            }.also { clients.clear() }
         }
-        owned?.close()
+        owned.forEach { runCatching { it.close() } }
     }
 
-    private companion object { const val MAX_IMAGE_BYTES = 96L * 1024L * 1024L }
 }
 
 internal actual fun createJmDownloadSession(

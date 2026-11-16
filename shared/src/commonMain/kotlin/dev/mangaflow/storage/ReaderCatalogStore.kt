@@ -22,7 +22,7 @@ import dev.mangaflow.json.JSONObject
 class ReaderCatalogStore(private val context: Context) {
     private val root = File(context.applicationContext.filesDir, "reader-catalogs")
     // Repository and ViewModel instances target the same AtomicFile siblings.
-    private val state = synchronized(statesLock) { states.getOrPut(root.path) { CatalogState() } }
+    private val state = synchronized(statesLock) { states.getOrPut(root.path) { CatalogState(root) } }
 
     suspend fun read(mangaId: String): MangaDetail? {
         val generation = state.epoch.get()
@@ -96,6 +96,7 @@ class ReaderCatalogStore(private val context: Context) {
                                 return@runCatching
                             }
                             file.finishWrite(stream)
+                            state.cacheFiles.changed(file.baseFile.name)
                             remember(detail, bytes.size.toLong(), generation)
                         } catch (failure: Exception) {
                             file.failWrite(stream)
@@ -108,8 +109,55 @@ class ReaderCatalogStore(private val context: Context) {
             synchronized(state.memoryLock) {
                 if (state.writes[detail.manga.id] == token) state.writes.remove(detail.manga.id)
             }
+            StorageCacheStore.get(context).cacheWorkFinished()
         }
     }
+
+    /** Catalogue entries share the cache review contract while retaining offline dependencies. */
+    internal val cacheOwner: AuxiliaryDiskCacheOwner = object : AuxiliaryDiskCacheOwner {
+        override val ownerId: String = "catalog"
+        override suspend fun snapshot(): List<AuxiliaryCacheEntry> = withContext(Dispatchers.IO) {
+            state.files.withLock {
+                state.cacheFiles.snapshot { filename ->
+                    catalogOwner(File(root, filename))?.let { owner ->
+                        synchronized(state.memoryLock) { state.memoryRevisions[owner] ?: 0L }
+                    } ?: 0L
+                }.mapNotNull { entry -> catalogOwner(File(root, entry.key))?.let { entry.copy(key = it) } }
+            }
+        }
+        override suspend fun remove(expected: AuxiliaryCacheEntry): Long? = withContext(Dispatchers.IO) {
+            state.files.withLock {
+                val owner = expected.key
+                if (StorageCacheStore.get(context).protectedCatalog(owner) || isWriting(owner)) return@withLock null
+                val file = fileFor(owner)
+                val reviewed = expected.copy(key = file.name)
+                val memoryRevision = synchronized(state.memoryLock) { state.memoryRevisions[owner] ?: 0L }
+                if (state.cacheFiles.entry(file.name, memoryRevision, verifyBytes = true) != reviewed) return@withLock null
+                synchronized(state.memoryLock) {
+                    // Hashing yields to queued/new save intents. Recheck their exact identity at deletion.
+                    if (owner in state.writes || (state.memoryRevisions[owner] ?: 0L) != memoryRevision ||
+                        StorageCacheStore.get(context).protectedCatalog(owner)) return@synchronized null
+                    var freed = 0L
+                    try {
+                        freed = state.cacheFiles.removeReviewed(reviewed)
+                        freed
+                    } catch (failure: AuxiliaryCacheRemovalException) {
+                        freed = failure.freedBytes
+                        throw failure
+                    } finally {
+                        if (freed > 0L) {
+                            state.memory.remove(owner)
+                            state.memoryRevisions.remove(owner)
+                            state.diskOwners.remove(file.path)
+                            StorageCacheStore.get(context).cacheWorkFinished()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    internal fun isWriting(mangaId: String): Boolean = synchronized(state.memoryLock) { mangaId in state.writes }
 
     suspend fun sizeBytes(): Long = withContext(Dispatchers.IO) {
         state.files.withLock { root.listFiles()?.sumOf { it.length() } ?: 0L }
@@ -145,6 +193,7 @@ class ReaderCatalogStore(private val context: Context) {
                     if (protect(owner)) return@forEach
                     val bytes = file.length()
                     AtomicFile(file).delete()
+                    state.cacheFiles.changed(file.name)
                     if (!file.exists()) { total -= bytes; freed += bytes; state.diskOwners.remove(file.path) }
                 }
             } finally { if (freed > 0L) invalidateMemory() }
@@ -167,6 +216,7 @@ class ReaderCatalogStore(private val context: Context) {
         state.epoch.incrementAndGet()
         synchronized(state.memoryLock) {
             state.memory.clear()
+            state.memoryRevisions.clear()
             state.writes.clear()
         }
     }
@@ -180,9 +230,15 @@ class ReaderCatalogStore(private val context: Context) {
     private fun remember(detail: MangaDetail, bytes: Long, generation: Long, storedAt: Long = wallTimeMillis()) = synchronized(state.memoryLock) {
         if (generation != state.epoch.get()) return@synchronized
         state.memory.remove(detail.manga.id)
-        if (bytes <= MAX_MEMORY_BYTES) state.memory[detail.manga.id] = CachedCatalog(detail, bytes, storedAt)
-        while (state.memory.size > MAX_MEMORY_ENTRIES || state.memory.values.sumOf { it.bytes } > MAX_MEMORY_BYTES) {
-            state.memory.remove(state.memory.keys.first())
+        state.memoryRevisions[detail.manga.id] = state.sequence.incrementAndGet()
+        val policy = dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value.runtime
+        val maxBytes = policy.catalogMemoryMiB.toLong() * 1_048_576L
+        if (bytes <= maxBytes) state.memory[detail.manga.id] = CachedCatalog(detail, bytes, storedAt)
+        else state.memoryRevisions.remove(detail.manga.id)
+        while (state.memory.size > policy.catalogMemoryEntries || state.memory.values.sumOf { it.bytes } > maxBytes) {
+            val oldest = state.memory.keys.first()
+            state.memory.remove(oldest)
+            state.memoryRevisions.remove(oldest)
         }
     }
 
@@ -205,21 +261,21 @@ class ReaderCatalogStore(private val context: Context) {
         StorageCacheStore.get(context).protectedCatalog(mangaId) || contentCachePreferences(context).storeOnDisk
 
     private data class CachedCatalog(val detail: MangaDetail, val bytes: Long, val storedAt: Long)
-    private class CatalogState {
+    private class CatalogState(root: File) {
+        val cacheFiles = AuxiliaryCacheFiles(root) { it.matches(Regex("[a-f0-9]{64}\\.json")) }
         val files = Mutex()
         val memoryLock = StorageLock()
         val epoch = AtomicLong()
         val sequence = AtomicLong()
         val memory = LinkedHashMap<String, CachedCatalog>()
         val writes = mutableMapOf<String, Long>()
+        val memoryRevisions = mutableMapOf<String, Long>()
         val diskOwners = mutableMapOf<String, Triple<Long, Long, String>>()
     }
 
     private companion object {
         val statesLock = StorageLock()
         val states = mutableMapOf<String, CatalogState>()
-        const val MAX_MEMORY_ENTRIES = 4
-        const val MAX_MEMORY_BYTES = 8L * 1024 * 1024
         const val MAX_FILE_BYTES = 64L * 1024 * 1024
     }
 }

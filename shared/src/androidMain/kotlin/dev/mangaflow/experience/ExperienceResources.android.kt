@@ -11,6 +11,8 @@ import android.os.Build
 import android.os.PowerManager
 import android.os.StatFs
 import android.os.BatteryManager
+import android.os.Debug
+import android.os.SystemClock
 import android.hardware.display.DisplayManager
 import android.net.ConnectivityManager
 import android.net.Network
@@ -21,6 +23,7 @@ import coil3.network.okhttp.asNetworkClient
 import dev.mangaflow.net.applyDownloadRoute
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
+import java.io.File
 import dev.mangaflow.platform.PlatformContext
 
 internal actual fun readExperienceResources(context: PlatformContext): ExperienceResources {
@@ -31,7 +34,23 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
     val battery = runCatching { app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) }.getOrNull()
     val network = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     val runtime = Runtime.getRuntime()
+    val processors = runtime.availableProcessors().takeIf { it > 0 }
+    val disk = runCatching { StatFs(app.cacheDir.absolutePath) }.getOrNull()
+    val processMemory = runCatching { Debug.MemoryInfo().also(Debug::getMemoryInfo) }.getOrNull()
     return ExperienceResources(
+        device = ExperienceDeviceInfo(
+            platformName = "Android",
+            osVersion = "${Build.VERSION.RELEASE} · API ${Build.VERSION.SDK_INT}",
+            deviceModel = listOfNotNull(experienceHardwareLabel(Build.MANUFACTURER), experienceHardwareLabel(Build.MODEL))
+                .joinToString(" ").ifEmpty { null },
+            processorName = if (Build.VERSION.SDK_INT >= 31) experienceHardwareLabel(Build.SOC_MODEL) else null,
+            processorArchitecture = experienceHardwareLabel(System.getProperty("os.arch")),
+            logicalProcessorCount = processors,
+        ),
+        sampledAtMillis = System.currentTimeMillis(),
+        processCpuLoad = AndroidProcessCpuSample.read(processors),
+        processResidentBytes = readOwnResidentBytes(),
+        processProportionalBytes = processMemory?.totalPss?.takeIf { it > 0 }?.toLong()?.times(1024L),
         lowMemoryDevice = runCatching { memory?.isLowRamDevice }.getOrNull(),
         memoryPressure = info?.takeIf { memory != null }?.lowMemory,
         lowPower = runCatching { power?.isPowerSaveMode }.getOrNull(),
@@ -45,12 +64,13 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
                 }
             }
         }.getOrNull() else null,
-        freeDiskBytes = runCatching { StatFs(app.cacheDir.absolutePath).availableBytes }.getOrNull(),
+        freeDiskBytes = runCatching { disk?.availableBytes?.takeIf { it >= 0L } }.getOrNull(),
+        totalDiskBytes = runCatching { disk?.totalBytes?.takeIf { it > 0L } }.getOrNull(),
         processHeapBytes = runtime.totalMemory() - runtime.freeMemory(),
         processHeapLimitBytes = runtime.maxMemory(),
         availableMemoryBytes = info?.takeIf { memory != null }?.availMem,
         totalMemoryBytes = info?.takeIf { memory != null }?.totalMem?.takeIf { it > 0L },
-        processorCount = runtime.availableProcessors().takeIf { it > 0 },
+        processorCount = processors,
         batteryPercent = battery?.let {
             val level = it.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
             val scale = it.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
@@ -69,6 +89,42 @@ internal actual fun readExperienceResources(context: PlatformContext): Experienc
         }.getOrDefault(emptyList()),
     )
 }
+
+/** One interval measurement under the existing policy sampler; no extra polling thread. */
+private object AndroidProcessCpuSample {
+    private var previousWall: Long? = null
+    private var previousCpu: Long? = null
+    private var previousProcessors: Int? = null
+
+    @Synchronized fun read(processors: Int?): Double? {
+        val wall = SystemClock.elapsedRealtime()
+        val cpu = android.os.Process.getElapsedCpuTime()
+        val oldWall = previousWall
+        val oldCpu = previousCpu
+        val oldProcessors = previousProcessors
+        // A very close lifecycle notification must not replace a useful interval baseline.
+        if (oldWall != null && wall - oldWall < 100L) return null
+        previousWall = wall
+        previousCpu = cpu
+        previousProcessors = processors
+        if (oldWall == null || oldCpu == null || processors == null || processors != oldProcessors ||
+            wall <= oldWall || cpu < oldCpu) return null
+        return ((cpu - oldCpu).toDouble() / (wall - oldWall).toDouble() / processors.toDouble())
+            .takeIf { it.isFinite() }?.coerceIn(0.0, 1.0)
+    }
+}
+
+/** Kernel RSS is an approximate resident counter; PSS remains separately labelled. */
+private fun readOwnResidentBytes(): Long? = runCatching {
+    File("/proc/self/status").bufferedReader().use { reader ->
+        reader.lineSequence().take(160).firstOrNull { it.startsWith("VmRSS:") }
+            ?.substringAfter(':')?.trim()?.split(Regex("\\s+"))?.let { fields ->
+                val kib = fields.firstOrNull()?.toLongOrNull()
+                if (fields.getOrNull(1) == "kB" && kib != null && kib > 0L && kib <= Long.MAX_VALUE / 1024L)
+                    kib * 1024L else null
+            }
+    }
+}.getOrNull()
 
 /** Native events only. Registration and release belong to the policy's visible/worker lifetime. */
 @Suppress("DEPRECATION")
@@ -124,10 +180,11 @@ internal actual fun observeExperienceResources(context: PlatformContext, changed
     }
 }
 
-internal actual fun createExperienceNetworkClient(route: DownloadRouteSnapshot?): ExperienceNetworkTransport {
+internal actual fun createExperienceNetworkClient(route: DownloadRouteSnapshot?, timeouts: ExperienceImageTimeouts): ExperienceNetworkTransport {
+    val effective = timeouts.forCurrentPlatform()
     val client = OkHttpClient.Builder().applyDownloadRoute(route)
-        .connectTimeout(20, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS)
-        .callTimeout(30, TimeUnit.MINUTES).build()
+        .connectTimeout(effective.connectMillis, TimeUnit.MILLISECONDS).readTimeout(effective.idleMillis, TimeUnit.MILLISECONDS)
+        .callTimeout(effective.totalMillis, TimeUnit.MILLISECONDS).build()
     return ExperienceNetworkTransport(client.asNetworkClient()) {
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()

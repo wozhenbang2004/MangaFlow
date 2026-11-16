@@ -44,8 +44,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
-private data class StorageClearPlan(val items: List<StoredCacheItem>, val legacy: Boolean, val data: Boolean,
-    val estimatedBytes: Long, val label: String)
+private data class StorageClearPlan(val items: List<StoredCacheItem>, val legacy: Boolean,
+    val estimatedBytes: Long, val label: String, val legacyRevision: Long?, val legacyStamp: String?)
 private data class StoragePane(val area: CacheArea?, val book: String?, val review: StorageClearPlan?, val snapshot: StorageCacheSnapshot?)
 
 /** One retained panel; overview, drill-down and review share the same header and scroll owner. */
@@ -53,7 +53,6 @@ private data class StoragePane(val area: CacheArea?, val book: String?, val revi
 internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, library: LibraryStore,
     repository: dev.mangaflow.data.UnifiedMangaRepository?,
     active: Boolean = true,
-    clearBrowse: suspend () -> Unit, clearMetadata: suspend () -> Unit,
     onDismiss: () -> Unit, onClosed: () -> Unit, onDownloads: () -> Unit, onModels: () -> Unit,
 ) {
     val context = LocalMangaContext.current
@@ -90,9 +89,11 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
         if (!visible || !active || busy) return@LaunchedEffect
         loading = true
         try {
-            snapshot = store.snapshot()
-            val ids = snapshot?.items.orEmpty().map { it.resource.mangaId }.filter { it.isNotBlank() }.distinct()
+            val observed = store.snapshot()
+            val ids = observed.items.map { it.resource.mangaId }.filter { it.isNotBlank() }.distinct()
             details = buildMap { for (id in ids) ReaderCatalogStore(context).read(id)?.let { put(id, it) } }
+            // Title reads can restore owner memory; issue the review after those reads settle.
+            snapshot = store.snapshot()
             offlineBytes = withContext(Dispatchers.IO) { downloads.storageBytes() }
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { notice = "用量读取未完成，点按刷新重试" }
@@ -113,19 +114,17 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     val chosen = if (selectedInScope.isEmpty()) scoped else selectedInScope
     val reclaimable = chosen.filterNot { it.protected }
     val includeLegacy = area == null && book == null && selected.isEmpty() && snapshot?.legacyReclaimable == true
-    val includeData = (area == null || area == CacheArea.DATA) && selected.isEmpty()
     val scopeBytes = reclaimable.sumOf { it.bytes } +
-        (if (includeLegacy) snapshot?.coilUnclassifiedBytes ?: 0L else 0L) +
-        (if (includeData) (snapshot?.auxiliaryBytes ?: 0L) + (snapshot?.catalogReclaimableBytes ?: 0L) else 0L)
+        (if (includeLegacy) snapshot?.coilUnclassifiedBytes ?: 0L else 0L)
     fun previewClear() {
         if (busy || loading || scopeBytes <= 0L) return
-        plan = StorageClearPlan(reclaimable.toList(), includeLegacy, includeData, scopeBytes,
-            if (selectedInScope.isNotEmpty()) "已选内容" else book?.let { known[it]?.title ?: "当前作品" } ?: area?.label ?: "可回收缓存")
+        plan = StorageClearPlan(reclaimable.toList(), includeLegacy, scopeBytes,
+            if (selectedInScope.isNotEmpty()) "已选内容" else book?.let { known[it]?.title ?: "当前作品" } ?: area?.label ?: "可回收缓存", snapshot?.legacyRevision, snapshot?.legacyStamp)
     }
     fun applyClear(reviewed: StorageClearPlan) {
         if (operations.find(UserOperationKeys.CACHE)?.active == true) return
         val handle = operations.clearStorageCache(store, imageLoader, reviewed.items,
-            reviewed.legacy, reviewed.data, clearBrowse, clearMetadata)
+            reviewed.legacy, reviewed.legacyRevision, reviewed.legacyStamp)
         if (handle.accepted) {
             plan = null
             selected = emptySet()
@@ -234,8 +233,6 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                         StorageLine(kind.label, "${items.size} 项", storageBytes(items.sumOf { it.bytes }))
                                     }
                                     if (paneReview.legacy) StorageLine("旧版图片缓存", "无可靠作品归属，空闲时清理", storageBytes(paneSnapshot?.coilUnclassifiedBytes ?: 0L))
-                                    if (paneReview.data) StorageLine("资料与列表", "保留离线所需目录", storageBytes((paneSnapshot?.auxiliaryBytes ?: 0L) +
-                                        (paneSnapshot?.catalogReclaimableBytes ?: 0L)))
                                     Text("当前阅读、播放缓冲、使用中的图片、下载断点与离线资料会保留。离线章节和模型由各自入口管理。",
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                 }
@@ -263,14 +260,16 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                 val inventory = paneSnapshot
                                 if (inventory != null) {
                                     val buckets = listOf(
-                                        "Coil 原图" to (inventory.items.filter { it.resource.backend == CacheBackend.COIL }
+                                        "原图与封面" to (inventory.items.filter { it.resource.backend == CacheBackend.COIL }
                                             .sumOf { it.bytes } + inventory.coilUnclassifiedBytes),
                                         "脚本素材" to inventory.items.filter { it.resource.backend == CacheBackend.SCRIPT }.sumOf { it.bytes },
                                         "JM 解密" to inventory.items.filter { it.resource.backend == CacheBackend.JM }.sumOf { it.bytes },
                                         "分镜" to inventory.items.filter { it.resource.backend == CacheBackend.PANEL }.sumOf { it.bytes },
                                         "番剧" to inventory.areaBytes(CacheArea.ANIME),
-                                        "目录" to inventory.catalogBytes,
-                                        "数据" to inventory.auxiliaryBytes,
+                                        "目录" to (inventory.items.filter { it.resource.backend == CacheBackend.CATALOG }
+                                            .sumOf { it.bytes } + inventory.catalogBytes),
+                                        "数据" to (inventory.items.filter { it.resource.backend == CacheBackend.AUXILIARY }
+                                            .sumOf { it.bytes } + inventory.auxiliaryBytes),
                                     )
                                     Column(Modifier.fillMaxWidth().padding(vertical = 7.dp),
                                         verticalArrangement = Arrangement.spacedBy(5.dp)) {

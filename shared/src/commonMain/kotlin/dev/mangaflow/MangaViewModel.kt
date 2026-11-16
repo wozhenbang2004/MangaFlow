@@ -17,10 +17,15 @@ import dev.mangaflow.data.ReaderSourceStandbyAvailability
 import dev.mangaflow.data.ReaderSourceStandbyAvailabilityPhase
 import dev.mangaflow.data.ReaderNextChapterPreparation
 import dev.mangaflow.data.ReaderNextChapterPreparationPhase
+import dev.mangaflow.reader.prepareReaderSourcePage
+import dev.mangaflow.reader.readerManifestFingerprint
+import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.data.approximateReaderPage
 import dev.mangaflow.data.plugins.prefetchScriptPage
 import dev.mangaflow.data.plugins.scriptSourceImageEpoch
 import dev.mangaflow.experience.PrefetchWork
+import dev.mangaflow.experience.withPrefetchImageInactivity
+import dev.mangaflow.experience.PrefetchImageInactivityException
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.mangaflow.account.AccountProfile
@@ -49,6 +54,8 @@ import dev.mangaflow.data.SourceException
 import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteMode
 import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.net.DownloadRoutingStore
+import dev.mangaflow.net.identity
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.data.ChapterVariant
 import dev.mangaflow.data.SourceKeys
@@ -324,6 +331,17 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     val sourceManagement = _sourceManagement.asStateFlow()
     private var sourceReadJob: Job? = null
     private var sourceReadRequest = 0L
+    private var failedSourcePage: Pair<String, String>? = null
+    private val automaticSourceSwitches = mutableMapOf<String, Long>()
+    private data class ReaderSourceUndo(
+        val workId: String, val chapter: Chapter, val variant: ChapterVariant,
+        val nativePage: Int, val manifest: String, val sourceEpoch: String,
+        val afterChapterId: String, val afterReadingEpoch: Long,
+    )
+    private var readerSourceUndo: ReaderSourceUndo? = null
+    private var readerNativeCursor: Triple<String, String, Int>? = null
+    private val _readerSourceSwitchUndoAvailable = MutableStateFlow(false)
+    val readerSourceSwitchUndoAvailable = _readerSourceSwitchUndoAvailable.asStateFlow()
     private var sourceManagementJob: Job? = null
     private var sourceManagementRequest = 0L
     private val _libraryOpening = MutableStateFlow<LibraryOpenState?>(null)
@@ -2067,6 +2085,39 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         prepareReadChapterVariant(chapter, variant, pageIndex.coerceAtLeast(0), pageCount.coerceAtLeast(0))
     }
 
+    /** Only the reader's decoded, explicitly aligned target can enter this automatic path. */
+    fun verifiedReadReaderChapterVariant(chapter: Chapter, variant: ChapterVariant,
+        targetIndex: Int, targetManifest: String) {
+        val session = _reading.value ?: return
+        val current = visibleReading?.takeIf { it.first.id == session.manga.id }?.second ?: return
+        if (current.id != chapter.id || session.collection != null || _chapterSourceOperation.value.loading) return
+        val policy = ExperiencePolicyStore.get(application).state.value.recovery
+        if (!policy.autoSwitch || policy.sourceLocked || targetManifest.isBlank() || targetIndex < 0) return
+        val key = session.manga.id + "\u0000" + chapter.logicalId.ifBlank { chapter.id }
+        val now = monotonicTimeMillis()
+        val last = automaticSourceSwitches[key]
+        if (last != null && now - last < policy.switchCooldownSeconds.toLong() * 1_000L) return
+        prepareReadChapterVariant(chapter, variant, targetIndex, verifiedManifest = targetManifest,
+            automaticKey = key)
+    }
+
+    /** Undo restores the original native index after checking its exact edition again. */
+    fun undoReaderSourceSwitch() {
+        val undo = readerSourceUndo ?: return
+        val session = _reading.value ?: return
+        if (session.manga.id != undo.workId || readingRequestId != undo.afterReadingEpoch ||
+            visibleReading?.second?.id != undo.afterChapterId || _chapterSourceOperation.value.loading) return
+        if (scriptSourceImageEpoch(application, undo.variant.sourceId) != undo.sourceEpoch) {
+            _readerSourceSwitchUndoAvailable.value = false
+            viewModelScope.launch { messages.send("原来源账号或图片会话已变化，请重新选择来源。") }
+            return
+        }
+        val current = session.chapters.firstOrNull { it.id == undo.afterChapterId } ?: return
+        val original = current.variants.firstOrNull { it.storageId == undo.variant.storageId } ?: return
+        prepareReadChapterVariant(current, original, undo.nativePage,
+            verifiedManifest = undo.manifest, undoing = true)
+    }
+
     private fun requestSourceVariant(chapter: Chapter, variant: ChapterVariant,
         fromPageIndex: Int?, fromPageCount: Int = 0) {
         if (chapter.variants.none { it.storageId == variant.storageId }) return
@@ -2118,7 +2169,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private fun prepareReadChapterVariant(chapter: Chapter, variant: ChapterVariant,
-        samePageIndex: Int?, fromPageCount: Int = 0) {
+        samePageIndex: Int?, fromPageCount: Int = 0, verifiedManifest: String? = null,
+        automaticKey: String? = null, undoing: Boolean = false) {
         if (chapter.variants.none { it.storageId == variant.storageId }) return
         val session = _reading.value
         val detail = _detail.value
@@ -2137,16 +2189,44 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }
         val selected = resolveChapter(currentChapter, currentVariant)
         val sourceMangaId = chapterSourceMangaId(work.id, selected)
+        val targetIdentity = work.id to selected.id
+        val retryImage = automaticKey == null && failedSourcePage == targetIdentity
+        val configuration = repository.sourceConfigurationKey()
+        val targetSourceEpoch = scriptSourceImageEpoch(application, currentVariant.sourceId)
+        val originalVariant = currentChapter.variants.firstOrNull { it.storageId == currentChapter.id }
+        val originalPages = repository.cachedPages(chapterSourceMangaId(work.id, currentChapter), currentChapter.id)
+        val originalPage = readerNativeCursor?.takeIf { it.first == work.id && it.second == currentChapter.id }?.third
+            ?: library.progressFor(work.id, currentChapter.id)?.pageIndex ?: session?.initialPageIndex ?: 0
+        val originalEpoch = originalVariant?.let { scriptSourceImageEpoch(application, it.sourceId) }
+        val targetRouteIdentity = DownloadRoutingStore.get(application).sourceSnapshot(currentVariant.sourceId).identity()
+        val selectionSettings = unifiedChapters.settings(work.id)
+        fun readingChapterCurrent(): Boolean = session == null ||
+            (_reading.value?.manga?.id == work.id &&
+                (readerNativeCursor?.takeIf { it.first == work.id }?.second
+                    ?: visibleReading?.takeIf { it.first.id == work.id }?.second?.id
+                    ?: _reading.value?.chapterId) == currentChapter.id)
+        fun verifiedTargetCurrent(): Boolean =
+            readingChapterCurrent() && repository.sourceConfigurationKey() == configuration &&
+                DownloadRoutingStore.get(application).sourceSnapshot(currentVariant.sourceId).identity() == targetRouteIdentity &&
+                scriptSourceImageEpoch(application, currentVariant.sourceId) == targetSourceEpoch &&
+                (automaticKey == null || ExperiencePolicyStore.get(application).state.value.recovery.let {
+                    it.autoSwitch && !it.sourceLocked
+                })
         _chapterSourceOperation.value = ChapterSourceOperation(loading = true, targetSource = variant.sourceName)
         // Keep the old readable page mounted until the target manifest is ready.
         // The source returns only URLs/metadata: no preceding images are fetched.
         sourceReadJob = viewModelScope.launch {
+            val storage = dev.mangaflow.storage.StorageCacheStore.get(application)
+            val release = storage.protectReading(work.id, selected.id, sourceMangaId)
+            var preparingImage = false
             try {
                 val pages = withContext(Dispatchers.IO) {
-                    foregroundRequest("准备本章来源") {
-                        repository.cachedPages(sourceMangaId, selected.id)
-                            ?: downloads.storedPages(work.id, selected.id)
-                            ?: repository.pages(sourceMangaId, selected.id)
+                    withTimeout(ExperiencePolicyStore.get(application).state.value.recovery.manifestTimeoutSeconds.toLong() * 1_000L) {
+                        foregroundRequest("准备本章来源") {
+                            repository.cachedPages(sourceMangaId, selected.id)
+                                ?: downloads.storedPages(work.id, selected.id)
+                                ?: repository.pages(sourceMangaId, selected.id)
+                        }
                     }
                 }
                 require(pages.isNotEmpty()) { "这个来源暂时没有可读图片。" }
@@ -2155,19 +2235,44 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 if (session == null && (detailEpoch != detailRequestId || _detail.value?.manga?.id != work.id)) return@launch
                 // Page cuts may differ between editions. Preserve approximate progress
                 // rather than treating the same integer page as the same artwork.
-                val initialPage = samePageIndex?.let { oldIndex ->
+                require(verifiedTargetCurrent()) { "来源或恢复设置已变化，请重新确认。" }
+                val initialPage = if (verifiedManifest != null) {
+                    require(readerManifestFingerprint(pages) == verifiedManifest &&
+                        samePageIndex != null && samePageIndex in pages.indices) {
+                        "目标图片清单已变化，请重新对齐后再切换。"
+                    }
+                    samePageIndex
+                } else samePageIndex?.let { oldIndex ->
                     approximateReaderPage(oldIndex, fromPageCount, pages.size)
                 }
+                val targetPageIndex = initialPage ?: library.progressFor(work.id, selected.id)?.pageIndex
+                    ?.coerceIn(pages.indices) ?: 0
+                val preparedManifest = readerManifestFingerprint(pages)
+                val headers = repository.imageHeaders(sourceMangaId, selected.id).toMap()
+                val runtime = ExperiencePolicyStore.get(application).state.value.runtime
+                preparingImage = true
+                prepareReaderSourcePage(application, work.id, currentVariant, pages[targetPageIndex], headers,
+                    downloads, runtime.previewWidthPx, runtime.previewHeightPx, retry = retryImage)
+                preparingImage = false
+                currentCoroutineContext().ensureActive()
+                require(verifiedTargetCurrent() && repository.cachedPages(sourceMangaId, selected.id)
+                    ?.let(::readerManifestFingerprint)?.let { it == preparedManifest } != false) {
+                    "来源图片清单或线路已变化，请重新选择。"
+                }
+                if (request != sourceReadRequest || readingEpoch != readingRequestId ||
+                    session == null && detailEpoch != detailRequestId) return@launch
                 val latestCatalog = (if (session != null) _reading.value?.chapters
                     else _detail.value?.detail?.chapters) ?: return@launch
                 val latestChapter = findSourceChapter(latestCatalog, chapter.id)
                 val latestVariant = latestChapter?.variants?.firstOrNull { it.storageId == selected.id }
                 require(latestChapter != null && latestVariant != null) { "章节来源已更新，请重新选择。" }
                 val latestSelected = resolveChapter(latestChapter, latestVariant)
-                val expectedSettings = unifiedChapters.settings(work.id)
                 withContext(Dispatchers.IO) {
                     unifiedChapters.choose(work.id, latestSelected.logicalId.ifBlank { latestSelected.id }, latestSelected.id,
-                        expectedSettings = expectedSettings)
+                        expectedSettings = selectionSettings, isCurrent = {
+                            request == sourceReadRequest && readingEpoch == readingRequestId &&
+                                (session != null || detailEpoch == detailRequestId) && verifiedTargetCurrent()
+                        })
                 }
                 if (request != sourceReadRequest) return@launch
                 if (session != null && (readingEpoch != readingRequestId || _reading.value?.manga?.id != work.id)) return@launch
@@ -2182,22 +2287,43 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     current.logicalId.ifBlank { current.id } == latestSelected.logicalId.ifBlank { latestSelected.id }) {
                     "章节来源已更新，请重新选择。"
                 }
+                require(verifiedTargetCurrent()) { "来源或恢复设置已变化，请重新确认。" }
                 val projected = selectedChapters(currentCatalog, resolveChapter(current, available))
                 _chapterSourceOperation.value = ChapterSourceOperation()
-                beginReading(ReadingSession(work, projected, selected.id, initialPageIndex = initialPage))
-                messages.send(if (initialPage != null)
+                failedSourcePage = null
+                beginReading(ReadingSession(work, projected, selected.id, initialPageIndex = targetPageIndex))
+                if (automaticKey != null) automaticSourceSwitches[automaticKey] = monotonicTimeMillis()
+                if (!undoing && session != null && originalVariant != null && originalPages != null &&
+                    originalPage in originalPages.indices && originalEpoch != null) {
+                    readerSourceUndo = ReaderSourceUndo(work.id, currentChapter, originalVariant,
+                        originalPage, readerManifestFingerprint(originalPages), originalEpoch, selected.id, readingRequestId)
+                    _readerSourceSwitchUndoAvailable.value = true
+                }
+                messages.send(if (verifiedManifest != null)
+                    if (undoing) "已回到原版本第${initialPage!! + 1}页。"
+                    else "已切换到 ${variant.sourceName}，从已对齐的第${initialPage!! + 1}页继续。"
+                else if (initialPage != null)
                     "已切换到 ${variant.sourceName}，从约第${initialPage + 1}页继续。不同版本分图可能不同。"
                 else if (library.progressFor(work.id, selected.id) != null)
                     "已切换到 ${variant.sourceName}，恢复该版本的位置。"
                 else "已切换到 ${variant.sourceName}，从本话开头阅读。")
+            } catch (_: TimeoutCancellationException) {
+                currentCoroutineContext().ensureActive()
+                if (request == sourceReadRequest) {
+                    val error = "目标来源图片清单等待超时，仍保留当前阅读版本。"
+                    _chapterSourceOperation.value = ChapterSourceOperation(error = error, targetSource = variant.sourceName)
+                    messages.send(error)
+                }
             } catch (cancel: CancellationException) { throw cancel
             } catch (failure: Exception) {
                 if (request == sourceReadRequest) {
+                    if (preparingImage) failedSourcePage = targetIdentity
                     val error = failure.message ?: "本章来源未能打开，请重试。"
                     _chapterSourceOperation.value = ChapterSourceOperation(error = error, targetSource = variant.sourceName)
                     messages.send(error)
                 }
             } finally {
+                release()
                 if (request == sourceReadRequest && _chapterSourceOperation.value.loading)
                     _chapterSourceOperation.value = ChapterSourceOperation()
             }
@@ -2347,6 +2473,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private fun beginReading(session: ReadingSession) {
+        readerNativeCursor = null
+        readerSourceUndo = null
+        _readerSourceSwitchUndoAvailable.value = false
         cancelReaderSourceStandbys()
         cancelLibraryReading()
         readingCatalogJob?.cancel()
@@ -2515,6 +2644,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         if (manga.sourceUrl == LOCAL_SOURCE_URL) return
         val session = _reading.value?.takeIf { it.manga.id == manga.id && it.collection == null } ?: return
         val current = session.chapters.firstOrNull { it.id == chapter.id } ?: return
+        if (pageIndex >= 0 && pageIndex < pageCount) readerNativeCursor = Triple(manga.id, current.id, pageIndex)
         val epoch = readingRequestId
         val logical = current.logicalId.ifBlank { current.id }
         val configuration = repository.sourceConfigurationKey()
@@ -2582,7 +2712,15 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         readerStandbys.nudge(manga.id, current.id)
     }
 
-    private data class NextChapterLimits(val allowed: Boolean, val ahead: Int, val bytes: Long, val foreground: Boolean)
+    fun rescueReaderSourceStandbys(chapter: Chapter, enabled: Boolean) {
+        val session = _reading.value ?: return
+        val current = session.chapters.firstOrNull { it.id == chapter.id } ?: return
+        if (enabled && visibleReading?.second?.id != current.id) return
+        readerStandbys.rescue(session.manga.id, current.id, enabled)
+    }
+
+    private data class NextChapterLimits(val allowed: Boolean, val ahead: Int, val bytes: Long,
+        val foreground: Boolean, val pages: Int, val manifestSeconds: Int, val imageSeconds: Int, val cacheSeconds: Int)
 
     private fun cancelNextChapterPrefetch() {
         chapterPrefetchRequest++
@@ -2635,24 +2773,25 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 // Replacement work cannot acquire a fresh byte window until the old children settle.
                 previous?.cancelAndJoin()
                 val policy = ExperiencePolicyStore.get(application)
-                policy.state.map { NextChapterLimits(it.crossChapter, it.prefetchAhead, it.nextChapterPrefetchBytes, it.foreground) }
-                    .distinctUntilChanged().collectLatest { (allowed, ahead, limit, foreground) ->
+                policy.state.map { NextChapterLimits(it.crossChapter, it.prefetchAhead, it.nextChapterPrefetchBytes, it.foreground,
+                    it.runtime.nextChapterPages, it.recovery.manifestTimeoutSeconds, it.recovery.imageTimeoutSeconds, it.runtime.cacheSampleSeconds) }
+                    .distinctUntilChanged().collectLatest { (allowed, ahead, limit, foreground, pageLimit, manifestSeconds, imageSeconds, cacheSeconds) ->
                         if (!currentSession()) throw CancellationException("下一话准备已更新")
-                        if (!allowed || !foreground || limit <= 0L || ahead <= 0) {
+                        if (!allowed || !foreground || limit <= 0L || ahead <= 0 || pageLimit <= 0) {
                             _nextChapterPreparation.value = initial.copy(phase = ReaderNextChapterPreparationPhase.DEFERRED,
                                 reason = if (!foreground) "阅读不在前台，下一话准备暂缓" else "当前策略未开启下一话原图准备")
                             return@collectLatest
                         }
                         _nextChapterPreparation.value = initial.copy(manifestQueued = true)
                         val upcoming = try {
-                            repository.cachedPages(owner, chapter.id) ?: withTimeout(25_000L) {
+                            repository.cachedPages(owner, chapter.id) ?: withTimeout(manifestSeconds.toLong() * 1_000L) {
                                 policy.withPrefetchAdmission(source, 1_048_576L, { false }, onWaiting = { wait ->
                                     _nextChapterPreparation.update { value -> if (!currentSession()) value else initial.copy(
                                         phase = if (wait == null) ReaderNextChapterPreparationPhase.MANIFEST else ReaderNextChapterPreparationPhase.QUEUED,
                                         manifestQueued = wait != null, manifestActive = wait == null,
                                         reason = if (wait == null) null else "下一话目录等待准备名额或可用资源") }
                                 }) {
-                                    withTimeout(15_000L) { repository.pages(owner, chapter.id) }
+                                    withTimeout(manifestSeconds.toLong() * 1_000L) { repository.pages(owner, chapter.id) }
                                 }
                             }
                         } finally {
@@ -2676,7 +2815,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                             var failure: String? = null
                             var deferred: String? = null
                         }
-                        val pages = upcoming.take(minOf(ahead, 3)).map { NextPage(it, window.child()) }
+                        val pages = upcoming.take(minOf(ahead, pageLimit)).map { NextPage(it, window.child()) }
                         var windowLive = true
                         fun publish() {
                             if (!windowLive || !currentSession()) return
@@ -2723,21 +2862,21 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                             coroutineScope {
                                 val jobs = pages.map { item -> launch {
                                     try {
-                                        withTimeout(25_000L) {
+                                        withPrefetchImageInactivity(item.work, imageSeconds.toLong() * 1_000L) {
                                             val available = downloads.resolvePrefetchPage(manga.id, chapter.id, item.page)
-                                            if (available == null) { item.deferred = "下一话原图暂不可准备"; return@withTimeout }
+                                            if (available == null) { item.deferred = "下一话原图暂不可准备"; return@withPrefetchImageInactivity }
                                             item.original = available
                                             item.cacheKey = readerPageCacheKey(available, headers, source)
                                             val cached = inspect(item, available)
                                             item.ready = cached.originalPresent
                                             if (cached.originalPresent == true) {
                                                 if (!available.url.startsWith("file:")) cached.originalBytes?.let(item.ticket::accept)
-                                                return@withTimeout
+                                                return@withPrefetchImageInactivity
                                             }
-                                            if (!currentSession() || !policy.state.value.crossChapter) return@withTimeout
+                                            if (!currentSession() || !policy.state.value.crossChapter) return@withPrefetchImageInactivity
                                             if (source == "jmcomic") {
                                                 item.deferred = "此来源原图需进入下一话后准备"
-                                                return@withTimeout
+                                                return@withPrefetchImageInactivity
                                             }
                                             if (source.startsWith("js_")) {
                                                 item.original = prefetchScriptPage(application, owner, chapter.id, available,
@@ -2749,7 +2888,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                                                 if (result.failure != null) item.failure = "下一话图片准备失败，翻章时可重试"
                                                 else if (!result.received) item.deferred = "当前资源或来源限制，下一话稍后准备"
                                             }
-                                            if (!currentSession()) return@withTimeout
+                                            if (!currentSession()) return@withPrefetchImageInactivity
                                             item.original?.let { original ->
                                                 val artifacts = inspect(item, original)
                                                 item.ready = artifacts.originalPresent
@@ -2759,6 +2898,9 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                                                 }
                                             }
                                         }
+                                    } catch (failure: PrefetchImageInactivityException) {
+                                        if (failure.sourceFailure) item.failure = "下一话图片等待新数据超时，翻章时可重试"
+                                        else item.deferred = "资源等待较久，下一话稍后准备"
                                     } catch (_: TimeoutCancellationException) { item.deferred = "下一话准备等待超时，翻章时按需读取" }
                                     catch (cancel: CancellationException) { throw cancel }
                                     catch (_: PrefetchBudgetExceeded) { item.deferred = "下一话准备窗口容量已用完" }
@@ -2775,7 +2917,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                                             item.ready = inspect(item, original).originalPresent
                                         } }
                                         publish()
-                                        delay(2_000L)
+                                        delay(cacheSeconds.toLong() * 1_000L)
                                     } else {
                                         publish()
                                         delay(250L)
@@ -3255,10 +3397,14 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     fun onChapterVisible(manga: Manga, chapter: Chapter) {
         if (_reading.value?.manga?.id != manga.id) return
         if (visibleReading?.second?.id != chapter.id) {
-            if (visibleReading != null) cancelReaderSourceStandbys()
+            if (visibleReading != null) {
+                cancelSourceSelection()
+                cancelReaderSourceStandbys()
+            }
             cancelNextChapterPrefetch()
         }
         visibleReading = manga to chapter
+        if (readerSourceUndo?.afterChapterId != chapter.id) _readerSourceSwitchUndoAvailable.value = false
         if (chapter.sourceId != "copy" || SourceKeys.isEncoded(chapter.id) || manga.sourceId != "copy") return
         if (manga.sourceUrl == LOCAL_SOURCE_URL) return
         if (_account.value.profile == null || _account.value.busy) return

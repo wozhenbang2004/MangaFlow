@@ -4,6 +4,8 @@ import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceKeys
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.experience.ExperienceDiskCache
+import dev.mangaflow.experience.ExperienceRuntimePreferences
+import dev.mangaflow.experience.CacheEvictionOrder
 import dev.mangaflow.experience.readerPageCacheKey
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
@@ -20,7 +22,7 @@ import kotlinx.coroutines.sync.withLock
 internal enum class CacheArea(val label: String) {
     ANIME("番剧缓冲"), READING("阅读图片"), ARTWORK("封面与头像"), DATA("资料与列表"), PANELS("分镜结果"),
 }
-internal enum class CacheBackend { COIL, SCRIPT, JM, PANEL, CATALOG, ANIME }
+internal enum class CacheBackend { COIL, SCRIPT, JM, PANEL, CATALOG, ANIME, AUXILIARY }
 
 /** The player retains its own journal and open spans; the shared cache coordinator never deletes its files. */
 internal data class AnimeDiskCacheUsage(val bytes: Long, val revision: Long, val active: Boolean, val accessedAt: Long)
@@ -36,15 +38,17 @@ internal data class CacheResource(
     val id: String, val backend: CacheBackend, val key: String,
     val area: CacheArea, val mangaId: String = "", val chapterId: String = "", val sourceId: String = "",
     val pageIndex: Int = -1, val accessedAt: Long = 0L, val used: Boolean = false,
+    val auxiliaryOwnerId: String = "",
 )
 internal data class StoredCacheItem(val resource: CacheResource, val bytes: Long, val modifiedAt: Long,
-    val protected: Boolean = false)
+    val protected: Boolean = false, val auxiliaryEntry: AuxiliaryCacheEntry? = null)
 internal data class StorageCacheSnapshot(val items: List<StoredCacheItem>, val coilUnclassifiedBytes: Long,
     val auxiliaryBytes: Long, val catalogBytes: Long, val catalogReclaimableBytes: Long,
-    val indexBytes: Long, val temporaryBytes: Long, val budgetBytes: Long, val pending: Boolean, val legacyReclaimable: Boolean) {
+    val indexBytes: Long, val temporaryBytes: Long, val budgetBytes: Long, val pending: Boolean, val legacyReclaimable: Boolean,
+    val legacyRevision: Long, val legacyStamp: String) {
     val totalBytes: Long get() = items.sumOf { it.bytes } + coilUnclassifiedBytes + auxiliaryBytes + catalogBytes + indexBytes + temporaryBytes
     val reclaimableBytes: Long get() = items.filterNot { it.protected }.sumOf { it.bytes } +
-        (if (legacyReclaimable) coilUnclassifiedBytes else 0L) + auxiliaryBytes + catalogReclaimableBytes
+        (if (legacyReclaimable) coilUnclassifiedBytes else 0L) + catalogReclaimableBytes
     fun areaBytes(area: CacheArea): Long = items.filter { it.resource.area == area }.sumOf { it.bytes } +
         if (area == CacheArea.DATA) auxiliaryBytes + catalogBytes else 0L
 }
@@ -70,9 +74,15 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     private var maintenanceRequested = false
     private var coil: ExperienceDiskCache? = null
     private var animeCache: AnimeDiskCacheOwner? = null
+    private val auxiliaryOwners = linkedMapOf<String, AuxiliaryDiskCacheOwner>()
+    private val catalogStore by lazy { ReaderCatalogStore(app) }
     private var budget = 512L * MIB
     private var budgetVersion = -1L
     private var cachedBytes = 0L
+    private var sampledSnapshot: StorageCacheSnapshot? = null
+    private var sampledAt = 0L
+    private var runtime = ExperienceRuntimePreferences()
+    private var runtimeVersion = -1L
     private var error = false
     private var revision = 0L
     private var retentionMillis = 0L
@@ -106,6 +116,26 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     }
 
     internal val measuredBytes: Long get() = synchronized(lock) { cachedBytes }
+    internal val measuredAtMillis: Long? get() = synchronized(lock) { sampledAt.takeIf { it > 0L } }
+    internal fun setRuntime(value: ExperienceRuntimePreferences, version: Long) {
+        val changed = synchronized(lock) {
+            if (version < runtimeVersion) return
+            runtimeVersion = version
+            (runtime != value).also { runtime = value }
+        }
+        if (changed) requestMaintenance()
+    }
+
+    /** One shared local scan; readers/settings cannot queue duplicate directory walks. */
+    internal suspend fun sample(maxAgeMillis: Long): StorageCacheSnapshot = withContext(Dispatchers.IO) {
+        ready.await()
+        mutation.withLock {
+            val cached = synchronized(lock) {
+                sampledSnapshot?.takeIf { wallTimeMillis() - sampledAt in 0L until maxAgeMillis }
+            }
+            cached ?: scan()
+        }
+    }
     internal fun cacheWorkFinished() = requestMaintenance()
     internal fun setRetention(hours: Int, version: Long) {
         val changed = synchronized(lock) {
@@ -129,6 +159,11 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     internal fun attachAnimeCache(owner: AnimeDiskCacheOwner) {
         val target = synchronized(lock) { animeCache = owner; budget }
         owner.resize(target)
+        requestMaintenance()
+    }
+
+    internal fun registerAuxiliaryOwner(owner: AuxiliaryDiskCacheOwner) {
+        synchronized(lock) { auxiliaryOwners[owner.ownerId] = owner; sampledSnapshot = null }
         requestMaintenance()
     }
 
@@ -268,6 +303,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         currentCoroutineContext().ensureActive()
         val disk = synchronized(lock) { coil }
         val saved = synchronized(lock) { records.values.toList() }
+        val scanRevision = synchronized(lock) { revision }
         val items = mutableListOf<StoredCacheItem>()
         val now = wallTimeMillis()
         val videoOwner = synchronized(lock) { animeCache }
@@ -309,22 +345,51 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         }
         val diskSize = imageFiles
             .filter { it.name.matches(Regex("[a-f0-9]{64}\\.[01]")) }.sumOf { it.length() }
+        val knownCoilHashes = items.filter { it.resource.backend == CacheBackend.COIL }
+            .map { it.resource.id.substringAfter(':') }.toSet()
+        val unknownFiles = imageFiles.filter { it.name.matches(Regex("[a-f0-9]{64}\\.[01]")) &&
+            it.name.substringBeforeLast('.') !in knownCoilHashes }
+        val legacyStamp = hash(unknownFiles.sortedBy { it.name }.joinToString("|") {
+            "${it.name}:${it.length()}:${it.lastModified()}"
+        })
         val unknown = (diskSize - items.filter { it.resource.backend == CacheBackend.COIL }.sumOf { it.bytes }).coerceAtLeast(0L)
-        val catalogs = ReaderCatalogStore(app).cacheUsage(::protectedCatalog)
-        val auxiliary = listOf("browse-cache", "metadata-cache", "site-rankings").sumOf { folder ->
-            StorageFile(root, folder).listFiles().orEmpty().sumOf { if (it.isFile) it.length() else 0L }
+        val catalogOwner = catalogStore.cacheOwner
+        val owners = synchronized(lock) { auxiliaryOwners.values.toList() } + catalogOwner
+        for (owner in owners) {
+            for (entry in owner.snapshot()) {
+                val catalogue = owner.ownerId == "catalog"
+                val backend = if (catalogue) CacheBackend.CATALOG else CacheBackend.AUXILIARY
+                val key = owner.ownerId + ":" + entry.key
+                val resource = CacheResource(identity(backend, key), backend, key, CacheArea.DATA,
+                    mangaId = if (catalogue) entry.key else "", accessedAt = if (catalogue)
+                        catalogAccess(entry.key).takeIf { it > 0L } ?: entry.modifiedAt else entry.modifiedAt,
+                    used = true, auxiliaryOwnerId = owner.ownerId)
+                items += StoredCacheItem(resource, entry.bytes, entry.modifiedAt,
+                    protected = catalogue && (protectedCatalog(entry.key) || catalogStore.isWriting(entry.key)),
+                    auxiliaryEntry = entry)
+                present += resource.id
+            }
         }
-        val total = StorageCacheSnapshot(items, unknown, auxiliary, catalogs.first, catalogs.second,
+        val catalogBytes = (catalogStore.sizeBytes() - items.filter { it.resource.backend == CacheBackend.CATALOG }
+            .sumOf { it.bytes }).coerceAtLeast(0L)
+        // Cold/unrecognized owners are measured but never reported as safely reclaimable.
+        val auxiliary = (listOf("browse-cache", "metadata-cache", "site-rankings").sumOf { folder ->
+            StorageFile(root, folder).listFiles().orEmpty().sumOf { if (it.isFile) it.length() else 0L }
+        } - items.filter { it.resource.backend == CacheBackend.AUXILIARY }.sumOf { it.bytes }).coerceAtLeast(0L)
+        val total = StorageCacheSnapshot(items, unknown, auxiliary, catalogBytes, 0L,
             index.baseFile.length(), imageFiles.filterNot { it.name.matches(Regex("[a-f0-9]{64}\\.[01]")) }.sumOf { it.length() } +
                 listOf("script-decoded", "jm-decoded", "reader-panels").sumOf { folder ->
                     StorageFile(root, folder).listFiles().orEmpty().filter { file ->
                         !file.name.matches(Regex("[a-f0-9]{64}\\.(img|jpg|json)"))
                     }.sumOf { it.length() }
                 }, synchronized(lock) { budget }, error || disk?.resizePending == true || (video == null && videoBytes > 0L),
-            synchronized(lock) { windows.isEmpty() && leases.isEmpty() } && !DownloadStore.get(app).loading.value &&
-                DownloadStore.get(app).entries.value.none { it.status != DownloadStatus.COMPLETED } && items.none { it.resource.backend == CacheBackend.COIL && it.protected })
+            synchronized(lock) { windows.isEmpty() && leases.isEmpty() && revision == scanRevision } && !DownloadStore.get(app).loading.value &&
+                DownloadStore.get(app).entries.value.none { it.status != DownloadStatus.COMPLETED } && items.none { it.resource.backend == CacheBackend.COIL && it.protected },
+            scanRevision, legacyStamp)
         synchronized(lock) {
             cachedBytes = total.totalBytes
+            sampledSnapshot = total
+            sampledAt = now
             records.values.filter { it.backend != CacheBackend.CATALOG && it.id !in present &&
                 now - it.accessedAt > 30L * 60_000L && (leases[it.id] ?: 0) == 0 &&
                 windowKeys.values.none { keys -> it.id in keys } }.map { it.id }.forEach {
@@ -339,16 +404,29 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     }
 
     /** Clear exactly the reviewed snapshot; new or changed entries are not silently swept in. */
-    internal suspend fun clear(items: List<StoredCacheItem>, clearLegacy: Boolean = false): CacheClearResult = withContext(Dispatchers.IO) {
+    internal suspend fun clear(items: List<StoredCacheItem>, clearLegacy: Boolean = false,
+        legacyRevision: Long? = null, legacyStamp: String? = null): CacheClearResult = withContext(Dispatchers.IO) {
         ready.await()
         mutation.withLock {
             var freed = 0L; var skipped = 0; var failed = 0
+            var ownedMutations = 0L
             val removedKeys = mutableSetOf<String>()
             for (item in items) {
                 currentCoroutineContext().ensureActive()
                 val resource = item.resource
                 var removedBytes = item.bytes
-                val removed = if (resource.backend == CacheBackend.ANIME) {
+                val failuresBefore = failed
+                val removed = if (resource.backend == CacheBackend.AUXILIARY || resource.backend == CacheBackend.CATALOG) {
+                    val owner = if (resource.auxiliaryOwnerId == "catalog") catalogStore.cacheOwner
+                        else synchronized(lock) { auxiliaryOwners[resource.auxiliaryOwnerId] }
+                    val expected = item.auxiliaryEntry
+                    val actual = try { if (item.protected || expected == null) null else owner?.remove(expected) }
+                    catch (cancel: CancellationException) { throw cancel }
+                    catch (failure: AuxiliaryCacheRemovalException) { freed += failure.freedBytes; failed++; null }
+                    catch (_: Exception) { failed++; null }
+                    if (actual != null) removedBytes = actual
+                    actual != null
+                } else if (resource.backend == CacheBackend.ANIME) {
                     val owner = synchronized(lock) { animeCache }
                     val actual = if (item.protected) null else owner?.clear(item.modifiedAt)
                     if (actual != null) removedBytes = actual
@@ -373,16 +451,19 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                         records.remove(resource.id)
                         removedKeys += memoryKeys.remove(resource.id).orEmpty()
                         revision++
+                        ownedMutations++
                     }
                 }
-                else skipped++
+                else if (failed == failuresBefore) skipped++
             }
             if (clearLegacy) {
                 val disk = synchronized(lock) { coil }
                 // Legacy entries have no reliable owner. Only a fully idle image cache can be cleared.
                 val remaining = scan()
                 val version = synchronized(lock) { revision }
-                if (disk != null && remaining.items.none { it.resource.backend == CacheBackend.COIL } &&
+                if (disk != null && legacyRevision != null && legacyStamp != null &&
+                    version == legacyRevision + ownedMutations && remaining.legacyStamp == legacyStamp &&
+                    remaining.items.none { it.resource.backend == CacheBackend.COIL } &&
                     synchronized(lock) { windows.isEmpty() && leases.isEmpty() } &&
                     !DownloadStore.get(app).loading.value && DownloadStore.get(app).entries.value.none { it.status != DownloadStatus.COMPLETED }) {
                     freed += disk.clearWhenIdle { synchronized(lock) { windows.isEmpty() && leases.isEmpty() && revision == version } }
@@ -406,6 +487,12 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     ready.await()
                     val snapshot = snapshot()
                     val limit = snapshot.budgetBytes
+                    val policy = synchronized(lock) { runtime }
+                    if (!policy.automaticCleanup) {
+                        val other = snapshot.totalBytes - snapshot.items.filter { it.resource.backend == CacheBackend.COIL }.sumOf { it.bytes } - snapshot.coilUnclassifiedBytes
+                        synchronized(lock) { coil }?.resize((limit - other).coerceAtLeast(0L), synchronized(lock) { budgetVersion })
+                        return@launch
+                    }
                     val age = synchronized(lock) { retentionMillis }
                     val now = wallTimeMillis()
                     val expired = if (age <= 0L) emptyList() else snapshot.items.filterNot { it.protected }.filter { item ->
@@ -418,13 +505,19 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     val afterExpiry = if (expired.isEmpty()) snapshot else snapshot()
                     var excess = (afterExpiry.totalBytes - limit).coerceAtLeast(0L)
                     if (excess > 0L) {
-                        val ordered = afterExpiry.items.filterNot { it.protected }.sortedWith(
-                            compareBy<StoredCacheItem> { if (!it.resource.used) 0 else 1 }
-                                .thenBy { it.resource.accessedAt.takeIf { at -> at > 0L } ?: it.modifiedAt })
+                        val ageOrder = compareBy<StoredCacheItem> { it.resource.accessedAt.takeIf { at -> at > 0L } ?: it.modifiedAt }
+                        val order = when (policy.evictionOrder) {
+                            CacheEvictionOrder.UNUSED_FIRST -> compareBy<StoredCacheItem> { if (!it.resource.used) 0 else 1 }.then(ageOrder)
+                            CacheEvictionOrder.LEAST_RECENT -> ageOrder
+                            CacheEvictionOrder.LARGEST_FIRST -> compareByDescending<StoredCacheItem> { it.bytes }.then(ageOrder)
+                        }
+                        val ordered = afterExpiry.items.filterNot { it.protected }.sortedWith(order)
                         val selected = ordered.takeWhile { item -> (excess > 0L).also { excess -= item.bytes } }
-                        clear(selected, clearLegacy = excess > 0L && afterExpiry.legacyReclaimable)
+                        clear(selected, clearLegacy = excess > 0L && afterExpiry.legacyReclaimable,
+                            legacyRevision = afterExpiry.legacyRevision, legacyStamp = afterExpiry.legacyStamp)
                     }
-                    ReaderCatalogStore(app).trimToSize((limit / 16).coerceAtMost(32L * MIB), ::protectedCatalog)
+                    ReaderCatalogStore(app).trimToSize(policy.catalogMiB?.toLong()?.times(MIB)
+                        ?: (limit / 16).coerceAtMost(32L * MIB), ::protectedCatalog)
                     val beforeVideo = snapshot()
                     val videoBytes = beforeVideo.items.filter { it.resource.backend == CacheBackend.ANIME }.sumOf { it.bytes }
                     synchronized(lock) { animeCache }?.resize(

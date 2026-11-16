@@ -111,7 +111,7 @@ internal actual class JavascriptHttpSession actual constructor(
     }
 
     internal suspend fun imageBytes(value: String, imageHeaders: Map<String, String>, onBytes: ((Long) -> Unit)?,
-        onResponse: ((Int, Map<String, String>) -> Unit)?): ByteArray {
+        onResponse: ((Int, Map<String, String>) -> Unit)?, imageIdleMillis: Long, imageTotalMillis: Long): ByteArray {
         var url = publicPluginUrl(value)
         var headers = nativeScriptHeaders(JSONObject(imageHeaders))
         repeat(4) { index ->
@@ -120,7 +120,7 @@ internal actual class JavascriptHttpSession actual constructor(
             if (pause > 0L) throw SourceException("来源图片请求暂时受限，请稍后重试。", retryAfterSeconds = ceil(pause / 1000.0).toLong())
             reserveNativeOrigin(url)
             val result = withContext(Dispatchers.IO) {
-                response(url, "GET", headers, ByteArray(0), SCRIPT_IMAGE_TOTAL_MILLIS, onBytes, onResponse, imageTransfer = true)
+                response(url, "GET", headers, ByteArray(0), imageTotalMillis, onBytes, onResponse, imageTransfer = true, imageIdleMillis = imageIdleMillis)
             }
             if (result.status in setOf(301, 302, 303, 307, 308)) {
                 require(index < 3) { "图片重定向次数过多。" }
@@ -157,7 +157,8 @@ internal actual class JavascriptHttpSession actual constructor(
 
     private suspend fun response(url: HttpUrl, method: String, headers: Map<String, String>, body: ByteArray,
         timeoutMillis: Long = 15_000L, onBytes: ((Long) -> Unit)? = null,
-        onResponse: ((Int, Map<String, String>) -> Unit)? = null, imageTransfer: Boolean = false): NativeScriptResponse {
+        onResponse: ((Int, Map<String, String>) -> Unit)? = null, imageTransfer: Boolean = false,
+        imageIdleMillis: Long = 45_000L): NativeScriptResponse {
         val selected = route?.checked()
         if (selected?.relayBinding != null) throw DownloadRouteException("Relay 联动线路仅支持 Android，请选择当前设备的线路。")
         if (selected?.mode == DownloadRouteMode.PROXY && selected.proxy?.type != DownloadProxyType.SOCKS)
@@ -202,7 +203,7 @@ internal actual class JavascriptHttpSession actual constructor(
                 check(CFReadStreamOpen(read) && CFWriteStreamOpen(write)) { "漫画源 TLS 连接失败。" }
                 val started = monotonicTimeMillis()
                 val deadline = started + timeoutMillis
-                val responseDeadline = started + if (imageTransfer) SCRIPT_IMAGE_IDLE_MILLIS else timeoutMillis
+                val responseDeadline = started + if (imageTransfer) imageIdleMillis else timeoutMillis
                 val authority = url.host + if (url.port == 443) "" else ":${url.port}"
                 val requestHead = buildString {
                     append(method).append(' ').append(url.encodedPath).append(url.query?.let { "?$it" }.orEmpty()).append(" HTTP/1.1\r\n")
@@ -234,7 +235,7 @@ internal actual class JavascriptHttpSession actual constructor(
                     val now = monotonicTimeMillis()
                     if (imageTransfer) {
                         if (now >= deadline) throw NetworkTransferException(NetworkFailureKind.REQUEST_TIMEOUT, "图片传输超过本次安全时限，请重试。")
-                        if (now - lastPayloadAt >= SCRIPT_IMAGE_IDLE_MILLIS) throw NetworkTransferException(
+                        if (now - lastPayloadAt >= imageIdleMillis) throw NetworkTransferException(
                             if (reportedBytes == 0L) NetworkFailureKind.RESPONSE_TIMEOUT else NetworkFailureKind.TRANSFER_TIMEOUT,
                             if (reportedBytes == 0L) "等待来源图片响应超时，请稍后重试。" else "来源图片传输已停止响应，请稍后重试。",
                         )
@@ -583,9 +584,11 @@ internal actual suspend fun fetchPluginText(context: PlatformContext, url: Strin
 internal actual suspend fun fetchScriptImageBytes(context: PlatformContext, url: String,
     headers: Map<String, String>, route: DownloadRouteSnapshot?, onBytes: ((Long) -> Unit)?,
     onResponse: ((Int, Map<String, String>) -> Unit)?): ByteArray {
-    val session = JavascriptHttpSession(true, route, 96 * 1024 * 1024, true)
-    try { return session.imageBytes(url, headers, onBytes, onResponse) } finally { session.close() }
+    val policy = dev.mangaflow.experience.ExperiencePolicyStore.get(context).state.value
+    val maxBytes = policy.runtime.maxImageBytes
+    // Preserve the user's limit; actual buffers still have the platform's Int index domain.
+    val session = JavascriptHttpSession(true, route, maxBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), true)
+    try { return session.imageBytes(url, headers, onBytes, onResponse,
+        policy.recovery.imageTimeoutSeconds.toLong() * 1_000L, policy.runtime.imageTotalMinutes.toLong() * 60_000L) } finally { session.close() }
 }
 
-private const val SCRIPT_IMAGE_IDLE_MILLIS = 45_000L
-private const val SCRIPT_IMAGE_TOTAL_MILLIS = 30L * 60L * 1000L

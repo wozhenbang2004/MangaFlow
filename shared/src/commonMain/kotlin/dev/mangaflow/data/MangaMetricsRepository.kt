@@ -25,6 +25,10 @@ import dev.mangaflow.json.JSONObject
 import dev.mangaflow.platform.storage.StorageFile as File
 import okio.IOException
 import dev.mangaflow.platform.AtomicBoolean
+import dev.mangaflow.storage.AuxiliaryCacheEntry
+import dev.mangaflow.storage.AuxiliaryCacheFiles
+import dev.mangaflow.storage.AuxiliaryDiskCacheOwner
+import dev.mangaflow.storage.StorageCacheStore
 
 /** Small, anonymous metadata shared by discovery, search, library and detail. */
 class MangaMetricsRepository(
@@ -40,7 +44,43 @@ class MangaMetricsRepository(
     private val requests = mutableMapOf<String, InFlightRequest>()
     private val entries = LinkedHashMap<String, CachedManga>()
     private var loaded = false
+    private var memoryRevision = 0L
+    private val ownedFiles = AuxiliaryCacheFiles(directory) { it == "metrics.json" }
     @kotlin.concurrent.Volatile private var generation = 0L
+
+    internal val cacheOwner: AuxiliaryDiskCacheOwner = object : AuxiliaryDiskCacheOwner {
+        override val ownerId = "metadata"
+        override suspend fun snapshot(): List<AuxiliaryCacheEntry> = withContext(Dispatchers.IO) {
+            disk.withLock {
+                val revision = synchronized(lock) { memoryRevision }
+                ownedFiles.snapshot { revision }
+            }
+        }
+        override suspend fun remove(expected: AuxiliaryCacheEntry): Long? = withContext(Dispatchers.IO) {
+            var changed = false
+            try {
+                disk.withLock {
+                    val revision = synchronized(lock) { memoryRevision }
+                    if (ownedFiles.entry(expected.key, revision, verifyBytes = true) != expected) return@withLock null
+                    val accepted = synchronized(lock) {
+                        if (memoryRevision != revision) false else {
+                            generation++
+                            memoryRevision++
+                            entries.clear()
+                            loaded = true
+                            true
+                        }
+                    }
+                    if (!accepted) null else {
+                        changed = true
+                        ownedFiles.removeReviewed(expected)
+                    }
+                }
+            } finally {
+                if (changed) StorageCacheStore.get(cacheContext).cacheWorkFinished()
+            }
+        }
+    }
 
     /** No disk or network work on composition. An expired success can still be shown. */
     fun cached(mangaId: String): List<MangaMetric> = synchronized(lock) {
@@ -76,7 +116,7 @@ class MangaMetricsRepository(
                 request.mutex.withLock {
                     if (epoch != generation) return@withLock emptyList()
                     val identity = identityKey(manga)
-                    prepare(manga.id, identity)
+                    if (!prepare(manga.id, identity, epoch)) return@withLock emptyList()
                     // Overall heat is already in public list/detail metadata. A badge must not
                     // fetch a chapter directory or copy a day/week rank value into overall heat.
                     val copy = community.metric(manga)
@@ -133,7 +173,7 @@ class MangaMetricsRepository(
         loadDisk(epoch)
         if (epoch != generation) return@withContext
         val identity = identityKey(manga)
-        prepare(manga.id, identity)
+        if (!prepare(manga.id, identity, epoch)) return@withContext
         sources.forEach { remember(manga, identity, epoch, it) }
         currentCoroutineContext().ensureActive()
         persist(epoch)
@@ -145,28 +185,35 @@ class MangaMetricsRepository(
 
     /** Association preferences belong to the user, and are deliberately not cache data. */
     suspend fun clearCache(): Unit = withContext(Dispatchers.IO) {
-        disk.withLock {
-            synchronized(lock) {
-                generation++
-                entries.clear()
-                loaded = true
+        try {
+            disk.withLock {
+                synchronized(lock) {
+                    generation++
+                    memoryRevision++
+                    entries.clear()
+                    loaded = true
+                }
+                reviews.clearCache()
+                community.clearCache()
+                ownedFiles.changed(file.baseFile.name)
+                file.delete()
+                if (directory.listFiles()?.any { it.isFile } == true) {
+                    throw IOException("评分缓存未能完全清理，请重试。")
+                }
             }
-            reviews.clearCache()
-            community.clearCache()
-            file.delete()
-            if (directory.listFiles()?.any { it.isFile } == true) {
-                throw IOException("评分缓存未能完全清理，请重试。")
-            }
-        }
+        } finally { StorageCacheStore.get(cacheContext).cacheWorkFinished() }
     }
 
-    private fun prepare(mangaId: String, identity: String) = synchronized(lock) {
+    private fun prepare(mangaId: String, identity: String, epoch: Long): Boolean = synchronized(lock) {
+        if (epoch != generation) return@synchronized false
         val now = wallTimeMillis()
         val policy = contentCachePreferences(cacheContext)
         val existing = entries.remove(mangaId)?.takeIf { policy.enabled && it.identity == identity }?.let { entry ->
             entry.copy(sources = entry.sources.filterValues { now - it.checkedAt in 0L..policy.retentionMillis }) }
         entries[mangaId] = existing?.copy(accessedAt = now) ?: CachedManga(identity, now)
         while (entries.size > MAX_ITEMS) entries.remove(entries.keys.first())
+        memoryRevision++
+        true
     }
 
     private fun current(mangaId: String, identity: String): List<MangaMetric> = synchronized(lock) {
@@ -200,6 +247,7 @@ class MangaMetricsRepository(
                 if (source.id == "copy") ContentCacheKind.POPULARITY else ContentCacheKind.METRICS, failed)
             entries[manga.id] = entry.copy(sources = entry.sources +
                 (source.id to CachedMetric(metric, checkedAt, now + ttl, now, failed)))
+            memoryRevision++
             true
         }
     }
@@ -211,6 +259,7 @@ class MangaMetricsRepository(
             if (epoch != generation || synchronized(lock) { loaded }) return@withLock
             val restored = LinkedHashMap<String, CachedManga>()
             try {
+                if (File(file.baseFile.path + ".bak").isFile) ownedFiles.changed(file.baseFile.name)
                 val bytes = file.openRead().use { input ->
                     if (file.baseFile.length() > MAX_BYTES) throw IOException("Metadata cache is too large")
                     input.readBytes()
@@ -260,6 +309,7 @@ class MangaMetricsRepository(
                 if (epoch == generation && contentCachePreferences(cacheContext).let { it.enabled && it.storeOnDisk }) {
                     restored.forEach { (id, entry) -> entries.putIfAbsent(id, entry) }
                     loaded = true
+                    memoryRevision++
                 }
             }
         }
@@ -288,6 +338,7 @@ class MangaMetricsRepository(
             try {
                 if (!contentCachePreferences(cacheContext).let { it.enabled && it.storeOnDisk }) return@withLock
                 if (!directory.exists() && !directory.mkdirs()) return@withLock
+                ownedFiles.changed(file.baseFile.name)
                 output = file.startWrite()
                 output.write(bytes)
                 if (!contentCachePreferences(cacheContext).let { it.enabled && it.storeOnDisk }) {
@@ -295,6 +346,7 @@ class MangaMetricsRepository(
                     return@withLock
                 }
                 file.finishWrite(output)
+                StorageCacheStore.get(cacheContext).cacheWorkFinished()
             } catch (cancel: CancellationException) {
                 output?.let(file::failWrite)
                 throw cancel

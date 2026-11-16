@@ -17,6 +17,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import dev.mangaflow.data.Page
+import dev.mangaflow.experience.ExperienceRuntimePreferences
+import dev.mangaflow.platform.storage.StorageFile
 import kotlinx.cinterop.*
 import platform.CoreFoundation.CFDictionaryCreate
 import platform.CoreFoundation.CFDictionaryGetValue
@@ -69,7 +71,10 @@ internal actual fun VerticalReaderTiles(page: Page, diskCacheKey: String?, image
 internal actual fun readerFilePath(uri: String): String? =
     if (uri.startsWith("file:")) NSURL.URLWithString(uri)?.path else null
 
-private fun <T> withSource(path: String, block: (CGImageSourceRef) -> T): T {
+private fun <T> withSource(path: String, runtime: ExperienceRuntimePreferences, block: (CGImageSourceRef) -> T): T {
+    val file = StorageFile(path)
+    check(file.isFile && file.length() > 0L) { "原图文件暂不可用，当前显示预览" }
+    check(file.length() <= runtime.maxImageBytes) { "原图压缩数据超过单图配置，当前显示预览" }
     val text = CFStringCreateWithCString(null, path, kCFStringEncodingUTF8) ?: error("原图路径无效")
     val url = try { CFURLCreateWithFileSystemPath(null, text, kCFURLPOSIXPathStyle, false) }
         finally { CFRelease(text) }
@@ -85,17 +90,21 @@ private fun CFDictionaryRef.number(key: CFStringRef?): Long = memScoped {
     if (CFNumberGetValue(value.reinterpret(), kCFNumberSInt64Type, output.ptr)) output.value else 0L
 }
 
-internal actual suspend fun readNativeReaderSize(path: String): IntSize? = withSource(path) { source ->
+internal actual suspend fun readNativeReaderSize(path: String, runtime: ExperienceRuntimePreferences): IntSize? =
+    withSource(path, runtime) { source ->
     val properties = CGImageSourceCopyPropertiesAtIndex(source, 0u, null) ?: return@withSource null
     try {
-        val width = properties.number(kCGImagePropertyPixelWidth).toInt()
-        val height = properties.number(kCGImagePropertyPixelHeight).toInt()
-        if (width <= 0 || height <= 0) null
-        else if (properties.number(kCGImagePropertyOrientation) in 5L..8L) IntSize(height, width) else IntSize(width, height)
+        val width = properties.number(kCGImagePropertyPixelWidth)
+        val height = properties.number(kCGImagePropertyPixelHeight)
+        if (width !in 1L..262_144L || height !in 1L..262_144L || width * height > 1_000_000_000L) null
+        else if (properties.number(kCGImagePropertyOrientation) in 5L..8L) IntSize(height.toInt(), width.toInt())
+        else IntSize(width.toInt(), height.toInt())
     } finally { CFRelease(properties) }
 }
 
-internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRect, sampleSize: Int): ReaderRegion = withSource(path) { source ->
+internal actual suspend fun decodeNativeReaderRegion(
+    path: String, bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences,
+): ReaderRegion = withSource(path, runtime) { source ->
     val properties = CGImageSourceCopyPropertiesAtIndex(source, 0u, null)
         ?: error("原图尺寸暂时无法读取")
     val dimensions = try {
@@ -114,10 +123,15 @@ internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRe
     // full-image decode request before constructing a CGImage, then crop only that result.
     // Normal images keep their original resolution; oversized images disclose the extra sample.
     val requestedSample = sampleSize.coerceAtLeast(1)
+    val pixelBudget = (runtime.fallbackDecodeMiPixels ?: 8).toLong() * 1_048_576L
+    require(pixelBudget > 0L) { "整图解码配置无效" }
     var effectiveSample = requestedSample
     fun decodedPixelBound(sample: Int): Long =
         ((dimensions.width.toLong() + sample - 1) / sample) * ((dimensions.height.toLong() + sample - 1) / sample)
-    while (decodedPixelBound(effectiveSample) > 8_388_608L) effectiveSample *= 2
+    while (decodedPixelBound(effectiveSample) > pixelBudget) {
+        check(effectiveSample <= Int.MAX_VALUE / 2) { "图片采样超出平台范围，当前显示预览" }
+        effectiveSample *= 2
+    }
     val maximumEdge = (maxOf(dimensions.width, dimensions.height).toLong() / effectiveSample).coerceAtLeast(1L)
     val decoded = memScoped {
         val maximum = alloc<LongVar>().apply { value = maximumEdge }
@@ -138,7 +152,7 @@ internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRe
         val decodedWidth = CGImageGetWidth(decoded).toInt()
         val decodedHeight = CGImageGetHeight(decoded).toInt()
         check(decodedWidth > 0 && decodedHeight > 0 &&
-            decodedWidth.toLong() * decodedHeight <= 8_388_608L) { "图片解码输出超出内存预算，当前显示预览" }
+            decodedWidth.toLong() * decodedHeight <= pixelBudget) { "图片解码输出超出整图解码配置，当前显示预览" }
         val left = bounds.left.toDouble() / dimensions.width * decodedWidth
         val top = bounds.top.toDouble() / dimensions.height * decodedHeight
         val right = bounds.right.toDouble() / dimensions.width * decodedWidth
@@ -152,7 +166,7 @@ internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRe
         try {
             val drawWidth = ceil(bounds.width.toDouble() / effectiveSample).coerceAtLeast(1.0)
             val drawHeight = ceil(bounds.height.toDouble() / effectiveSample).coerceAtLeast(1.0)
-            check(drawWidth * drawHeight <= 8_388_608) { "原图区域过大" }
+            check(drawWidth * drawHeight <= pixelBudget.toDouble()) { "原图区域超过整图解码配置" }
             val xScale = drawWidth / (right - left)
             val yScale = drawHeight / (bottom - top)
             UIGraphicsBeginImageContextWithOptions(CGSizeMake(drawWidth, drawHeight), false, 1.0)
@@ -161,6 +175,8 @@ internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRe
                     (cropTop - top) * yScale, (cropRight - cropLeft) * xScale, (cropBottom - cropTop) * yScale))
                 UIImagePNGRepresentation(requireNotNull(UIGraphicsGetImageFromCurrentImageContext()))
             } finally { UIGraphicsEndImageContext() } ?: error("原图区域暂时无法转换")
+            check(data.length > 0uL && data.length <= runtime.maxImageBytes.toULong() &&
+                data.length <= Int.MAX_VALUE.toULong()) { "原图转换数据超过单图配置或平台数组范围，当前显示预览" }
             val bytes = requireNotNull(data.bytes).reinterpret<kotlinx.cinterop.ByteVar>().readBytes(data.length.toInt())
             ReaderRegion(org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap(),
                 if (effectiveSample > requestedSample)

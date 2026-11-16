@@ -12,6 +12,8 @@ import dev.mangaflow.platform.storage.preferences
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 internal val maximumBackgroundPageParallelism: Int get() = if (platformKind == PlatformKind.DESKTOP) 12 else 6
 
@@ -21,6 +23,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private val disk = preferences(app, "mangaflow_library")
     private val lock = StorageLock()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val configurationWrites = Mutex()
+    private var configurationWriteActive = false
+    private var failedConfiguration: ConfigurationRecord? = null
     private var resources = ExperienceResources()
     private var mode = readMode()
     private val mutableOverrides = MutableStateFlow(readOverrides())
@@ -33,7 +38,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var storageLow = false
     private var interactionUntil = 0L
     private var interactionJob: Job? = null
-    private var sampleGeneration = 0L
+    private var resourceSampling: Job? = null
+    private var resourceRefreshPending = false
     private var foregroundUsers = 0
     private var readerUsers = 0
     private var readerWaiting = false
@@ -52,6 +58,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var activeReaderImages = 0
     private var activeResolves = 0
     private var activeDecodes = 0
+    private var activeTileDecodes = 0
+    private var activePreparations = 0
     private var activeOptionalResolves = 0
     private var activeOptionalDecodes = 0
     private var framePressureUntil = 0L
@@ -79,9 +87,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     val usage: StateFlow<ExperienceUsage> = mutableUsage.asStateFlow()
     private val preferenceListener = PreferenceChangeListener { _, key ->
         if (key == null || key.startsWith("experience_")) synchronized(lock) {
-            mode = readMode()
-            mutableOverrides.value = readOverrides()
-            publish()
+            // Both platform editors can notify after changing preference memory, even when
+            // commit fails. The writer reconciles their final record before publishing.
+            if (!configurationWriteActive) publishConfigurationRecord(readConfigurationRecord())
         }
     }
 
@@ -90,13 +98,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         refreshResources()
     }
 
-    fun setMode(next: ExperienceMode) {
-        disk.edit().putString(MODE_KEY, next.name).apply()
-        synchronized(lock) { mode = next; publish() }
-    }
+    suspend fun setMode(next: ExperienceMode): Boolean = persistConfiguration { _, current -> next to current }
 
-    fun setOverrides(value: ExperienceOverrides) {
-        val next = value.copy(
+    private fun normalized(value: ExperienceOverrides): ExperienceOverrides = value.copy(
             ahead = value.ahead?.coerceAtLeast(0), behind = value.behind?.coerceAtLeast(0),
             prefetchRequests = value.prefetchRequests?.coerceAtLeast(1),
             prefetchMiB = value.prefetchMiB?.coerceAtLeast(1),
@@ -110,38 +114,158 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             decodedPrefetchPages = value.decodedPrefetchPages?.coerceAtLeast(0),
             standbySources = value.standbySources?.coerceAtLeast(1), standbyPages = value.standbyPages.coerceAtLeast(1),
             standbyMiB = value.standbyMiB?.coerceAtLeast(1),
-            contentCache = value.contentCache.bounded(),
+            contentCache = value.contentCache.bounded(), runtime = value.runtime.checked(),
+            recovery = value.recovery.checked(),
         )
-        if (next == mutableOverrides.value) return
-        // One typed, backup-compatible preference makes a restore/change atomic.
-        disk.edit().putString(OVERRIDES_KEY, encodeExperienceOverrides(next)).apply()
-        synchronized(lock) { mutableOverrides.value = next; publish() }
+
+    suspend fun setOverrides(value: ExperienceOverrides): Boolean = persistConfiguration { currentMode, _ ->
+        currentMode to value
     }
+
+    /** Change only this field against the latest confirmed configuration inside the writer. */
+    suspend fun setSourceLocked(locked: Boolean): Boolean = persistConfiguration { currentMode, current ->
+        currentMode to current.copy(recovery = current.recovery.copy(sourceLocked = locked))
+    }
+
+    /** A settings draft never mutates live admissions, pressure observations or caches. */
+    fun previewBudget(overrides: ExperienceOverrides, mode: ExperienceMode = state.value.mode): ExperienceBudget =
+        synchronized(lock) { budget(normalized(overrides), mode) }
+
+    /** Compare the saved baseline before committing both mode and all numeric choices together. */
+    suspend fun applyConfiguration(
+        mode: ExperienceMode, overrides: ExperienceOverrides,
+        expectedMode: ExperienceMode? = null, expectedOverrides: ExperienceOverrides? = null,
+    ): Boolean = persistConfiguration(expectedMode, expectedOverrides) { _, _ -> mode to overrides }
+
+    private data class ConfigurationRecord(val mode: String?, val overrides: String?)
+    private data class ConfigurationWrite(val before: ConfigurationRecord, val candidate: ConfigurationRecord)
+
+    /** A coherent two-key snapshot also observes restores whose listener has not run yet. */
+    private fun readConfigurationRecord(): ConfigurationRecord = disk.all.let { values ->
+        ConfigurationRecord(values[MODE_KEY] as? String, values[OVERRIDES_KEY] as? String)
+    }
+
+    private fun writeConfigurationRecord(value: ConfigurationRecord): Boolean = disk.edit().apply {
+        if (value.mode == null) remove(MODE_KEY) else putString(MODE_KEY, value.mode)
+        if (value.overrides == null) remove(OVERRIDES_KEY) else putString(OVERRIDES_KEY, value.overrides)
+    }.commit()
+
+    /** Called under the policy lock; no disk IO or suspend work occurs while publishing. */
+    private fun publishConfigurationRecord(record: ConfigurationRecord) {
+        // A failed rollback must not let a delayed native listener publish the failed candidate.
+        if (record == failedConfiguration) return
+        failedConfiguration = null
+        val nextMode = ExperienceMode.entries.firstOrNull { it.name == record.mode } ?: ExperienceMode.AUTO
+        val next = normalized(decodeExperienceOverrides(record.overrides))
+        if (mode == nextMode && mutableOverrides.value == next) return
+        val oldReserve = diskReserve()
+        mode = nextMode
+        mutableOverrides.value = next
+        if (oldReserve != diskReserve()) resources.freeDiskBytes?.let { storageLow = it <= diskReserve() }
+        publish()
+    }
+
+    /** The existing application scope owns every accepted write, including its failure cleanup. */
+    private suspend fun persistConfiguration(
+        expectedMode: ExperienceMode? = null, expectedOverrides: ExperienceOverrides? = null,
+        select: (ExperienceMode, ExperienceOverrides) -> Pair<ExperienceMode, ExperienceOverrides>,
+    ): Boolean = scope.async {
+        configurationWrites.withLock {
+            withContext(NonCancellable) {
+                val write = synchronized(lock) {
+                    val before = readConfigurationRecord()
+                    publishConfigurationRecord(before)
+                    if (expectedMode != null && mode != expectedMode ||
+                        expectedOverrides != null && mutableOverrides.value != expectedOverrides) null
+                    else {
+                        val (nextMode, requested) = select(mode, mutableOverrides.value)
+                        val candidate = ConfigurationRecord(nextMode.name, encodeExperienceOverrides(normalized(requested)))
+                        configurationWriteActive = true
+                        ConfigurationWrite(before, candidate)
+                    }
+                } ?: return@withContext false
+                var attempted = false
+                var committed = false
+                var failure: Throwable? = null
+                try {
+                    try {
+                        // A restore that reached preference memory after the baseline check wins.
+                        if (readConfigurationRecord() == write.before) {
+                            attempted = true
+                            committed = writeConfigurationRecord(write.candidate)
+                            if (!committed) failure = IllegalStateException("体验配置未能保存，请检查存储空间后重试。")
+                        }
+                    } catch (problem: Throwable) { failure = problem }
+                    synchronized(lock) {
+                        if (attempted && !committed) failedConfiguration = write.candidate
+                        else if (committed) failedConfiguration = null
+                    }
+                    if (attempted && !committed && readConfigurationRecord() == write.candidate) {
+                        // Editors update their in-memory map before returning commit's result.
+                        // Restore that map too, but never overwrite an observed external change.
+                        runCatching { writeConfigurationRecord(write.before) }
+                    }
+                    val accepted = synchronized(lock) {
+                        val latest = readConfigurationRecord()
+                        if (attempted && !committed && latest == write.candidate) failedConfiguration = write.candidate
+                        else if (committed && latest == write.candidate) failedConfiguration = null
+                        configurationWriteActive = false
+                        publishConfigurationRecord(latest)
+                        committed && latest == write.candidate
+                    }
+                    failure?.let { throw it }
+                    accepted
+                } finally {
+                    synchronized(lock) { configurationWriteActive = false }
+                }
+            }
+        }
+    }.await()
 
     /** Native snapshots only; no bandwidth probes, hardware grades or synthetic benchmarks. */
     fun refreshResources() {
-        val generation = synchronized(lock) { ++sampleGeneration }
-        scope.launch {
-            val sampled = try { readExperienceResources(app) } catch (_: Exception) { ExperienceResources() }
-            synchronized(lock) {
-                if (generation != sampleGeneration) return@synchronized
-                val now = monotonicTimeMillis()
-                if (sampled.memoryPressure == true) memoryUntil = now + 60_000L
-                if ((sampled.thermalPressure ?: 0) >= 2) heatUntil = now + 30_000L
-                if ((sampled.thermalPressure ?: 0) >= 1) warmUntil = now + 15_000L
-                if ((sampled.cpuLoad ?: 0.0) > .85) cpuUntil = now + 20_000L
-                if (sampled.lowPower == true) powerUntil = now + 15_000L
-                sampled.freeDiskBytes?.let { free ->
-                    val reserve = diskReserve()
-                    if (free <= reserve) storageLow = true
-                    else if (free > reserve + 64L * EXPERIENCE_MIB) storageLow = false
-                }
-                resources = sampled
-                publish()
-                updateUsage()
+        val job = synchronized(lock) {
+            if (resourceSampling != null) {
+                resourceRefreshPending = true
+                return
             }
-            refreshCacheUsage()
+            resourceRefreshPending = false
+            scope.launch(start = CoroutineStart.LAZY) {
+                val owner = currentCoroutineContext()[Job]
+                try {
+                    do {
+                        val sampled = try { readExperienceResources(app) }
+                        catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { ExperienceResources() }
+                        synchronized(lock) {
+                            val now = monotonicTimeMillis()
+                            if (sampled.memoryPressure == true) memoryUntil = now + mutableOverrides.value.runtime.memoryRecoverySeconds.toLong() * 1_000L
+                            if ((sampled.thermalPressure ?: 0) >= 2) heatUntil = now + mutableOverrides.value.runtime.thermalRecoverySeconds.toLong() * 1_000L
+                            if ((sampled.thermalPressure ?: 0) >= 1) warmUntil = now + mutableOverrides.value.runtime.warmRecoverySeconds.toLong() * 1_000L
+                            if ((sampled.cpuLoad ?: 0.0) > mutableOverrides.value.runtime.cpuBusyPercent / 100.0)
+                                cpuUntil = now + mutableOverrides.value.runtime.cpuRecoverySeconds.toLong() * 1_000L
+                            if (sampled.lowPower == true) powerUntil = now + mutableOverrides.value.runtime.powerRecoverySeconds.toLong() * 1_000L
+                            sampled.freeDiskBytes?.let { free ->
+                                val reserve = diskReserve()
+                                if (free <= reserve) storageLow = true
+                                else if (free > reserve + mutableOverrides.value.runtime.diskRecoveryMiB.toLong() * EXPERIENCE_MIB) storageLow = false
+                            }
+                            resources = sampled
+                            publish()
+                            updateUsage()
+                        }
+                        refreshCacheUsage()
+                        val again = synchronized(lock) {
+                            if (resourceRefreshPending) { resourceRefreshPending = false; true }
+                            else { if (resourceSampling === owner) resourceSampling = null; false }
+                        }
+                    } while (again)
+                } finally {
+                    synchronized(lock) { if (resourceSampling === owner) resourceSampling = null }
+                }
+            }.also { resourceSampling = it }
         }
+        job.start()
     }
 
     /** Events and the light snapshot loop exist only for a visible app or an actual worker. */
@@ -150,7 +274,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             watchers++
             if (watchers == 1) {
                 sampling = scope.launch {
-                    while (isActive) { refreshResources(); delay(10_000L) }
+                    overrides.map { it.runtime.resourceSampleSeconds }.distinctUntilChanged().collectLatest { seconds ->
+                        while (isActive) { refreshResources(); delay(seconds.toLong() * 1_000L) }
+                    }
                 }
                 ++observerGeneration
             } else null
@@ -223,7 +349,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     }
 
     private fun resourceChanged(memoryWarning: Boolean) {
-        if (memoryWarning) synchronized(lock) { memoryUntil = monotonicTimeMillis() + 60_000L; publish() }
+        if (memoryWarning) synchronized(lock) { memoryUntil = monotonicTimeMillis() + mutableOverrides.value.runtime.memoryRecoverySeconds.toLong() * 1_000L; publish() }
         refreshResources()
     }
 
@@ -244,25 +370,77 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                     val memory = caches.first
                     val disk = caches.second
                     memory?.trimExpired()
-                    dev.mangaflow.storage.StorageCacheStore.get(app).maintenanceTick()
+                    val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
+                    storage.maintenanceTick()
+                    val global = storage.sample(overrides.value.runtime.cacheSampleSeconds.toLong() * 1_000L)
                     val snapshot = listOf(memory?.size, memory?.maxSize, disk?.size, disk?.maxSize)
                     val pending = disk?.resizePending == true
                     val error = disk?.resizeError
+                    val cacheGroups = global.items.groupBy { item ->
+                        when (item.resource.backend) {
+                            dev.mangaflow.storage.CacheBackend.SCRIPT -> "SCRIPT"
+                            dev.mangaflow.storage.CacheBackend.JM -> "JM"
+                            dev.mangaflow.storage.CacheBackend.CATALOG -> "CATALOG"
+                            dev.mangaflow.storage.CacheBackend.AUXILIARY -> when (item.resource.auxiliaryOwnerId) {
+                                "browse" -> "BROWSE"
+                                "metadata" -> "METADATA"
+                                "rankings" -> "RANKINGS"
+                                else -> "DATA"
+                            }
+                            else -> item.resource.area.name
+                        }
+                    }
+                    val cacheLabels = linkedMapOf("READING" to "阅读图片", "SCRIPT" to "脚本图片", "JM" to "JM 图片",
+                        "ARTWORK" to "封面与头像", "CATALOG" to "章节目录", "BROWSE" to "浏览列表",
+                        "METADATA" to "作品资料与评分", "RANKINGS" to "榜单", "DATA" to "其他资料",
+                        "PANELS" to "分镜结果", "ANIME" to "番剧缓冲")
+                    val cacheAreas = cacheLabels.map { (id, label) ->
+                        val owned = cacheGroups[id].orEmpty()
+                        val extraBytes = when (id) { "CATALOG" -> global.catalogBytes; "DATA" -> global.auxiliaryBytes; else -> 0L }
+                        val extraReclaimable = if (id == "CATALOG") global.catalogReclaimableBytes else 0L
+                        ExperienceCacheAreaUsage(id, label, owned.sumOf { it.bytes } + extraBytes,
+                            protectedBytes = owned.filter { it.protected }.sumOf { it.bytes } + extraBytes - extraReclaimable,
+                            reclaimableBytes = owned.filterNot { it.protected }.sumOf { it.bytes } + extraReclaimable)
+                    }.filter { it.bytes > 0L } + listOf(
+                        ExperienceCacheAreaUsage("UNCLASSIFIED", "未归类图片", global.coilUnclassifiedBytes,
+                            protectedBytes = if (global.legacyReclaimable) 0L else global.coilUnclassifiedBytes,
+                            reclaimableBytes = if (global.legacyReclaimable) global.coilUnclassifiedBytes else 0L),
+                        ExperienceCacheAreaUsage("INDEX", "索引与临时文件", global.indexBytes + global.temporaryBytes,
+                            protectedBytes = global.indexBytes + global.temporaryBytes),
+                    ).filter { it.bytes > 0L }
                     synchronized(lock) {
-                        sampledDiskBytes = maxOf(snapshot[2] ?: 0L, dev.mangaflow.storage.StorageCacheStore.get(app).measuredBytes)
+                        sampledDiskBytes = global.totalBytes
                         mutableUsage.value = mutableUsage.value.copy(
                             memoryBytes = snapshot[0], memoryLimit = snapshot[1],
-                            diskBytes = snapshot[2], diskLimit = snapshot[3],
-                            diskResizePending = pending, cacheError = error,
+                            memoryCacheBasisBytes = memory?.automaticBasisBytes,
+                            imageDiskBytes = snapshot[2], diskBytes = global.totalBytes,
+                            diskLimit = state.value.diskCacheBytes, diskSampledAtMillis = storage.measuredAtMillis,
+                            diskProtectedBytes = (global.totalBytes - global.reclaimableBytes).coerceAtLeast(0L),
+                            diskReclaimableBytes = global.reclaimableBytes,
+                            diskAreas = cacheAreas,
+                            diskResizePending = pending || global.pending || global.totalBytes > state.value.diskCacheBytes,
+                            cacheError = error,
+                            observedImageMemoryPeakBytes = maxObserved(mutableUsage.value.observedImageMemoryPeakBytes, snapshot[0]),
+                            observedDiskPeakBytes = maxObserved(mutableUsage.value.observedDiskPeakBytes, global.totalBytes),
                         )
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) {
-                    synchronized(lock) { mutableUsage.value = mutableUsage.value.copy(cacheError = "图片缓存用量暂时无法读取") }
+                    synchronized(lock) { mutableUsage.value = mutableUsage.value.copy(cacheError = "缓存用量暂时无法读取") }
                 } finally { synchronized(lock) { cacheUsageJob = null } }
             }.also { cacheUsageJob = it }
         }
         job.start()
+    }
+
+    /** Drops reusable decoded images only. Visible/native owners and original files retain their lifetimes. */
+    fun clearDecodedMemory(): Deferred<Long> = scope.async {
+        val memory = synchronized(lock) { memoryCache }
+        val before = memory?.size ?: 0L
+        memory?.clear()
+        val freed = (before - (memory?.size ?: 0L)).coerceAtLeast(0L)
+        refreshCacheUsage()
+        freed
     }
 
     internal suspend fun <T> withChapterAdmission(
@@ -435,6 +613,51 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         )
     }
     internal fun wakeAdmissions(): Unit = synchronized(lock) { revision.value++; Unit }
+
+    internal val tileDecodeParallelism: Int get() = state.value.runtime.tileDecodeRequests
+        ?: if (platformKind == PlatformKind.DESKTOP) 2 else 1
+
+    internal suspend fun <T> withTileDecodeAdmission(block: suspend () -> T): T = admit(
+        ready = { activeTileDecodes < tileDecodeParallelism },
+        enter = { activeTileDecodes++ }, leave = { activeTileDecodes-- }, block = block,
+    )
+
+    /** A dynamic permit retains its owner until finally releases it; shrinking never cancels an accepted write. */
+    internal suspend fun acquirePreparationPermit(maxWaitMillis: Long, onWaiting: (AdmissionWait?) -> Unit): () -> Unit {
+        val deadline = monotonicTimeMillis() + maxWaitMillis.coerceAtLeast(1L)
+        var accepted = false
+        synchronized(lock) { queued++; updateUsage() }
+        try {
+            while (!accepted) {
+                currentCoroutineContext().ensureActive()
+                val before = synchronized(lock) {
+                    if (activePreparations < (mutableState.value.runtime.chapterPreparationRequests ?: 2)) {
+                        activePreparations++; queued--; accepted = true; updateUsage()
+                    }
+                    revision.value
+                }
+                if (accepted) break
+                val wait = AdmissionWait(AdmissionWaitReason.CHAPTER_LIMIT)
+                onWaiting(wait)
+                val remaining = deadline - monotonicTimeMillis()
+                if (remaining <= 0L) throw ExperienceAdmissionDeferred(wait)
+                withTimeoutOrNull(remaining) { revision.first { it != before } }
+            }
+            onWaiting(null)
+            var released = false
+            return {
+                synchronized(lock) {
+                    if (!released) { released = true; activePreparations--; revision.value++; updateUsage() }
+                }
+            }
+        } catch (failure: Throwable) {
+            synchronized(lock) {
+                if (accepted) activePreparations-- else queued--
+                revision.value++; updateUsage()
+            }
+            throw failure
+        }
+    }
 
     private suspend fun <T> admit(
         ready: () -> Boolean, enter: () -> Unit, leave: () -> Unit,
@@ -672,34 +895,35 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         }
     }
 
-    private fun budget(): ExperienceBudget {
-        val o = mutableOverrides.value
+    private fun budget(o: ExperienceOverrides = mutableOverrides.value, selectedMode: ExperienceMode = mode): ExperienceBudget {
+        val mode = selectedMode
         val desktop = platformKind == PlatformKind.DESKTOP
         val tier = resourceTier(desktop)
-        val goal = goalBudget(desktop, tier)
+        val goal = goalBudget(desktop, tier, mode)
         val now = monotonicTimeMillis()
         val warning = resources.memoryPressure == true || memoryUntil > now
         val hot = (resources.thermalPressure ?: 0) >= 2 || heatUntil > now
         val warm = (resources.thermalPressure ?: 0) >= 1 || warmUntil > now
         val heapHigh = resources.processHeapBytes?.let { used ->
             resources.processHeapLimitBytes?.takeIf { it > 0L }?.let { limit ->
-                used.toDouble() / limit > .88 || limit - used < 32L * EXPERIENCE_MIB
+                used.toDouble() / limit > o.runtime.heapBusyPercent / 100.0 || limit - used < 32L * EXPERIENCE_MIB
             }
         } == true
         val physicalFloor = (if (desktop) 512L else 256L) * EXPERIENCE_MIB
         val physicalTight = resources.availableMemoryBytes?.let { available ->
             available < maxOf(physicalFloor, (resources.totalMemoryBytes ?: 0L) / 20L)
         } == true
-        val lowBattery = o.batteryProtection && resources.charging != true && resources.batteryPercent?.let { it <= 20 } == true
+        val lowBattery = o.batteryProtection && resources.charging != true && resources.batteryPercent?.let { it <= o.runtime.lowBatteryPercent } == true
         val power = resources.lowPower == true || powerUntil > now || lowBattery
-        val cpuBusy = (resources.cpuLoad ?: 0.0) > .85 || cpuUntil > now
+        val cpuBusy = (resources.cpuLoad ?: 0.0) > o.runtime.cpuBusyPercent / 100.0 || cpuUntil > now
         val frameBusy = framePressureUntil > now
         val decodeBusy = decodePressureUntil > now
         val lowRam = resources.lowMemoryDevice == true
         val severe = warning || heapHigh || physicalTight || hot
-        val reserve = diskReserve()
+        val reserve = diskReserve(o)
         val free = resources.freeDiskBytes
-        val diskLow = storageLow || free != null && free <= (if (o.diskMiB == null) reserve else 0L)
+        val diskLow = free?.let { it <= reserve || storageLow && reserve == diskReserve() &&
+            it <= reserve + o.runtime.diskRecoveryMiB.toLong() * EXPERIENCE_MIB } ?: storageLow
         val foreground = foregroundUsers > 0
         val reading = foreground && readerUsers > 0 && o.yieldToReading
         var networkCap = when (tier) { 0 -> 2; 1 -> 6; 2 -> 8; else -> 12 }
@@ -774,7 +998,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         // Keep at least half the live Coil budget for visible/backward images and details.
         // The recent decode p90 is only a conservative sizing estimate, never a hit guarantee.
         val previewEstimate = measurements.estimatedDecodedPageBytes()
-        val memoryLimit = memoryCache?.maxSize ?: 64L * EXPERIENCE_MIB
+        val memoryLimit = o.memoryMiB?.toLong()?.times(EXPERIENCE_MIB)
+            ?: memoryCache?.automaticBasisBytes?.let { (it * fraction).toLong() } ?: 64L * EXPERIENCE_MIB
         val protectedPreviewBytes = maxOf(memoryLimit / 2L, previewEstimate * 2L)
         val warmPageLimit = ((memoryLimit - protectedPreviewBytes).coerceAtLeast(0L) / previewEstimate)
             .coerceAtMost(8L).toInt()
@@ -812,7 +1037,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             if (hot) add(if ((resources.thermalPressure ?: 0) >= 2) "温度保护" else "温度恢复中")
             else if (warm) add(if ((resources.thermalPressure ?: 0) >= 1) "设备温度升高" else "温度恢复中")
             if (power) add(if (lowBattery) "电量较低" else "系统省电保护")
-            if (cpuBusy) add(if ((resources.cpuLoad ?: 0.0) > .85) "处理器负载较高" else "负载恢复中")
+            if (cpuBusy) add(if ((resources.cpuLoad ?: 0.0) > o.runtime.cpuBusyPercent / 100.0) "处理器负载较高" else "负载恢复中")
             if (frameBusy) add("帧工作耗时较高")
             else if (decodeBusy) add("图片解码耗时较高")
             if (resources.metered == true && !o.allowMeteredPrefetch) add("计费网络暂停网络预取")
@@ -839,7 +1064,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             resolveRequests = o.resolveRequests ?: minOf(goal.resolveRequests, resolveCap).coerceAtLeast(1),
             decodeRequests = o.decodeRequests ?: minOf(goal.decodeRequests, decodeCap).coerceAtLeast(1),
             prefetchRequests = if (prefetchBytes == 0L) 0 else o.prefetchRequests ?: minOf(goal.prefetchRequests, networkCap),
-            prefetchBytes = prefetchBytes, materializationBytes = o.prefetchMiB?.toLong()?.times(EXPERIENCE_MIB) ?: transportHeadroom,
+            prefetchBytes = prefetchBytes, materializationBytes = o.runtime.materializationMiB?.toLong()?.times(EXPERIENCE_MIB) ?: transportHeadroom,
             crossChapter = o.crossChapter && prefetchBytes > 0L && (manualReading || !warm && !power && !cpuBusy && !lowRam) &&
                 (resources.metered == false || o.allowMeteredPrefetch),
             memoryCacheBytes = o.memoryMiB?.toLong()?.times(EXPERIENCE_MIB),
@@ -853,7 +1078,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                 SourceRecoveryMode.OFF -> goal.sourceHedgeDelayMillis
                 SourceRecoveryMode.BALANCED -> 1_800L
                 SourceRecoveryMode.AGGRESSIVE -> 650L
-            }, goal = goal,
+            }, goal = goal, runtime = o.runtime, recovery = o.recovery, diskReserveBytes = reserve,
         )
     }
 
@@ -875,7 +1100,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         return 0
     }
 
-    private fun goalBudget(desktop: Boolean, tier: Int): ExperienceGoalBudget {
+    private fun goalBudget(desktop: Boolean, tier: Int, selectedMode: ExperienceMode = mode): ExperienceGoalBudget {
+        val mode = selectedMode
         if (mode == ExperienceMode.ECO) return ExperienceGoalBudget(
             prefetchAhead = 3, prefetchBehind = 1, decodedPrefetchPages = 0,
             backgroundPages = if (desktop) 2 else 1, chapterParallelism = 1,
@@ -922,6 +1148,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
             storage.setBudget(next.diskCacheBytes, version)
             storage.setRetention(retention.imageRetentionHours, version)
+            storage.setRuntime(next.runtime, version)
         }
     }
 
@@ -930,13 +1157,26 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             resources = resources, activeChapters = chapters.size, activeBackgroundPages = activePages,
             activeReaderImages = activeReaderImages, activePrefetch = activePrefetch,
             activeResolves = activeResolves, activeDecodes = activeDecodes,
+            activeTileDecodes = activeTileDecodes, activePreparations = activePreparations,
+            materializationBytes = materializationStreamingBytes,
             queuedTasks = queued, prefetchReservedBytes = prefetchReserved,
             throttledSources = sources.values.count { it.recoverAfter > monotonicTimeMillis() },
+            observedHeapPeakBytes = maxObserved(mutableUsage.value.observedHeapPeakBytes, resources.processHeapBytes),
+            observedResidentPeakBytes = maxObserved(mutableUsage.value.observedResidentPeakBytes, resources.processResidentBytes),
+            observedProportionalPeakBytes = maxObserved(mutableUsage.value.observedProportionalPeakBytes, resources.processProportionalBytes),
         )
     }
     private fun readMode() = ExperienceMode.entries.firstOrNull { it.name == disk.getString(MODE_KEY) } ?: ExperienceMode.AUTO
     private fun readOverrides() = decodeExperienceOverrides(disk.getString(OVERRIDES_KEY))
-    private fun diskReserve(): Long = (if (platformKind == PlatformKind.DESKTOP) 1024L else 256L) * EXPERIENCE_MIB
+    private fun diskReserve(o: ExperienceOverrides = mutableOverrides.value): Long =
+        (o.runtime.diskReserveMiB?.toLong() ?: if (o.diskMiB != null) 0L
+            else if (platformKind == PlatformKind.DESKTOP) 1024L else 256L) * EXPERIENCE_MIB
+
+    private fun maxObserved(previous: Long?, current: Long?): Long? = when {
+        current == null -> previous
+        previous == null -> current
+        else -> maxOf(previous, current)
+    }
 
     private class SourceObservation(
         var blockedUntil: Long = 0L, var recoverAfter: Long = 0L, var parallelism: Int = 1,

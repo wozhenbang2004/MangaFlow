@@ -14,6 +14,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.exifinterface.media.ExifInterface
+import dev.mangaflow.experience.ExperienceRuntimePreferences
 import java.io.File
 import java.net.URI
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
@@ -34,11 +35,12 @@ internal actual fun ReaderZoomableImage(
         gesturesEnabled = gesturesEnabled, onClick = onClick)
 }
 
-internal actual suspend fun readNativeReaderSize(path: String): IntSize? {
+internal actual suspend fun readNativeReaderSize(path: String, runtime: ExperienceRuntimePreferences): IntSize? {
+    val file = checkedReaderFile(path, runtime)
     val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(path, options)
     if (options.outWidth <= 0 || options.outHeight <= 0) return null
-    val rotation = ExifInterface(File(path)).rotationDegrees
+    val rotation = ExifInterface(file).rotationDegrees
     return if (rotation == 90 || rotation == 270) IntSize(options.outHeight, options.outWidth)
         else IntSize(options.outWidth, options.outHeight)
 }
@@ -47,10 +49,18 @@ internal actual fun readerFilePath(uri: String): String? =
     if (uri.startsWith("file:")) runCatching { File(URI(uri)).absolutePath }.getOrNull() else null
 
 @Suppress("DEPRECATION")
-internal actual suspend fun decodeNativeReaderRegion(path: String, bounds: IntRect, sampleSize: Int): ReaderRegion {
+internal actual suspend fun decodeNativeReaderRegion(
+    path: String, bounds: IntRect, sampleSize: Int, runtime: ExperienceRuntimePreferences,
+): ReaderRegion {
+    checkedReaderFile(path, runtime)
     val decoder = requireNotNull(BitmapRegionDecoder.newInstance(path, false)) { "原图区域暂时无法读取" }
     return try {
         ReaderRegion(requireNotNull(decoder.decodeRegion(android.graphics.Rect(bounds.left, bounds.top, bounds.right, bounds.bottom),
             BitmapFactory.Options().apply { inSampleSize = sampleSize.coerceAtLeast(1) })).asImageBitmap())
     } finally { decoder.recycle() }
+}
+
+private fun checkedReaderFile(path: String, runtime: ExperienceRuntimePreferences): File = File(path).also { file ->
+    check(file.isFile && file.length() > 0L) { "原图文件暂不可用，当前显示预览" }
+    check(file.length() <= runtime.maxImageBytes) { "原图压缩数据超过单图配置，当前显示预览" }
 }

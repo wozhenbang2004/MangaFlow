@@ -19,6 +19,8 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
       - path: Assets.xcassets
         buildPhase: resources
       - path: ../THIRD_PARTY_NOTICES.md

@@ -4,6 +4,7 @@ import androidx.compose.ui.unit.IntSize
 import coil3.ImageLoader
 import dev.mangaflow.data.Page
 import dev.mangaflow.experience.readerPageCacheKey
+import dev.mangaflow.experience.ExperienceRuntimePreferences
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
@@ -55,6 +56,7 @@ internal suspend fun readerImageDimensions(
     originalPage: Page? = null,
     refresh: Boolean = false,
     originalCacheIdentity: String? = null,
+    runtime: ExperienceRuntimePreferences,
 ): IntSize? {
     val file = readerFilePath(page.url)
     val identity = diskCacheKey ?: readerPageCacheKey(page, emptyMap())
@@ -75,10 +77,10 @@ internal suspend fun readerImageDimensions(
         dimensionReads[(identity.hashCode() and Int.MAX_VALUE) % dimensionReads.size].withLock {
             if (!refresh) ReaderDimensionCache.get(identity)?.let { return@withLock publish(it) }
             val dimensions = try {
-                if (file != null) readNativeReaderSize(file)
+                if (file != null) readNativeReaderSize(file, runtime)
                 else diskCacheKey?.let { key ->
                     imageLoader.diskCache?.openSnapshot(key)?.use { snapshot ->
-                        readNativeReaderSize(snapshot.data.toString())
+                        readNativeReaderSize(snapshot.data.toString(), runtime)
                     }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }

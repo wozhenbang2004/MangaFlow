@@ -1,5 +1,7 @@
 package dev.mangaflow.experience
 
+import dev.mangaflow.reader.ReaderRecoveryPreferences
+
 enum class ExperienceMode { AUTO, ECO, PERFORMANCE }
 enum class PrefetchMode { SMART, OFF, MANUAL }
 enum class RefreshPreference { SYSTEM, INTERACTION, MANUAL }
@@ -36,6 +38,8 @@ data class ExperienceOverrides(
     val standbyMemoryWarmup: Boolean = true,
     val readerStatusPlacement: ReaderStatusPlacement = ReaderStatusPlacement.BOTTOM,
     val contentCache: ContentCachePreferences = ContentCachePreferences(),
+    val runtime: ExperienceRuntimePreferences = ExperienceRuntimePreferences(),
+    val recovery: ReaderRecoveryPreferences = ReaderRecoveryPreferences(),
 )
 
 /** Selected mode's automatic intent; explicit allocations are applied independently. */
@@ -92,6 +96,9 @@ data class ExperienceBudget(
     val sourceHedgeDelayMillis: Long = 1_800L,
     val sourceRecovery: SourceRecoveryMode = SourceRecoveryMode.OFF,
     val goal: ExperienceGoalBudget = ExperienceGoalBudget(),
+    val runtime: ExperienceRuntimePreferences = ExperienceRuntimePreferences(),
+    val recovery: ReaderRecoveryPreferences = ReaderRecoveryPreferences(),
+    val diskReserveBytes: Long = 0L,
 ) {
     val standbyPrefetchBytes: Long get() = if (standbySources > 0)
         standbyBytes ?: (prefetchBytes / 4L) else 0L
@@ -102,6 +109,12 @@ data class ExperienceBudget(
 
 /** Only actual sensors are populated. JVM heap is labelled separately from physical RAM. */
 data class ExperienceResources(
+    val device: ExperienceDeviceInfo = ExperienceDeviceInfo(),
+    val sampledAtMillis: Long? = null,
+    val processCpuLoad: Double? = null,
+    val processResidentBytes: Long? = null,
+    val processProportionalBytes: Long? = null,
+    val totalDiskBytes: Long? = null,
     val lowMemoryDevice: Boolean? = null,
     val memoryPressure: Boolean? = null,
     val lowPower: Boolean? = null,
@@ -125,7 +138,14 @@ data class ExperienceUsage(
     val resources: ExperienceResources = ExperienceResources(),
     val memoryBytes: Long? = null,
     val memoryLimit: Long? = null,
+    val memoryCacheBasisBytes: Long? = null,
+    val materializationBytes: Long = 0L,
     val diskBytes: Long? = null,
+    val imageDiskBytes: Long? = null,
+    val diskSampledAtMillis: Long? = null,
+    val diskProtectedBytes: Long? = null,
+    val diskReclaimableBytes: Long? = null,
+    val diskAreas: List<ExperienceCacheAreaUsage> = emptyList(),
     val diskLimit: Long? = null,
     val diskResizePending: Boolean = false,
     val cacheError: String? = null,
@@ -134,6 +154,8 @@ data class ExperienceUsage(
     val activeReaderImages: Int = 0,
     val activeResolves: Int = 0,
     val activeDecodes: Int = 0,
+    val activeTileDecodes: Int = 0,
+    val activePreparations: Int = 0,
     val activePrefetch: Int = 0,
     val queuedTasks: Int = 0,
     val prefetchReservedBytes: Long = 0L,
@@ -153,6 +175,19 @@ data class ExperienceUsage(
     val throttledSources: Int = 0,
     val frameP95Millis: Double? = null,
     val frameP99Millis: Double? = null,
+    val observedHeapPeakBytes: Long? = null,
+    val observedResidentPeakBytes: Long? = null,
+    val observedProportionalPeakBytes: Long? = null,
+    val observedImageMemoryPeakBytes: Long? = null,
+    val observedDiskPeakBytes: Long? = null,
+    val decodedPageP90Bytes: Long? = null,
+    val decodedPageMaxBytes: Long? = null,
+    val decodedSampleCount: Int = 0,
+)
+
+data class ExperienceCacheAreaUsage(
+    val id: String, val label: String, val bytes: Long,
+    val protectedBytes: Long = 0L, val reclaimableBytes: Long = 0L,
 )
 
 internal expect fun readExperienceResources(context: dev.mangaflow.platform.PlatformContext): ExperienceResources
