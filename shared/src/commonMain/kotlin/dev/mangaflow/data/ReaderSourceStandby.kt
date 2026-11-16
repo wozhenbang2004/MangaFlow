@@ -80,6 +80,10 @@ data class ReaderSourceStandby(
     val expectedBytes: Long? = null,
     val cacheInspectedAtMillis: Long? = null,
     val windowPages: List<ReaderSourceStandbyPage> = emptyList(),
+    /** Directory intent is queued separately from image work and has no page-count denominator. */
+    val manifestQueued: Boolean = false,
+    /** True only while this source directory owns its existing optional-admission permit. */
+    val manifestActive: Boolean = false,
 )
 
 /** Editions may split images differently; this is only an explicitly labelled resume estimate. */

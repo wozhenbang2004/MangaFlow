@@ -27,4 +27,8 @@ data class ReaderNextChapterPreparation(
     /** Image body bytes actually observed in this attempt; no cache-size or budget substitution. */
     val receivedBytes: Long? = null,
     val reason: String? = null,
+    /** Directory intent is queued separately from the upcoming image window. */
+    val manifestQueued: Boolean = false,
+    /** Actual ownership of the existing directory admission, never inferred from phase. */
+    val manifestActive: Boolean = false,
 )

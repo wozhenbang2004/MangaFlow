@@ -31,6 +31,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -68,6 +69,9 @@ internal class ReaderSourceStandbyController(
     private data class Stopped(val reason: String, val failed: Boolean, val retryOnRelease: Boolean = false,
         val retryWhenWritable: Boolean = false,
         val at: Long = monotonicTimeMillis())
+    private data class SourceAttempt(val variant: ChapterVariant, val earliest: Long = 0L,
+        val deadline: Long = 0L, val revision: Long = 0L, val onePass: Boolean = false,
+        val restore: Boolean = false)
     private val mutableState = MutableStateFlow<List<ReaderSourceStandby>>(emptyList())
     val state = mutableState.asStateFlow()
     private val mutableAvailability = MutableStateFlow(ReaderSourceStandbyAvailability())
@@ -77,9 +81,11 @@ internal class ReaderSourceStandbyController(
     private var job: Job? = null
     private var key: String? = null
     private var request = 0L
+    private var retryOne: ((String) -> Boolean)? = null
 
     fun clear() {
         request++
+        retryOne = null
         key = null
         job?.cancel()
         job = null
@@ -91,6 +97,17 @@ internal class ReaderSourceStandbyController(
     fun nudge(workId: String, chapterId: String) {
         val current = availability.value
         if (key != null && current.workId == workId && current.chapterId == chapterId) retryRevision.value++
+    }
+
+    fun retry(workId: String, chapterId: String, variantId: String): Boolean {
+        val identity = availability.value
+        val budget = ExperiencePolicyStore.get(context).state.value
+        val row = state.value.firstOrNull { it.variantId == variantId } ?: return false
+        if (identity.workId != workId || identity.chapterId != chapterId ||
+            !budget.foreground || budget.standbySources <= 0 || budget.standbyPrefetchBytes <= 0L ||
+            row.workId != workId || row.chapterId != chapterId ||
+            row.phase != ReaderSourceStandbyPhase.FAILED && row.failedPages == 0) return false
+        return retryOne?.invoke(variantId) == true
     }
 
     fun warm(
@@ -128,15 +145,16 @@ internal class ReaderSourceStandbyController(
                 .distinctUntilChanged().collectLatest { limits ->
                 if (generation != request) return@collectLatest
                 val eligible = candidates.filter(current)
-                val selected = select(eligible, policy, limits.sources.coerceAtLeast(0))
+                val ordered = select(eligible, policy, eligible.size)
                 val allowed = limits.foreground && limits.sources > 0 && limits.bytes > 0L
                 mutableState.value = eligible.map { variant -> standby(workId, chapter, variant).let { row ->
-                    if (allowed && variant in selected) row else row.copy(phase = ReaderSourceStandbyPhase.DEFERRED,
+                    if (allowed) row.copy(reason = "等待备用来源准备名额") else row.copy(phase = ReaderSourceStandbyPhase.DEFERRED,
+                        manifestQueued = false,
                         reason = when {
                             !limits.foreground -> "阅读不在前台，暂停可选备用准备"
                             limits.sources <= 0 -> "备用来源数量已设为零"
                             limits.bytes <= 0L -> "备用来源容量已设为零"
-                            else -> "超出本轮备用来源数量，优先准备其他来源"
+                            else -> "备用来源准备暂缓"
                         })
                 } }
                 if (!allowed) return@collectLatest
@@ -149,23 +167,132 @@ internal class ReaderSourceStandbyController(
                 delay(limits.delayMillis)
                 if (generation != request) return@collectLatest
                 coroutineScope {
-                    selected.forEachIndexed { order, variant -> launch {
-                        val saved = retained.getOrPut(variant.storageId) { linkedMapOf() }
-                        repeat(2) { attempt ->
-                            val retryAt = retryRevision.value
-                            prepareSource(generation, variant, order, limits, bytes, saved, current, refreshManifest = attempt > 0)
-                            if (generation != request || !current(variant) || attempt == 1) return@launch
-                            // A transient directory failure must not permanently poison this session.
-                            // Keep a finite retry and the existing source admission/cooldown authority.
-                            delay(5_000L)
-                            withTimeoutOrNull(25_000L) { retryRevision.first { it != retryAt } }
-                            if (generation != request || !current(variant)) return@launch
-                            mutableState.update { rows -> if (generation != request) rows else rows.map { row ->
-                                if (row.variantId == variant.storageId) row.copy(phase = ReaderSourceStandbyPhase.QUEUED,
-                                    reason = "重试备用来源目录，当前来源继续阅读") else row
-                            } }
+                    val queue = ordered.map { SourceAttempt(it) }.toMutableList()
+                    val running = mutableMapOf<String, Job>()
+                    val activeAttempts = mutableMapOf<String, SourceAttempt>()
+                    val attempts = mutableMapOf<String, Int>()
+                    val restart = mutableSetOf<String>()
+                    val yielding = mutableSetOf<String>()
+                    val paused = mutableSetOf<String>()
+                    val wake = MutableStateFlow(0L)
+                    val workers = minOf(limits.sources, ordered.size)
+                    fun enqueue(entry: SourceAttempt, first: Boolean = false) {
+                        queue.removeAll { it.variant.storageId == entry.variant.storageId }
+                        if (first) queue.add(0, entry) else queue.add(entry)
+                        wake.value++
+                    }
+                    fun makeRoom() {
+                        if (running.size < workers || yielding.isNotEmpty()) return
+                        val desired = queue.firstOrNull { it.onePass && current(it.variant) &&
+                            policy.sourceCooldownRemainingMillis(it.variant.sourceId) <= 0L } ?: return
+                        val victim = running.keys.lastOrNull { it != desired.variant.storageId &&
+                            activeAttempts[it]?.onePass != true && running[it]?.isCancelled == false } ?: return
+                        yielding += victim
+                        running[victim]?.cancel()
+                    }
+                    val retry: (String) -> Boolean = retry@{ id ->
+                        val variant = ordered.firstOrNull { it.storageId == id } ?: return@retry false
+                        if (generation != request || !current(variant)) return@retry false
+                        attempts[id] = 0
+                        if (running[id] != null) { restart += id; running[id]?.cancel() }
+                        else enqueue(SourceAttempt(variant, onePass = true), first = true)
+                        mutableState.update { rows -> if (generation != request) rows else rows.map { row ->
+                            if (row.variantId == id) row.copy(phase = ReaderSourceStandbyPhase.QUEUED,
+                                failedPages = 0, manifestQueued = true, reason = "已请求重试，等待旧请求结算与准备名额") else row
+                        } }
+                        makeRoom()
+                        wake.value++
+                        true
+                    }
+                    retryOne = retry
+                    val observations = launch {
+                        while (isActive && generation == request) {
+                            delay(2_000L)
+                            paused.toList().forEach { id ->
+                                val variant = ordered.firstOrNull { it.storageId == id } ?: return@forEach
+                                if (id !in running && current(variant)) try {
+                                    refreshPaused(generation, variant, retained.getOrPut(id) { linkedMapOf() },
+                                        limits, current) { id !in running && id in paused }
+                                } catch (cancel: CancellationException) { throw cancel }
+                                catch (_: Exception) {
+                                    mutableState.update { rows -> if (generation != request || id in running || !current(variant)) rows else rows.map { row ->
+                                        if (row.variantId == id) row.copy(targetPrepared = false, targetOriginalPresent = false,
+                                            memoryWarmed = false, targetPreviewResident = false, cacheInspectedAtMillis = null,
+                                            reason = "暂停窗口的缓存暂未核实") else row
+                                    } }
+                                }
+                            }
+                            makeRoom()
                         }
-                    } }
+                    }
+                    try {
+                        val tasks = List(workers) { launch {
+                            while (isActive && generation == request) {
+                                val before = wake.value to retryRevision.value
+                                val now = monotonicTimeMillis()
+                                fun remaining(entry: SourceAttempt): Long {
+                                    val retryWait = if (entry.deadline == 0L) 0L else if (retryRevision.value != entry.revision)
+                                        (entry.earliest - now).coerceAtLeast(0L) else (entry.deadline - now).coerceAtLeast(0L)
+                                    return maxOf(retryWait, policy.sourceCooldownRemainingMillis(entry.variant.sourceId))
+                                }
+                                queue.removeAll { !current(it.variant) }
+                                val entry = queue.withIndex().filter { remaining(it.value) == 0L }
+                                    .minWithOrNull(compareBy<IndexedValue<SourceAttempt>> {
+                                        when { it.value.onePass -> 0; it.value.restore -> 1; it.value.deadline == 0L -> 2; else -> 3 }
+                                    }.thenBy { it.index })?.value
+                                if (entry == null) {
+                                    val wait = queue.minOfOrNull(::remaining)
+                                    if (wait == null) combine(wake, retryRevision) { a, b -> a to b }.first { it != before }
+                                    else withTimeoutOrNull(wait.coerceAtLeast(1L)) {
+                                        combine(wake, retryRevision) { a, b -> a to b }.first { it != before }
+                                    }
+                                    continue
+                                }
+                                queue.remove(entry)
+                                val variant = entry.variant
+                                val id = variant.storageId
+                                paused.remove(id)
+                                val number = (attempts[id] ?: 0) + if (entry.restore) 0 else 1
+                                attempts[id] = number
+                                mutableState.update { rows -> if (generation != request) rows else rows.map { row ->
+                                    if (row.variantId == id) row.copy(phase = ReaderSourceStandbyPhase.QUEUED,
+                                        manifestQueued = true, manifestActive = false, reason = "准备此来源目录") else row
+                                } }
+                                val revision = retryRevision.value
+                                val child = launch(start = CoroutineStart.LAZY) {
+                                    prepareSource(generation, variant, ordered.indexOf(variant), limits, bytes,
+                                        retained.getOrPut(id) { linkedMapOf() }, current,
+                                        refreshManifest = entry.onePass || number > 1 && !entry.restore, onePass = entry.onePass)
+                                }
+                                running[id] = child
+                                activeAttempts[id] = entry
+                                try { child.start(); child.join() }
+                                finally {
+                                    withContext(NonCancellable) { child.cancelAndJoin() }
+                                    if (running[id] === child) { running.remove(id); activeAttempts.remove(id) }
+                                    wake.value++
+                                }
+                                currentCoroutineContext().ensureActive()
+                                if (generation != request || !current(variant)) continue
+                                paused += id
+                                val wasYielded = yielding.remove(id)
+                                if (restart.remove(id)) enqueue(SourceAttempt(variant, onePass = true), first = true)
+                                else if (wasYielded) enqueue(SourceAttempt(variant, restore = true))
+                                else if (!entry.onePass && number < 2) {
+                                    val at = monotonicTimeMillis()
+                                    enqueue(SourceAttempt(variant, at + 5_000L, at + 30_000L, revision))
+                                }
+                                mutableState.update { rows -> if (generation != request) rows else rows.map { row ->
+                                    if (row.variantId == id) row.copy(activePages = 0, manifestActive = false,
+                                        manifestQueued = queue.any { it.variant.storageId == id }) else row
+                                } }
+                            }
+                        } }
+                        tasks.forEach { it.join() }
+                    } finally {
+                        if (retryOne === retry) retryOne = null
+                        observations.cancel()
+                    }
                 }
             }
         }
@@ -194,6 +321,7 @@ internal class ReaderSourceStandbyController(
 
     private suspend fun prepareSource(generation: Long, variant: ChapterVariant, order: Int, limits: Limits, bytes: PrefetchByteBudget,
         prepared: LinkedHashMap<Int, Prepared>, current: (ChapterVariant) -> Boolean, refreshManifest: Boolean = false,
+        onePass: Boolean = false,
     ) {
         val policy = ExperiencePolicyStore.get(context)
         val owner = SourceKeys.manga(variant.sourceId, variant.mangaId)
@@ -209,20 +337,28 @@ internal class ReaderSourceStandbyController(
         var sourceRequestTimedOut = false
         try {
             if (!active()) return
-            val pages = withTimeout(25_000L) {
+            val pages = try { withTimeout(25_000L) {
                 (if (refreshManifest) null else repository.cachedPages(owner, variant.storageId)) ?: policy.withPrefetchAdmission(
                     variant.sourceId, 1_048_576L, { false },
                     onWaiting = { wait -> update { it.copy(
                         phase = if (wait == null) ReaderSourceStandbyPhase.RESOLVING else ReaderSourceStandbyPhase.QUEUED,
+                        manifestQueued = wait != null, manifestActive = wait == null,
                         reason = wait?.let(::waitingReason)) } },
                 ) {
-                    update { it.copy(phase = ReaderSourceStandbyPhase.RESOLVING, reason = null) }
+                    update { it.copy(phase = ReaderSourceStandbyPhase.RESOLVING,
+                        manifestQueued = false, manifestActive = true, reason = null) }
                     try { withTimeout(15_000L) { repository.pages(owner, variant.storageId, forceRefresh = refreshManifest) } }
                     catch (timeout: TimeoutCancellationException) {
                         sourceRequestTimedOut = true
                         throw timeout
                     }
                 }
+            } } finally {
+                // Retire this permit observation even if its source epoch just became invalid.
+                // A replacement reader generation owns another row and must never be touched.
+                mutableState.update { rows -> if (generation != request) rows else rows.map { row ->
+                    if (row.variantId == variant.storageId) row.copy(manifestQueued = false, manifestActive = false) else row
+                } }
             }
             currentCoroutineContext().ensureActive()
             if (!active()) return
@@ -325,19 +461,9 @@ internal class ReaderSourceStandbyController(
                 }
                 suspend fun updateWindow(at: Position) = windowLock.withLock {
                     if (!active()) return@withLock
-                    val target = approximateReaderPage(at.index, at.count, pages.size)
-                    val wanted = buildList {
-                        add(target)
-                        for (offset in 1 until minOf(limits.pages, pages.size)) {
-                            val next = target + offset * at.direction
-                            if (next in pages.indices) add(next)
-                        }
-                        for (offset in 1 until minOf(limits.pages, pages.size)) {
-                            val previous = target - offset * at.direction
-                            if (size < limits.pages && previous in pages.indices) add(previous)
-                        }
-                    }
-                    val nextWindow = Window(target, wanted)
+                    val nextWindow = windowAt(at, pages.size, limits.pages)
+                    val target = nextWindow.target
+                    val wanted = nextWindow.indices
                     if (window != nextWindow) windowId++
                     window = nextWindow
                     // Keep overlap alive; fast page turns only cancel work that really left the window.
@@ -548,6 +674,12 @@ internal class ReaderSourceStandbyController(
                             }
                             publish()
                         }
+                        val target = window?.target
+                        if (target != null && target !in pending && target !in prepared &&
+                            stopped[target]?.failed == true && (failures[target] ?: 0) >= 2) return@coroutineScope
+                        if (onePass && pending.isEmpty() && window != null && window!!.indices.all {
+                                it in prepared || it in stopped
+                            }) return@coroutineScope
                         if (resumeWrite || bytes.remaining > 0L && stopped.any { (index, stop) ->
                                 index in window?.indices.orEmpty() && (stop.retryOnRelease ||
                                     stop.failed && (failures[index] ?: 0) < 2 && monotonicTimeMillis() - stop.at >= 30_000L)
@@ -585,6 +717,73 @@ internal class ReaderSourceStandbyController(
         }
     }
 
+    private fun windowAt(at: Position, pageCount: Int, limit: Int): Window {
+        val target = approximateReaderPage(at.index, at.count, pageCount)
+        val count = minOf(limit, pageCount)
+        return Window(target, buildList {
+            add(target)
+            for (offset in 1 until count) {
+                val next = target + offset * at.direction
+                if (next in 0 until pageCount) add(next) else break
+            }
+            for (offset in 1 until count) {
+                val previous = target - offset * at.direction
+                if (size >= count || previous !in 0 until pageCount) break
+                add(previous)
+            }
+        })
+    }
+
+    /** Yielding a worker preserves cache artifacts, with continued cache-only evidence checks. */
+    private suspend fun refreshPaused(generation: Long, variant: ChapterVariant,
+        prepared: LinkedHashMap<Int, Prepared>, limits: Limits, current: (ChapterVariant) -> Boolean,
+        stillPaused: () -> Boolean,
+    ) {
+        fun valid() = generation == request && current(variant) && stillPaused()
+        if (!valid()) return
+        val previous = state.value.firstOrNull { it.variantId == variant.storageId } ?: return
+        val total = previous.totalPages?.takeIf { it > 0 } ?: return
+        val at = position.value
+        val wanted = windowAt(at, total, limits.pages)
+        val headers = repository.imageHeaders(SourceKeys.manga(variant.sourceId, variant.mangaId), variant.storageId).toMap()
+        val views = wanted.indices.map { index ->
+            var saved = prepared[index]
+            if (saved != null && stamp(saved.original, saved.cacheKey, headers, variant.sourceId) != saved.stamp) {
+                if (prepared[index] === saved) prepared.remove(index)
+                saved = null
+            }
+            val old = previous.windowPages.firstOrNull { it.index == index }
+            val resident = saved?.previewKey?.let { exact ->
+                SingletonImageLoader.get(imagePlatformContext(context)).memoryCache?.keys?.contains(exact)
+            } == true
+            val phase = when { saved != null -> ReaderSourceStandbyPhase.READY
+                old?.phase == ReaderSourceStandbyPhase.FAILED -> ReaderSourceStandbyPhase.FAILED
+                else -> ReaderSourceStandbyPhase.DEFERRED }
+            ReaderSourceStandbyPage(index, phase, saved != null, resident, saved?.stamp?.bytes ?: 0L,
+                old?.receivedBytes ?: 0L, old?.expectedBytes, saved?.let { wallTimeMillis() },
+                if (phase == ReaderSourceStandbyPhase.FAILED) old?.reason else "准备名额暂让出，原图按实际缓存核验")
+        }
+        if (!valid() || at != position.value) return
+        val target = views.first { it.index == wanted.target }
+        mutableState.update { rows -> if (!valid() || at != position.value) rows else rows.map { row ->
+            if (row.variantId != variant.storageId) row else row.copy(phase = target.phase,
+                targetPageIndex = wanted.target, requestedPages = views.size,
+                preparedPages = views.count { it.originalPresent }, decodedPages = views.count { prepared[it.index]?.decoded == true },
+                memoryWarmed = target.previewResident, targetPrepared = target.originalPresent,
+                activePages = 0, manifestActive = false, queuedPages = 0, resolvingPages = 0, downloadingPages = 0,
+                checkingPages = 0, settlingPages = 0, failedPages = views.count { it.phase == ReaderSourceStandbyPhase.FAILED },
+                deferredPages = views.count { it.phase == ReaderSourceStandbyPhase.DEFERRED },
+                cachedOriginalBytes = views.sumOf { it.cachedOriginalBytes }, previewResidentPages = views.count { it.previewResident },
+                targetOriginalPresent = target.originalPresent, targetPreviewResident = target.previewResident,
+                receivedBytes = views.sumOf { it.receivedBytes },
+                expectedBytes = views.map { it.expectedBytes }.takeIf { values -> values.all { it != null } }?.sumOf { it ?: 0L },
+                cacheInspectedAtMillis = views.mapNotNull { it.cacheInspectedAtMillis }.minOrNull(), windowPages = views,
+                windowId = row.windowId + if (row.targetPageIndex != wanted.target ||
+                    row.windowPages.map { it.index } != wanted.indices) 1L else 0L,
+                reason = if (target.originalPresent) "原图仍在缓存，准备名额暂让出" else target.reason)
+        } }
+    }
+
     /** Read existing storage only. A cancelled/evicted/replaced original cannot retain READY. */
     private suspend fun stamp(page: Page, cacheKey: String?, headers: Map<String, String>, source: String): Stamp? =
         withContext(Dispatchers.IO) {
@@ -608,7 +807,7 @@ internal class ReaderSourceStandbyController(
 
     private fun standby(workId: String, chapter: Chapter, variant: ChapterVariant) =
         ReaderSourceStandby(workId, chapter.id, variant.storageId, variant.sourceId,
-            variant.sourceName, ReaderSourceStandbyPhase.QUEUED)
+            variant.sourceName, ReaderSourceStandbyPhase.QUEUED, manifestQueued = true)
 
     private fun waitingReason(wait: AdmissionWait): String = when (wait.reason) {
         AdmissionWaitReason.NO_NETWORK -> "等待网络恢复"

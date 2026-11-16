@@ -956,6 +956,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                         sourceStandbys = sourceStandbys,
                         standbyAvailability = standbyAvailability,
                         nextChapterPreparation = nextChapterPreparation,
+                        onRetryStandby = { chapter, variantId ->
+                            if (model.reading.value === current.session)
+                                model.retryReaderSourceStandby(current.session.manga, chapter, variantId)
+                        },
                         onWarmSourceStandbys = { chapter, index, count ->
                             if (model.reading.value === current.session)
                                 model.warmReaderSourceStandbys(current.session.manga, chapter, index, count)

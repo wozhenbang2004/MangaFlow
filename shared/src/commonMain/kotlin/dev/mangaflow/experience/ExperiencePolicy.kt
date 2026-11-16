@@ -43,6 +43,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var sampling: Job? = null
     private var memoryCache: ExperienceMemoryCache? = null
     private var diskCache: ExperienceDiskCache? = null
+    private var cacheUsageJob: Job? = null
     private var cacheRevision = 0L
     private var sampledDiskBytes = 0L
     private var activeSavedTransfers = 0
@@ -233,28 +234,35 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     }
 
     fun refreshCacheUsage() {
-        scope.launch {
-            val caches = synchronized(lock) { memoryCache to diskCache }
-            val memory = caches.first
-            val disk = caches.second
-            try {
-                memory?.trimExpired()
-                dev.mangaflow.storage.StorageCacheStore.get(app).maintenanceTick()
-                val snapshot = listOf(memory?.size, memory?.maxSize, disk?.size, disk?.maxSize)
-                val pending = disk?.resizePending == true
-                val error = disk?.resizeError
-                synchronized(lock) {
-                    sampledDiskBytes = maxOf(snapshot[2] ?: 0L, dev.mangaflow.storage.StorageCacheStore.get(app).measuredBytes)
-                    mutableUsage.value = mutableUsage.value.copy(
-                        memoryBytes = snapshot[0], memoryLimit = snapshot[1],
-                        diskBytes = snapshot[2], diskLimit = snapshot[3],
-                        diskResizePending = pending, cacheError = error,
-                    )
-                }
-            } catch (_: Exception) {
-                synchronized(lock) { mutableUsage.value = mutableUsage.value.copy(cacheError = "图片缓存用量暂时无法读取") }
-            }
+        val job = synchronized(lock) {
+            // Reader indicators, settings and maintenance share this same local sample.
+            // A slow filesystem must not accumulate one refresh job per visible tick.
+            if (cacheUsageJob != null) return
+            scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    val caches = synchronized(lock) { memoryCache to diskCache }
+                    val memory = caches.first
+                    val disk = caches.second
+                    memory?.trimExpired()
+                    dev.mangaflow.storage.StorageCacheStore.get(app).maintenanceTick()
+                    val snapshot = listOf(memory?.size, memory?.maxSize, disk?.size, disk?.maxSize)
+                    val pending = disk?.resizePending == true
+                    val error = disk?.resizeError
+                    synchronized(lock) {
+                        sampledDiskBytes = maxOf(snapshot[2] ?: 0L, dev.mangaflow.storage.StorageCacheStore.get(app).measuredBytes)
+                        mutableUsage.value = mutableUsage.value.copy(
+                            memoryBytes = snapshot[0], memoryLimit = snapshot[1],
+                            diskBytes = snapshot[2], diskLimit = snapshot[3],
+                            diskResizePending = pending, cacheError = error,
+                        )
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) {
+                    synchronized(lock) { mutableUsage.value = mutableUsage.value.copy(cacheError = "图片缓存用量暂时无法读取") }
+                } finally { synchronized(lock) { cacheUsageJob = null } }
+            }.also { cacheUsageJob = it }
         }
+        job.start()
     }
 
     internal suspend fun <T> withChapterAdmission(

@@ -2559,6 +2559,19 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }
     }
 
+    /** Retry one exact confirmed alternate without resetting any other healthy preparation. */
+    fun retryReaderSourceStandby(manga: Manga, chapter: Chapter, variantId: String) {
+        val session = _reading.value?.takeIf { it.manga.id == manga.id && it.collection == null } ?: return
+        val current = session.chapters.firstOrNull { it.id == chapter.id } ?: return
+        val variant = current.variants.firstOrNull { it.storageId == variantId && it.storageId != current.id } ?: return
+        if (variant.sourceId !in repository.enabledSources()) return
+        val owner = SourceKeys.manga(variant.sourceId, variant.mangaId)
+        if (owner != manga.id && unifiedChapters.linkedSources(manga.id).none {
+                it.manga.id == owner && it.confirmedAt > 0L
+            }) return
+        readerStandbys.retry(manga.id, current.id, variantId)
+    }
+
     /** Only a real failed look-ahead page can request early preparation of an alternative. */
     fun onPrefetchPageFailed(manga: Manga, chapter: Chapter, page: Page) {
         val session = _reading.value?.takeIf { it.manga.id == manga.id } ?: return
@@ -2615,7 +2628,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }
         val initial = ReaderNextChapterPreparation(epoch, manga.id, currentChapter, chapter.id,
             chapter.title, source, owner, ReaderNextChapterPreparationPhase.QUEUED)
-        _nextChapterPreparation.value = initial
+        _nextChapterPreparation.value = initial.copy(manifestQueued = true)
         chapterPrefetchJob = viewModelScope.launch {
             try {
                 // Replacement work cannot acquire a fresh byte window until the old children settle.
@@ -2629,13 +2642,21 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                                 reason = if (!foreground) "阅读不在前台，下一话准备暂缓" else "当前策略未开启下一话原图准备")
                             return@collectLatest
                         }
-                        _nextChapterPreparation.value = initial
-                        val upcoming = repository.cachedPages(owner, chapter.id) ?: withTimeout(25_000L) {
-                            policy.withPrefetchAdmission(source, 1_048_576L, { false }) {
-                                if (currentSession()) _nextChapterPreparation.value = initial.copy(
-                                    phase = ReaderNextChapterPreparationPhase.MANIFEST)
-                                withTimeout(15_000L) { repository.pages(owner, chapter.id) }
+                        _nextChapterPreparation.value = initial.copy(manifestQueued = true)
+                        val upcoming = try {
+                            repository.cachedPages(owner, chapter.id) ?: withTimeout(25_000L) {
+                                policy.withPrefetchAdmission(source, 1_048_576L, { false }, onWaiting = { wait ->
+                                    _nextChapterPreparation.update { value -> if (!currentSession()) value else initial.copy(
+                                        phase = if (wait == null) ReaderNextChapterPreparationPhase.MANIFEST else ReaderNextChapterPreparationPhase.QUEUED,
+                                        manifestQueued = wait != null, manifestActive = wait == null,
+                                        reason = if (wait == null) null else "下一话目录等待准备名额或可用资源") }
+                                }) {
+                                    withTimeout(15_000L) { repository.pages(owner, chapter.id) }
+                                }
                             }
+                        } finally {
+                            _nextChapterPreparation.update { value -> if (!currentSession()) value else
+                                value?.copy(manifestQueued = false, manifestActive = false) }
                         }
                         if (!currentSession()) throw CancellationException("下一话准备已更新")
                         if (upcoming.isEmpty()) {

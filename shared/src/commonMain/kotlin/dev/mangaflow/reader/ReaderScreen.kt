@@ -293,6 +293,7 @@ fun ReaderScreen(
     standbyAvailability: dev.mangaflow.data.ReaderSourceStandbyAvailability = dev.mangaflow.data.ReaderSourceStandbyAvailability(),
     nextChapterPreparation: dev.mangaflow.data.ReaderNextChapterPreparation? = null,
     onWarmSourceStandbys: (Chapter, Int, Int) -> Unit = { _, _, _ -> },
+    onRetryStandby: (Chapter, String) -> Unit = { _, _ -> },
     onPrefetchPageFailed: (Chapter, Page) -> Unit = { _, _ -> },
     onCancelSourceStandbys: () -> Unit = {},
 ) {
@@ -1443,6 +1444,26 @@ fun ReaderScreen(
                 sourceTriggerAnchor = null
                 sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
             }),
+            onRetryStandby = { variantId ->
+                val failed = currentSourceStandbys.any { it.variantId == variantId &&
+                    !it.manifestQueued && !it.manifestActive &&
+                    (it.phase == dev.mangaflow.data.ReaderSourceStandbyPhase.FAILED || it.failedPages > 0) }
+                if (latestReadingIdentity == (manga.id to sourceIdentity) && readerForeground &&
+                    failed && chapter.variants.any { it.storageId == variantId && it.storageId != chapter.id })
+                    onRetryStandby(chapter, variantId)
+            },
+            onUseStandby = { variantId ->
+                if (latestReadingIdentity == (manga.id to sourceIdentity) && readerForeground) {
+                    val prepared = currentSourceStandbys.firstOrNull { row ->
+                        row.variantId == variantId && row.targetOriginalPresent && row.totalPages?.let { count ->
+                            count > 0 && row.targetPageIndex == dev.mangaflow.data.approximateReaderPage(pageIndex, pages.size, count)
+                        } == true
+                    }
+                    val variant = chapter.variants.firstOrNull { it.storageId == variantId && it.storageId != chapter.id }
+                    if (prepared != null && variant != null)
+                        onQuickReadVariant(chapter, variant, pageIndex, pages.size)
+                }
+            },
         )
 
         if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Text(
