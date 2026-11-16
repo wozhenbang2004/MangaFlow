@@ -204,8 +204,7 @@ internal fun BodySourceSettingsSheet(
                 }
                 items(added, key = { "added:${it.source.id}" }) { entry ->
                     BodySourceSettingsRow(entry, enabled = busyId == null,
-                        networkLabel = routing.sourceOverrides[entry.source.id]?.let { downloadRouteLabel(it.mode) }
-                            ?: "跟随默认",
+                        networkLabel = downloadRouteSummary(routing.sourceOverrides[entry.source.id]?.mode ?: routing.defaultMode),
                         onDetails = if (repository != null) { { inspecting = entry.source.id } } else null,
                         modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null,
                             placementSpec = if (motion) tween(MangaMotion.Content, easing = MangaMotion.EnterEasing) else snap()),

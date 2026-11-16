@@ -301,7 +301,7 @@ private fun NetworkAutoCheckRow(
                         DownloadRouteMode.PROXY -> "代"; null -> "待设" }, style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant, maxLines = 1, softWrap = false,
                         modifier = Modifier.semantics { contentDescription = (if (historical) "检测时线路，" else "当前线路，") +
-                            (current?.let(::downloadRouteLabel) ?: "跟随默认") })
+                            (current?.let(::downloadRouteLabel) ?: "未单独指定") })
                     Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
                         Modifier.size(12.dp), tint = colors.onSurfaceVariant)
                 }

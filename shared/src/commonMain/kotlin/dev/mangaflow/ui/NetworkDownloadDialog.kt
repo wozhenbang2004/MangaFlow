@@ -538,6 +538,7 @@ private fun NetworkConnectionHelp(relayInstalled: Boolean) {
             "检测反映本次入口响应，不代表带宽或全部图片可用；可调整每项选择，确认后才修改配置。",
             "Steam 等独立连接会单独标记覆盖范围，普通接口可用不代表其所有连接都可用。",
             "每个漫画源可单独设置搜索、阅读、账号接口与新下载线路；网页认证仍遵循系统网络，进行中任务保留原线路。",
+            "点选直连或代理后才切换线路，未选择的旧设置继续使用原线路。下载来源尚未确定时，入口只显示“线路”。",
             "新请求使用新设置。已有下载保留原线路，需明确选择“使用当前设置重试”才更换。手工代理地址目前不支持账号密码。",
         ).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
     }
