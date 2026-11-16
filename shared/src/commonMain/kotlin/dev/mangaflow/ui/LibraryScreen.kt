@@ -268,7 +268,7 @@ fun LibraryScreen(
         when (shelfSort) {
             UnifiedShelfSort.RECENT -> filtered.sortedWith(compareByDescending<Manga> {
                 maxOf(progressById[it.id]?.updatedAt ?: 0L, cloudMetadata[it.id]?.readAt ?: 0L)
-            }.thenBy(::stableIndex))
+            }.thenBy { cloudMetadata[it.id]?.readOrder ?: Int.MAX_VALUE }.thenBy(::stableIndex))
             UnifiedShelfSort.COPY_JOINED -> filtered.sortedWith(compareBy<Manga> {
                 cloudMetadata[it.id]?.joinedOrder == null && cloudMetadata[it.id]?.joinedAt == null
             }.thenBy { cloudMetadata[it.id]?.joinedOrder ?: Int.MAX_VALUE }
