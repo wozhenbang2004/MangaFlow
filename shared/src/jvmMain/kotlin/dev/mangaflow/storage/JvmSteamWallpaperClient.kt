@@ -543,7 +543,7 @@ internal class JvmSteamWallpaperClient(
                 val unrouted = restoredRequest ?: makeRequest() ?: return@launch
                 requireCurrent(lane, token, lease)
                 val frozenRoute = route ?: steamRoute()
-                var request = routedRequest(unrouted, frozenRoute)
+                var request = routedSteamRequest(unrouted, frozenRoute)
                 if (download != null) {
                     val root = File(cacheDirectory(app).path, "steam-wallpapers")
                     check(root.isDirectory || root.mkdirs())
@@ -941,30 +941,6 @@ internal class JvmSteamWallpaperClient(
         return route
     }
 
-    private fun routedRequest(request: JsonObject, route: DownloadRouteSnapshot): JsonObject = buildJsonObject {
-        request.forEach { (key, value) -> put(key, value) }
-        val managed = route.relayBinding?.let { resolveRelayEndpoint(it, route.mode) }
-        put("network", buildJsonObject {
-            if (managed != null) {
-                // This object goes only to JNI memory. Session/vault/checkpoints receive unrouted data.
-                put("kind", "HTTP_AUTH"); put("host", managed.host); put("port", managed.port)
-                put("username", managed.username); put("password", managed.password)
-            } else {
-                put("kind", when (route.mode) {
-                    DownloadRouteMode.SYSTEM -> "SYSTEM"
-                    DownloadRouteMode.DIRECT -> "DIRECT"
-                    DownloadRouteMode.PROXY -> when (checkNotNull(route.proxy).type) {
-                        DownloadProxyType.HTTP -> "HTTP"
-                        DownloadProxyType.SOCKS -> "SOCKS5"
-                    }
-                })
-                if (route.mode == DownloadRouteMode.PROXY) {
-                    val proxy = checkNotNull(route.proxy)
-                    put("host", proxy.host); put("port", proxy.port)
-                }
-            }
-        })
-    }
 
     private fun request(op: String, credentials: JsonObject? = session,
         arguments: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit = {}): JsonObject =
@@ -1077,4 +1053,30 @@ internal class JvmSteamWallpaperClient(
             "connection_timeout", "metadata_timeout", "download_stalled", "range_unsupported", "content_changed",
             "auth_connection_lost", "auth_session_expired", "profile_unavailable", "profile_timeout")
     }
+}
+
+
+internal fun routedSteamRequest(request: JsonObject, route: DownloadRouteSnapshot): JsonObject = buildJsonObject {
+    request.forEach { (key, value) -> put(key, value) }
+    val managed = route.relayBinding?.let { resolveRelayEndpoint(it, route.mode) }
+    put("network", buildJsonObject {
+        if (managed != null) {
+            // This object goes only to JNI memory. Session/vault/checkpoints receive unrouted data.
+            put("kind", "HTTP_AUTH"); put("host", managed.host); put("port", managed.port)
+            put("username", managed.username); put("password", managed.password)
+        } else {
+            put("kind", when (route.mode) {
+                DownloadRouteMode.SYSTEM -> "SYSTEM"
+                DownloadRouteMode.DIRECT -> "DIRECT"
+                DownloadRouteMode.PROXY -> when (checkNotNull(route.proxy).type) {
+                    DownloadProxyType.HTTP -> "HTTP"
+                    DownloadProxyType.SOCKS -> "SOCKS5"
+                }
+            })
+            if (route.mode == DownloadRouteMode.PROXY) {
+                val proxy = checkNotNull(route.proxy)
+                put("host", proxy.host); put("port", proxy.port)
+            }
+        }
+    })
 }

@@ -37,11 +37,13 @@ import kotlin.concurrent.Volatile
  * Protocol shapes checked against l2studio/picacomic-api (Apache-2.0) and niuhuan/pica-rust (MIT).
  * Access permissions remain controlled by the upstream service.
  */
-class PicacgBodySource(private val context: PlatformContext) : BodySource {
+class PicacgBodySource(private val context: PlatformContext) : BodySource, BodySourceProbeIdentity {
     override val info = BodySourceInfo("picacg", "哔咔", "简中", HOME, "", adult = true)
     private val network = SourceHttp(sourceId = info.id)
     private val accountLock = Mutex()
     @Volatile private var session: String = readSecret(context, SECRET_KEY).orEmpty()
+    override fun connectionProbeIdentity(): String = dev.mangaflow.platform.sha256(session.encodeToByteArray())
+        .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
     private val _signedIn = MutableStateFlow(session.isNotBlank())
     val signedIn = _signedIn.asStateFlow()
 

@@ -1,279 +1,310 @@
 package dev.mangaflow.ui
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.CheckBox
+import androidx.compose.material.icons.outlined.CheckBoxOutlineBlank
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
-import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.Remove
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.mangaflow.net.DownloadProxyType
-import dev.mangaflow.net.DownloadRouteMode
-import dev.mangaflow.net.DownloadRouteSnapshot
-import dev.mangaflow.net.DownloadRoutingSettings
-import dev.mangaflow.net.DownloadRoutingStore
-import dev.mangaflow.net.NetworkDiagnosis
-import dev.mangaflow.net.NetworkProbeTarget
-import dev.mangaflow.net.NetworkProbeResult
-import dev.mangaflow.net.diagnoseNetwork
-import dev.mangaflow.platform.LocalMangaContext
-import dev.mangaflow.ui.motion.MotionTabs
-import dev.mangaflow.ui.motion.MotionIconButton
-import dev.mangaflow.ui.motion.MotionBusyIndicator
-import dev.mangaflow.ui.motion.MotionTabTreatment
-import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.net.*
+import dev.mangaflow.ui.motion.*
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-/** A user-owned check reuses the same stored endpoint and real download transport. */
+/** One explicit run produces a read-only review; only its selected, measured differences can be saved. */
 @Composable
-internal fun DownloadConnectionDiagnostics(store: DownloadRoutingStore, active: Boolean) {
-    val context = LocalMangaContext.current
-    val clipboard = LocalClipboardManager.current
-    val settings by store.state.collectAsStateWithLifecycle()
-    val latestSettings by rememberUpdatedState(settings)
+internal fun NetworkAutoCheckWorkspace(controller: NetworkAutoCheckController, active: Boolean) {
+    val state by controller.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    val colors = MaterialTheme.colorScheme
     val latestActive by rememberUpdatedState(active)
-    var target by remember { mutableStateOf(NetworkProbeTarget.CATALOG) }
-    var diagnosis by remember { mutableStateOf<NetworkDiagnosis?>(null) }
-    var diagnosedSettings by remember { mutableStateOf<DownloadRoutingSettings?>(null) }
-    var job by remember { mutableStateOf<Job?>(null) }
-    var generation by remember { mutableStateOf(0) }
-    var notice by remember { mutableStateOf<String?>(null) }
-    var details by remember { mutableStateOf<DownloadRouteMode?>(null) }
-    var showScope by remember { mutableStateOf(false) }
-
-    fun invalidate(clearNotice: Boolean = true) {
-        generation += 1
-        job?.cancel()
-        job = null
-        diagnosis = null
-        diagnosedSettings = null
-        details = null
-        if (clearNotice) notice = null
+    val colors = MaterialTheme.colorScheme
+    val list = rememberLazyListState()
+    var selected by remember(controller) { mutableStateOf<Map<String, DownloadRouteMode>>(emptyMap()) }
+    var appliedChoices by remember(controller) { mutableStateOf<Map<String, DownloadRouteMode>>(emptyMap()) }
+    var expandedId by remember(controller) { mutableStateOf<String?>(null) }
+    var notice by remember(controller) { mutableStateOf<String?>(null) }
+    var saving by remember(controller) { mutableStateOf(false) }
+    var starting by remember(controller) { mutableStateOf(false) }
+    val canReview = state.complete && !state.applied && !state.stale && !state.running && !state.applying && !saving
+    val applicable = selected.filter { (id, mode) ->
+        state.rows.firstOrNull { it.id == id }?.let { row ->
+            routeResult(row, mode).verified() && mode != (appliedChoices[id] ?: row.currentRoute?.mode)
+        } == true
     }
-    LaunchedEffect(settings) { invalidate(clearNotice = false) }
-    LaunchedEffect(active) {
-        if (!active && job != null) {
-            generation += 1
-            job?.cancel()
-            job = null
-            notice = "检查已取消，可重新检查"
+    LaunchedEffect(controller, state.running, state.complete) {
+        if (state.running) {
+            selected = emptyMap(); appliedChoices = emptyMap(); expandedId = null; notice = null
+        } else if (state.complete && !state.stale) {
+            selected = state.rows.mapNotNull { row -> row.recommendation?.takeIf { mode ->
+                routeResult(row, mode).verified() && mode != row.currentRoute?.mode
+            }?.let { row.id to it } }.toMap()
+            list.animateScrollToItem(0)
         }
-        // A completed result belongs to its captured settings, not the selected tab.
-        // The settings effect and identity guards still discard genuinely stale evidence.
     }
-    DisposableEffect(Unit) { onDispose { generation += 1; job?.cancel() } }
-
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("服务响应", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
-                color = colors.onSurfaceVariant)
-            diagnosis?.takeIf { diagnosedSettings === store.state.value }?.let { result ->
-                MotionIconButton(onClick = {
-                    if (latestActive && diagnosedSettings === store.state.value) {
-                        clipboard.setText(AnnotatedString(result.safeReport()))
-                        notice = "已复制检查结果"
-                    }
-                }, enabled = active && job == null, modifier = Modifier.size(44.dp), tooltip = "复制脱敏检查结果") {
-                    Icon(Icons.Outlined.ContentCopy, "复制脱敏检查结果", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-                }
+    fun run() {
+        if (!latestActive || state.running || starting || saving || state.applying) return
+        starting = true
+        notice = null
+        scope.launch {
+            try { controller.run() }
+            catch (cancel: CancellationException) { throw cancel }
+            catch (_: Exception) { notice = "检测未完成，可重新检测" }
+            finally { starting = false }
+        }
+    }
+    fun choose(row: NetworkAutoRow, mode: DownloadRouteMode) {
+        if (!latestActive || !canReview || !routeResult(row, mode).verified()) return
+        val current = appliedChoices[row.id] ?: row.currentRoute?.mode
+        selected = if (mode == current) selected - row.id else selected + (row.id to mode)
+        notice = null
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (state.running || starting) MotionBusyIndicator(Modifier.size(15.dp), strokeWidth = 1.4.dp)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(when {
+                    state.stale -> "结果已过期"
+                    state.running || starting -> if (state.total > 0) "检测 ${state.completed}/${state.total}" else "准备检测项目"
+                    state.applied -> "设置已保存"
+                    state.complete -> "建议 ${state.rows.count { it.recommendation != null }} · 共 ${state.rows.size} 项"
+                    state.rows.isNotEmpty() -> "检测已停止"
+                    else -> "直连与代理分别检测"
+                }, style = MaterialTheme.typography.labelMedium)
+                Text(when {
+                    state.stale -> state.staleReason ?: "配置或网络已变化，请重新检测"
+                    state.running || starting -> "检测不修改配置"
+                    state.applied -> "本次建议已处理，可重新检测"
+                    state.complete -> if (applicable.isEmpty()) "保留当前设置" else "已选 ${applicable.size} 项调整"
+                    state.rows.isNotEmpty() -> "保留已完成结果，未完成项不参与修改"
+                    else -> "漫画源与下载服务 · 完成后逐项确认"
+                }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
-            MotionIconButton(onClick = { showScope = !showScope }, enabled = active,
-                modifier = Modifier.size(44.dp), tooltip = if (showScope) "收起检查范围" else "检查范围") {
-                Icon(Icons.Outlined.Info, if (showScope) "收起检查范围" else "检查范围",
-                    Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            if (state.running || starting) MotionIconButton(onClick = controller::cancel,
+                enabled = active && !state.applying, modifier = Modifier.size(44.dp), tooltip = "取消检测") {
+                Icon(Icons.Outlined.Close, "取消检测", Modifier.size(18.dp))
+            } else MotionTextButton(onClick = ::run, enabled = active && !saving && !state.applying,
+                contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Icon(if (state.rows.isEmpty()) Icons.Outlined.PlayArrow else Icons.Outlined.Refresh,
+                    null, Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(if (state.rows.isEmpty()) "一键检测" else "重新检测", style = MaterialTheme.typography.labelMedium)
             }
         }
-        // Adapt the existing settings disclosure: scope belongs on demand, not in every result row.
-        if (showScope) Text("仅在点击后请求所选服务，比较两次接口响应的平均耗时；不代表下载速度，也不识别外部软件或验证 VPN 绕行。",
-                Modifier.padding(bottom = 4.dp), style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant)
-        MotionTabs(
-            selected = target.ordinal,
-            labels = listOf("拷贝", "GitHub"),
-            onSelect = { index ->
-                if (latestActive) {
-                    val next = NetworkProbeTarget.entries[index]
-                    if (next != target) { invalidate(); target = next }
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            treatment = MotionTabTreatment.Soft, fullWidthIndicator = true, controlHeight = 36.dp,
-            track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface,
-        )
-        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (job != null) {
-                MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
-                Text("比较连接方式…", Modifier.weight(1f).padding(start = 7.dp),
-                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                MotionIconButton(onClick = { invalidate() }, enabled = active,
-                    modifier = Modifier.size(44.dp), tooltip = "取消检查") {
-                    Icon(Icons.Outlined.Close, "取消检查", Modifier.size(17.dp))
-                }
-            } else {
-                Text(if (diagnosis == null) "手动检查所选服务" else "本次接口响应", Modifier.weight(1f),
-                    style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                MotionTextButton(enabled = active, contentPadding = PaddingValues(horizontal = 8.dp), onClick = {
-                    if (!latestActive) return@MotionTextButton
-                    invalidate()
-                    val started = generation
-                    val saved = store.state.value
-                    val selectedTarget = target
-                    job = scope.launch(start = CoroutineStart.LAZY) {
-                        try {
-                            val result = diagnoseNetwork(context, selectedTarget, saved.proxy)
-                            if (generation == started && latestSettings === saved && store.state.value === saved && latestActive &&
-                                result.target == selectedTarget) {
-                                diagnosedSettings = saved
-                                diagnosis = result
-                            }
-                        } catch (cancel: CancellationException) {
-                            throw cancel
-                        } catch (_: Exception) {
-                            if (generation == started && latestActive) notice = "检查未完成，可重试"
-                        } finally {
-                            if (generation == started) job = null
-                        }
+        if (state.rows.isNotEmpty()) {
+            val groups = state.rows.groupBy { if (it.sourceId != null) "漫画源" else "下载与服务" }
+            LazyColumn(Modifier.weight(1f, fill = false).fillMaxWidth(), state = list,
+                contentPadding = PaddingValues(bottom = 4.dp)) {
+                groups.forEach { (group, rows) ->
+                    item("group-$group") { NetworkAutoGroupHeading("$group · ${rows.size}") }
+                    items(rows, key = { it.id }) { row ->
+                        val current = appliedChoices[row.id] ?: row.currentRoute?.mode
+                        NetworkAutoCheckRow(row, current, selected[row.id],
+                            stale = state.stale, enabled = active && canReview,
+                            applied = row.id in appliedChoices, expanded = expandedId == row.id,
+                            directRunning = "${row.id}:DIRECT" in state.activeProbeIds,
+                            proxyRunning = "${row.id}:PROXY" in state.activeProbeIds,
+                            onDetails = { expandedId = if (expandedId == row.id) null else row.id },
+                            onToggle = {
+                                if (row.id in selected) selected = selected - row.id
+                                else row.recommendation?.let { choose(row, it) }
+                            }, onChoose = { choose(row, it) })
                     }
-                    job?.start()
-                }) {
-                    Icon(Icons.Outlined.PlayArrow, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(if (diagnosis == null) "检查" else "重新检查")
                 }
             }
         }
-        diagnosis?.takeIf { diagnosedSettings === store.state.value }?.let { result ->
-            result.results.forEach { row ->
-                Column(Modifier.fillMaxWidth()) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(if (row.usable) Icons.Outlined.Check else Icons.Outlined.Info,
-                            if (row.usable) "接口可用" else "查看检查结果",
-                            Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-                        Text(diagnosticRouteLabel(row.route), Modifier.weight(1.1f),
-                            style = MaterialTheme.typography.bodyMedium, maxLines = 2,
-                            overflow = TextOverflow.Ellipsis)
-                        Text(diagnosticResultLabel(row), Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.End)
-                        MotionIconButton(onClick = { details = if (details == row.route.mode) null else row.route.mode },
-                            enabled = active, modifier = Modifier.size(44.dp),
-                            tooltip = if (details == row.route.mode) "收起连接详情" else "连接详情") {
-                            Icon(if (details == row.route.mode) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                                if (details == row.route.mode) "收起连接详情" else "连接详情", Modifier.size(16.dp),
-                                tint = colors.onSurfaceVariant)
-                        }
-                    }
-                    if (details == row.route.mode) Column(Modifier.padding(start = 24.dp, end = 8.dp, bottom = 6.dp),
-                            verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text(row.message, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
-                            val facts = listOfNotNull(row.httpStatus?.let { "HTTP $it" },
-                                row.responseMillis?.let { "本次总耗时 $it ms" })
-                            if (facts.isNotEmpty()) Text(facts.joinToString(" · "),
-                                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                            row.route.proxy?.let { endpoint ->
-                                val host = if (':' in endpoint.host) "[" + endpoint.host + "]" else endpoint.host
-                                Text(host + ":" + endpoint.port, style = MaterialTheme.typography.labelSmall,
-                                    color = colors.onSurfaceVariant)
-                            }
-                        }
-                }
-            }
-            result.recommended?.let { recommended ->
-                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("建议 · " + diagnosticRouteLabel(recommended), Modifier.weight(1f),
-                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (recommended.mode == settings.defaultMode) {
-                        Icon(Icons.Outlined.Check, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
-                        Text("当前默认", Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelSmall,
-                            color = colors.onSurfaceVariant)
-                    } else MotionTextButton(enabled = active && job == null, onClick = {
-                        if (!latestActive) return@MotionTextButton
-                        if (store.state.value !== diagnosedSettings) {
-                            invalidate()
-                            notice = "连接设置已变化，请重新检查"
-                            return@MotionTextButton
-                        }
-                        try {
-                            store.setDefault(recommended.mode)
-                            diagnosis = null
-                            notice = "默认已更新；分类、各源与进行中任务保留原设置"
-                        } catch (failure: Exception) {
-                            notice = failure.message ?: "暂时无法保存连接设置"
-                        }
-                    }) { Text("设为默认") }
-                }
-            } ?: Text("本次未找到可用连接", style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant)
-        }
-        if (settings.proxy == null) Row(Modifier.fillMaxWidth().heightIn(min = 32.dp),
+        state.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
+        notice?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant) }
+        if (state.rows.isNotEmpty()) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(Icons.Outlined.Remove, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
-            Text("指定代理未参与 · 尚未配置地址", style = MaterialTheme.typography.labelSmall,
-                color = colors.onSurfaceVariant)
+            Text(if (state.stale) "重新检测后可应用" else if (state.applied) "进行中任务保留原线路"
+                else if (state.complete) "分类调整会影响跟随它的项目" else "尚未生成可应用建议",
+                Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            MotionButton(onClick = {
+                if (!latestActive || !canReview || applicable.isEmpty()) return@MotionButton
+                val chosen = applicable.toMap()
+                saving = true
+                notice = null
+                scope.launch {
+                    try {
+                        val result = controller.apply(chosen)
+                        notice = result.message
+                        if (result.success) {
+                            appliedChoices = appliedChoices + chosen
+                            selected = selected - chosen.keys
+                        }
+                    } catch (cancel: CancellationException) { throw cancel }
+                    catch (_: Exception) { notice = "设置未能更新，请重试" }
+                    finally { saving = false }
+                }
+            }, enabled = active && canReview && applicable.isNotEmpty(), contentPadding = PaddingValues(horizontal = 14.dp)) {
+                if (saving || state.applying) {
+                    MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(if (saving || state.applying) "正在应用" else if (state.applied) "已保存" else "应用 ${applicable.size} 项")
+            }
         }
-        notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
     }
 }
 
-private fun diagnosticRouteLabel(route: DownloadRouteSnapshot): String = when (route.mode) {
-    DownloadRouteMode.SYSTEM -> downloadRouteLabel(route.mode)
-    DownloadRouteMode.DIRECT -> downloadRouteLabel(route.mode)
-    DownloadRouteMode.PROXY -> if (route.proxy?.type == DownloadProxyType.SOCKS) "SOCKS5 代理" else "HTTP 代理"
+@Composable
+private fun NetworkAutoGroupHeading(label: String) {
+    val colors = MaterialTheme.colorScheme
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val stacked = maxWidth < 300.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
+        Row(Modifier.fillMaxWidth().heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant)
+            if (!stacked) {
+                Text("直连", Modifier.width(58.dp), textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                Text("代理", Modifier.width(58.dp), textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                Spacer(Modifier.width(44.dp))
+            }
+        }
+    }
 }
 
+@Composable
+private fun NetworkAutoCheckRow(
+    row: NetworkAutoRow, current: DownloadRouteMode?, selected: DownloadRouteMode?, stale: Boolean,
+    enabled: Boolean, applied: Boolean, expanded: Boolean, directRunning: Boolean, proxyRunning: Boolean,
+    onDetails: () -> Unit, onToggle: () -> Unit,
+    onChoose: (DownloadRouteMode) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val recommended = row.recommendation?.takeIf { routeResult(row, it).verified() && it != current }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val stacked = maxWidth < 300.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
+        Column(Modifier.fillMaxWidth().alpha(if (stale) .58f else 1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
+                MotionIconButton(onClick = onToggle, enabled = enabled && (selected != null || recommended != null),
+                    modifier = Modifier.size(44.dp), tooltip = if (selected != null) "保留${row.label}当前设置" else "选择${row.label}建议") {
+                    Icon(if (selected != null) Icons.Outlined.CheckBox else Icons.Outlined.CheckBoxOutlineBlank,
+                        if (selected != null) "已选${row.label}" else "未选${row.label}", Modifier.size(17.dp),
+                        tint = colors.onSurfaceVariant)
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(row.label, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text((if (stale) "原设置 · " else if (applied) "已更新 · " else "当前 · ") +
+                        (current?.let(::downloadRouteLabel) ?: "继承默认"), style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (!stacked) {
+                    NetworkAutoRouteCell(row.direct, DownloadRouteMode.DIRECT, selected, recommended,
+                        enabled, false, directRunning, onChoose)
+                    NetworkAutoRouteCell(row.proxy, DownloadRouteMode.PROXY, selected, recommended,
+                        enabled, false, proxyRunning, onChoose)
+                }
+                MotionIconButton(onClick = onDetails, modifier = Modifier.size(44.dp),
+                    tooltip = if (expanded) "收起${row.label}详情" else "${row.label}检测详情") {
+                    Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        if (expanded) "收起详情" else "检测详情", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                }
+            }
+            if (stacked) Row(Modifier.fillMaxWidth().padding(start = 44.dp, end = 44.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                NetworkAutoRouteCell(row.direct, DownloadRouteMode.DIRECT, selected, recommended,
+                    enabled, true, directRunning, onChoose, Modifier.weight(1f))
+                NetworkAutoRouteCell(row.proxy, DownloadRouteMode.PROXY, selected, recommended,
+                    enabled, true, proxyRunning, onChoose, Modifier.weight(1f))
+            }
+            CopyShelfReveal(expanded) {
+                Column(Modifier.fillMaxWidth().padding(start = 44.dp, end = 8.dp, bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(row.coverage, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    Text(row.reason, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    listOf(DownloadRouteMode.DIRECT to row.direct, DownloadRouteMode.PROXY to row.proxy).forEach { (mode, result) ->
+                        Text(downloadRouteLabel(mode) + " · " + (result?.message ?: "尚未检测") +
+                            (result?.samples?.takeIf { it > 0 }?.let { " · $it 次" } ?: "") +
+                            (result?.httpStatus?.let { " · HTTP $it" } ?: ""),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (result?.status == NetworkAutoRouteStatus.FAILED) colors.error else colors.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
+}
 
-/** Summaries preserve the difference between a remote rejection and a transport failure. */
-private fun diagnosticResultLabel(result: NetworkProbeResult): String = when {
-    result.usable && result.millis != null -> result.millis.toString() + " ms"
-    result.usable -> "接口可用"
-    result.failureKind != null -> result.failureKind!!.label
-    "超时" in result.message -> "连接超时"
-    "拒绝访问" in result.message -> "已响应 · 拒绝访问"
-    "限流" in result.message -> "已响应 · 限流"
-    "需要跳转" in result.message -> "已响应 · 需跳转"
-    "内容与接口不符" in result.message -> "已响应 · 内容不符"
-    "不支持" in result.message -> "此方式不支持"
-    "代理" in result.message && listOf("配置", "填写", "端口", "地址", "主机").any { it in result.message } -> "检查代理配置"
-    result.message.startsWith("服务返回 HTTP") -> result.message.removePrefix("服务返回 ")
-    else -> "未能连接"
+@Composable
+private fun NetworkAutoRouteCell(
+    result: NetworkAutoRouteResult?, mode: DownloadRouteMode, selected: DownloadRouteMode?,
+    recommended: DownloadRouteMode?, enabled: Boolean, showRoute: Boolean, running: Boolean,
+    onChoose: (DownloadRouteMode) -> Unit, modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    val chosen = selected == mode
+    MotionTextButton(onClick = { onChoose(mode) }, enabled = enabled && result.verified(),
+        modifier = modifier.then(if (showRoute) Modifier else Modifier.width(58.dp)).heightIn(min = 44.dp)
+            .background(if (chosen) colors.onSurface.copy(alpha = .055f) else colors.surface.copy(alpha = 0f),
+                RoundedCornerShape(10.dp)).semantics {
+                contentDescription = downloadRouteLabel(mode) + "，" + (if (running) "正在检测" else networkAutoResultLabel(result)) +
+                    if (chosen) "，待应用" else if (recommended == mode) "，建议" else ""
+            }, contentPadding = PaddingValues(horizontal = 2.dp, vertical = 3.dp)) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            if (showRoute) Text(downloadRouteLabel(mode), style = MaterialTheme.typography.labelSmall)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                if (running) MotionBusyIndicator(Modifier.size(13.dp), strokeWidth = 1.3.dp)
+                else if (chosen) Icon(Icons.Outlined.Check, null, Modifier.size(11.dp), tint = colors.onSurface)
+                Text(if (running) "检测中" else networkAutoResultLabel(result), style = MaterialTheme.typography.labelSmall,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                    color = if (result?.status == NetworkAutoRouteStatus.FAILED) colors.error else colors.onSurfaceVariant)
+            }
+            // Keep the same actual text line before and after a recommendation arrives.
+            // The cell already announces its recommendation in its combined description.
+            Text(if (recommended == mode) "建议" else "", Modifier.clearAndSetSemantics { },
+                style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                minLines = 1, maxLines = 1)
+        }
+    }
+}
+
+private fun routeResult(row: NetworkAutoRow, mode: DownloadRouteMode): NetworkAutoRouteResult? = when (mode) {
+    DownloadRouteMode.DIRECT -> row.direct
+    DownloadRouteMode.PROXY -> row.proxy
+    DownloadRouteMode.SYSTEM -> null
+}
+private fun NetworkAutoRouteResult?.verified(): Boolean = this != null && usable && samples == 2
+private fun networkAutoResultLabel(result: NetworkAutoRouteResult?): String = when (result?.status) {
+    null -> "待测"
+    NetworkAutoRouteStatus.AVAILABLE -> result.millis?.let { "${it}ms" } ?: "可用"
+    NetworkAutoRouteStatus.NOT_CONFIGURED -> "未配置"
+    NetworkAutoRouteStatus.LOGIN_REQUIRED -> "需登录"
+    NetworkAutoRouteStatus.UNSUPPORTED -> "未覆盖"
+    NetworkAutoRouteStatus.CANCELLED -> "已取消"
+    NetworkAutoRouteStatus.PARTIAL -> "部分响应"
+    NetworkAutoRouteStatus.FAILED -> when {
+        "超时" in result.message -> "超时"
+        result.httpStatus == 429 -> "限流"
+        result.httpStatus == 401 || result.httpStatus == 403 -> "拒绝访问"
+        else -> "失败"
+    }
 }

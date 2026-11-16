@@ -64,8 +64,7 @@ import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.SourceNetworkSettings
 import dev.mangaflow.net.RelayLinkController
 import dev.mangaflow.net.currentRelayBinding
-import dev.mangaflow.data.UnifiedMangaRepository
-import dev.mangaflow.storage.BodySourceRegistry
+import dev.mangaflow.net.NetworkAutoCheckController
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.LocalMangaContext
@@ -88,8 +87,8 @@ internal fun NetworkDownloadSettings(
     suggestedProxy: DownloadProxyEndpoint? = null,
     suggestionRevision: Int = 0,
     onSuggestionConsumed: () -> Unit = {},
-    repository: UnifiedMangaRepository? = null,
-    registry: BodySourceRegistry? = null,
+    autoCheck: NetworkAutoCheckController,
+    onStartCheck: () -> Unit,
     proxyEditing: Boolean = false,
     onProxyEditing: (Boolean) -> Unit = {},
     connectionSummary: @Composable () -> Unit = {},
@@ -97,14 +96,10 @@ internal fun NetworkDownloadSettings(
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
-    val entries = if (registry != null) {
-        val installed by registry.entries.collectAsStateWithLifecycle()
-        installed
-    } else emptyList()
     when (scene) {
         NetworkDownloadScene.CONNECTION -> DownloadConnectionSettings(
             store, active, environment, suggestedProxy, suggestionRevision, onSuggestionConsumed,
-            proxyEditing, onProxyEditing, connectionSummary)
+            proxyEditing, onProxyEditing, connectionSummary, onStartCheck)
         NetworkDownloadScene.CATEGORIES -> BoxWithConstraints(Modifier.fillMaxWidth()) {
             val stacked = maxWidth < 300.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -125,14 +120,7 @@ internal fun NetworkDownloadSettings(
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        NetworkDownloadScene.CHECK -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (repository != null) {
-                val sources = if (registry != null) entries.filter { it.isInstalled && it.enabled && !it.removed }.map { it.source }
-                    else repository.sources.filter { it.id in repository.enabledSources() }
-                SourceConnectionChecks(repository, sources, active = active, animateDetails = false)
-            }
-            DownloadConnectionDiagnostics(store, active)
-        }
+        NetworkDownloadScene.CHECK -> NetworkAutoCheckWorkspace(autoCheck, active)
     }
 }
 
@@ -141,6 +129,7 @@ private fun DownloadConnectionSettings(
     store: DownloadRoutingStore, active: Boolean, environment: DownloadNetworkEnvironment?,
     suggestedProxy: DownloadProxyEndpoint?, suggestionRevision: Int, onSuggestionConsumed: () -> Unit,
     proxyEditing: Boolean, onProxyEditing: (Boolean) -> Unit, connectionSummary: @Composable () -> Unit,
+    onStartCheck: () -> Unit,
 ) {
     val settings by store.state.collectAsStateWithLifecycle()
     val context = LocalMangaContext.current
@@ -235,6 +224,13 @@ private fun DownloadConnectionSettings(
                 track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
             if (settings.defaultMode == DownloadRouteMode.DIRECT && !relayDirect && environment?.defaultNetworkUsesVpn == true)
                 Text("VPN 仍可能接管直连", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+            MotionTextButton(onClick = onStartCheck, enabled = interactive,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                Icon(Icons.Outlined.SwapVert, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Text("一键检测", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                Icon(Icons.Outlined.ChevronRight, "检测全部网络配置", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+            }
             MotionTextButton(onClick = { startEditing(false) }, enabled = interactive,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
                 Icon(Icons.Outlined.Edit, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)

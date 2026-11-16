@@ -502,6 +502,28 @@ async fn run(mut request: SecretValue, job: Arc<Job>) -> Outcome {
     let op = text(&request.0, "op").ok_or("invalid_request")?;
     let (transport, route) = routed_shared(&mut request.0)?;
     match op.as_str() {
+        "probe" => {
+            // Diagnostic ownership is independent from every authenticated lane.
+            // This path never accepts credentials or opens a login/Workshop RPC.
+            if ["account", "steamId", "refreshToken", "password"].iter()
+                .any(|key| request.0.get(*key).is_some()) {
+                return Err("invalid_request");
+            }
+            let started = Instant::now();
+            phase(&job, "connecting");
+            // The pinned anonymous constructor performs directory lookup, CM
+            // TLS/WebSocket connection, anonymous logon and read-only host discovery.
+            let session = tokio::time::timeout(
+                Duration::from_secs(18), Session::anonymous_shared(transport),
+            ).await.map_err(|_| "connection_timeout")?.map_err(|_| "steam_unavailable")?;
+            drop(session);
+            job.emit(json!({
+                "kind":"probeConnected","scope":"steam_cm","anonymous":true,
+                "responseMillis":started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+            }));
+            // A terminal/local completion alone is not connection evidence.
+            Ok(json!({"kind":"complete"}))
+        }
         "login" | "passwordLogin" => {
             let token = if op == "passwordLogin" {
                 password_login(&mut request.0, &job, Arc::clone(&transport)).await?
@@ -779,6 +801,7 @@ fn start(request: Result<SecretValue, serde_json::Error>) -> i64 {
         return id;
     };
     let seconds = match request.0.get("op").and_then(Value::as_str) {
+        Some("probe") => 20,
         Some("login" | "passwordLogin") => 360,
         Some("download") => 1800,
         _ => 90,

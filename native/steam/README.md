@@ -1,6 +1,6 @@
 # Steam Workshop native component
 
-MangaFlow media adapter version 0.1.5; component identity 0.1.5-f541366.
+MangaFlow media adapter version 0.1.6; component identity 0.1.6-f541366.
 
 The module links the real tapline core pinned to
 https://github.com/UnhingedSoftware/tapline/tree/f54136611519bef50cf31336e0c28a78eb175657.
@@ -47,7 +47,7 @@ nativePoll is nonblocking: null means pending. A complete or error event is
 terminal. Completed queues also return complete once drained. An invalid handle
 returns error code invalid_job; nativeStart returns0 when unavailable/busy.
 
-All requests are JSON, op is login/passwordLogin/account/profile/library/search/download.
+All requests are JSON, op is probe/login/passwordLogin/account/profile/library/search/download.
 Every operation also requires an immutable network object. kind is SYSTEM or
 DIRECT, or HTTP/SOCKS5 with an explicit host and port. Authorized Relay uses HTTP_AUTH,
 loopback host/port and in-memory credentials from the verified Binder receipt. PROXY mode is resolved by
@@ -71,11 +71,25 @@ Each native job owns a separate immutable-route HTTP pool while its derived Shar
 retains the original application-wide four-chunk semaphore. TCP connection and proxy negotiation
 are bounded by30seconds; TLS/WS and request work retain the existing job deadline. The app's package
 identity and per-job cancel/free lifetime stay unchanged; changing a setting
-applies to subsequently started jobs. This slice supports unauthenticated local
-HTTP/SOCKS ports only, with no credential/profile/authentication extension. Credentials, where
-needed, are flat account, steamId (decimal string) and refreshToken.
+applies to subsequently started jobs. Ordinary configured HTTP/SOCKS endpoints remain
+unauthenticated; only a verified Relay loopback HTTP_AUTH receipt supplies proxy
+credentials. Steam account credentials, where needed, are flat account,
+steamId (decimal string) and refreshToken.
 The adapter never calls TokenStore, automatic login or local Steam discovery.
 
+- probe creates an independent immutable-route anonymous CM session, with an18second
+  connection deadline and20second native job deadline. The pinned constructor performs
+  actual directory lookup, CM TLS/WebSocket connection, anonymous logon and read-only
+  host discovery. It then drops that session and emits probeConnected with scope
+  steam_cm, anonymous=true and actual responseMillis, followed by complete. No account,
+  password or refresh token is accepted. It does not invoke authentication UI, read or
+  write the account vault, query a user collection, download media, install a component
+  or replace an existing session. The JVM requires the specific probeConnected receipt;
+  cached/local terminal completion is not connection evidence. An older component's
+  invalid_request response requires a component update, never a direct-route retry.
+  Success proves only anonymous CM connectivity on this exact route, not account access,
+  content CDN reachability, a Workshop download or the public exit IP. Product diagnostic
+  jobs do not record normal Relay request observations.
 - login emits qr/url updates, then loggedIn/account/steamId/refreshToken only
   after a refreshed Steam client session succeeds, followed by complete.
 - passwordLogin accepts an explicit account/password for this attempt only. It uses the
@@ -136,7 +150,8 @@ are display-only and are never used as download payloads or main-media fallback.
 
 At most8 live jobs,4 shared chunk permits and2 runtime workers. Progress events
 coalesce in a32-entry queue. Login is capped360seconds including connection and
-verification, account/search/library90seconds, profile15seconds, and native download30minutes.
+verification, account/search/library90seconds, profile15seconds, probe20seconds,
+and native download30minutes.
 The JVM caps native download work at15minutes, with separate120second extraction/import limits. Password login and guard submission are explicit user actions; no publisher key,
 account probe or token file is introduced. Native credential
 buffers and queued response strings are zeroized; the JVM still owns its strings

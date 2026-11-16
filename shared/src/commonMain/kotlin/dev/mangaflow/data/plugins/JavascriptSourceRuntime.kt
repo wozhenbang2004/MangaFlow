@@ -80,6 +80,7 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                 var preferenceCalls = 0
                 try {
                     checkPackage()
+                    val probeResponse = currentCoroutineContext()[ChapterDownloadTransport]?.onProbeResponse
                     val route = if (allowNetwork) currentCoroutineContext()[ChapterDownloadTransport]?.route
                         ?: DownloadRoutingStore.get(application).sourceSnapshot(bundle.sourceId) else null
                     val network = JavascriptHttpSession(allowNetwork, route, MAX_RESPONSE_BYTES, allowRedirects,
@@ -90,7 +91,9 @@ class JavascriptSourceRuntime(context: PlatformContext) {
                     js.evaluationTimeoutMillis = 2_000L
                     js.defineBinding("__mfHttp", AsyncFunctionBinding<String> { values ->
                         try { checkPackage(); network.request(argument(values)).also { result ->
-                            responseStatus = JSONObject(result).optInt("statusCode", 0).takeIf { it in 400..599 }
+                            val status = JSONObject(result).optInt("statusCode", 0)
+                            responseStatus = status.takeIf { it in 400..599 }
+                            if (status in 200..299) probeResponse?.invoke()
                         } }
                         catch (failure: Exception) { hostFailure = failure; throw failure }
                     })

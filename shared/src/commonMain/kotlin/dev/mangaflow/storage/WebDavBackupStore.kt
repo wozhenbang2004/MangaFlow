@@ -88,6 +88,26 @@ class WebDavBackupStore(private val context: PlatformContext) {
         WebDavTransferSnapshot(credentials.first, credentials.second, route)
     }
 
+    /** A read-only collection request; does not create directories, transfer a backup or update timestamps. */
+    internal fun connectionProbeConfigured(): Boolean = synchronized(lock) { readConfig().configured }
+
+    internal suspend fun connectionProbeRequest(): Request = withContext(Dispatchers.IO) {
+        val credentials = readCredentials()
+        val base = normalizeEndpoint(credentials.first.endpoint)
+        requestBuilder(base, credentials).header("Depth", "0").header("Accept", "application/xml, text/xml")
+            .method("PROPFIND", RequestBody("<?xml version=\"1.0\"?><d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/></d:prop></d:propfind>".encodeToByteArray(), "application/xml"))
+            .build()
+    }
+
+    /** Opaque equality guard only; neither the hash nor its input enters diagnostic output. */
+    internal suspend fun connectionProbeIdentity(): String = withContext(Dispatchers.IO) {
+        if (!connectionProbeConfigured()) return@withContext "unconfigured"
+        val credentials = readCredentials()
+        dev.mangaflow.platform.sha256((credentials.first.endpoint + "\u0000" + credentials.first.username +
+            "\u0000" + credentials.first.remotePath + "\u0000" + credentials.second).encodeToByteArray())
+            .joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
+    }
+
     suspend fun upload(payload: String) = upload(payload,
         captureTransfer(DownloadRoutingStore.get(context).snapshot(DownloadCategory.WEBDAV)))
 

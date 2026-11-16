@@ -57,13 +57,17 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
  *
  * The shared bridge runs on Android and desktop; iOS does not advertise this adapter.
  */
-internal class JvmJmBodySource(private val context: PlatformContext) : BodySource {
+internal class JvmJmBodySource(private val context: PlatformContext) : BodySource, BodySourceProbeIdentity {
     override val info = BodySourceInfo("jmcomic", "禁漫", "简中", "https://18comic.vip", "", adult = true)
     private val mutex = Mutex()
     private val root = StorageFile(cacheDirectory(context), "jm-decoded")
     private var client: JmApiClient? = null
     private var clientConfig: JmConfiguration? = null
     private var clientRoute: DownloadRouteSnapshot? = null
+    private var clientObservesRelayTraffic = true
+    @kotlin.concurrent.Volatile private var probeResponse: (() -> Unit)? = null
+    @kotlin.concurrent.Volatile private var probeSession = 0L
+    override fun connectionProbeIdentity(): String = probeSession.toString()
     private var savedSession: JSONObject? = readSecret(context, SECRET_KEY)?.let {
         runCatching { JSONObject(it) }.getOrNull()
     }
@@ -73,16 +77,18 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     private suspend fun <T> clientCall(operation: (JmApiClient) -> T): T = withContext(Dispatchers.IO) {
         mutex.withLock {
             currentCoroutineContext().ensureActive()
-            val route = currentCoroutineContext()[ChapterDownloadTransport]?.route
+            val frozen = currentCoroutineContext()[ChapterDownloadTransport]
+            val route = frozen?.route
                 ?: DownloadRoutingStore.get(context).sourceSnapshot(info.id)
-            if (client != null && clientRoute != route) {
+            val observesRelay = frozen?.connectionCheck != true
+            if (client != null && (clientRoute != route || clientObservesRelayTraffic != observesRelay)) {
                 val previous = client
                 client = null; clientConfig = null; clientRoute = null
                 photoImages.clear()
                 runInterruptible { previous?.close() }
             }
             val active = client ?: runInterruptible {
-                val (created, config) = createClient(route = route)
+                val (created, config) = createClient(route = route, observeRelayTraffic = observesRelay)
                 try {
                     savedSession?.let { session -> runCatching {
                         val host = session.optString("host")
@@ -94,27 +100,34 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                     }.onFailure { accountName = "" } }
                     clientConfig = config
                     clientRoute = route
+                    clientObservesRelayTraffic = observesRelay
                     created.also { client = it }
                 } catch (failure: Exception) { created.close(); throw failure }
             }
             currentCoroutineContext().ensureActive()
             if (currentCoroutineContext()[ChapterDownloadTransport]?.connectionCheck == true) clientConfig?.cachePool?.clear()
+            probeResponse = frozen?.onProbeResponse
             try { runInterruptible { operation(active) } }
             catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 if (failure.message.orEmpty().contains("請先登入會員")) accountName = ""
                 throw SourceException("禁漫请求失败：${failure.cause?.message ?: failure.message}", info.homeUrl, cause = failure)
             }
+            finally { probeResponse = null }
         }
     }
 
     /** A cookie-only reader never enables the upstream client's cached-password retry. */
     private fun createClient(pinDomain: Boolean = false,
-        route: DownloadRouteSnapshot = DownloadRoutingStore.get(context).sourceSnapshot(info.id)): Pair<JmApiClient, JmConfiguration> {
+        route: DownloadRouteSnapshot = DownloadRoutingStore.get(context).sourceSnapshot(info.id),
+        observeRelayTraffic: Boolean = true): Pair<JmApiClient, JmConfiguration> {
         val config = JmConfiguration.Builder().clientType(ClientType.API).retryTimes(0)
             .cacheSize(24 * 1024 * 1024).closeTimeoutMs(1_000).build()
         val bundle = OkHttpBuilder.build(config)
-        val http = bundle.client.newBuilder().applyDownloadRoute(route).retryOnConnectionFailure(false).build()
+        val http = bundle.client.newBuilder().applyDownloadRoute(route, observeTraffic = observeRelayTraffic)
+            .addNetworkInterceptor { chain -> chain.proceed(chain.request()).also { response ->
+                if (response.isSuccessful) probeResponse?.invoke()
+            } }.retryOnConnectionFailure(false).build()
         val created = JmApiClient(config, http, bundle.cookieManager, bundle.domainManager)
         try {
             created.initializeAsync().get()
@@ -197,7 +210,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
                         writeSecret(context, SECRET_KEY, secret.toString())
                         val previous = client
                         client = replacement; clientConfig = config; clientRoute = route
-                        savedSession = secret; accountName = owner
+                        savedSession = secret; accountName = owner; probeSession++
                         previous?.close()
                     } catch (failure: Exception) { replacement.close(); throw failure }
                 } finally {
@@ -212,7 +225,7 @@ internal class JvmJmBodySource(private val context: PlatformContext) : BodySourc
     override suspend fun logout(): Unit = withContext(Dispatchers.IO) {
         mutex.withLock {
             deleteSecret(context, SECRET_KEY)
-            savedSession = null; accountName = ""
+            savedSession = null; accountName = ""; probeSession++
             val previous = client
             client = null; clientConfig = null; clientRoute = null
             previous?.let { active -> runInterruptible { active.cookies = emptyList(); active.close() } }

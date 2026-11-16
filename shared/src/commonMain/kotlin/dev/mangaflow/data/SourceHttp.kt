@@ -66,6 +66,7 @@ internal class SourceHttp(
             if (owned != null) synchronized(transportLock) { routedClients.remove(owned) }
             owned?.close()
         }
+        if (response.isSuccessful) frozen?.onProbeResponse?.invoke()
         val retry = retryAfterMillis(response.header("Retry-After"))?.let { ceil(it / 1000.0).toLong() }
             ?: when (response.code) { 429 -> 60L; 503 -> 30L; else -> 0L }
         when (response.code) {

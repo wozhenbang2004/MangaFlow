@@ -15,6 +15,7 @@ internal class ChapterDownloadTransport(
     val route: DownloadRouteSnapshot,
     val client: NetworkClient,
     val connectionCheck: Boolean = false,
+    val onProbeResponse: (() -> Unit)? = null,
 ) : AbstractCoroutineContextElement(Key) {
     // Completed metadata may survive a retry on this exact route; ordinary reads have no scope.
     val cacheKey: String = sha256(route.identity().encodeToByteArray())

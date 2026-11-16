@@ -291,12 +291,31 @@ class UnifiedMangaRepository(
         adapter(id).comments(ref.mangaId, page)
     }
     /** Explicit user action; no scheduler, automatic availability probe or account retry. */
+    internal fun sourceProbeIdentity(id: String): String = if (id == "copy") "anonymous-catalogue"
+        else (adapter(id) as? dev.mangaflow.data.sources.BodySourceProbeIdentity)?.connectionProbeIdentity().orEmpty()
+
     suspend fun sourceProbe(id: String, route: DownloadRouteSnapshot? = null) {
+        check(sourceProbeObserved(id, route)) { "来源仅返回了缓存目录，尚未验证真实响应。" }
+    }
+
+    internal suspend fun sourceProbeObserved(id: String, route: DownloadRouteSnapshot? = null): Boolean {
         require(sources.any { it.id == id }) { "这个漫画源尚未安装。" }
         val selected = (route ?: DownloadRoutingStore.activeSourceSnapshot(id)).checked()
         val client = NetworkClient(route = selected, observeRelayTraffic = false)
+        val observed = kotlinx.coroutines.flow.MutableStateFlow(false)
         try {
-            withContext(Dispatchers.IO + ChapterDownloadTransport(selected, client, connectionCheck = true)) { browseSource(id, 0) }
+            withContext(Dispatchers.IO + ChapterDownloadTransport(selected, client, connectionCheck = true,
+                onProbeResponse = { observed.value = true })) {
+                diagnostics.track(id, SourceStage.CATALOGUE) {
+                    if (id == "copy") copy.discover(0)
+                    else {
+                        val installed = adapter(id)
+                        val isolated = if (installed is ScriptBodySource) installed.forDownload() else installed
+                        isolated.discover(0)
+                    }
+                }
+            }
+            return observed.value
         } finally { client.close() }
     }
 

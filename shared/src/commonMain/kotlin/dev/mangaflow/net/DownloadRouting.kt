@@ -181,6 +181,60 @@ class DownloadRoutingStore private constructor(context: PlatformContext) {
         mutableState.value = readSettings()
     }
 
+    /** One reviewed result writes its selected rules together; callers perform disk I/O off Main. */
+    fun applyBatch(
+        expected: DownloadRoutingSettings,
+        defaultMode: DownloadRouteMode? = null,
+        categoryModes: Map<DownloadCategory, DownloadRouteMode> = emptyMap(),
+        sourceSettings: Map<String, SourceNetworkSettings> = emptyMap(),
+    ): Boolean = synchronized(lock) {
+        val current = mutableState.value
+        if (current !== expected) return@synchronized false
+
+        // Validate the entire selected batch before creating an editor. Source proxy addresses
+        // are explicit probe results: null means Relay, never an implicit borrow from global.
+        defaultMode?.let { configuredRoute(it, current.proxy) }
+        val categories = categoryModes.toMap()
+        categories.values.forEach { configuredRoute(it, current.proxy) }
+        val sources = sourceSettings.toMap().mapValues { (id, settings) ->
+            if (!id.matches(Regex("[A-Za-z0-9_.-]{1,96}"))) throw DownloadRouteException("漫画源标识无效。")
+            val route = configuredRoute(settings.mode, settings.proxy)
+            SourceNetworkSettings(route.mode, route.proxy)
+        }
+        val changes = linkedMapOf<String, String>()
+        defaultMode?.let { changes["default"] = it.name }
+        categories.forEach { (category, mode) -> changes[categoryKey(category)] = mode.name }
+        if (sources.isNotEmpty()) {
+            val encoded = JSONObject()
+            (current.sourceOverrides + sources).entries.sortedBy { it.key }.forEach { (id, value) ->
+                encoded.put(id, JSONObject().put("mode", value.mode.name).apply {
+                    value.proxy?.let { put("host", it.host); put("port", it.port); put("type", it.type.name) }
+                })
+            }
+            changes["sources"] = encoded.toString()
+        }
+        if (changes.isEmpty()) return@synchronized true
+
+        val previous = changes.keys.associateWith { disk.getString(it) }
+        val editor = disk.edit()
+        changes.forEach { (key, value) -> editor.putString(key, value) }
+        val saved = try { editor.commit() } catch (_: Exception) { false }
+        if (!saved) {
+            // Both actual preference backends update memory before reporting a failed write.
+            // Restore touched keys so a later unrelated edit cannot publish this failed batch.
+            runCatching {
+                val rollback = disk.edit()
+                previous.forEach { (key, value) ->
+                    if (value == null) rollback.remove(key) else rollback.putString(key, value)
+                }
+                rollback.apply()
+            }
+            throw DownloadRouteException("网络设置未能保存，请检查存储空间后重试。")
+        }
+        mutableState.value = readSettings()
+        true
+    }
+
     /** Explicit task choices are resolved once; source overrides never rewrite a frozen task. */
     fun sourceSnapshot(sourceId: String, category: DownloadCategory? = null,
         overrideMode: DownloadRouteMode? = null): DownloadRouteSnapshot {

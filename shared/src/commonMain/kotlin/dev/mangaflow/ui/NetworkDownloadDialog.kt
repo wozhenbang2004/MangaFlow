@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Language
@@ -67,6 +68,8 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     val context = LocalMangaContext.current
     val relay = remember(context) { RelayLinkController.get(context) }
     val relayState by relay.state.collectAsStateWithLifecycle()
+    val autoCheck = remember(context, repository, registry) { NetworkAutoCheckController(context, repository, registry) }
+    val autoState by autoCheck.state.collectAsStateWithLifecycle()
     val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
     val foreground = lifecycle.isAtLeast(Lifecycle.State.RESUMED)
     val colors = MaterialTheme.colorScheme
@@ -74,6 +77,7 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     var scene by remember { mutableStateOf(initialScene) }
     var showInfo by remember { mutableStateOf(false) }
     var proxyEditing by remember { mutableStateOf(false) }
+    var checkReview by remember(autoCheck) { mutableStateOf(false) }
     var pendingReportedProxy by remember { mutableStateOf<DownloadProxyEndpoint?>(null) }
     var environment by remember { mutableStateOf<DownloadNetworkEnvironment?>(null) }
     var environmentLoading by remember { mutableStateOf(false) }
@@ -84,6 +88,25 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
     var suggestionRevision by remember { mutableIntStateOf(0) }
     val active = visible && foreground
     LaunchedEffect(active, environmentRevision, context) { if (active) relay.refresh() }
+    DisposableEffect(autoCheck) { onDispose { autoCheck.close() } }
+    LaunchedEffect(active, scene) {
+        if ((!active || scene != NetworkDownloadScene.CHECK) && autoCheck.state.value.running) autoCheck.cancel()
+        if (scene != NetworkDownloadScene.CHECK) checkReview = false
+    }
+    LaunchedEffect(active, scene, autoState.running, autoState.complete, autoState.applied) {
+        if (autoState.running) checkReview = false
+        else if (active && scene == NetworkDownloadScene.CHECK && (autoState.complete || autoState.applied)) {
+            showInfo = false
+            checkReview = true
+        }
+    }
+    fun startCheck() {
+        if (!active || autoCheck.state.value.running || autoCheck.state.value.applying) return
+        proxyEditing = false
+        scene = NetworkDownloadScene.CHECK
+        checkReview = false
+        scope.launch { autoCheck.run() }
+    }
     fun useReportedProxy(endpoint: DownloadProxyEndpoint) {
         val current = environment
         val supported = platformKind != PlatformKind.IOS || endpoint.type != DownloadProxyType.HTTP
@@ -119,10 +142,13 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
         } else environmentLoading = false
     }
     MotionDialog(visible, onDismissRequest = {
-        if (scene == NetworkDownloadScene.CONNECTION && proxyEditing) proxyEditing = false else onDismiss()
+        if (scene == NetworkDownloadScene.CONNECTION && proxyEditing) proxyEditing = false
+        else if (checkReview) { checkReview = false; scene = NetworkDownloadScene.CONNECTION }
+        else onDismiss()
     }, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 520.dp,
         onClosed = {
             proxyEditing = false
+            checkReview = false
             showInfo = false
             pendingReportedProxy = null
             suggestedProxy = null
@@ -142,8 +168,16 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("网络与下载", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (checkReview) MotionIconButton(onClick = {
+                            checkReview = false
+                            scene = NetworkDownloadScene.CONNECTION
+                        }, enabled = active, modifier = Modifier.size(44.dp), tooltip = "返回网络设置") {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回网络设置", Modifier.size(18.dp))
+                        }
+                        MotionSwap(if (checkReview) "检测结果" else "网络与下载", Modifier.weight(1f)) { title ->
+                            Text(title, style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                         MotionIconButton(onClick = { showInfo = !showInfo }, enabled = active,
                             modifier = Modifier.size(44.dp), tooltip = "连接与识别说明") {
                             Icon(Icons.Outlined.Info, "连接与识别说明", Modifier.size(18.dp), tint = colors.onSurfaceVariant)
@@ -158,12 +192,14 @@ internal fun NetworkDownloadDialog(visible: Boolean, backdrop: HazeState?, onDis
                         track = colors.onSurface.copy(alpha = .045f), indicator = colors.surface)
                     NetworkSceneContent(scene, NetworkDownloadScene.entries,
                         Modifier.weight(1f, fill = false).fillMaxWidth()) { shown ->
-                        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-                            .padding(top = 4.dp, bottom = 4.dp)) {
+                        val contentModifier = if (shown == NetworkDownloadScene.CHECK) Modifier.fillMaxWidth()
+                            else Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                        Column(contentModifier.padding(top = 4.dp, bottom = 4.dp)) {
                             NetworkDownloadSettings(shown, backdrop, active = active && shown == scene,
                                 environment = environment, suggestedProxy = suggestedProxy,
                                 suggestionRevision = suggestionRevision,
-                                onSuggestionConsumed = { suggestedProxy = null }, repository = repository, registry = registry,
+                                onSuggestionConsumed = { suggestedProxy = null },
+                                autoCheck = autoCheck, onStartCheck = ::startCheck,
                                 proxyEditing = proxyEditing, onProxyEditing = { proxyEditing = it },
                                 connectionSummary = {
                                     RelayLinkSummary(relayState, relay, enabled = active && shown == scene,
@@ -471,9 +507,10 @@ private fun NetworkConnectionHelp(relayInstalled: Boolean) {
                 else "识别系统公开的 VPN、代理地址和自动代理配置。检测到配置不代表请求一定使用它。",
             if (relayInstalled) "联动启用后的直连与代理由 Relay 执行，无需填写端口；共享图片域名使用专用入口。绕过 VPN、强制出口或授权变化会明确提示。"
                 else "直连跳过 HTTP / SOCKS，系统 VPN 仍可能接管。外部软件需提供相应的分流能力。",
-            "Steam 连接沿用系统网络；指定 HTTP / SOCKS 出口需配置地址。部分扩展安装与 iOS 连接不支持 HTTP 代理，会明确提示。",
+            "检测反映本次入口响应，不代表带宽或全部图片可用；可调整每项选择，确认后才修改配置。",
+            "Steam 等独立连接会单独标记覆盖范围，普通接口可用不代表其所有连接都可用。",
             "每个漫画源可单独设置搜索、阅读、账号接口与新下载线路；网页认证仍遵循系统网络，进行中任务保留原线路。",
-            "新请求使用新设置。已有下载保留原线路，需明确选择“使用当前设置重试”才更换。代理地址目前不支持账号密码。",
+            "新请求使用新设置。已有下载保留原线路，需明确选择“使用当前设置重试”才更换。手工代理地址目前不支持账号密码。",
         ).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
     }
 }

@@ -34,7 +34,7 @@ internal fun adultSourceMetadata(metadata: JSONObject): Boolean =
 
 /** Script protocols translated into the existing source-qualified reader contract. */
 class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: JavascriptSourceRuntime,
-    private val context: PlatformContext? = null) : BodySource {
+    private val context: PlatformContext? = null) : BodySource, BodySourceProbeIdentity {
     val bundle = bundle.copy(metadata = JSONObject(bundle.metadata.toString()))
     val digest: String get() = bundle.digest
     override val info = BodySourceInfo(bundle.sourceId, bundle.metadata.getString("name"),
@@ -211,6 +211,7 @@ class ScriptBodySource(bundle: ScriptSourcePackage, private val runtime: Javascr
     }
 
     private fun paginationSession(): String = "$sessionGeneration:" + context?.let { scriptSourceImageEpoch(it, info.id) }.orEmpty()
+    override fun connectionProbeIdentity(): String = paginationSession()
 
     /** Logical pages stay in the app; opaque continuations never become a manga or chapter id. */
     private suspend fun listing(method: String, args: JSONArray): MangaPage = withContext(Dispatchers.IO) { paginationLock.withLock {

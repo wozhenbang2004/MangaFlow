@@ -21,6 +21,9 @@ data class BodySourceInfo(
     val adult: Boolean = false,
 )
 
+/** Opaque, in-memory comparison token; consumers never receive account credentials. */
+interface BodySourceProbeIdentity { fun connectionProbeIdentity(): String }
+
 interface BodySource : MangaRepository {
     val info: BodySourceInfo
     suspend fun capabilities(): SourceCapabilities = SourceCapabilities()
