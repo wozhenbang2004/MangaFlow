@@ -353,10 +353,10 @@ internal fun ReaderExperienceStatus(
                                                 }
                                             }
                                         }, enabled = bodyEnabled && !changingSourceLock, modifier = Modifier.size(44.dp),
-                                            tooltip = if (custom.recovery.sourceLocked) "解除来源锁定，允许按策略自动补页和切源" else "锁定来源，暂停自动补页和切源") {
+                                            tooltip = if (custom.recovery.sourceLocked) "恢复自动补页与自动切源（全局）" else "暂停所有漫画的自动补页和整章切源；手动选择仍可用") {
                                             if (changingSourceLock) MotionBusyIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
                                             else Icon(if (custom.recovery.sourceLocked) Icons.Outlined.Lock else Icons.Outlined.LockOpen,
-                                                if (custom.recovery.sourceLocked) "已锁定来源" else "来源未锁定", Modifier.size(18.dp),
+                                                if (custom.recovery.sourceLocked) "自动补页与切源已暂停" else "允许自动补页与切源", Modifier.size(18.dp),
                                                 tint = if (custom.recovery.sourceLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
                                         if (alternativeCount > 0 && onOpenSources != null) MotionIconButton(
