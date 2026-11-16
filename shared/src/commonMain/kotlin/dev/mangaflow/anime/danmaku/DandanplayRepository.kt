@@ -7,6 +7,7 @@ import dev.mangaflow.anime.sources.animePublicUrl
 import dev.mangaflow.data.plugins.JavascriptHttpSession
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
@@ -80,7 +81,7 @@ internal class DandanplayRepository(private val context: PlatformContext) {
 
     private suspend fun get(address: String): JSONObject {
         val credential = credentials() ?: throw AnimeDanmakuException("请先配置此应用自己的弹弹play凭据，或选择已安装来源的站内弹幕。")
-        val route = DownloadRoutingStore.get(context).sourceSnapshot(SOURCE_ID)
+        val route = DownloadRoutingStore.get(context).sourceSnapshot(SOURCE_ID, DownloadCategory.ANIME)
         val transport = JavascriptHttpSession(true, route, 12 * 1024 * 1024)
         return try {
             withTimeout(30_000L) {
@@ -92,12 +93,12 @@ internal class DandanplayRepository(private val context: PlatformContext) {
                     .put("X-Timestamp", timestamp).put("X-Signature", signature)
                 repeat(4) { hop ->
                     currentCoroutineContext().ensureActive()
-                    if (DownloadRoutingStore.get(context).sourceSnapshot(SOURCE_ID) != route)
+                    if (DownloadRoutingStore.get(context).sourceSnapshot(SOURCE_ID, DownloadCategory.ANIME) != route)
                         throw AnimeDanmakuException("弹幕网络路由已改变，请重新加载。")
                     val reply = JSONObject(transport.request(JSONObject().put("url", url.toString()).put("method", "GET")
                         .put("headers", headers).put("followRedirects", false).toString()))
                     currentCoroutineContext().ensureActive()
-                    if (DownloadRoutingStore.get(context).sourceSnapshot(SOURCE_ID) != route)
+                    if (DownloadRoutingStore.get(context).sourceSnapshot(SOURCE_ID, DownloadCategory.ANIME) != route)
                         throw AnimeDanmakuException("弹幕网络路由已改变，请重新加载。")
                     val status = reply.optInt("statusCode")
                     if (status in setOf(301, 302, 303, 307, 308)) {
