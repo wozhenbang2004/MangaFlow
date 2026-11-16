@@ -203,6 +203,7 @@ internal fun ReaderImageRecovery(
     readySourceVariants: Map<String, ReaderSourceStandby> = emptyMap(),
     foreground: Color = MaterialTheme.colorScheme.onSurface,
     onStop: () -> Unit = {},
+    onRepairPage: (() -> Unit)? = null,
 ) {
     // Multiple editions from one provider must be selected explicitly, not guessed.
     val sourceGroups = remember(alternatives) { alternatives.groupBy { it.sourceId }.values }
@@ -237,6 +238,11 @@ internal fun ReaderImageRecovery(
                 Spacer(Modifier.width(5.dp))
                 Text(if (index == null) "重新读取" else "重试本页", fontSize = 12.sp, color = foreground)
             }
+            if (index != null && expanded && alternatives.isNotEmpty() && onRepairPage != null)
+                MotionTextButton(onClick = onRepairPage) {
+                    Icon(Icons.Outlined.Check, null, Modifier.size(15.dp), tint = foreground)
+                    Text("补此页", fontSize = 12.sp, color = foreground)
+                }
             MotionTextButton(onClick = onControls) {
                 Icon(Icons.Outlined.Tune, "打开阅读控制台", Modifier.size(16.dp), tint = foreground)
             }
