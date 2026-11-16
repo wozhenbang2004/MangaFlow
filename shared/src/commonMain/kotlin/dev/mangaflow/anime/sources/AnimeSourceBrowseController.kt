@@ -13,6 +13,7 @@ import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.experience.contentCachePreferences
 import dev.mangaflow.json.JSONObject
 import dev.mangaflow.net.DownloadRouteException
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRouteSnapshot
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.platform.PlatformContext
@@ -250,10 +251,10 @@ class AnimeSourceBrowseController(
     }
 
     // Invalid configured routes stay failed; observing them must not crash the discovery owner.
-    private fun routeFor(id: String): DownloadRouteSnapshot? = runCatching { routing.sourceSnapshot(id) }.getOrNull()
+    private fun routeFor(id: String): DownloadRouteSnapshot? = runCatching { routing.sourceSnapshot(id, DownloadCategory.ANIME) }.getOrNull()
 
     private fun requireRoute(selection: Selection) {
-        if (routing.sourceSnapshot(selection.source.id) != selection.route)
+        if (routing.sourceSnapshot(selection.source.id, DownloadCategory.ANIME) != selection.route)
             throw CancellationException("Anime source route changed")
     }
 
@@ -484,7 +485,7 @@ class AnimeSourceBrowseController(
         val deferred = scope.async(Dispatchers.Main.immediate, start = CoroutineStart.LAZY) {
             fun ownsLatest() = request == latestGeneration && route == routeFor(AGE_SOURCE)
             try {
-                if (routing.sourceSnapshot(AGE_SOURCE) != route)
+                if (routing.sourceSnapshot(AGE_SOURCE, DownloadCategory.ANIME) != route)
                     throw CancellationException("Anime latest source route changed")
                 val provider = sources.provider(AGE_SOURCE)?.takeIf { it.supportsLatest }
                     ?: throw LanercCapabilityException("最近更新来源暂不可用。")
