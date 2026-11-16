@@ -30,6 +30,12 @@ data class ExperienceOverrides(
     val decodedPrefetchPages: Int? = null,
     val sourceRecovery: SourceRecoveryMode? = null,
     val browseWarmup: Boolean = true,
+    val standbySources: Int? = null,
+    val standbyPages: Int = 1,
+    val standbyMiB: Int? = null,
+    val standbyMemoryWarmup: Boolean = true,
+    val readerStatusPlacement: ReaderStatusPlacement = ReaderStatusPlacement.BOTTOM,
+    val contentCache: ContentCachePreferences = ContentCachePreferences(),
 )
 
 /** Selected mode's intent, before manual ceilings and live resource protection. */
@@ -78,12 +84,17 @@ data class ExperienceBudget(
     val foreground: Boolean = false,
     val decodedPrefetchPages: Int = 0,
     val standbySources: Int = 0,
+    val standbyPages: Int = 1,
+    val standbyMemoryWarmup: Boolean = true,
+    val standbyPauseReason: String? = null,
+    val standbyBytes: Long? = null,
     val browseWarmup: Boolean = false,
     val sourceHedgeDelayMillis: Long = 1_800L,
     val sourceRecovery: SourceRecoveryMode = SourceRecoveryMode.OFF,
     val goal: ExperienceGoalBudget = ExperienceGoalBudget(),
 ) {
-    val standbyPrefetchBytes: Long get() = if (standbySources > 0) minOf(prefetchBytes / 4L, 12L * EXPERIENCE_MIB) else 0L
+    val standbyPrefetchBytes: Long get() = if (standbySources > 0)
+        minOf(standbyBytes ?: minOf(prefetchBytes / 4L, 12L * EXPERIENCE_MIB), prefetchBytes / 2L) else 0L
     val nextChapterPrefetchBytes: Long get() = if (crossChapter) minOf(prefetchBytes / 4L, 12L * EXPERIENCE_MIB) else 0L
     val adjacentPrefetchBytes: Long get() = prefetchBytes - nextChapterPrefetchBytes - standbyPrefetchBytes
 }

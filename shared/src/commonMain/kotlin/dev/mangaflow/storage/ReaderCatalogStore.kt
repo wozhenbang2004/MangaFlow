@@ -8,6 +8,8 @@ import dev.mangaflow.data.MangaDetail
 import dev.mangaflow.platform.storage.StorageFile as File
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.AtomicLong
+import dev.mangaflow.platform.wallTimeMillis
+import dev.mangaflow.experience.contentCachePreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.sync.Mutex
@@ -23,15 +25,19 @@ class ReaderCatalogStore(private val context: Context) {
     private val state = synchronized(statesLock) { states.getOrPut(root.path) { CatalogState() } }
 
     suspend fun read(mangaId: String): MangaDetail? {
-        StorageCacheStore.get(context).noteCatalog(mangaId)
         val generation = state.epoch.get()
-        cached(mangaId, generation)?.let { return it }
+        cached(mangaId, generation)?.let {
+            StorageCacheStore.get(context).noteCatalog(mangaId)
+            return it
+        }
+        if (!canStoreOnDisk(mangaId)) return null
         return withContext(Dispatchers.IO) {
             state.files.withLock {
                 if (generation != state.epoch.get()) return@withLock null
                 cached(mangaId, generation)?.let { return@withLock it }
                 val loaded = runCatching {
                     val file = fileFor(mangaId)
+                    if (!reusable(mangaId, file.lastModified())) return@runCatching null
                     val json = AtomicFile(file).openRead().bufferedReader().use { input ->
                         if (file.length() !in 1..MAX_FILE_BYTES) return@runCatching null
                         JSONObject(input.readText())
@@ -43,10 +49,11 @@ class ReaderCatalogStore(private val context: Context) {
                     val chapters = (0 until array.length()).map { readChapter(array.getJSONObject(it)) }
                         .distinctBy { it.id }.sortedBy { it.index }
                     if (chapters.isEmpty()) null else MangaDetail(manga, chapters).also {
-                        remember(it, file.length(), generation)
+                        remember(it, file.length(), generation, file.lastModified())
                     }
                 }.getOrNull()
-                loaded.takeIf { generation == state.epoch.get() }
+                loaded.takeIf { generation == state.epoch.get() && reusable(mangaId, fileFor(mangaId).lastModified()) }
+                    ?.also { StorageCacheStore.get(context).noteCatalog(mangaId) }
             }
         }
     }
@@ -69,8 +76,13 @@ class ReaderCatalogStore(private val context: Context) {
                     }.toString().encodeToByteArray()
                 }.getOrNull() ?: return@withContext
                 if (bytes.size > MAX_FILE_BYTES) return@withContext
+                if (!canStoreOnDisk(detail.manga.id)) {
+                    if (contentCachePreferences(context).enabled && currentWrite(detail.manga.id, generation, token, isCurrent))
+                        remember(detail, bytes.size.toLong(), generation)
+                    return@withContext
+                }
                 state.files.withLock {
-                    if (!currentWrite(detail.manga.id, generation, token, isCurrent)) return@withLock
+                    if (!currentWrite(detail.manga.id, generation, token, isCurrent) || !canStoreOnDisk(detail.manga.id)) return@withLock
                     if (cached(detail.manga.id, generation) == detail) return@withLock
                     // Disk failure prevents caching, not otherwise valid online reading.
                     runCatching {
@@ -79,7 +91,7 @@ class ReaderCatalogStore(private val context: Context) {
                         val stream = file.startWrite()
                         try {
                             stream.write(bytes)
-                            if (!currentWrite(detail.manga.id, generation, token, isCurrent)) {
+                            if (!currentWrite(detail.manga.id, generation, token, isCurrent) || !canStoreOnDisk(detail.manga.id)) {
                                 file.failWrite(stream)
                                 return@runCatching
                             }
@@ -119,14 +131,16 @@ class ReaderCatalogStore(private val context: Context) {
     internal suspend fun trimToSize(maxBytes: Long, protect: (String) -> Boolean): Long = withContext(Dispatchers.IO) {
         state.files.withLock {
             var total = root.listFiles().orEmpty().sumOf { it.length() }
-            if (total <= maxBytes) return@withLock 0L
+            val retention = contentCachePreferences(context).retentionMillis
+            val now = wallTimeMillis()
             var freed = 0L
             try {
                 root.listFiles().orEmpty().sortedBy { file ->
                     catalogOwner(file)?.let { StorageCacheStore.get(context).catalogAccess(it) }?.takeIf { it > 0L } ?: file.lastModified()
                 }.forEach { file ->
-                    if (total <= maxBytes) return@forEach
                     val owner = catalogOwner(file) ?: return@forEach
+                    val last = StorageCacheStore.get(context).catalogAccess(owner).takeIf { it > 0L } ?: file.lastModified()
+                    if (total <= maxBytes && now - last < retention) return@forEach
                     // Re-evaluate dependencies immediately before removing this AtomicFile family.
                     if (protect(owner)) return@forEach
                     val bytes = file.length()
@@ -159,13 +173,14 @@ class ReaderCatalogStore(private val context: Context) {
 
     private fun cached(mangaId: String, generation: Long): MangaDetail? = synchronized(state.memoryLock) {
         if (generation != state.epoch.get()) return@synchronized null
-        state.memory.remove(mangaId)?.also { state.memory[mangaId] = it }?.detail
+        state.memory.remove(mangaId)?.takeIf { reusable(mangaId, it.storedAt) }
+            ?.also { state.memory[mangaId] = it }?.detail
     }
 
-    private fun remember(detail: MangaDetail, bytes: Long, generation: Long) = synchronized(state.memoryLock) {
+    private fun remember(detail: MangaDetail, bytes: Long, generation: Long, storedAt: Long = wallTimeMillis()) = synchronized(state.memoryLock) {
         if (generation != state.epoch.get()) return@synchronized
         state.memory.remove(detail.manga.id)
-        if (bytes <= MAX_MEMORY_BYTES) state.memory[detail.manga.id] = CachedCatalog(detail, bytes)
+        if (bytes <= MAX_MEMORY_BYTES) state.memory[detail.manga.id] = CachedCatalog(detail, bytes, storedAt)
         while (state.memory.size > MAX_MEMORY_ENTRIES || state.memory.values.sumOf { it.bytes } > MAX_MEMORY_BYTES) {
             state.memory.remove(state.memory.keys.first())
         }
@@ -181,7 +196,15 @@ class ReaderCatalogStore(private val context: Context) {
         return File(root, "$key.json")
     }
 
-    private data class CachedCatalog(val detail: MangaDetail, val bytes: Long)
+    private fun reusable(mangaId: String, storedAt: Long): Boolean =
+        StorageCacheStore.get(context).protectedCatalog(mangaId) || contentCachePreferences(context).let { policy ->
+            policy.enabled && storedAt > 0L && wallTimeMillis() - storedAt in 0L..policy.retentionMillis
+        }
+
+    private fun canStoreOnDisk(mangaId: String): Boolean =
+        StorageCacheStore.get(context).protectedCatalog(mangaId) || contentCachePreferences(context).storeOnDisk
+
+    private data class CachedCatalog(val detail: MangaDetail, val bytes: Long, val storedAt: Long)
     private class CatalogState {
         val files = Mutex()
         val memoryLock = StorageLock()

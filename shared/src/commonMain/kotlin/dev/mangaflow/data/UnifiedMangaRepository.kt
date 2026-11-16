@@ -1,6 +1,7 @@
 package dev.mangaflow.data
 
 import dev.mangaflow.platform.*
+import dev.mangaflow.experience.ContentCacheKind
 import kotlin.concurrent.Volatile
 import kotlin.time.TimeSource
 
@@ -58,6 +59,9 @@ class UnifiedMangaRepository(
     private val catalogStore: ReaderCatalogStore? = null,
     private val storageCache: dev.mangaflow.storage.StorageCacheStore? = null,
 ) : MangaRepository {
+    private fun freshNanos(kind: ContentCacheKind, failure: Boolean = false): Long =
+        copy.contentCachePolicy().freshMillis(kind, failure).coerceIn(0L, Long.MAX_VALUE / 1_000_000L) * 1_000_000L
+    private fun useDiskCache(): Boolean = copy.contentCachePolicy().let { it.enabled && it.storeOnDisk }
     private val diagnostics = SourceDiagnostics()
     val sourceHealth = diagnostics.state
     private val builtinAdapters = bodySources.associateBy { it.info.id }
@@ -224,9 +228,9 @@ class UnifiedMangaRepository(
             val generation = synchronized(unifiedMangaRepositoryStateLock) { pageCacheGenerations[sourceId] ?: 0L }
             synchronized(unifiedMangaRepositoryStateLock) {
                 sourceSearchCache[key]?.takeIf { it.generation == generation &&
-                    repositoryNanoTime() - it.storedAt in 0L until
-                        (if (it.page.items.isEmpty()) EMPTY_SEARCH_CACHE_NANOS else DISCOVERY_TTL_NANOS) &&
-                    (!forceRefresh || it.storedAt >= requestedAt) }?.page
+                    (it.storedAt >= requestedAt || !forceRefresh &&
+                        repositoryNanoTime() - it.storedAt in 0L until
+                            freshNanos(ContentCacheKind.SEARCH, it.page.items.isEmpty())) }?.page
             }?.let { return@withLock it }
             val result = diagnostics.track(sourceId, SourceStage.SEARCH) {
                 if (sourceId == "copy") copy.search(key.query, page) else adapter(sourceId).search(key.query, page)
@@ -437,7 +441,7 @@ class UnifiedMangaRepository(
             val completed = discoveryCompleted[work.id]
             val elapsed = repositoryNanoTime() - (completed?.second ?: 0L)
             if (!cachedOnly && !force && active == null && completed?.first == signature &&
-                elapsed in 0L until DISCOVERY_TTL_NANOS) return
+                elapsed in 0L until freshNanos(ContentCacheKind.DISCOVERY)) return
             active?.job?.cancel()
             val generation = (discoveryGenerations[work.id] ?: 0L) + 1L
             discoveryGenerations[work.id] = generation
@@ -594,7 +598,7 @@ class UnifiedMangaRepository(
             var count = 0
             linked.forEach { link ->
                 ensureEligibility(eligibility, info.id)
-                if (cachedSourceDetail(link.manga.id) == null) catalogStore?.read(link.manga.id)?.let {
+                if (useDiskCache() && cachedSourceDetail(link.manga.id) == null) catalogStore?.read(link.manga.id)?.let {
                     ensureEligibility(eligibility, info.id)
                     rememberRaw(it)
                     _catalogRevision.update { revision -> revision + 1L }
@@ -757,8 +761,8 @@ class UnifiedMangaRepository(
                 val generation = synchronized(unifiedMangaRepositoryStateLock) { pageCacheGenerations[sourceId] ?: 0L }
                 synchronized(unifiedMangaRepositoryStateLock) {
                     rawCatalogs[id]?.takeIf { catalogFetchedAt[id]?.let { stamp ->
-                        stamp.generation == generation && repositoryNanoTime() - stamp.at in 0L until CATALOG_CACHE_NANOS &&
-                            (!forceRefresh || stamp.at >= requestedAt)
+                        stamp.generation == generation && (stamp.at >= requestedAt || !forceRefresh &&
+                            repositoryNanoTime() - stamp.at in 0L until freshNanos(ContentCacheKind.DETAILS))
                     } == true }
                 }?.let { return@withLock it }
                 val loaded = diagnostics.track(sourceId, SourceStage.DETAIL) {
@@ -772,8 +776,8 @@ class UnifiedMangaRepository(
                 }
                 // Usable source data is published independently of disposable cache persistence.
                 scope.launch {
-                    catalogStore?.save(loaded) {
-                        synchronized(unifiedMangaRepositoryStateLock) {
+                    if (useDiskCache()) catalogStore?.save(loaded) {
+                        useDiskCache() && synchronized(unifiedMangaRepositoryStateLock) {
                             (pageCacheGenerations[sourceId] ?: 0L) == generation && rawCatalogs[id] === loaded
                         }
                     }
@@ -825,7 +829,14 @@ class UnifiedMangaRepository(
     }
 
     fun cachedDetail(mangaId: String): MangaDetail? {
-        val retained = synchronized(unifiedMangaRepositoryStateLock) { rawCatalogs[mangaId] }
+        if (!copy.contentCachePolicy().enabled) return null
+        val retained = synchronized(unifiedMangaRepositoryStateLock) {
+            rawCatalogs[mangaId]?.takeIf {
+                storageCache?.protectedCatalog(mangaId) == true || catalogFetchedAt[mangaId]?.let { stamp ->
+                    repositoryNanoTime() - stamp.at in 0L..copy.contentCachePolicy().retentionMillis * 1_000_000L
+                } == true
+            }
+        }
         val ref = SourceKeys.decodeManga(mangaId)
         val raw = retained ?: if (ref.sourceId == "copy") copy.cachedDetail(ref.mangaId) else null
         return raw?.let(::project)
@@ -834,13 +845,14 @@ class UnifiedMangaRepository(
     /** Stale catalogues remain readable; only proven fresh data may skip revalidation. */
     fun isCatalogFresh(mangaId: String): Boolean {
         val ref = SourceKeys.decodeManga(mangaId)
-        // Copy owns its existing ten-minute cache; explicit invalidation clears it too.
+        // Copy owns its source catalogue; explicit invalidation clears it too.
         if (ref.sourceId == "copy") return copy.cachedDetail(ref.mangaId)?.chapters?.isNotEmpty() == true
         return synchronized(unifiedMangaRepositoryStateLock) {
             val generation = pageCacheGenerations[ref.sourceId] ?: 0L
             mangaId in nativeCatalogIds && rawCatalogs[mangaId]?.chapters?.isNotEmpty() == true &&
                 catalogFetchedAt[mangaId]?.let { stamp ->
-                    stamp.generation == generation && repositoryNanoTime() - stamp.at in 0L until CATALOG_CACHE_NANOS
+                    stamp.generation == generation && repositoryNanoTime() - stamp.at in 0L until
+                        freshNanos(ContentCacheKind.DETAILS)
                 } == true
         }
     }
@@ -869,7 +881,7 @@ class UnifiedMangaRepository(
         val key = SourceKeys.chapter(ref.sourceId, ref.mangaId, ref.chapterId) + "@network/" + DownloadRoutingStore.sourceRevision(ref.sourceId)
         return synchronized(unifiedMangaRepositoryStateLock) {
             val now = repositoryNanoTime()
-            pageCache[key]?.takeIf { now - it.storedAtNanos in 0L until PAGE_CACHE_NANOS }?.pages
+            pageCache[key]?.takeIf { now - it.storedAtNanos in 0L until freshNanos(ContentCacheKind.PAGE_MANIFEST) }?.pages
         }
     }
 
@@ -888,7 +900,8 @@ class UnifiedMangaRepository(
         val request = synchronized(unifiedMangaRepositoryStateLock) {
             val generation = pageCacheGenerations[ref.sourceId] ?: 0L
             val now = repositoryNanoTime()
-            pageCache.entries.removeAll { now - it.value.storedAtNanos !in 0L until PAGE_CACHE_NANOS }
+            val ttl = freshNanos(ContentCacheKind.PAGE_MANIFEST)
+            pageCache.entries.removeAll { now - it.value.storedAtNanos !in 0L until ttl }
             if (forceRefresh) pageCache.remove(key)
             else pageCache.remove(key)?.let { cached ->
                 pageCache[key] = cached
@@ -1053,7 +1066,8 @@ class UnifiedMangaRepository(
         refreshes[workId]?.takeIf { it.eligibilityGeneration == eligibility.generation && it.job.isActive }
             ?.let { return@synchronized it.job }
         refreshes[workId]?.job?.cancel()
-        if (!force && wallTimeMillis() - (refreshedAt[workId] ?: 0L) < 60_000L) return@synchronized null
+        if (!force && wallTimeMillis() - (refreshedAt[workId] ?: 0L) in 0L until
+                copy.contentCachePolicy().freshMillis(ContentCacheKind.DETAILS)) return@synchronized null
         val links = unified.linkedSources(workId).filter { it.manga.sourceId in eligibility.ids }
         if (links.isEmpty()) {
             if (eligibility.generation == sourceEligibility.generation) _sourceErrors.update { it - workId }
@@ -1067,7 +1081,7 @@ class UnifiedMangaRepository(
                         try {
                             slots.withPermit {
                                 ensureEligibility(eligibility, link.manga.sourceId)
-                                if (cachedSourceDetail(link.manga.id) == null) {
+                                if (useDiskCache() && cachedSourceDetail(link.manga.id) == null) {
                                     catalogStore?.read(link.manga.id)?.let {
                                         ensureEligibility(eligibility, link.manga.sourceId)
                                         rememberRaw(it)
@@ -1103,12 +1117,8 @@ class UnifiedMangaRepository(
     }
 
     private companion object {
-        const val PAGE_CACHE_NANOS = 60_000_000_000L
-        const val DISCOVERY_TTL_NANOS = 300_000_000_000L
-        const val EMPTY_SEARCH_CACHE_NANOS = 60_000_000_000L
         const val MAX_SEARCH_CACHE_PAGES = 64
         const val MAX_SEARCH_CACHE_HITS = 1_200
-        const val CATALOG_CACHE_NANOS = 60_000_000_000L
     }
 }
 

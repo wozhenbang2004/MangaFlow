@@ -1,6 +1,8 @@
 package dev.mangaflow.data
 
 import dev.mangaflow.platform.*
+import dev.mangaflow.experience.ContentCacheKind
+import dev.mangaflow.experience.contentCachePreferences
 
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -30,6 +32,7 @@ class MangaMetricsRepository(
     private val reviews: ReviewRepository,
     private val community: CopyCommunityRepository,
 ) {
+    private val cacheContext = context.applicationContext
     private val directory = File(context.applicationContext.cacheDir, "metadata-cache")
     private val file = AtomicFile(File(directory, "metrics.json"))
     private val lock = SynchronizedObject()
@@ -41,6 +44,16 @@ class MangaMetricsRepository(
 
     /** No disk or network work on composition. An expired success can still be shown. */
     fun cached(mangaId: String): List<MangaMetric> = synchronized(lock) {
+        val policy = contentCachePreferences(cacheContext)
+        if (!policy.enabled) return@synchronized emptyList()
+        val now = wallTimeMillis()
+        val sources = entries[mangaId]?.sources.orEmpty()
+        SOURCE_IDS.mapNotNull { source -> sources[source]
+            ?.takeIf { now - it.checkedAt in 0L..policy.retentionMillis }?.metric }
+    }
+
+    /** The visible request's observations stay publishable even when reusable caches are off. */
+    internal fun latestMetrics(mangaId: String): List<MangaMetric> = synchronized(lock) {
         entries[mangaId]?.metrics().orEmpty()
     }
 
@@ -75,8 +88,10 @@ class MangaMetricsRepository(
                     val now = wallTimeMillis()
                     val due = synchronized(lock) {
                         ReviewProviders.metricIds.filter { source ->
-                            val next = entries[manga.id]?.sources?.get(source)?.nextFetchAt ?: 0
-                            forceRefresh || next <= now || next > now + SCORE_TTL
+                            val cached = entries[manga.id]?.sources?.get(source)
+                            val ttl = contentCachePreferences(cacheContext).freshMillis(ContentCacheKind.METRICS,
+                                cached?.failed == true || cached?.metric == null)
+                            forceRefresh || cached == null || now - cached.attemptedAt !in 0L until ttl
                         }.toSet()
                     }
                     if (due.isNotEmpty()) {
@@ -147,7 +162,9 @@ class MangaMetricsRepository(
 
     private fun prepare(mangaId: String, identity: String) = synchronized(lock) {
         val now = wallTimeMillis()
-        val existing = entries.remove(mangaId)?.takeIf { it.identity == identity }
+        val policy = contentCachePreferences(cacheContext)
+        val existing = entries.remove(mangaId)?.takeIf { policy.enabled && it.identity == identity }?.let { entry ->
+            entry.copy(sources = entry.sources.filterValues { now - it.checkedAt in 0L..policy.retentionMillis }) }
         entries[mangaId] = existing?.copy(accessedAt = now) ?: CachedManga(identity, now)
         while (entries.size > MAX_ITEMS) entries.remove(entries.keys.first())
     }
@@ -178,19 +195,19 @@ class MangaMetricsRepository(
             if (preserveUnchangedTime && previous != null && previous.metric == metric) return@synchronized false
             val oldTime = previous?.checkedAt ?: now
             val checkedAt = if (source.status == ReviewStatus.UNAVAILABLE) oldTime else now
-            val ttl = when {
-                source.status == ReviewStatus.UNAVAILABLE -> RETRY_TTL
-                source.status == ReviewStatus.NO_MATCH -> NO_MATCH_TTL
-                source.id == "copy" -> HEAT_TTL
-                else -> SCORE_TTL
-            }
-            entries[manga.id] = entry.copy(sources = entry.sources + (source.id to CachedMetric(metric, checkedAt, now + ttl)))
+            val failed = source.status != ReviewStatus.READY
+            val ttl = contentCachePreferences(cacheContext).freshMillis(
+                if (source.id == "copy") ContentCacheKind.POPULARITY else ContentCacheKind.METRICS, failed)
+            entries[manga.id] = entry.copy(sources = entry.sources +
+                (source.id to CachedMetric(metric, checkedAt, now + ttl, now, failed)))
             true
         }
     }
 
     private suspend fun loadDisk(epoch: Long) {
         disk.withLock {
+            val policy = contentCachePreferences(cacheContext)
+            if (!policy.enabled || !policy.storeOnDisk) return@withLock
             if (epoch != generation || synchronized(lock) { loaded }) return@withLock
             val restored = LinkedHashMap<String, CachedManga>()
             try {
@@ -208,7 +225,7 @@ class MangaMetricsRepository(
                         val identity = row.optString("identity")
                         val accessed = row.optLong("accessedAt")
                         if (!id.matches(Regex("[A-Za-z0-9_-]{1,160}")) || !identity.matches(Regex("[a-f0-9]{64}")) ||
-                            accessed > now + RETRY_TTL || now - accessed > MAX_AGE) continue
+                            accessed > now + CLOCK_SKEW_MILLIS || now - accessed > policy.retentionMillis) continue
                         val sourceRows = row.optJSONArray("sources") ?: JSONArray()
                         val sources = mutableMapOf<String, CachedMetric>()
                         for (position in 0 until minOf(sourceRows.length(), SOURCE_IDS.size)) {
@@ -216,7 +233,8 @@ class MangaMetricsRepository(
                             val source = value.optString("source")
                             val checked = value.optLong("checkedAt")
                             val next = value.optLong("nextFetchAt")
-                            if (source !in SOURCE_IDS || checked <= 0 || checked > now + RETRY_TTL || now - checked > MAX_AGE) continue
+                            if (source !in SOURCE_IDS || checked <= 0 || checked > now + CLOCK_SKEW_MILLIS ||
+                                now - checked > policy.retentionMillis) continue
                             val scale = ReviewProviders.find(source)?.scoreScale ?: 10
                             val score = value.number("score")?.takeIf { it.isFinite() && it >= 0 &&
                                 (scale == 0 || it <= scale.toDouble()) }
@@ -224,11 +242,13 @@ class MangaMetricsRepository(
                             val count = value.nonNegativeLong("ratingCount")?.takeIf { it <= Int.MAX_VALUE }?.toInt()
                             val label = value.optString("scoreLabel").take(40)
                             val metric = if (score != null || heat != null) MangaMetric(source, sourceName(source), score, scale, count, heat, label) else null
-                            val validNext = next.takeIf { it in checked..(now + SCORE_TTL) } ?: 0
-                            // Older v1/v2 caches gave empty matches the six-hour score TTL.
-                            // Shorten only empty entries, preserving any shorter failure retry.
-                            val nextFetch = if (metric == null) minOf(validNext, checked + NO_MATCH_TTL) else validNext
-                            sources[source] = CachedMetric(metric, checked, nextFetch)
+                            val attempted = value.optLong("attemptedAt", checked)
+                                .takeIf { it in checked..(now + CLOCK_SKEW_MILLIS) } ?: checked
+                            val failed = value.optBoolean("failed", metric == null)
+                            val ttl = policy.freshMillis(if (source == "copy") ContentCacheKind.POPULARITY
+                                else ContentCacheKind.METRICS, failed)
+                            val nextFetch = next.takeIf { it in attempted..(attempted + ttl) } ?: attempted
+                            sources[source] = CachedMetric(metric, checked, nextFetch, attempted, failed)
                         }
                         restored[id] = CachedManga(identity, accessed, sources)
                     }
@@ -237,7 +257,7 @@ class MangaMetricsRepository(
                 // A missing, old or damaged cache does not block real source data.
             }
             synchronized(lock) {
-                if (epoch == generation) {
+                if (epoch == generation && contentCachePreferences(cacheContext).let { it.enabled && it.storeOnDisk }) {
                     restored.forEach { (id, entry) -> entries.putIfAbsent(id, entry) }
                     loaded = true
                 }
@@ -248,13 +268,15 @@ class MangaMetricsRepository(
     private suspend fun persist(epoch: Long) {
         disk.withLock {
             currentCoroutineContext().ensureActive()
-            if (epoch != generation) return@withLock
+            val policy = contentCachePreferences(cacheContext)
+            if (epoch != generation || !policy.enabled || !policy.storeOnDisk) return@withLock
             val rows = synchronized(lock) {
                 JSONArray().apply {
                     entries.forEach { (id, entry) -> put(JSONObject().put("id", id).put("identity", entry.identity)
                         .put("accessedAt", entry.accessedAt).put("sources", JSONArray().apply {
                             entry.sources.forEach { (source, value) -> put(JSONObject().put("source", source)
                                 .put("checkedAt", value.checkedAt).put("nextFetchAt", value.nextFetchAt)
+                                .put("attemptedAt", value.attemptedAt).put("failed", value.failed)
                                 .put("score", value.metric?.score).put("ratingCount", value.metric?.ratingCount)
                                 .put("popularity", value.metric?.popularity).put("scoreLabel", value.metric?.scoreLabel)) }
                         })) }
@@ -264,9 +286,14 @@ class MangaMetricsRepository(
             if (bytes.size > MAX_BYTES || epoch != generation) return@withLock
             var output: dev.mangaflow.platform.storage.StorageOutput? = null
             try {
+                if (!contentCachePreferences(cacheContext).let { it.enabled && it.storeOnDisk }) return@withLock
                 if (!directory.exists() && !directory.mkdirs()) return@withLock
                 output = file.startWrite()
                 output.write(bytes)
+                if (!contentCachePreferences(cacheContext).let { it.enabled && it.storeOnDisk }) {
+                    file.failWrite(output)
+                    return@withLock
+                }
                 file.finishWrite(output)
             } catch (cancel: CancellationException) {
                 output?.let(file::failWrite)
@@ -290,16 +317,13 @@ class MangaMetricsRepository(
     private data class CachedManga(val identity: String, val accessedAt: Long, val sources: Map<String, CachedMetric> = emptyMap()) {
         fun metrics() = SOURCE_IDS.mapNotNull { sources[it]?.metric }
     }
-    private data class CachedMetric(val metric: MangaMetric?, val checkedAt: Long, val nextFetchAt: Long)
+    private data class CachedMetric(val metric: MangaMetric?, val checkedAt: Long, val nextFetchAt: Long,
+        val attemptedAt: Long = checkedAt, val failed: Boolean = false)
 
     private companion object {
         const val MAX_ITEMS = 256
         const val MAX_BYTES = 512 * 1024
-        const val HEAT_TTL = 30 * 60_000L
-        const val SCORE_TTL = 6 * 60 * 60_000L
-        const val RETRY_TTL = 5 * 60_000L
-        const val NO_MATCH_TTL = 15 * 60_000L
-        const val MAX_AGE = 7 * 24 * 60 * 60_000L
+        const val CLOCK_SKEW_MILLIS = 5 * 60_000L
         val SOURCE_IDS = listOf("copy") + ReviewProviders.metricIds
         fun sourceName(id: String) = if (id == "copy") "热度" else ReviewProviders.find(id)?.name ?: id
     }

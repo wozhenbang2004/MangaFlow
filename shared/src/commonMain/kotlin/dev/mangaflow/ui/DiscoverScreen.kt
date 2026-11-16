@@ -372,6 +372,9 @@ internal fun DiscoverySearchResults(
     // Empty title/author search is only the 44dp input row; no padded, invisible result panel.
     if (awaitingKeyword && !selectingTags) return
     val showResults = search.isSearch && !selectingTags && !awaitingKeyword
+    val showCacheStatus = showResults && backdrop != null
+    val showSummary = (federated && search.searchSources.isNotEmpty()) ||
+        (showResults && search.items.isNotEmpty()) || showCacheStatus
     BrowseCoverWarmup(search.items, repository,
         active && expanded && showResults && sourceChoices == null, retainedResults)
     val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
@@ -389,8 +392,7 @@ internal fun DiscoverySearchResults(
         val controlsRoom = (contentRoom - resultReserve).coerceAtLeast(0.dp)
         val fixedScope = (if (tagsOnly || scopeInToolbar) 0.dp else 42.dp) +
             (if (search.selectedTags.isEmpty()) 0.dp else 42.dp) +
-            if ((federated && search.searchSources.isNotEmpty()) ||
-                (showResults && search.items.isNotEmpty())) 28.dp else 0.dp
+            if (showSummary) if (showCacheStatus) 44.dp else 28.dp else 0.dp
         val choicesRoom = (controlsRoom - fixedScope).coerceIn(0.dp, 200.dp)
         Column(Modifier.then(if (desktopMainContent)
                 Modifier.align(Alignment.TopCenter).widthIn(max = 1040.dp).fillMaxHeight()
@@ -405,9 +407,8 @@ internal fun DiscoverySearchResults(
                 SearchScopeBar(search.searchTarget, search.query, search.selectedTags, search.availableTags,
                     search.tagsLoading, search.tagsError, onTarget, onTag, onRetryTags, tagsOnly = tagsOnly,
                     onTagQuery = onTagQuery, maxChoicesHeight = choicesRoom, showScope = !scopeInToolbar)
-                if ((federated && search.searchSources.isNotEmpty()) ||
-                    (showResults && search.items.isNotEmpty())) Row(
-                    Modifier.fillMaxWidth().heightIn(min = 28.dp)
+                if (showSummary) Row(
+                    Modifier.fillMaxWidth().heightIn(min = if (showCacheStatus) 44.dp else 28.dp)
                         .padding(horizontal = if (tagsOnly) 0.dp else 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -428,6 +429,8 @@ internal fun DiscoverySearchResults(
                         if (search.loading && !federated)
                             CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
                     }
+                    if (showResults && backdrop != null) BrowseCacheStatus(search, backdrop,
+                        active = active && expanded && sourceChoices == null)
                 }
             }
             when {
@@ -511,6 +514,8 @@ internal fun RankingControls(
     onAudience: (RankAudience) -> Unit,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
+    backdrop: HazeState? = null,
+    active: Boolean = true,
 ) {
     val density = LocalDensity.current
     val measurer = rememberTextMeasurer()
@@ -523,12 +528,13 @@ internal fun RankingControls(
     val choiceWidth = maxOf(44.dp, labelWidth + 16.dp)
     val periodWidth = choiceWidth * RankPeriod.entries.size
     BoxWithConstraints(modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-        if (maxWidth >= periodWidth + 92.dp) {
+        if (maxWidth >= periodWidth + (if (backdrop != null) 136.dp else 92.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 RankingPeriods(state.period, onPeriod, Modifier.weight(1f))
                 Spacer(Modifier.width(4.dp))
                 RankingAudienceToggle(state.audience, onAudience, Modifier.width(44.dp))
-                Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh) }
+                if (backdrop != null) BrowseCacheStatus(state, backdrop, active)
+                Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh, active) }
             }
         } else {
             // Keep the actual period names and every choice at large font scales.
@@ -539,7 +545,8 @@ internal fun RankingControls(
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically) {
                     RankingAudienceToggle(state.audience, onAudience, Modifier.width(44.dp))
-                    Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh) }
+                    if (backdrop != null) BrowseCacheStatus(state, backdrop, active)
+                    Box(Modifier.width(44.dp), contentAlignment = Alignment.Center) { DiscoveryRefresh(state, onRefresh, active) }
                 }
             }
         }
@@ -709,7 +716,8 @@ private fun DiscoveryPane(
                 style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
             DiscoveryLayoutControl(columns, visibleColumns, backdrop, active, onColumnsChange,
                 onPresenceChange = { layoutPresent = it })
-            DiscoveryRefresh(state, onRefresh)
+            BrowseCacheStatus(state, backdrop, active)
+            DiscoveryRefresh(state, onRefresh, active)
         }
     }
     LazyVerticalGrid(
@@ -732,6 +740,10 @@ private fun DiscoveryPane(
                     desktopActions = desktopActions)
             }
         }
+        if (!ranking)
+            item(span = { GridItemSpan(maxLineSpan) }, key = "section", contentType = "section-control") {
+                sectionControls()
+            }
         if (state.loading && state.items.isEmpty()) {
             if (state.mode != DiscoveryMode.RECOMMENDED)
                 item(span = { GridItemSpan(maxLineSpan) }, key = "loading") { QuietLoading("正在翻开书页…") }
@@ -752,10 +764,6 @@ private fun DiscoveryPane(
                 }
             }
         } else {
-            if (!ranking)
-                item(span = { GridItemSpan(maxLineSpan) }, key = "section", contentType = "section-control") {
-                    sectionControls()
-                }
             if (ranking) {
                 itemsIndexed(state.items, key = { _, manga -> manga.id }, contentType = { _, _ -> "ranking-book" },
                     span = { _, _ -> GridItemSpan(maxLineSpan) }) { index, manga ->
@@ -1111,12 +1119,12 @@ private fun DiscoveryLayoutControl(
 }
 
 @Composable
-private fun DiscoveryRefresh(state: BrowseState, onRefresh: () -> Unit) {
+private fun DiscoveryRefresh(state: BrowseState, onRefresh: () -> Unit, active: Boolean = true) {
     val motion = LocalMotionEnabled.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val rotation = remember { Animatable(0f) }
-    LaunchedEffect(state.refreshing, motion, lifecycle) {
-        if (!motion) rotation.snapTo(0f)
+    LaunchedEffect(state.refreshing, motion, lifecycle, active) {
+        if (!motion || !active) rotation.snapTo(0f)
         else if (state.refreshing) {
             lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 while (true) {
@@ -1129,7 +1137,7 @@ private fun DiscoveryRefresh(state: BrowseState, onRefresh: () -> Unit) {
             rotation.snapTo(0f)
         }
     }
-    MotionIconButton(onClick = onRefresh, modifier = Modifier.size(44.dp), enabled = !state.loading && !state.refreshing) {
+    MotionIconButton(onClick = onRefresh, modifier = Modifier.size(44.dp), enabled = active && !state.loading && !state.refreshing) {
         Icon(Icons.Outlined.Refresh,
             if (state.refreshing) "正在刷新漫画" else if (state.updatedAt > 0) "刷新漫画，${browseUpdatedAt(state.updatedAt)}" else "刷新漫画",
             Modifier.size(19.dp).graphicsLayer { rotationZ = rotation.value },
@@ -1369,7 +1377,7 @@ private fun recentReadingLocation(progress: ReadingProgress): String =
         "${progress.pageIndex + 1}/${progress.pageCount} 页" else "第${progress.pageIndex + 1}页"
 
 private fun browseUpdatedAt(timestamp: Long): String =
-    formatInstantMillis(timestamp, "HH:mm") + " 更新"
+    "列表生成 / 保存于 " + formatInstantMillis(timestamp, "HH:mm")
 
 private val BrowsePositionsSaver = listSaver<LinkedHashMap<String, LazyGridState>, Any>(
     save = { positions -> positions.entries.flatMap { (key, state) ->

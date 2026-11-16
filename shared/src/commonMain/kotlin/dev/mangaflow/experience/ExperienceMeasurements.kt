@@ -19,6 +19,19 @@ internal fun encodeExperienceOverrides(o: ExperienceOverrides) = buildJsonObject
     o.decodedPrefetchPages?.let { put("decodedPages", it) }
     o.sourceRecovery?.let { put("sourceRecovery", it.name) }
     put("browseWarmup", o.browseWarmup)
+    o.standbySources?.let { put("standbySources", it) }
+    put("standbyPages", o.standbyPages); put("standbyMemory", o.standbyMemoryWarmup)
+    o.standbyMiB?.let { put("standbyMiB", it) }
+    put("readerStatus", o.readerStatusPlacement.name)
+    put("contentCache", buildJsonObject {
+        val c = o.contentCache
+        put("storage", c.storage.name); put("open", c.refreshOnOpen)
+        put("search", c.searchMinutes); put("discovery", c.discoveryMinutes); put("ranking", c.rankingMinutes)
+        put("detail", c.detailMinutes); put("manifest", c.manifestMinutes); put("score", c.scoreMinutes)
+        put("popularity", c.popularityMinutes); put("comments", c.commentMinutes); put("failure", c.failureMinutes)
+        put("retention", c.retentionHours); put("memoryEntries", c.snapshotMemoryEntries); put("diskMiB", c.snapshotDiskMiB)
+        put("memoryIdle", c.memoryIdleMinutes); put("imageAge", c.imageRetentionHours)
+    })
 }.toString()
 
 internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = runCatching {
@@ -38,6 +51,26 @@ internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = ru
         decodedPrefetchPages = int("decodedPages", 0, 8),
         sourceRecovery = SourceRecoveryMode.entries.firstOrNull { it.name == json["sourceRecovery"]?.jsonPrimitive?.content },
         browseWarmup = bool("browseWarmup", true),
+        standbySources = int("standbySources", 1, 4), standbyPages = int("standbyPages", 1, 4) ?: 1,
+        standbyMiB = int("standbyMiB", 1, 128),
+        standbyMemoryWarmup = bool("standbyMemory", true),
+        readerStatusPlacement = ReaderStatusPlacement.entries.firstOrNull { it.name == json["readerStatus"]?.jsonPrimitive?.content }
+            ?: ReaderStatusPlacement.BOTTOM,
+        contentCache = json["contentCache"]?.jsonObject?.let { c ->
+            val defaults = ContentCachePreferences()
+            fun number(key: String, default: Int) = c[key]?.jsonPrimitive?.intOrNull ?: default
+            ContentCachePreferences(
+                storage = ContentCacheStorage.entries.firstOrNull { it.name == c["storage"]?.jsonPrimitive?.content } ?: defaults.storage,
+                refreshOnOpen = c["open"]?.jsonPrimitive?.booleanOrNull ?: defaults.refreshOnOpen,
+                searchMinutes = number("search", defaults.searchMinutes), discoveryMinutes = number("discovery", defaults.discoveryMinutes),
+                rankingMinutes = number("ranking", defaults.rankingMinutes), detailMinutes = number("detail", defaults.detailMinutes),
+                manifestMinutes = number("manifest", defaults.manifestMinutes), scoreMinutes = number("score", defaults.scoreMinutes),
+                popularityMinutes = number("popularity", defaults.popularityMinutes), commentMinutes = number("comments", defaults.commentMinutes),
+                failureMinutes = number("failure", defaults.failureMinutes), retentionHours = number("retention", defaults.retentionHours),
+                snapshotMemoryEntries = number("memoryEntries", defaults.snapshotMemoryEntries), snapshotDiskMiB = number("diskMiB", defaults.snapshotDiskMiB),
+                memoryIdleMinutes = number("memoryIdle", defaults.memoryIdleMinutes), imageRetentionHours = number("imageAge", defaults.imageRetentionHours),
+            ).bounded()
+        } ?: ContentCachePreferences(),
     )
 }.getOrDefault(ExperienceOverrides())
 

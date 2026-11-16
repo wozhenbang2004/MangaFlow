@@ -59,7 +59,8 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val scope = operations.scope
     val relayLink = RelayLinkController.get(application)
     private val sourcePreferences = preferences(application, "mangaflow_library")
-    val copyRepository = CopyMangaRepository(identityProvider = { CopyAnonymousIdentityStore.load(application) })
+    val copyRepository = CopyMangaRepository(identityProvider = { CopyAnonymousIdentityStore.load(application) },
+        cachePreferences = { dev.mangaflow.experience.contentCachePreferences(application) })
     val komiicSource = KomiicBodySource {
         sourcePreferences.getString("body_source_komiic_domain", KomiicBodySource.BASE_URLS.first())
             ?.takeIf { it in KomiicBodySource.BASE_URLS } ?: KomiicBodySource.BASE_URLS.first()
@@ -68,7 +69,8 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val unifiedChapters = UnifiedChapterStore(application)
     val readerCatalogs = ReaderCatalogStore(application)
     val repository = UnifiedMangaRepository(copyRepository, unifiedChapters,
-        bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(), komiicSource,
+        bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(
+            cachePreferences = { dev.mangaflow.experience.contentCachePreferences(application) }), komiicSource,
             MangaDexBodySource(), picacgSource) + listOfNotNull(createJmBodySource(application)),
         catalogStore = readerCatalogs, storageCache = dev.mangaflow.storage.StorageCacheStore.get(application))
     val bodySources = BodySourceRegistry(application, repository.sources)

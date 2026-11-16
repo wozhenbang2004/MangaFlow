@@ -124,15 +124,38 @@ internal fun ImageRequest.Builder.prefetchPriority(bytes: PrefetchByteBudget, so
     extras[workTokenKey] = work
 }
 
-/** Held for a whole future-page window, including completed requests, not recycled per page. */
-internal class PrefetchByteBudget(private val maximum: Long) {
+/** Held for a future-page window; optional child tickets release only after their work settles. */
+internal class PrefetchByteBudget(private val maximum: Long, private val parent: PrefetchByteBudget? = null) {
     private val lock = StorageLock()
     private var spent = 0L
-    val remaining: Long get() = synchronized(lock) { (maximum - spent).coerceAtLeast(0L) }
-    fun exhaust() = synchronized(lock) { spent = maximum }
+    private var exhausted = false
+    private var closed = false
+    val used: Long get() = synchronized(lock) { spent }
+    val remaining: Long get() = synchronized(lock) {
+        if (closed || exhausted) 0L else minOf((maximum - spent).coerceAtLeast(0L), parent?.remaining ?: Long.MAX_VALUE)
+    }
+    fun child(): PrefetchByteBudget = PrefetchByteBudget(maximum, this)
+    // A failed receipt cannot manufacture a parent charge. Existing ordinary windows still
+    // remain exhausted for the rest of their lifetime, while close releases only real bytes.
+    fun exhaust() = synchronized(lock) { exhausted = true }
     fun accept(count: Long) = synchronized(lock) {
-        if (count < 0L || count > maximum - spent) throw PrefetchBudgetExceeded()
+        if (closed || exhausted || count < 0L || count > maximum - spent) throw PrefetchBudgetExceeded()
+        // Every nested operation takes child then parent; parents never acquire child locks.
+        parent?.accept(count)
         spent += count
+    }
+    fun release(count: Long): Unit = synchronized(lock) {
+        val released = count.coerceIn(0L, spent)
+        spent -= released
+        parent?.release(released)
+    }
+    fun close(): Unit = synchronized(lock) {
+        if (!closed) {
+            closed = true
+            val released = spent
+            spent = 0L
+            parent?.release(released)
+        }
     }
 }
 internal class PrefetchBudgetExceeded : IOException("本次预取已达到资源预算")

@@ -1,6 +1,8 @@
 package dev.mangaflow.data
 
 import dev.mangaflow.platform.*
+import dev.mangaflow.experience.ContentCacheKind
+import dev.mangaflow.experience.contentCachePreferences
 
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -33,6 +35,7 @@ import com.fleeksoft.ksoup.Ksoup as Jsoup
 
 /** Anonymous, attributed reviews. Each provider keeps its own scale and identity. */
 class ReviewRepository(context: Context) {
+    private val cacheContext = context.applicationContext
     private val http = SourceHttp()
     private val providerHttp = ReviewProviderHttp(http)
     private val mangaBaka = MangaBakaReviewProvider(providerHttp)
@@ -48,7 +51,7 @@ class ReviewRepository(context: Context) {
     private val chapterIdentityCache = LinkedHashMap<String, ChapterIdentitySnapshot>()
     private val associations = context.applicationContext.getSharedPreferences("review_associations", 0)
     private val cache = LinkedHashMap<String, CachedSource>()
-    private val confirmedNames = LinkedHashMap<String, List<String>>()
+    private val confirmedNames = LinkedHashMap<String, CachedNames>()
     @kotlin.concurrent.Volatile private var cacheGeneration = 0L
 
     /** Source callbacks run on IO workers and can arrive concurrently. */
@@ -120,7 +123,9 @@ class ReviewRepository(context: Context) {
             val requested = ReviewProviders.metricIds.filter { it in sourceIds }
             if (requested.isEmpty()) return@withContext
             val identityLock = SynchronizedObject()
-            val knownNames = synchronized(reviewRepositoryStateLock) { confirmedNames[key] }.orEmpty()
+            val knownNames = synchronized(reviewRepositoryStateLock) { confirmedNames[key]
+                ?.takeIf { wallTimeMillis() - it.time in 0L until
+                    contentCachePreferences(cacheContext).freshMillis(ContentCacheKind.DETAILS) }?.names }.orEmpty()
             // Metadata identities are local to this batch; READY here does not mean comments were loaded.
             // The parallel score batch shares original-provider confirmations only.
             // MangaBaka mappings are verified in the ordered detail lookup before reuse.
@@ -259,9 +264,12 @@ class ReviewRepository(context: Context) {
 
     /** Retain the last known snapshot while a reader refreshes; never cross saved associations. */
     fun cachedSources(manga: Manga): List<ReviewSource> {
+        val policy = contentCachePreferences(cacheContext)
+        if (!policy.enabled) return emptyList()
         val key = identityKey(manga)
         return synchronized(reviewRepositoryStateLock) {
-            ReviewProviders.ids.mapNotNull { cache["$key\u0000$it"]?.source }
+            ReviewProviders.ids.mapNotNull { cache["$key\u0000$it"]
+                ?.takeIf { wallTimeMillis() - it.time in 0L..policy.retentionMillis }?.source }
         }
     }
 
@@ -280,7 +288,8 @@ class ReviewRepository(context: Context) {
         val epoch = cacheGeneration
         var ids = confirmedIds(cachedSources(manga))
         val stored = synchronized(reviewRepositoryStateLock) { chapterIdentityCache[key] }
-            ?.takeIf { wallTimeMillis() - it.time in 0 until 6 * 60 * 60_000L }
+            ?.takeIf { wallTimeMillis() - it.time in 0L until
+                contentCachePreferences(cacheContext).freshMillis(ContentCacheKind.DETAILS) }
         if (stored != null) ids = stored.ids + ids
         val selectedAniList = savedId(manga, "anilist")
         if (selectedAniList.isNotBlank()) ids = ids + ("anilist" to selectedAniList)
@@ -330,7 +339,8 @@ class ReviewRepository(context: Context) {
 
     private fun cachedSource(key: String, sourceId: String): CachedSource? = synchronized(reviewRepositoryStateLock) {
         cache["$key\u0000$sourceId"]?.takeIf {
-            val ttl = if (it.source.status == ReviewStatus.UNAVAILABLE || it.source.reviewsError != null) 5 * 60_000L else 3 * 60_000L
+            val ttl = contentCachePreferences(cacheContext).freshMillis(ContentCacheKind.COMMENTS,
+                it.source.status != ReviewStatus.READY || it.source.reviewsError != null)
             wallTimeMillis() - it.time in 0L until ttl
         }
     }
@@ -338,7 +348,10 @@ class ReviewRepository(context: Context) {
     private fun rememberSource(key: String, source: ReviewSource, names: List<String> = emptyList(), epoch: Long = cacheGeneration): ReviewSource = synchronized(reviewRepositoryStateLock) {
         if (epoch != cacheGeneration) return@synchronized source
         val sourceKey = "$key\u0000${source.id}"
-        val previous = cache[sourceKey]?.source?.takeIf { it.status == ReviewStatus.READY }
+        val policy = contentCachePreferences(cacheContext)
+        val previous = cache[sourceKey]?.takeIf {
+            policy.enabled && wallTimeMillis() - it.time in 0L..policy.retentionMillis }
+            ?.source?.takeIf { it.status == ReviewStatus.READY }
         val retained = when {
             source.status == ReviewStatus.UNAVAILABLE && previous != null -> previous.copy(reviewsError = source.message)
             source.reviewsError != null && previous != null && source.subjectId == previous.subjectId && previous.reviews.isNotEmpty() ->
@@ -851,7 +864,7 @@ class ReviewRepository(context: Context) {
 
     private fun rememberNames(manga: Manga, key: String, epoch: Long, names: List<String>) = synchronized(reviewRepositoryStateLock) {
         if (epoch != cacheGeneration || key != identityKey(manga)) return@synchronized
-        confirmedNames[key] = names
+        confirmedNames[key] = CachedNames(wallTimeMillis(), names)
         while (confirmedNames.size > 96) confirmedNames.remove(confirmedNames.keys.first())
     }
 
@@ -901,6 +914,7 @@ class ReviewRepository(context: Context) {
     private data class MetricLookupIdentity(val aliases: List<String>, val externalIds: Map<String, String>)
     private data class MetricLookupAttempt(val source: ReviewSource, val identity: MetricLookupIdentity)
     private data class CachedSource(val time: Long, val source: ReviewSource, val names: List<String> = emptyList())
+    private data class CachedNames(val time: Long, val names: List<String>)
     private data class ChapterIdentitySnapshot(val time: Long, val ids: Map<String, String>)
 
     private companion object { const val PAGE_SIZE = 20 }

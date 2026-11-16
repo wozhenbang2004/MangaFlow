@@ -19,6 +19,15 @@ data class ReaderSourceStandby(
     val targetPageIndex: Int? = null,
     val totalPages: Int? = null,
     val approximate: Boolean = true,
+    /** Current nearby window only; these are observed originals, never whole-chapter claims. */
+    val requestedPages: Int = 0,
+    val preparedPages: Int = 0,
+    /** Successfully inspected previews; resident memory is reported independently below. */
+    val decodedPages: Int = 0,
+    val memoryWarmed: Boolean = false,
+    val targetPrepared: Boolean = false,
+    val activePages: Int = 0,
+    val reason: String? = null,
 )
 
 /** Editions may split images differently; this is only an explicitly labelled resume estimate. */
