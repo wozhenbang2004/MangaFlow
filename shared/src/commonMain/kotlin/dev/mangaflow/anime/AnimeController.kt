@@ -1356,7 +1356,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val settings = routing.state.value
         val ids = sourceHomes.keys + sources.extensions.state.value.map { it.id } + tracking.providerIds
         mutableState.update { it.copy(sourceRoutes = ids.associateWith { id ->
-            settings.sourceOverrides[id]?.mode ?: settings.defaultMode
+            settings.sourceOverrides[id]?.mode ?: settings.categoryOverrides[dev.mangaflow.net.DownloadCategory.ANIME]
+                ?: settings.defaultMode
         }) }
     }
 
