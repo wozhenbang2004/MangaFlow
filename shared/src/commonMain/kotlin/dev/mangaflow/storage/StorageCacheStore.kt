@@ -18,9 +18,18 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 internal enum class CacheArea(val label: String) {
-    READING("阅读图片"), ARTWORK("封面与头像"), DATA("资料与列表"), PANELS("分镜结果"),
+    ANIME("番剧缓冲"), READING("阅读图片"), ARTWORK("封面与头像"), DATA("资料与列表"), PANELS("分镜结果"),
 }
-internal enum class CacheBackend { COIL, SCRIPT, JM, PANEL, CATALOG }
+internal enum class CacheBackend { COIL, SCRIPT, JM, PANEL, CATALOG, ANIME }
+
+/** The player retains its own journal and open spans; the shared cache coordinator never deletes its files. */
+internal data class AnimeDiskCacheUsage(val bytes: Long, val revision: Long, val active: Boolean, val accessedAt: Long)
+internal interface AnimeDiskCacheOwner {
+    fun snapshot(): AnimeDiskCacheUsage
+    fun resize(bytes: Long)
+    /** Null means the reviewed revision changed or playback still owns the cache. */
+    fun clear(expectedRevision: Long): Long?
+}
 
 /** Exact cache identities only. No cookies, request headers, source code or account records. */
 internal data class CacheResource(
@@ -60,6 +69,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     private var maintenance: Job? = null
     private var maintenanceRequested = false
     private var coil: ExperienceDiskCache? = null
+    private var animeCache: AnimeDiskCacheOwner? = null
     private var budget = 512L * MIB
     private var budgetVersion = -1L
     private var cachedBytes = 0L
@@ -116,6 +126,12 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         }
         if (due) requestMaintenance()
     }
+    internal fun attachAnimeCache(owner: AnimeDiskCacheOwner) {
+        val target = synchronized(lock) { animeCache = owner; budget }
+        owner.resize(target)
+        requestMaintenance()
+    }
+
     internal fun attach(cache: ExperienceDiskCache) { synchronized(lock) { coil = cache }; requestMaintenance() }
     internal fun setBudget(bytes: Long, version: Long) {
         synchronized(lock) {
@@ -254,6 +270,16 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         val saved = synchronized(lock) { records.values.toList() }
         val items = mutableListOf<StoredCacheItem>()
         val now = wallTimeMillis()
+        val videoOwner = synchronized(lock) { animeCache }
+        val video = videoOwner?.snapshot()
+        val videoBytes = video?.bytes ?: ownedVideoBytes(StorageFile(root, "anime-stream-v1"))
+        if (videoBytes > 0L) {
+            val resource = CacheResource("anime:stream", CacheBackend.ANIME, "anime-stream-v1",
+                CacheArea.ANIME, accessedAt = video?.accessedAt ?: 0L, used = true)
+            // modifiedAt is an owner revision for this aggregate, never a guessed file timestamp.
+            items += StoredCacheItem(resource, videoBytes, video?.revision ?: -1L,
+                protected = video == null || video.active)
+        }
         val present = mutableSetOf<String>()
         val imageFiles = StorageFile(root, "image-cache").listFiles().orEmpty()
         val imageNames = imageFiles.map { it.name }.toSet()
@@ -294,7 +320,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     StorageFile(root, folder).listFiles().orEmpty().filter { file ->
                         !file.name.matches(Regex("[a-f0-9]{64}\\.(img|jpg|json)"))
                     }.sumOf { it.length() }
-                }, synchronized(lock) { budget }, error || disk?.resizePending == true,
+                }, synchronized(lock) { budget }, error || disk?.resizePending == true || (video == null && videoBytes > 0L),
             synchronized(lock) { windows.isEmpty() && leases.isEmpty() } && !DownloadStore.get(app).loading.value &&
                 DownloadStore.get(app).entries.value.none { it.status != DownloadStatus.COMPLETED } && items.none { it.resource.backend == CacheBackend.COIL && it.protected })
         synchronized(lock) {
@@ -321,7 +347,13 @@ class StorageCacheStore private constructor(context: PlatformContext) {
             for (item in items) {
                 currentCoroutineContext().ensureActive()
                 val resource = item.resource
-                val removed = if (resource.backend == CacheBackend.COIL) {
+                var removedBytes = item.bytes
+                val removed = if (resource.backend == CacheBackend.ANIME) {
+                    val owner = synchronized(lock) { animeCache }
+                    val actual = if (item.protected) null else owner?.clear(item.modifiedAt)
+                    if (actual != null) removedBytes = actual
+                    actual != null
+                } else if (resource.backend == CacheBackend.COIL) {
                     val disk = synchronized(lock) { coil }
                     disk?.reclaim(resource.key, item.bytes, item.modifiedAt) {
                         synchronized(lock) { !protected(resource, wallTimeMillis()) &&
@@ -335,7 +367,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     else file.delete().also { if (!it && file.exists()) failed++ }
                 }
                 if (removed) {
-                    freed += item.bytes
+                    freed += removedBytes
                     removedKeys += resource.key
                     synchronized(lock) {
                         records.remove(resource.id)
@@ -393,6 +425,10 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                         clear(selected, clearLegacy = excess > 0L && afterExpiry.legacyReclaimable)
                     }
                     ReaderCatalogStore(app).trimToSize((limit / 16).coerceAtMost(32L * MIB), ::protectedCatalog)
+                    val beforeVideo = snapshot()
+                    val videoBytes = beforeVideo.items.filter { it.resource.backend == CacheBackend.ANIME }.sumOf { it.bytes }
+                    synchronized(lock) { animeCache }?.resize(
+                        (limit - (beforeVideo.totalBytes - videoBytes)).coerceAtLeast(0L))
                     val current = snapshot()
                     retryAfterGrace = current.totalBytes > current.budgetBytes &&
                         current.items.any { it.protected && wallTimeMillis() - it.resource.accessedAt in 0L..FILE_HANDOFF_MILLIS }
@@ -413,6 +449,12 @@ class StorageCacheStore private constructor(context: PlatformContext) {
             }
         }
     }
+
+    /** Cold caches are measured but protected until their native journal owner is attached. */
+    private fun ownedVideoBytes(directory: StorageFile): Long =
+        directory.listFiles().orEmpty().sumOf { file ->
+            if (file.isDirectory) ownedVideoBytes(file) else if (file.isFile) file.length() else 0L
+        }
 
     private fun persist() {
         var rows = synchronized(lock) { records.values.toList().takeLast(MAX_ENTRIES) }

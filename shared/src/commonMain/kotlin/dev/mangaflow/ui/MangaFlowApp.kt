@@ -1,5 +1,8 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.anime.ui.AnimeWorkspace
+import androidx.compose.material.icons.outlined.Tv
+
 import dev.mangaflow.data.sources.SourceCapabilities
 import dev.mangaflow.data.sources.SourceFeature
 
@@ -178,7 +181,7 @@ import kotlinx.coroutines.withContext
 
 private enum class Section(val title: String, val icon: ImageVector) {
     DISCOVER("发现", Icons.Outlined.Explore), BOARDS("各站榜单", Icons.Outlined.Leaderboard),
-    LIBRARY("书架", Icons.Outlined.Bookmarks),
+    ANIME("番剧", Icons.Outlined.Tv), LIBRARY("书架", Icons.Outlined.Bookmarks),
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
 }
@@ -327,7 +330,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     val restrictedSection = rememberSaveable { mutableStateOf(Section.DISCOVER.name) }
     var sectionName by (if (restrictedMode) restrictedSection else ordinarySection)
     val section = Section.entries.firstOrNull {
-        it.name == sectionName && (!restrictedMode || it != Section.BOARDS)
+        it.name == sectionName && (!restrictedMode || it != Section.BOARDS && it != Section.ANIME)
     } ?: Section.DISCOVER
     LaunchedEffect(account.profile?.username, account.busy, reading == null, detail == null,
         restrictedMode, copySyncOpen, experienceLifecycle) {
@@ -362,6 +365,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         derivedStateOf { drawerAction?.let { (it.destination != null || it.restricted != null) && !it.rootCommitted } == true }
     }
     val changeSection: (Section) -> Unit = { destination ->
+        if (section == Section.ANIME && destination != Section.ANIME) model.services.anime.closePlayback()
         model.cancelLibraryReading()
         // Root pages share one shell, so every entry must use its interruptible handoff.
         drawerAction = DrawerAction(DrawerValue.Closed, destination)
@@ -377,6 +381,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     var searchExpanded by (if (restrictedMode) restrictedSearch else ordinarySearch)
     var desktopNavigationMode by rememberSaveable { mutableIntStateOf(0) }
     var desktopSearchRequest by remember { mutableIntStateOf(0) }
+    var animeSearchRequest by remember { mutableIntStateOf(0) }
+    var animeBackRequest by remember { mutableIntStateOf(0) }
+    var animeImmersive by remember { mutableStateOf(false) }
     var tagSearchVisible by rememberSaveable { mutableStateOf(false) }
     var recentReadingOpen by rememberSaveable { mutableStateOf(false) }
     val ordinaryBrowse = remember(model) { StandardBrowseActions(model) }
@@ -537,14 +544,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     }
     val frame: Frame = reading?.let { Frame.Reader(it) } ?: detailFrame ?: Frame.Root(section, profileKey)
     val desktop = platformKind == PlatformKind.DESKTOP
-    val desktopNavigationVisible = desktop && reading == null && windowSize.width >= 760.dp
+    val desktopNavigationVisible = desktop && reading == null && windowSize.width >= 760.dp &&
+        !(section == Section.ANIME && animeImmersive)
     val desktopNavigationWide = when (desktopNavigationMode) {
         1 -> true
         2 -> false
         else -> windowSize.width >= 1060.dp * windowSize.fontScale.coerceAtLeast(1f)
     }
     val profileSections = remember(restrictedMode) {
-        Section.entries.filter { !restrictedMode || it != Section.BOARDS }
+        Section.entries.filter { !restrictedMode || it != Section.BOARDS && it != Section.ANIME }
     }
     val desktopDestinations = remember(profileSections, restrictedMode) {
         profileSections.map { DesktopDestination(it.navigationTitle(restrictedMode), it.icon) }
@@ -577,6 +585,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     LaunchedEffect(frame.key) { focus.clearFocus(force = true); keyboard?.hide() }
     val commitProfile: (Boolean) -> Unit = { restricted ->
         if (restricted != restrictedMode) {
+            if (section == Section.ANIME) model.services.anime.closePlayback()
             model.cancelLibraryReading()
             model.closeReader()
             model.closeDetail()
@@ -618,16 +627,21 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             onSourceChanged = { scopedBrowse.invalidateSource(id) })
     } }
     val openDesktopSearch: () -> Unit = {
-        // The regular reader/detail close paths retain their own positions and cancellation.
-        model.closeReader()
-        model.closeDetail()
-        tagSearchVisible = false
-        recentReadingOpen = false
-        drawerAction = null
-        sectionName = Section.DISCOVER.name
-        browseActions.resumeBrowseSearch()
-        searchExpanded = true
-        desktopSearchRequest++
+        if (section == Section.ANIME && reading == null && detail == null) {
+            animeSearchRequest++
+        } else {
+            // The regular reader/detail close paths retain their own positions and cancellation.
+            if (section == Section.ANIME) model.services.anime.closePlayback()
+            model.closeReader()
+            model.closeDetail()
+            tagSearchVisible = false
+            recentReadingOpen = false
+            drawerAction = null
+            sectionName = Section.DISCOVER.name
+            browseActions.resumeBrowseSearch()
+            searchExpanded = true
+            desktopSearchRequest++
+        }
     }
     if (recentReadingOpen) {
         RecentReadingSheet(ordinaryHistory, model.repository, model.library,
@@ -669,7 +683,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     val darkSystem = isSystemInDarkTheme()
-    SystemBarAppearance(lightStatus = !darkSystem, lightNavigation = !darkSystem, active = frame is Frame.Root)
+    SystemBarAppearance(lightStatus = !darkSystem, lightNavigation = !darkSystem,
+        active = frame is Frame.Root && !(section == Section.ANIME && animeImmersive))
 
     val density = LocalDensity.current
     val drawerWidth = (296.dp + 48.dp * (windowSize.fontScale - 1f)).coerceAtMost(360.dp)
@@ -755,6 +770,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 if (event.type == KeyEventType.KeyUp) when {
                     reading != null -> model.returnToMangaDetail()
                     detail != null -> model.closeDetail()
+                    section == Section.ANIME -> animeBackRequest++
                     searchExpanded -> { searchExpanded = false; browseActions.suspendBrowseSearch(); focus.clearFocus(force = true) }
                     section != Section.DISCOVER -> changeSection(Section.DISCOVER)
                 }
@@ -767,7 +783,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
             .drawerSelectionTapInput(drawerTargets, canSelectDrawer,
                 { drawer.isAnimationRunning && !drawerScroll.isScrollInProgress }, selectDrawer),
         drawerState = drawer,
-        gesturesEnabled = frame is Frame.Root && !desktopNavigationVisible,
+        gesturesEnabled = frame is Frame.Root && !desktopNavigationVisible && section != Section.ANIME,
         scrimColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.14f),
         drawerContent = {
             ModalDrawerSheet(
@@ -918,7 +934,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                 MotionBackHandler(
                     enabled = current.key == frame.key && !drawerVisible && libraryOpening == null &&
                         !recentReadingOpen && authorWorks == null &&
-                        (reading != null || detail != null || section != Section.DISCOVER),
+                        (reading != null || detail != null || section != Section.DISCOVER && section != Section.ANIME),
                     state = currentBack,
                 ) {
                     when {
@@ -1121,7 +1137,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             .background(MaterialTheme.colorScheme.background)) {
                             AppWallpaper(wallpaperStore, Modifier.fillMaxSize(), active = rootWallpaperActive)
                         }
-                        val contentWidth = if (desktop && current.section != Section.DISCOVER) {
+                        val contentWidth = if (current.section == Section.ANIME && animeImmersive) {
+                            windowSize.width
+                        } else if (desktop && current.section != Section.DISCOVER) {
                             MangaLayout.DesktopWorkspaceWidth
                         } else when (current.section) {
                             Section.SETTINGS -> MangaLayout.SettingsWidth
@@ -1139,7 +1157,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             translationY = ((1f - rootOpacity.value) / (1f - MangaMotion.RootEntryAlpha))
                                 .coerceIn(0f, 1f) * 6.dp.toPx()
                         }.motionInputGate(!rootHandoff)) {
-                            val discoveryActionsWidth = (if (ordinaryHistory.isEmpty()) 44.dp else 88.dp) + 16.dp
+                            val discoveryActionsWidth = (if (ordinaryHistory.isEmpty()) 44.dp else 88.dp) +
+                                (if (restrictedMode) 0.dp else 44.dp) + 16.dp
                             val discoveryStacked = maxWidth - 16.dp < 44.dp + 12.dp + discoveryTabsWidth + discoveryActionsWidth
                             val discoveryTabHeight = with(chromeDensity) {
                                 maxOf(44.dp, 14.sp.toDp() * (if (fontScale > 1.3f) 2.6f else 1.3f) + 16.dp)
@@ -1253,6 +1272,14 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             }
                                         }) else gallery()
                                     }
+                                    Section.ANIME -> AnimeWorkspace(
+                                        controller = model.services.anime,
+                                        onManga = { changeSection(Section.DISCOVER) },
+                                        backdrop = searchBackdrop, navigation = navigation, active = rootActive,
+                                        navigationVisible = !desktopNavigationVisible,
+                                        searchRequest = animeSearchRequest, backRequest = animeBackRequest,
+                                        onPlaybackVisibility = { animeImmersive = it },
+                                    )
                                     Section.BOARDS -> {
                                         if (restrictedMode) Box(Modifier.fillMaxSize()) {
                                             Box(Modifier.fillMaxSize().padding(top = chromePadding)) {
@@ -1403,6 +1430,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         )
                                     },
                                     recent = {
+                                        if (!restrictedMode) MotionIconButton(
+                                            modifier = Modifier.size(44.dp), tooltip = "切换到番剧",
+                                            onClick = { closeSearch(); changeSection(Section.ANIME) },
+                                        ) { Icon(Icons.Outlined.Tv, "番剧", Modifier.size(21.dp)) }
                                         if (ordinaryHistory.isNotEmpty()) MotionIconButton(
                                             modifier = Modifier.size(36.dp), tooltip = "最近阅读",
                                             onClick = { feedback.perform(FeelEvent.Selection); recentReadingOpen = true },
@@ -1439,6 +1470,10 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         Row(Modifier.padding(horizontal = 8.dp).height(44.dp)
                                             .motionInputGate(rootActive && chromeReady),
                                             verticalAlignment = Alignment.CenterVertically) {
+                                            if (!restrictedMode) MotionIconButton(
+                                                modifier = Modifier.size(44.dp), tooltip = "切换到番剧",
+                                                onClick = { closeSearch(); changeSection(Section.ANIME) },
+                                            ) { Icon(Icons.Outlined.Tv, "番剧", Modifier.size(21.dp)) }
                                             if (ordinaryHistory.isNotEmpty()) MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
                                                 feedback.perform(FeelEvent.Selection)
                                                 closeSearch()

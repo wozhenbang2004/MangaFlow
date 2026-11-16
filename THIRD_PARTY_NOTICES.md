@@ -636,3 +636,48 @@ The complete Apache-2.0 license is included at
 `third_party/multi-source/KEIYOUSHI-APACHE-2.0.txt`; the exact file map and omitted
 upstream account, certificate-bypass and HTTP-workaround features are in ADAPTATION.md.
 Unlicensed Venera script text is not bundled or translated verbatim.
+
+
+## Anime source adapters and playback (2026-11-16)
+
+MangaFlow's anime adapters use public source/API contracts. A source entry does not establish that the remote service is currently reachable, that all media formats are supported, or that the application grants distribution rights to remote content.
+
+- **KazumiRules** — https://github.com/Predidit/KazumiRules/tree/64ea35976c383a3a760eb23d744fcada076317ee
+  TvTFun 1.3, giriGiriLove 2.7 and LMM 2.4 rule endpoint/selector contracts are adapted into Kotlin. MIT, Copyright (c) 2024 Predidit.
+- **AGE provider contract** — https://github.com/miru-2-0/repo/blob/aea94f7e8a16689aeb9e510a86cd4a6cadab286f/repo/agedm.io.js
+  The provider file declares MIT and attributes appdevelpo. The /v2 catalogue and Vurl response contract is adapted; the application uses its existing routed network and HTML implementation.
+- **TvTFun protocol cross-references** — https://github.com/AniBakaBaka/AniBaka/blob/4041aa6200c76bb829422dabba213fa9e8819db5/assets/rules/tvtfun.json and https://github.com/uerax/Animaku/blob/2040ce6175f3b2eec72a4b829ad7a30129f1c191/apps/server/src/lib/tvtfun.ts
+  Public request/response field references only. Animaku implementation code is not copied or linked.
+- **Bangumi API** — https://github.com/bangumi/api/blob/master/open-api/v0.yaml
+  Metadata and collection protocol integration. The implementation preserves canonical episode identities and uses explicit episode collections for animation progress.
+- **AniList API** — https://github.com/AniList/docs/tree/03281c0a4bbf0c7f2097e0c935cddaed1096aa65
+  GraphQL protocol integration. User credentials are supplied separately and never distributed with the application.
+- **AndroidX Media3** — https://developer.android.com/media/media3 and https://github.com/androidx/media
+  Android playback, media sessions, data sources and compressed media caching. Apache License 2.0; licenses and attribution supplied by its published artifacts remain applicable.
+- **MediaMP 0.5.1** — https://github.com/open-ani/mediamp/tree/v0.5.1
+  Desktop mpv and iOS AVKit adapters. MediaMP glue and the bundled native runtime have distinct license obligations. The chosen Windows/macOS native runtime includes dynamically linked libmpv/FFmpeg and related components under their applicable LGPL and other licenses; it is not described as an exclusively Apache-licensed bundle. Corresponding native dependency versions and build/source references are maintained in the upstream tagged project, submodules and runtime distribution. The application does not use the all-platform runtime aggregator or introduce Linux GPL runtime artifacts.
+- **Apple AVKit / AVFoundation** — system frameworks used on iOS. Native platform format and subtitle limitations remain applicable.
+- Existing Ksoup, kotlinx.coroutines, Ktor, OkHttp, QuickJS/SourcePackedScript, Compose and shared glass/motion notices above continue to apply.
+
+### MIT permission notice for adapted MIT source contracts
+
+Copyright (c) 2024 Predidit
+AGE adapter attribution: appdevelpo (as declared in the referenced provider file).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -1,5 +1,6 @@
 package dev.mangaflow
 
+import dev.mangaflow.anime.AnimeController
 import dev.mangaflow.account.CopyAccountRepository
 import dev.mangaflow.account.CopyReadingOutbox
 import dev.mangaflow.account.CopyShelfSyncController
@@ -63,6 +64,14 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     private val application = applicationContext(context)
     val operations = ApplicationOperations.get(application)
     val scope = operations.scope
+    private val animeOwner = lazy {
+        AnimeController(application, scope).also { controller ->
+            relayLink.updateSources(bodySources.entries.value.filter { it.enabled && !it.removed && it.isInstalled }
+                .associate { it.source.id to it.source.homeUrl } + controller.sourceHomes)
+        }
+    }
+    val anime: AnimeController get() = animeOwner.value
+    fun flushAnimePlayback() { if (animeOwner.isInitialized()) animeOwner.value.flushPlayback() }
     val relayLink = RelayLinkController.get(application)
     private val sourcePreferences = preferences(application, "mangaflow_library")
     val copyRepository = CopyMangaRepository(identityProvider = { CopyAnonymousIdentityStore.load(application) },
@@ -128,7 +137,8 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
         scope.launch {
             bodySources.entries.collect { entries ->
                 relayLink.updateSources(entries.filter { it.enabled && !it.removed && it.isInstalled }
-                    .associate { it.source.id to it.source.homeUrl })
+                    .associate { it.source.id to it.source.homeUrl } +
+                    if (animeOwner.isInitialized()) animeOwner.value.sourceHomes else emptyMap())
                 withContext(Dispatchers.Default) {
                     sourceSync.withLock {
                         repository.setEnabledSources(bodySources.enabledSourceIds)

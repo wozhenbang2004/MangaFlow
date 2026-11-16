@@ -1,3 +1,57 @@
+## Anime watching and multi-source review · 2026-11-16 (ANIME-01–12)
+
+### User intent and scope
+
+Current conversation, exact message IDs unavailable, recorded 2026-11-16 UTC:
+
+> 我们的软件要引入动漫功能了即支持看番请你好好深度调研下
+>
+> 去交给你去彻底实现我提个醒多个追番来源呀之类的都要像我们漫画那样类似的冲突处理机制但我们可以做的更好目前现在的我不是很满意尤其是 uiux
+
+The second request authorizes implementation following the anime research, including multiple playback and tracking sources and a substantial improvement in conflict-review UX. It does not approve the resulting appearance in advance. This batch adds a real application-owned anime journey inside MangaFlow, retains manga identities/progress and the current shared design language, and does not claim a currently unreachable provider is playable.
+
+| Requirement | Implementation and observable acceptance |
+| --- | --- |
+| ANIME-01 · Entrance and task hierarchy | A real anime destination in the existing app shell, with compact manga/anime navigation, discovery/search and the personal watch list. Preserve drawer/desktop navigation, retained exits, theme, wallpaper and search behavior. Discovery focuses on covers and titles; settings and tracking credentials are disclosed rather than permanently filling the page. |
+| ANIME-02 · Canonical identity | Bangumi subjects and actual episode IDs own work/season/episode identity. Anime is a distinct model and atomic watch store; it never repurposes Manga, Chapter, Page or manga progress. Special episodes, OP/ED and trailers remain separate from MAIN episodes. |
+| ANIME-03 · Multiple playback providers | Current source contracts for TvTFun, AGE, giriGiriLove and LMM feed separate search/catalog/resolve stages. Keep per-provider errors and the exact selected native episode. Catalogue presence is not a playback receipt. Dynamic verification, encrypted or unsupported pages produce actionable errors, never fake media URLs. |
+| ANIME-04 · Work and season confirmation | Search results are candidates. Preview the actual source title, year/count when available, and episode groups before explicitly associating it with the canonical work. When a source combines seasons/lines, require group selection. Only a unique kind+number within that chosen group may become an automatic episode correspondence. Duplicate/unknown numbers remain unconfirmed. |
+| ANIME-05 · Manual correction and source choice | A user can select an exact source episode for the current canonical episode, persist it, change the preferred source or unlink a work. The native catalogue ID/URL is checked again inside the serialized write, preventing a late choice from changing a newly replaced association. Re-confirming the same native catalogue preserves manual mappings and the selected group. Failed bound catalogues retain their work row, error and retry/unlink actions. Association edits use the same persisted undo mechanism as watch-state edits. |
+| ANIME-06 · Playback and continuation | One application-owned player session, shared control UI, real elapsed/duration/buffer values and explicit unknowns. Android uses Media3; desktop/iOS use the selected native engine adapter. Source change preserves the old record but requests a choice before reusing seconds from a different asset/edition. No cross-source segment splicing or guessed timeline equivalence. Pause intent and buffering are distinct. Fullscreen resizes one retained native surface, uses the existing ReaderWindow and fades shared controls while keeping failure recovery visible. Desktop fullscreen fills app content; it does not change OS window placement. |
+| ANIME-07 · Progress ownership | Canonical episode, asset, source, position, duration and timestamp are stored locally. Checkpoints are gated by episode/asset/player generation and per-subject playback epoch. Ended events mark completion, once per session; UI disposal does not own persistence. Library writes publish atomically, read failure preserves the original file, and failed writes cannot acknowledge saved progress. |
+| ANIME-08 · Multiple tracking accounts | Bangumi and AniList use explicit user-supplied access tokens kept in platform secret storage, verified owner identities and provider-scoped routes. Anonymous browsing/playback remains independent. AniList first-time work binding requires an explicit remote subject ID; no same-name automatic association. Account changes invalidate pending reviews. |
+| ANIME-09 · Visible differences and explicit apply | Review a work's actual local/remote tracking status and MAIN completed episodes as separate fields. Stage local/remote selection independently; completed-episode union is an explicit additional choice. No timestamp default winner. Reading failures are unknown, not missing membership. Applying locally and publishing remotely are distinct visible actions. Unsupported platform values fail before mutation. |
+| ANIME-10 · Conflict guards and undo | Local semantic revision guards every reviewed apply; normal position checkpoints are separate. A remote write rereads the account and canonical remote revision, then verifies the result. The upstream services do not provide server-side conditional mutation, so this is not advertised as remote transactional CAS. Partial/uncertain writes require a fresh review. Persist one guarded local undo record; do not overwrite later edits or silently reverse remote writes. |
+| ANIME-11 · Routing and owned storage | Source requests and playback use frozen route identities. Native backends must not bypass the selected route for manifests, media segments, keys or subtitle resources. Cache identity retains source/edition/revision/session and exact request identity. Android compressed-stream cache joins the existing shared disk budget and storage review through its native owner; reviewed explicit cleanup protects active or changed owners, and the coordinator never directly removes the player's journal files. |
+| ANIME-12 · Delivery evidence | Cloud GitHub reads and in-memory edits only. Preserve the current no-test/no-local-build/no-probe boundary; publish one complete expected-head main batch and confirm ordinary CI activation. Source/API review, CI trigger, build success, playback success and installed UI acceptance remain separate facts. Current device playback, availability, performance, motion and visual acceptance remain unverified. |
+
+### UI/UX design decisions and reuse
+
+The core journey is discovery/search → work detail → source preview → confirm season/line → select episode → watch → return/continue → review tracking differences. The shared navigation and compact anime header retain the existing glass/motion family; content stays clear and content-led. The source workspace discloses candidate search, bound catalogues and per-episode correction in that order. Tracking comparison is a separate context, so a playback-line mismatch cannot masquerade as a cloud-progress conflict.
+
+The implementation reuses the repository's actual MotionTabs, press buttons, sliders, retained panels/popovers, title header, source-mark and search foundations. It does not introduce an alternate component system or assert that generic Material defaults satisfy the user's UI preference. Sources are adapted from the existing project components and the references already documented below; no invented screenshot stands in for an installed UI.
+
+| UI check | Adopted decision / current evidence |
+| --- | --- |
+| UIX-01 · Main task | Watching and continuing a selected episode are primary; source/account maintenance is disclosed. Source-level implementation; installed journey pending. |
+| UIX-02 · Information architecture | Discovery/watch list → detail/episodes → playback. Mapping and tracking review retain their owning work. |
+| UIX-03 · Layout and density | Content-led metadata height, compact episode rows/grid, real covers, no equal-weight dashboard of technical cards. |
+| UIX-04 · Spatial continuity | Existing retained navigation/panel motion and in-place source review; explicit Back/close returns to the owning work. |
+| UIX-05 · Type and color | Existing theme/type roles, neutral surfaces and restrained semantic emphasis; no new saturated accent family. |
+| UIX-06 · Components | Reuse checked-in glass/motion/control implementations, with at least 44dp input targets and explicit content descriptions. |
+| UIX-07 · Interaction | Stage differences without writing, apply once, preserve focus/context, expose undo when its revision is still valid. |
+| UIX-08 · State/recovery | Distinct loading, empty, provider error, unsupported stream, expired URL, stale review and failed persistence. Controls remain available on playback failure. |
+| UIX-09 · Real content | API/source data and native media observations; no seed watch history, fake counters or inferred successful playback. |
+| UIX-10 · Adaptation/acceptance | Shared Compose UI respects the current adaptive shell. Device sizing, touch/keyboard, accessibility behavior and actual glass/motion quality await real artifact feedback. |
+
+### Research-to-implementation boundary
+
+- Adopt current provider contracts from KazumiRules (MIT) and the cited AGE adapter, preserving exact source identity; the installed rules do not establish present availability.
+- Adapt Bangumi's actual episode collections API and AniList's GraphQL model; preserve their different expressive power instead of flattening both to a guessed episode count.
+- Combine an app-owned session controller with native playback engines and existing routed networking/cache ownership. Do not reuse the wallpaper MediaPlayer as the full player.
+- Retain established manga comparison safeguards while giving anime its own work/season/episode mapping, per-field review, local-only apply and reversible association edits.
+- Offline downloads, unsupported native container/subtitle combinations, dynamic web verification, optional licensed danmaku integration and advanced casting are not claimed merely because the player/adapter exists. Record concrete implemented support and remaining limitations in this batch's handoff.
+
 ## Reader work and cache workspace · 2026-11-16 (READING-WORK-01–05)
 
 User request in this conversation: “我还希望显示器每项工作的线程数以及状态才更好吧还有内存缓存磁盘缓存的状态以及优化下 uiux 吧相关的才对吧”, following “没太懂里面的各种数据图标” and inspected screenshot1000121890. Exact message IDs are unavailable. The old disclosure places five unlabeled stage totals, three page-stage marks and two residency marks at equal weight; explaining it in chat does not repair the reading UI. The authorized scope is this reader's work/cache presentation and minimal missing real observations, preserving the completed prefetch recovery and latest manual authority/source-check work.

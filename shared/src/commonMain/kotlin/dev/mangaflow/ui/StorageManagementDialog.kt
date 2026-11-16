@@ -236,13 +236,14 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                                     if (paneReview.legacy) StorageLine("旧版图片缓存", "无可靠作品归属，空闲时清理", storageBytes(paneSnapshot?.coilUnclassifiedBytes ?: 0L))
                                     if (paneReview.data) StorageLine("资料与列表", "保留离线所需目录", storageBytes((paneSnapshot?.auxiliaryBytes ?: 0L) +
                                         (paneSnapshot?.catalogReclaimableBytes ?: 0L)))
-                                    Text("当前阅读、使用中的图片、下载断点与离线资料会保留。离线章节和模型由各自入口管理。",
+                                    Text("当前阅读、播放缓冲、使用中的图片、下载断点与离线资料会保留。离线章节和模型由各自入口管理。",
                                         style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                 }
                             }
                         } else if (paneArea == null) {
                             items(CacheArea.entries, key = { it.name }) { kind ->
                                 StorageNavigationRow(kind.label, when (kind) {
+                                    CacheArea.ANIME -> "播放片段 · 播放中保留"
                                     CacheArea.READING -> "原图 · 脚本与解密图片"
                                     CacheArea.ARTWORK -> "封面 · 用户头像"
                                     CacheArea.DATA -> "推荐 · 榜单 · 目录 · 评分与评论"
@@ -272,6 +273,12 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             }
                         } else if (paneArea == CacheArea.DATA) {
                             item("data") { StorageLine("资料与列表", "离线目录受保护", storageBytes(paneSnapshot?.areaBytes(CacheArea.DATA) ?: 0L)) }
+                        } else if (paneArea == CacheArea.ANIME) {
+                            item("anime-buffer") {
+                                StorageLine("播放缓存",
+                                    if (paneItems.any { it.protected }) "使用中或播放器尚未接管，暂不清理" else "可重新获取，不影响追番与续播记录",
+                                    storageBytes(paneSnapshot?.areaBytes(CacheArea.ANIME) ?: 0L))
+                            }
                         } else if (paneBook == null) {
                             val groups = paneItems.groupBy { it.resource.mangaId.ifBlank { UNCLASSIFIED } }.entries.sortedByDescending { it.value.sumOf { row -> row.bytes } }
                             if (groups.isEmpty()) item("empty") { StorageEmpty(loading) }
@@ -386,6 +393,7 @@ private fun StorageEmpty(loading: Boolean) { Text(if (loading) "正在统计…"
     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
 
 private fun areaIcon(area: CacheArea) = when (area) {
+    CacheArea.ANIME -> Icons.Outlined.PlayCircleOutline
     CacheArea.READING -> Icons.Outlined.Image
     CacheArea.ARTWORK -> Icons.Outlined.AccountCircle
     CacheArea.DATA -> Icons.Outlined.Storage

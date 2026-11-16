@@ -10,6 +10,8 @@ plugins {
 
 // Ktor 3.6.1 uses OkHttp 5.5.1. Align the legacy JM cookie adapter with that core.
 val okHttpVersion = "5.5.1"
+val media3Version = "1.11.1"
+val mediampVersion = "0.5.1"
 
 // Keep Java/Kotlin APIs in the base APK; native engines are signed optional assets.
 val inferenceRuntimeAars = configurations.create("inferenceRuntimeAars") {
@@ -124,6 +126,9 @@ kotlin {
         desktopMain.kotlin.srcDir("src/jvmMain/kotlin")
         desktopMain.dependsOn(nonAndroidMain)
         iosMain.get().dependsOn(nonAndroidMain)
+        nonAndroidMain.dependencies {
+            implementation("org.openani.mediamp:mediamp-api:$mediampVersion")
+        }
         commonMain.dependencies {
             implementation("io.github.dokar3:quickjs-kt:1.0.18")
             implementation("io.github.alexzhirkevich:qrose:1.3.1")
@@ -156,6 +161,10 @@ kotlin {
             api("org.jetbrains.compose.material3:material3:1.9.0")
         }
         androidMain.dependencies {
+            listOf("exoplayer", "exoplayer-hls", "exoplayer-dash", "datasource-okhttp",
+                "database", "session", "ui", "ui-compose").forEach { module ->
+                implementation("androidx.media3:media3-$module:$media3Version")
+            }
             implementation(project.dependencies.platform("com.squareup.okhttp3:okhttp-bom:$okHttpVersion"))
             implementation("androidx.core:core-ktx:1.16.0")
             implementation("androidx.activity:activity-compose:1.10.1")
@@ -185,6 +194,7 @@ kotlin {
             implementation(files(optionalOnnxApi.flatMap { it.archiveFile }))
         }
         desktopMain.dependencies {
+            implementation("org.openani.mediamp:mediamp-mpv:$mediampVersion")
             implementation(project.dependencies.platform("com.squareup.okhttp3:okhttp-bom:$okHttpVersion"))
             implementation(compose.desktop.currentOs)
             implementation("org.update4j:update4j:1.5.9")
@@ -197,6 +207,14 @@ kotlin {
             // JavaFX's native classifiers follow the host used by jpackage.
             val osName = System.getProperty("os.name").lowercase()
             val arm = System.getProperty("os.arch") in setOf("aarch64", "arm64")
+            // Ship only the native runtime for the actual desktop distribution.
+            // The Linux GPL runtime is not included in the Windows/macOS bundle.
+            val mpvPlatform = when {
+                osName.contains("win") -> if (arm) "windows-arm64" else "windows-x64"
+                osName.contains("mac") -> if (arm) "macos-arm64" else "macos-x64"
+                else -> null
+            }
+            mpvPlatform?.let { runtimeOnly("org.openani.mediamp:mediamp-mpv-runtime-$it:$mediampVersion") }
             val javafxPlatform = when {
                 osName.contains("win") -> if (arm) "win-aarch64" else "win"
                 osName.contains("mac") -> if (arm) "mac-aarch64" else "mac"
@@ -206,7 +224,10 @@ kotlin {
                 implementation("org.openjfx:javafx-$module:21.0.9:$javafxPlatform")
             }
         }
-        iosMain.dependencies { implementation("io.ktor:ktor-client-darwin:3.6.1") }
+        iosMain.dependencies {
+            implementation("io.ktor:ktor-client-darwin:3.6.1")
+            implementation("org.openani.mediamp:mediamp-avkit:$mediampVersion")
+        }
     }
 }
 

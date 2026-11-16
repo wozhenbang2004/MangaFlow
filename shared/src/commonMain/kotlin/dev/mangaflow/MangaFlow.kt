@@ -61,7 +61,10 @@ fun MangaFlowHost(
         DisposableEffect(lifecycle, model) {
             val observer = LifecycleEventObserver { _, event ->
                 if (event == Lifecycle.Event.ON_RESUME) model.services.resumePending()
-                if (event == Lifecycle.Event.ON_STOP) model.flushPendingStorage()
+                if (event == Lifecycle.Event.ON_STOP) {
+                    model.flushPendingStorage()
+                    model.services.flushAnimePlayback()
+                }
             }
             lifecycle.addObserver(observer)
             onDispose { lifecycle.removeObserver(observer) }
