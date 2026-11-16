@@ -7,6 +7,9 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.storage.*
+import dev.mangaflow.experience.ContentCacheKind
+import dev.mangaflow.experience.ContentCachePreferences
+import dev.mangaflow.experience.contentCachePreferences
 import dev.mangaflow.storage.readManga
 import dev.mangaflow.storage.toJson
 import kotlinx.coroutines.Dispatchers
@@ -116,6 +119,8 @@ internal fun rankedCandidateRelevant(work: SiteRankedWork, query: String, manga:
 
 /** Anonymous native rankings; the Copy ranking repository and its keys are not used here. */
 class SiteRankingsRepository(context: PlatformContext) {
+    private val cacheContext = context.applicationContext
+    internal fun contentCachePolicy(): ContentCachePreferences = contentCachePreferences(cacheContext)
     private val http = ReviewProviderHttp(SourceHttp())
     private val directory = StorageFile(context.applicationContext.cacheDir, "site-rankings")
     private val links by lazy { preferences(context, "mangaflow_site_ranking_links") }
@@ -315,7 +320,8 @@ class SiteRankingsRepository(context: PlatformContext) {
             return@withContext updated
         }
         val cached = identityLock.withLock {
-            identityCache[work.key]?.takeIf { wallTimeMillis() - it.fetchedAt in 0..300_000L }
+            identityCache[work.key]?.takeIf { wallTimeMillis() - it.fetchedAt in 0L until
+                contentCachePolicy().freshMillis(ContentCacheKind.DETAILS) }
         }
         if (cached != null) return@withContext work.withIdentity(cached)
         // Rankings supply display names, often romanized only. Resolve the same native
@@ -474,13 +480,15 @@ class SiteRankingsRepository(context: PlatformContext) {
 
     suspend fun readCache(selection: SiteRankingSelection): SiteRankingSnapshot? = withContext(Dispatchers.IO) {
         diskLock.withLock {
+            val policy = contentCachePolicy()
+            if (!policy.enabled || !policy.storeOnDisk) return@withLock null
             runCatching {
                 val file = cacheFile(selection)
                 if (!file.isFile || file.length() !in 1..MAX_CACHE_BYTES) return@runCatching null
                 val root = JSONObject(StorageAtomicFile(file).openRead().bufferedReader().use { it.readText() })
                 if (root.optInt("version") != 1 || root.getString("key") != selection.key) return@runCatching null
                 val fetchedAt = root.getLong("fetchedAt")
-                if (wallTimeMillis() - fetchedAt !in -300_000L..604_800_000L) return@runCatching null
+                if (wallTimeMillis() - fetchedAt !in -300_000L..policy.retentionMillis) return@runCatching null
                 val rows = root.getJSONArray("entries")
                 if (rows.length() > 600) return@runCatching null
                 val entries = (0 until rows.length()).map { i ->
@@ -499,7 +507,8 @@ class SiteRankingsRepository(context: PlatformContext) {
                 }
                 require(entries.distinctBy { it.work.key }.size == entries.size)
                 SiteRankingSnapshot(selection, entries, root.getInt("page").also { require(it in 0..199) },
-                    root.getBoolean("hasMore"), fetchedAt)
+                    root.getBoolean("hasMore"), fetchedAt).takeIf {
+                        contentCachePolicy().let { current -> current.enabled && current.storeOnDisk } }
             }.getOrNull()
         }
     }
@@ -507,7 +516,7 @@ class SiteRankingsRepository(context: PlatformContext) {
     suspend fun writeCache(snapshot: SiteRankingSnapshot, epoch: Long) = withContext(Dispatchers.IO) {
         if (snapshot.entries.size > 600) return@withContext
         diskLock.withLock {
-            if (epoch != cacheEpoch) return@withLock
+            if (epoch != cacheEpoch || !contentCachePolicy().let { it.enabled && it.storeOnDisk }) return@withLock
             val rows = JSONArray()
             snapshot.entries.forEach { entry ->
                 val w = entry.work
@@ -526,6 +535,10 @@ class SiteRankingsRepository(context: PlatformContext) {
             val output = file.startWrite()
             try {
                 output.write(bytes)
+                if (!contentCachePolicy().let { it.enabled && it.storeOnDisk }) {
+                    file.failWrite(output)
+                    return@withLock
+                }
                 file.finishWrite(output)
             } catch (failure: Exception) {
                 file.failWrite(output)

@@ -65,6 +65,9 @@ class StorageCacheStore private constructor(context: PlatformContext) {
     private var cachedBytes = 0L
     private var error = false
     private var revision = 0L
+    private var retentionMillis = 0L
+    private var retentionVersion = -1L
+    private var lastMaintenanceTick = 0L
 
     init {
         scope.launch {
@@ -94,6 +97,25 @@ class StorageCacheStore private constructor(context: PlatformContext) {
 
     internal val measuredBytes: Long get() = synchronized(lock) { cachedBytes }
     internal fun cacheWorkFinished() = requestMaintenance()
+    internal fun setRetention(hours: Int, version: Long) {
+        val changed = synchronized(lock) {
+            if (version < retentionVersion) return
+            retentionVersion = version
+            val next = hours.coerceIn(0, 720) * 3_600_000L
+            (next != retentionMillis).also { retentionMillis = next }
+        }
+        if (changed) requestMaintenance()
+    }
+    /** The visible application's existing sampler checks age at most once per minute. */
+    internal fun maintenanceTick() {
+        val due = synchronized(lock) {
+            val now = wallTimeMillis()
+            (retentionMillis > 0L && (now - lastMaintenanceTick !in 0L until 60_000L)).also {
+                if (it) lastMaintenanceTick = now
+            }
+        }
+        if (due) requestMaintenance()
+    }
     internal fun attach(cache: ExperienceDiskCache) { synchronized(lock) { coil = cache }; requestMaintenance() }
     internal fun setBudget(bytes: Long, version: Long) {
         synchronized(lock) {
@@ -352,13 +374,23 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     ready.await()
                     val snapshot = snapshot()
                     val limit = snapshot.budgetBytes
-                    var excess = (snapshot.totalBytes - limit).coerceAtLeast(0L)
+                    val age = synchronized(lock) { retentionMillis }
+                    val now = wallTimeMillis()
+                    val expired = if (age <= 0L) emptyList() else snapshot.items.filterNot { it.protected }.filter { item ->
+                        item.resource.area == CacheArea.READING || item.resource.area == CacheArea.ARTWORK
+                    }.filter { item ->
+                        val last = item.resource.accessedAt.takeIf { it > 0L } ?: item.modifiedAt
+                        last > 0L && now - last >= age
+                    }
+                    if (expired.isNotEmpty()) clear(expired)
+                    val afterExpiry = if (expired.isEmpty()) snapshot else snapshot()
+                    var excess = (afterExpiry.totalBytes - limit).coerceAtLeast(0L)
                     if (excess > 0L) {
-                        val ordered = snapshot.items.filterNot { it.protected }.sortedWith(
+                        val ordered = afterExpiry.items.filterNot { it.protected }.sortedWith(
                             compareBy<StoredCacheItem> { if (!it.resource.used) 0 else 1 }
                                 .thenBy { it.resource.accessedAt.takeIf { at -> at > 0L } ?: it.modifiedAt })
                         val selected = ordered.takeWhile { item -> (excess > 0L).also { excess -= item.bytes } }
-                        clear(selected, clearLegacy = excess > 0L && snapshot.legacyReclaimable)
+                        clear(selected, clearLegacy = excess > 0L && afterExpiry.legacyReclaimable)
                     }
                     ReaderCatalogStore(app).trimToSize((limit / 16).coerceAtMost(32L * MIB), ::protectedCatalog)
                     val current = snapshot()

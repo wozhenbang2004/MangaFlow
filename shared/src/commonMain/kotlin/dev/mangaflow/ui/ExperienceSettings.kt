@@ -111,6 +111,8 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
     val focus = LocalFocusManager.current
     var detail by rememberSaveable { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var cacheTab by rememberSaveable { mutableStateOf("images") }
+    var cacheKind by rememberSaveable { mutableStateOf(ContentCacheKind.SEARCH) }
     val colors = MaterialTheme.colorScheme
     fun closeEditor() {
         editor.field = null
@@ -252,7 +254,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             budget.standbySources == 0 -> "预热暂停"
             else -> "备用 " + budget.standbySources + " 源"
         }, Icons.Outlined.Layers, expanded == "sources", { toggle("sources") },
-            compact = true, modified = custom.sourceRecovery != null) {
+            compact = true, modified = custom.sourceRecovery != null || custom.standbySources != null || custom.standbyMiB != null || custom.standbyPages != 1 || !custom.standbyMemoryWarmup) {
             SettingsChoices(listOf<Pair<SourceRecoveryMode?, String>>(
                 null to "跟随", SourceRecoveryMode.OFF to "关闭",
                 SourceRecoveryMode.BALANCED to "稳健", SourceRecoveryMode.AGGRESSIVE to "积极"), custom.sourceRecovery) {
@@ -260,13 +262,36 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
             if (custom.sourceRecovery == null) ExperienceBudgetRow("当前", sourceRecoveryLabel(budget.sourceRecovery))
             ExperienceBudgetRow("备用预热", budget.standbySources.toString() + " 源 · " + experienceCacheSize(budget.standbyPrefetchBytes))
+            budget.standbyPauseReason?.let { ExperienceHint(it) }
+            ExperienceNumber("同时备用来源", custom.standbySources,
+                if (budget.sourceRecovery == SourceRecoveryMode.AGGRESSIVE) 2 else 1, 1..4, "源",
+                editor, active && expanded == "sources", effective = budget.standbySources, automaticLabel = "预热模式") {
+                change(custom.copy(standbySources = it))
+            }
+            ExperienceNumber("每源附近预热", custom.standbyPages, 1, 1..4, "页",
+                editor, active && expanded == "sources", effective = budget.standbyPages) { change(custom.copy(standbyPages = it ?: 1)) }
+            ExperienceNumber("备用原图窗口", custom.standbyMiB,
+                (minOf(budget.goal.prefetchBytes / 4L, 12L * EXPERIENCE_MIB) / EXPERIENCE_MIB).toInt(), 1..128, "MB",
+                editor, active && expanded == "sources", effective = (budget.standbyPrefetchBytes / EXPERIENCE_MIB).toInt()) {
+                change(custom.copy(standbyMiB = it))
+            }
+            SettingsToggle("备用小图存入内存", custom.standbyMemoryWarmup, Icons.Outlined.Memory) {
+                change(custom.copy(standbyMemoryWarmup = it))
+            }
+            ExperienceHint(if (custom.standbyMemoryWarmup) "原图 → 磁盘 · 小图 → 内存；受实际解码预算限制"
+                else "原图 → 磁盘；切换时再解码，不预先占用解码内存")
+            SettingsToggle("允许计费或未知网络预热", custom.allowMeteredPrefetch, Icons.Outlined.NetworkCheck) {
+                change(custom.copy(allowMeteredPrefetch = it))
+            }
             if (usage.throttledSources > 0) ExperienceHint("限流 · " + usage.throttledSources + " 源")
             ExperienceTools("sources", "多源与补页", active && expanded == "sources", detail, ::toggleDetail,
-                custom.sourceRecovery != null, onRestore = {
-                    closeEditor(); change(custom.copy(sourceRecovery = null))
+                custom.sourceRecovery != null || custom.standbySources != null || custom.standbyMiB != null || custom.standbyPages != 1 || !custom.standbyMemoryWarmup, onRestore = {
+                    closeEditor(); change(custom.copy(sourceRecovery = null, standbySources = null, standbyMiB = null, standbyPages = 1, standbyMemoryWarmup = true))
                 }) {
                 ExperienceBudgetRow("模式目标", "备用至多 " + budget.goal.standbySources + " 源")
                 ExperienceHint("提前准备已关联的同章备用来源，预取可发现请求和图片错误。章节对齐不代表每一页相同，不会仅按页码替换图片；切换版本保留独立位置。")
+                ExperienceHint("不同来源并行准备，当前位置优先；限流或预算用尽会显示原因。磁盘原图与内存预览遵循“缓存与离线”的独立保留策略。")
+                ExperienceHint("备用窗口最多占总预取预算的一半，给当前来源留出空间。翻页后只释放已退出窗口且结束的任务额度；磁盘旧原图仍按缓存策略回收。")
             }
         }
 
@@ -302,7 +327,11 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
 
         if (expanded == null || expanded == "cache") SettingsDisclosure("缓存与离线", usage.diskBytes?.let { "已用 " + experienceCacheSize(it) } ?: "用量未知",
             Icons.Outlined.Storage, expanded == "cache", { toggle("cache") },
-            compact = true, modified = custom.memoryMiB != null || custom.diskMiB != null) {
+            compact = true, modified = custom.memoryMiB != null || custom.diskMiB != null || custom.contentCache != ContentCachePreferences()) {
+            SettingsChoices(listOf("images" to "图片", "data" to "页面与资料"), cacheTab) {
+                closeEditor(); cacheTab = it
+            }
+            if (cacheTab == "images") {
             ExperienceBudgetRow("解码内存", cacheUsage(usage.memoryBytes, usage.memoryLimit))
             ExperienceNumber("内存缓存上限", custom.memoryMiB, usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, 16..512, "MB",
                 editor, active && expanded == "cache", effective = usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, automaticLabel = "当前可用上限") {
@@ -320,11 +349,72 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
             if (usage.diskResizePending) ExperienceHint("等待在用原图释放后应用容量")
             usage.cacheError?.let { ExperienceHint(it) }
+            ExperienceNumber("解码内存闲置回收", custom.contentCache.memoryIdleMinutes, 0, 0..120, "分钟",
+                editor, active && expanded == "cache") { change(custom.copy(contentCache = custom.contentCache.copy(memoryIdleMinutes = it ?: 0))) }
+            ExperienceNumber("磁盘图片保留", custom.contentCache.imageRetentionHours, 0, 0..720, "小时",
+                editor, active && expanded == "cache") { change(custom.copy(contentCache = custom.contentCache.copy(imageRetentionHours = it ?: 0))) }
+            ExperienceHint("0＝只按空间与最近使用淘汰。闲置回收只释放缓存引用；当前显示图像仍可持有内存。磁盘保留从最近访问起算，在前台约每分钟检查，并始终保护正在阅读、传输和离线文件。")
+            } else {
+                val cache = custom.contentCache
+                SettingsChoices(listOf(ContentCacheStorage.MEMORY_AND_DISK to "内存＋磁盘",
+                    ContentCacheStorage.MEMORY_ONLY to "仅内存", ContentCacheStorage.DISABLED to "关闭"), cache.storage) {
+                    closeEditor(); change(custom.copy(contentCache = cache.copy(storage = it)))
+                }
+                SettingsToggle("打开页面即更新", cache.refreshOnOpen, Icons.Outlined.Refresh) {
+                    change(custom.copy(contentCache = cache.copy(refreshOnOpen = it)))
+                }
+                SettingsChoices(listOf(ContentCacheKind.SEARCH to "搜索", ContentCacheKind.DISCOVERY to "发现",
+                    ContentCacheKind.RANKING to "榜单", ContentCacheKind.DETAILS to "目录"),
+                    cacheKind) {
+                    closeEditor(); cacheKind = it
+                }
+                SettingsChoices(listOf(ContentCacheKind.PAGE_MANIFEST to "图址", ContentCacheKind.METRICS to "评分",
+                    ContentCacheKind.POPULARITY to "热度", ContentCacheKind.COMMENTS to "评论"),
+                    cacheKind) {
+                    closeEditor(); cacheKind = it
+                }
+                val minutes = when (cacheKind) {
+                    ContentCacheKind.SEARCH -> cache.searchMinutes; ContentCacheKind.DISCOVERY -> cache.discoveryMinutes
+                    ContentCacheKind.RANKING -> cache.rankingMinutes; ContentCacheKind.DETAILS -> cache.detailMinutes
+                    ContentCacheKind.PAGE_MANIFEST -> cache.manifestMinutes; ContentCacheKind.METRICS -> cache.scoreMinutes
+                    ContentCacheKind.POPULARITY -> cache.popularityMinutes; ContentCacheKind.COMMENTS -> cache.commentMinutes
+                }
+                val defaultMinutes = (ContentCachePreferences().freshMillis(cacheKind) / 60_000L).toInt()
+                ExperienceNumber(if (cacheKind == ContentCacheKind.POPULARITY) "热度资料时效上限" else "重新请求间隔",
+                    minutes, defaultMinutes, 0..10_080, "分钟", editor, active && expanded == "cache") { value ->
+                    val next = value ?: defaultMinutes
+                    change(custom.copy(contentCache = when (cacheKind) {
+                        ContentCacheKind.SEARCH -> cache.copy(searchMinutes = next); ContentCacheKind.DISCOVERY -> cache.copy(discoveryMinutes = next)
+                        ContentCacheKind.RANKING -> cache.copy(rankingMinutes = next); ContentCacheKind.DETAILS -> cache.copy(detailMinutes = next)
+                        ContentCacheKind.PAGE_MANIFEST -> cache.copy(manifestMinutes = next); ContentCacheKind.METRICS -> cache.copy(scoreMinutes = next)
+                        ContentCacheKind.POPULARITY -> cache.copy(popularityMinutes = next); ContentCacheKind.COMMENTS -> cache.copy(commentMinutes = next)
+                    }))
+                }
+                val effectiveMinutes = cache.freshMillis(cacheKind) / 60_000L
+                ExperienceBudgetRow("当前更新规则", if (effectiveMinutes == 0L) "每次请求更新" else "访问时超过 $effectiveMinutes 分钟再更新")
+                if (cacheKind == ContentCacheKind.POPULARITY) ExperienceHint("热度随列表与详情返回，此上限同时约束这些资料的复用时间；不为每张卡单独请求热度。")
+                else if (effectiveMinutes < minutes && cache.enabled && !cache.refreshOnOpen)
+                    ExperienceHint("当前同时受热度资料时效上限约束。")
+                ExperienceNumber("失败结果重试间隔", cache.failureMinutes, 1, 0..60, "分钟", editor, active && expanded == "cache") {
+                    change(custom.copy(contentCache = cache.copy(failureMinutes = it ?: 1)))
+                }
+                ExperienceNumber("快照最长保留", cache.retentionHours, 168, 1..720, "小时", editor, active && expanded == "cache") {
+                    change(custom.copy(contentCache = cache.copy(retentionHours = it ?: 168)))
+                }
+                ExperienceNumber("列表快照上限", cache.snapshotMemoryEntries, 24, 1..64, "份", editor, active && expanded == "cache") {
+                    change(custom.copy(contentCache = cache.copy(snapshotMemoryEntries = it ?: 24)))
+                }
+                ExperienceNumber("列表磁盘上限", cache.snapshotDiskMiB, 8, 1..128, "MB", editor, active && expanded == "cache") {
+                    change(custom.copy(contentCache = cache.copy(snapshotDiskMiB = it ?: 8)))
+                }
+                ExperienceHint("0 分钟＝不复用已完成结果。同次正在进行的请求仍合并。开启缓存时，可先显示旧快照再更新；更新失败保留旧内容并显示原因。关闭后停止复用页面资料；旧文件可在缓存管理中清理。历史、收藏和离线章节单独保存。")
+            }
             ExperienceTools("cache", "缓存与离线", active && expanded == "cache", detail, ::toggleDetail,
-                custom.memoryMiB != null || custom.diskMiB != null, onRestore = {
-                    closeEditor(); change(custom.copy(memoryMiB = null, diskMiB = null))
+                custom.memoryMiB != null || custom.diskMiB != null || custom.contentCache != ContentCachePreferences(), onRestore = {
+                    closeEditor(); change(custom.copy(memoryMiB = null, diskMiB = null, contentCache = ContentCachePreferences()))
                 }) {
                 ExperienceHint("用量 / 上限；— 表示尚未取得。内存缓存只包含可复用的解码图像，上限受可用资源保护。磁盘缓存可自动回收，离线章节独立保存；可回收内容在缓存管理中清理。")
+                ExperienceHint("预读离开窗口会取消未完成任务，完成的图片按内存闲置、磁盘保留与总空间规则回收。列表另受每份600条、总内存2400条等结构上限保护；资料仓库也有有限条目上限，防止无界增长。")
             }
         }
 
@@ -332,7 +422,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             null -> "跟随目标"; RefreshPreference.SYSTEM -> "跟随系统"; RefreshPreference.INTERACTION -> "交互高刷"
             RefreshPreference.MANUAL -> custom.refreshHz?.let { it.toString() + " Hz 请求" } ?: "指定刷新率"
         }, Icons.Outlined.Speed, expanded == "display", { toggle("display") },
-            compact = true, modified = custom.refresh != null || custom.refreshHz != null) {
+            compact = true, modified = custom.refresh != null || custom.refreshHz != null || custom.readerStatusPlacement != ReaderStatusPlacement.BOTTOM) {
+            Text("阅读状态栏", style = MaterialTheme.typography.bodyMedium)
+            SettingsChoices(listOf(ReaderStatusPlacement.TOP to "顶部", ReaderStatusPlacement.BOTTOM to "底部",
+                ReaderStatusPlacement.HIDDEN to "隐藏"), custom.readerStatusPlacement) { change(custom.copy(readerStatusPlacement = it)) }
             val manualRates = if (platformKind == PlatformKind.ANDROID) usage.resources.supportedRefreshRates else emptyList()
             val choices = listOf<Pair<RefreshPreference?, String>>(
                 null to "自动", RefreshPreference.SYSTEM to "系统", RefreshPreference.INTERACTION to "交互") +
@@ -352,8 +445,8 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             ExperienceBudgetRow("当前刷新请求", budget.refreshHz?.let { it.toString() + " Hz" }
                 ?: if (budget.preferHighRefresh) "优先高刷" else "跟随系统")
             ExperienceTools("display", "显示与交互", active && expanded == "display", detail, ::toggleDetail,
-                custom.refresh != null || custom.refreshHz != null, onRestore = {
-                    closeEditor(); change(custom.copy(refresh = null, refreshHz = null))
+                custom.refresh != null || custom.refreshHz != null || custom.readerStatusPlacement != ReaderStatusPlacement.BOTTOM, onRestore = {
+                    closeEditor(); change(custom.copy(refresh = null, refreshHz = null, readerStatusPlacement = ReaderStatusPlacement.BOTTOM))
                 }) {
                 ExperienceHint(if (platformKind == PlatformKind.ANDROID)
                     "交互结束后释放高刷请求；系统温度、省电和显示能力决定最终刷新率。"
@@ -473,8 +566,8 @@ private fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range:
                 }, enabled = active, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                     modifier = Modifier.widthIn(max = maxWidth).heightIn(min = 44.dp).semantics(mergeDescendants = true) {
                         contentDescription = title + "，" + (selected?.toString()?.plus(" " + unit) ?: "自动值尚未知") +
-                            (if (value == null) "，跟随" + automaticLabel else "，手动上限") +
-                            (effective?.let { "，当前上限 " + it + " " + unit } ?: "，当前上限尚未知") +
+                            (if (value == null) "，跟随" + automaticLabel else "，手动值") +
+                            (effective?.let { "，当前有效值 " + it + " " + unit } ?: "") +
                             (if (editing) "，点击取消未应用的编辑" else "，点击编辑")
                     }) {
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp),

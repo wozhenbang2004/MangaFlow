@@ -106,6 +106,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             memoryMiB = value.memoryMiB?.coerceIn(16, 512),
             diskMiB = value.diskMiB?.coerceIn(32, 8192), refreshHz = value.refreshHz?.coerceIn(30, 360),
             decodedPrefetchPages = value.decodedPrefetchPages?.coerceIn(0, 8),
+            standbySources = value.standbySources?.coerceIn(1, 4), standbyPages = value.standbyPages.coerceIn(1, 4),
+            standbyMiB = value.standbyMiB?.coerceIn(1, 128),
+            contentCache = value.contentCache.bounded(),
         )
         if (next == mutableOverrides.value) return
         // One typed, backup-compatible preference makes a restore/change atomic.
@@ -234,6 +237,8 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             val memory = caches.first
             val disk = caches.second
             try {
+                memory?.trimExpired()
+                dev.mangaflow.storage.StorageCacheStore.get(app).maintenanceTick()
                 val snapshot = listOf(memory?.size, memory?.maxSize, disk?.size, disk?.maxSize)
                 val pending = disk?.resizePending == true
                 val error = disk?.resizeError
@@ -756,12 +761,25 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             .coerceAtMost(8L).toInt()
         decodedPages = minOf(decodedPages, ahead, warmPageLimit)
         val recovery = o.sourceRecovery ?: goal.sourceRecovery
-        val standby = if (prefetchBytes > 0L && !warm && !power && !cpuBusy && !lowRam &&
-            (resources.metered == false || o.allowMeteredPrefetch)) when (recovery) {
-            SourceRecoveryMode.OFF -> 0
-            SourceRecoveryMode.BALANCED -> 1
-            SourceRecoveryMode.AGGRESSIVE -> 2
-        } else 0
+        val standbyPause = when {
+            recovery == SourceRecoveryMode.OFF -> "备用预热已关闭，可在此选择稳健或积极"
+            !foreground -> "应用不在前台，返回阅读后恢复"
+            resources.networkAvailable == false -> "网络未连接，联网后自动恢复"
+            resources.metered == null && !o.allowMeteredPrefetch -> "网络计费状态未知，确认非计费网络或允许计费预热后恢复"
+            resources.metered == true && !o.allowMeteredPrefetch -> "计费网络受限，切换网络或允许计费预热后恢复"
+            o.prefetchMode == PrefetchMode.OFF -> "阅读预取已关闭，开启后恢复备用准备"
+            diskLow -> "磁盘空间不足，释放空间后恢复"
+            severe -> "内存或温度保护，资源恢复后自动继续"
+            warm -> "设备温度升高，温度恢复后自动继续"
+            power -> "省电保护，恢复电量或退出省电后继续"
+            cpuBusy -> "处理器繁忙，负载恢复后自动继续"
+            lowRam -> "低内存设备暂缓额外来源，当前源继续阅读"
+            prefetchBytes <= 0L -> "没有可用预取预算，恢复窗口或空间后继续"
+            else -> null
+        }
+        val requestedStandbys = o.standbySources ?: if (recovery == SourceRecoveryMode.AGGRESSIVE) 2 else 1
+        val standby = if (standbyPause == null) minOf(requestedStandbys, networkCap,
+            o.prefetchRequests ?: goal.prefetchRequests, 4) else 0
         val browseWarmup = o.browseWarmup && goal.browseWarmup && foreground && readerUsers == 0 &&
             prefetchBytes > 0L && !warm && !power && !cpuBusy && !lowRam &&
             (resources.metered == false || o.allowMeteredPrefetch)
@@ -806,6 +824,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
             memoryCacheBytes = o.memoryMiB?.toLong()?.times(EXPERIENCE_MIB),
             refreshHz = requestedHz, protections = protections, foreground = foreground,
             decodedPrefetchPages = decodedPages, standbySources = standby,
+            standbyPages = o.standbyPages, standbyMemoryWarmup = o.standbyMemoryWarmup && decodedPages > 0,
+            standbyPauseReason = standbyPause,
+            standbyBytes = o.standbyMiB?.toLong()?.times(EXPERIENCE_MIB),
             browseWarmup = browseWarmup, sourceRecovery = recovery,
             sourceHedgeDelayMillis = when (recovery) {
                 SourceRecoveryMode.OFF -> goal.sourceHedgeDelayMillis
@@ -874,9 +895,12 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         revision.value++
         val memory = memoryCache
         val version = ++cacheRevision
+        val retention = mutableOverrides.value.contentCache
         scope.launch {
-            memory?.applyBudget(next.memoryCacheFraction, next.memoryCacheBytes, version)
-            dev.mangaflow.storage.StorageCacheStore.get(app).setBudget(next.diskCacheBytes, version)
+            memory?.applyBudget(next.memoryCacheFraction, next.memoryCacheBytes, version, retention.memoryIdleMinutes)
+            val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
+            storage.setBudget(next.diskCacheBytes, version)
+            storage.setRetention(retention.imageRetentionHours, version)
         }
     }
 

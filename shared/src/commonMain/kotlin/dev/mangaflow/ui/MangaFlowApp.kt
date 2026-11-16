@@ -655,7 +655,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     onRetry = browseActions::retryBrowse, onMore = browseActions::loadMore,
                     onOpen = { manga -> selectedCover = null; dismiss(); model.openManga(manga) },
                     onTarget = { browseActions.setSearchTarget(SearchTarget.TAG) }, onTag = browseActions::toggleSearchTag,
-                    onRetryTags = browseActions::retrySearchTags, tagsOnly = true, onTagQuery = browseActions::setQuery)
+                    onRetryTags = browseActions::retrySearchTags, tagsOnly = true, onTagQuery = browseActions::setQuery,
+                    backdrop = drawerBackdrop)
             }
         }
         }
@@ -1399,7 +1400,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         if (rankingExpanded) RankingControls(displayedDiscovery,
                                             onPeriod = { browseActions.selectDiscovery(DiscoveryMode.RANKING, period = it) },
                                             onAudience = { browseActions.selectDiscovery(DiscoveryMode.RANKING, audience = it) },
-                                            onRefresh = browseActions::refresh)
+                                            onRefresh = browseActions::refresh, backdrop = searchBackdrop,
+                                            active = rootActive && rankingExpanded)
                                     },
                                     modifier = Modifier.align(Alignment.TopCenter)
                                         .onSizeChanged { chromeHeightPx = it.height }
@@ -1441,7 +1443,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                             RankingControls(if (rankingExpanded) displayedDiscovery else retainedRankingState,
                                                 onPeriod = { browseActions.selectDiscovery(DiscoveryMode.RANKING, period = it) },
                                                 onAudience = { browseActions.selectDiscovery(DiscoveryMode.RANKING, audience = it) },
-                                                onRefresh = browseActions::refresh)
+                                                onRefresh = browseActions::refresh, backdrop = searchBackdrop,
+                                                active = rootActive && chromeReady && rankingExpanded)
                                         }
                                     }) {
                                     BrowseTabs(discoveryModes.indexOf(browse.mode).coerceAtLeast(0), discoveryModes.map { if (restrictedMode) "发现" else it.label },

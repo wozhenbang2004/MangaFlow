@@ -1,6 +1,8 @@
 package dev.mangaflow.data
 
 import dev.mangaflow.platform.*
+import dev.mangaflow.experience.ContentCacheKind
+import dev.mangaflow.experience.ContentCachePreferences
 
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -38,7 +40,11 @@ data class CopyMangaConfig(
 class CopyMangaRepository(
     private val config: CopyMangaConfig = CopyMangaConfig(),
     private val identityProvider: () -> CopyAnonymousIdentity = { CopyAnonymousIdentity.create() },
+    private val cachePreferences: () -> ContentCachePreferences = { ContentCachePreferences() },
 ) : MangaRepository {
+    internal fun contentCachePolicy(): ContentCachePreferences = cachePreferences()
+    private fun freshNanos(kind: ContentCacheKind): Long =
+        cachePreferences().freshMillis(kind).coerceIn(0L, Long.MAX_VALUE / 1_000_000L) * 1_000_000L
     private val webOrigin = checkedOrigin(config.websiteOrigin)
     private val apiOrigin = checkedOrigin(config.apiOrigin)
     private val api = SourceHttp(sourceId = "copy")
@@ -227,7 +233,8 @@ class CopyMangaRepository(
     fun cachedDetail(mangaId: String): MangaDetail? {
         segment(mangaId)
         return synchronized(copyMangaRepositoryStateLock) {
-            catalogCache[mangaId]?.takeIf { wallTimeMillis() - it.fetchedAt in 0L until 10 * 60_000L }
+            catalogCache[mangaId]?.takeIf { wallTimeMillis() - it.fetchedAt in 0L until
+                cachePreferences().freshMillis(ContentCacheKind.DETAILS) }
                 ?.detail
         }
     }
@@ -248,7 +255,8 @@ class CopyMangaRepository(
     suspend fun comicUuid(mangaId: String): String = withContext(Dispatchers.IO) {
         segment(mangaId)
         val cached = synchronized(copyMangaRepositoryStateLock) { catalogCache[mangaId] }
-        if (cached?.comicUuid != null && wallTimeMillis() - cached.fetchedAt < 10 * 60_000) {
+        if (cached?.comicUuid != null && wallTimeMillis() - cached.fetchedAt in 0L until
+                cachePreferences().freshMillis(ContentCacheKind.DETAILS)) {
             return@withContext cached.comicUuid
         }
         // Account operations need only this public identity. A broken/empty
@@ -262,7 +270,7 @@ class CopyMangaRepository(
         return synchronized(copyMangaRepositoryStateLock) {
             val now = monotonicTimeMillis() * 1_000_000L
             pageCache[PageKey(mangaId, id)]
-                ?.takeIf { now - it.fetchedAt in 0L until PAGE_CACHE_NANOS }?.pages
+                ?.takeIf { now - it.fetchedAt in 0L until freshNanos(ContentCacheKind.PAGE_MANIFEST) }?.pages
         }
     }
 
@@ -273,7 +281,8 @@ class CopyMangaRepository(
         val key = PageKey(mangaId, id)
         val request = synchronized(copyMangaRepositoryStateLock) {
             val now = (monotonicTimeMillis() * 1_000_000L)
-            pageCache.entries.removeAll { now - it.value.fetchedAt >= PAGE_CACHE_NANOS }
+            val ttl = freshNanos(ContentCacheKind.PAGE_MANIFEST)
+            pageCache.entries.removeAll { now - it.value.fetchedAt !in 0L until ttl }
             if (forceRefresh) pageCache.remove(key)
             else pageCache.remove(key)?.let { cached ->
                 pageCache[key] = cached
@@ -331,7 +340,8 @@ class CopyMangaRepository(
         val key = PageKey(mangaId, uuid(chapterId, "章节"))
         synchronized(copyMangaRepositoryStateLock) {
             val now = (monotonicTimeMillis() * 1_000_000L)
-            coverCache.entries.removeAll { now - it.value.fetchedAt >= PAGE_CACHE_NANOS }
+            val ttl = freshNanos(ContentCacheKind.PAGE_MANIFEST)
+            coverCache.entries.removeAll { now - it.value.fetchedAt !in 0L until ttl }
             if (forceRefresh) coverCache.remove(key)
             else coverCache.remove(key)?.let { cached ->
                 coverCache[key] = cached
@@ -636,9 +646,6 @@ class CopyMangaRepository(
     }
     private class SharedPages(val result: Deferred<List<Page>>, var readers: Int = 0)
 
-    private companion object {
-        const val PAGE_CACHE_NANOS = 3 * 60_000_000_000L
-    }
 }
 
 private val copyMangaRepositoryStateLock = SynchronizedObject()

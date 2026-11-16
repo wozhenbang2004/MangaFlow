@@ -1,6 +1,7 @@
 package dev.mangaflow.data
 
 import dev.mangaflow.platform.*
+import dev.mangaflow.experience.ContentCacheKind
 
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -175,16 +176,20 @@ class CopyCommunityRepository(
 
     /** Reuse the manga detail's work-comment snapshot before the mixed reader feed refreshes. */
     fun cachedWorkComments(manga: Manga): ReviewPage? {
+        if (!repository.contentCachePolicy().enabled) return null
         if (!validUuid(manga.sourceUuid)) return null
         val subjectId = canonicalUuid(manga.sourceUuid)
-        return synchronized(copyCommunityRepositoryStateLock) { commentCache["work:$subjectId:0"]?.page }
+        return synchronized(copyCommunityRepositoryStateLock) { commentCache["work:$subjectId:0"]
+            ?.takeIf { wallTimeMillis() - it.fetchedAt in 0L..repository.contentCachePolicy().retentionMillis }?.page }
     }
 
     /** Chapter and work snapshots retain different identities, even in a mixed feed. */
     fun cachedChapterComments(chapter: Chapter): ReviewPage? {
+        if (!repository.contentCachePolicy().enabled) return null
         if (!validUuid(chapter.id)) return null
         val chapterId = canonicalUuid(chapter.id)
-        return synchronized(copyCommunityRepositoryStateLock) { commentCache["chapter:$chapterId:0"]?.page }
+        return synchronized(copyCommunityRepositoryStateLock) { commentCache["chapter:$chapterId:0"]
+            ?.takeIf { wallTimeMillis() - it.fetchedAt in 0L..repository.contentCachePolicy().retentionMillis }?.page }
     }
 
     suspend fun chapterComments(
@@ -212,7 +217,8 @@ class CopyCommunityRepository(
         val epoch = commentGeneration
         return commentRequests[(key.hashCode() and Int.MAX_VALUE) % commentRequests.size].withLock {
             if (!forceRefresh) synchronized(copyCommunityRepositoryStateLock) { commentCache[key] }
-                ?.takeIf { wallTimeMillis() - it.fetchedAt in 0L until 3 * 60_000L }
+                ?.takeIf { wallTimeMillis() - it.fetchedAt in 0L until
+                    repository.contentCachePolicy().freshMillis(ContentCacheKind.COMMENTS) }
                 ?.let { return@withLock it.page }
             val page = load()
             currentCoroutineContext().ensureActive()

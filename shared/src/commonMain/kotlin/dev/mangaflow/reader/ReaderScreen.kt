@@ -381,7 +381,9 @@ fun ReaderScreen(
     val currentSourceName = chapter.variants.firstOrNull { it.storageId == chapter.id }?.sourceName
     val sourceSwitchWait = remember(sourceLoading, sourceSwitchName) { ReaderLoadAttempt() }
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
+    var topControlsHeightPx by remember { mutableIntStateOf(0) }
     var bottomControlsHeightPx by remember { mutableIntStateOf(0) }
+    var readerStatusInspecting by remember(chapterId) { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showPanelModels by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) { if (!PanelReadingAvailable) showPanelModels = false }
@@ -454,9 +456,11 @@ fun ReaderScreen(
     val warmSourceStandbys by rememberUpdatedState(onWarmSourceStandbys)
     val prefetchedPageFailed by rememberUpdatedState(onPrefetchPageFailed)
     val cancelSourceStandbys by rememberUpdatedState(onCancelSourceStandbys)
-    val readySourceVariants = remember(sourceStandbys, manga.id, chapter.id) {
-        sourceStandbys.filter { it.workId == manga.id && it.chapterId == chapter.id &&
-            it.phase == ReaderSourceStandbyPhase.READY }.associateBy { it.variantId }
+    val currentSourceStandbys = remember(sourceStandbys, manga.id, chapter.id) {
+        sourceStandbys.filter { it.workId == manga.id && it.chapterId == chapter.id }
+    }
+    val readySourceVariants = remember(currentSourceStandbys) {
+        currentSourceStandbys.filter { it.targetPageIndex != null && it.targetPrepared }.associateBy { it.variantId }
     }
     val standbyActive = readerForeground && !leavingReader && !chapterChangeRequested
     DisposableEffect(sourceIdentity, standbyActive) {
@@ -619,7 +623,7 @@ fun ReaderScreen(
     val clock = rememberReaderClock(active && !leavingReader)
     val readingEligible = active && !leavingReader && !loading && error == null && imageVisible &&
         !panelBlocksReading && !showPanelModels && !showComments && !showSpreadAdjustment && !showPageNavigator &&
-        !showReaderActions && !readerActionsPresent && !sourcePickerBlocking
+        !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !readerStatusInspecting
     RecordReaderActivity(manga, readingEligible, libraryStore, chapterId) { owner, confirmedChapter ->
         if (owner == manga.id && confirmedChapter == chapterId && readingEligible) {
             recentConfirmed = true
@@ -824,9 +828,10 @@ fun ReaderScreen(
     }
 
     LaunchedEffect(controlsVisible, showSettings, showChapters, showSpreadAdjustment, showComments,
-        showPageNavigator, showReaderActions, readerActionsPresent, sourcePickerBlocking, loading, error, imageVisible, progressInteracting, touchExploration, chromeEngaged) {
+        showPageNavigator, showReaderActions, readerActionsPresent, sourcePickerBlocking, readerStatusInspecting,
+        loading, error, imageVisible, progressInteracting, touchExploration, chromeEngaged) {
         if (controlsVisible && !showSettings && !showChapters && !showSpreadAdjustment && !showComments &&
-            !showPageNavigator && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking &&
+            !showPageNavigator && !showReaderActions && !readerActionsPresent && !sourcePickerBlocking && !readerStatusInspecting &&
             !loading && error == null && imageVisible && !progressInteracting && !touchExploration && !chromeEngaged) {
             delay(5000)
             controlsVisible = false
@@ -849,8 +854,8 @@ fun ReaderScreen(
             discussionState.ensureLoaded()
         }
     }
-    LaunchedEffect(atChapterEnd, touchExploration) {
-        if (atChapterEnd && !touchExploration && !chromeEngaged) controlsVisible = false
+    LaunchedEffect(atChapterEnd, touchExploration, chromeEngaged, readerStatusInspecting) {
+        if (atChapterEnd && !touchExploration && !chromeEngaged && !readerStatusInspecting) controlsVisible = false
     }
 
     val keyboard = LocalReaderKeyboard.current
@@ -1088,7 +1093,8 @@ fun ReaderScreen(
 
         if (!localImport && active && !leavingReader && atChapterEnd && !loading && error == null &&
             !showComments && !showSettings && !showChapters && !showSpreadAdjustment &&
-            !showReaderActions && !readerActionsPresent && !showPageNavigator && !sourcePickerBlocking && !progressInteracting) {
+            !showReaderActions && !readerActionsPresent && !showPageNavigator && !sourcePickerBlocking &&
+            !readerStatusInspecting && !progressInteracting) {
             ChapterEndComments(
                 chapterId = chapterId, state = discussionState, backdrop = readerBackdrop,
                 bottomClearance = if (controlsVisible) with(LocalDensity.current) {
@@ -1104,7 +1110,7 @@ fun ReaderScreen(
         }
 
         AnimatedVisibility(
-            controlsVisible, Modifier.align(Alignment.TopCenter),
+            controlsVisible, Modifier.align(Alignment.TopCenter).onSizeChanged { topControlsHeightPx = it.height },
             enter = fadeIn(tween(if (motionEnabled) MangaMotion.Content else 0)) +
                 slideInVertically(tween(if (motionEnabled) MangaMotion.Chrome else 0, easing = MangaMotion.EnterEasing)) { -toolbarTravel },
             exit = fadeOut(tween(if (motionEnabled) MangaMotion.Exit else 0)) +
@@ -1389,6 +1395,24 @@ fun ReaderScreen(
                 }
             }
         }
+
+        ReaderExperienceStatus(
+            visible = readerForeground && !leavingReader && !panelBlocksReading && !showPanelModels &&
+                !showSpreadAdjustment && !showComments && !showPageNavigator && !sourcePickerBlocking &&
+                !chapterChangeRequested && !showReaderActions && !readerActionsPresent,
+            sessionKey = sourceIdentity, store = experience, budget = experienceBudget,
+            standbys = currentSourceStandbys, alternativeCount = alternativeSources.size, backdrop = readerBackdrop,
+            topClearance = with(LocalDensity.current) {
+                (if (controlsVisible) (topControlsHeightPx - readerStatusInsets().getTop(this))
+                    .coerceAtLeast(0).toDp().coerceAtLeast(60.dp) else 0.dp) +
+                    if (sourceLoading || sourceError != null) 64.dp else 0.dp
+            },
+            bottomClearance = maxOf(if (atChapterEnd) 72.dp else 24.dp, with(LocalDensity.current) {
+                if (controlsVisible) (bottomControlsHeightPx - readerNavigationInsets().getBottom(this))
+                    .coerceAtLeast(0).toDp().coerceAtLeast(112.dp) else 0.dp
+            }),
+            onInspectingChange = { readerStatusInspecting = it },
+        )
 
         if (!controlsVisible && pages.isNotEmpty() && preferences.panelEngine == PanelEngine.OFF) Text(
             "$clock · ${pageIndex + 1} / ${pages.size}",

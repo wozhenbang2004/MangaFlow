@@ -2,6 +2,8 @@ package dev.mangaflow
 
 import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.experience.ExperiencePolicyStore
+import dev.mangaflow.experience.ContentCacheKind
+import dev.mangaflow.experience.contentCachePreferences
 import dev.mangaflow.experience.PrefetchByteBudget
 import dev.mangaflow.experience.prefetchOriginalPage
 import dev.mangaflow.data.ReaderSourceStandbyController
@@ -119,6 +121,7 @@ data class BrowseState(
     val page: Int = 0,
     val refreshing: Boolean = false,
     val updatedAt: Long = 0,
+    val fromCache: Boolean = false,
     val sourceMatches: Map<String, List<Manga>> = emptyMap(),
     val sourceChoiceIds: Set<String> = emptySet(),
     val searchSources: Map<String, FederatedSearchSource> = emptyMap(),
@@ -582,9 +585,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 }
                 // Fresh selections need no request. Stale rankings refresh their complete
                 // loaded range atomically, so a saved deep position never sees page zero alone.
-                if (isFresh(snapshot.updatedAt, configured) ||
-                    snapshot.page > 0 && (configured.isSearch ||
-                        configured.mode != DiscoveryMode.RANKING)) return@launch
+                if (isFresh(snapshot.updatedAt, configured) && snapshot.searchSources.values.none { it.error != null }) return@launch
             }
             if (debounce) delay(450)
             if (requestId != browseRequestId) return@launch
@@ -617,7 +618,18 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     fun retryBrowse() {
         val state = _browse.value
         if (state.loading || state.refreshing || state.loadingMore) return
-        if (state.isFederatedSearch && state.searchSources.values.any { it.error != null }) {
+        if (state.isFederatedSearch && state.page > 0 && state.fromCache && state.searchSources.values.any { it.error != null }) {
+            val failedSources = state.searchSources.values.filter { it.error != null }.map { it.sourceId }.toSet()
+            val requestId = ++browseRequestId
+            val generation = browseCache.generation
+            browseJob?.cancel()
+            _browse.update { it.copy(refreshing = true, error = null) }
+            browseJob = viewModelScope.launch {
+                refreshFederatedRange(state, requestId, generation, forceRefresh = true, onlySources = failedSources)
+            }
+            return
+        }
+        if (state.isFederatedSearch && state.failedPage != 0 && state.searchSources.values.any { it.error != null }) {
             val pages = state.searchSources.values.filter { it.error != null }
                 .associate { it.sourceId to (it.failedPage ?: 0) }
             val requestId = ++browseRequestId
@@ -638,6 +650,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private suspend fun loadBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long,
         forceRefresh: Boolean = false) {
         if (state.isFederatedSearch) {
+            if (page == 0 && state.page > 0 && state.items.isNotEmpty()) {
+                refreshFederatedRange(state, requestId, generation, forceRefresh)
+                return
+            }
             loadFederatedBrowse(state, page, requestId, generation, forceRefresh = forceRefresh)
             return
         }
@@ -648,12 +664,14 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     else repository.search(query, state.searchTarget, state.selectedTags, page)
                 val replacement = result.items.toMutableList()
                 var loadedPage = result.nextPage?.minus(1) ?: page
-                if (!state.isSearch && state.mode == DiscoveryMode.RANKING && page == 0 && state.items.isNotEmpty()) {
+                if (page == 0 && state.items.isNotEmpty()) {
                     // Never combine a new first page with old ranking pages. Keep the old list
                     // visible until the previously loaded range (or the new source end) is ready.
                     while (loadedPage < state.page && result.hasMore) {
                         if (requestId != browseRequestId || generation != browseCache.generation) throw CancellationException("Superseded browse")
-                        result = community.browse(state.mode, state.period, state.audience, ++loadedPage)
+                        val nextPage = ++loadedPage
+                        result = if (!state.isSearch) community.browse(state.mode, state.period, state.audience, nextPage)
+                            else repository.search(query, state.searchTarget, state.selectedTags, nextPage)
                         replacement += result.items
                     }
                 }
@@ -667,6 +685,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                             it.totalPopularity ?: it.popularity ?: -1L
                         } else items },
                     loading = false, refreshing = false, loadingMore = false, error = null, failedPage = null,
+                    fromCache = false,
                     hasMore = result.hasMore, page = loadedPage,
                     updatedAt = if (page == 0 || current.updatedAt <= 0) wallTimeMillis() else current.updatedAt,
                 )
@@ -688,13 +707,80 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private fun BrowseSnapshot.restore(selection: BrowseState): BrowseState {
         val incomplete = selection.isFederatedSearch && items.isEmpty() && searchSources.values.any { it.error != null }
         return selection.copy(
-            items = items, page = page, hasMore = hasMore, updatedAt = updatedAt,
+            items = items, page = page, hasMore = hasMore, updatedAt = updatedAt, fromCache = true,
             loading = false, loadingMore = false, refreshing = false,
             error = if (incomplete) "部分来源暂时不可用，可重试；其他来源没有返回匹配作品。" else null,
             failedPage = page.takeIf { incomplete },
             sourceMatches = sourceMatches, sourceNextPages = sourceNextPages, sourceChoiceIds = sourceChoiceIds,
             searchSources = searchSources,
         )
+    }
+
+    /** Revalidate a restored deep result as one range; never splice fresh page zero into old pages. */
+    private suspend fun refreshFederatedRange(state: BrowseState, requestId: Long, generation: Long,
+        forceRefresh: Boolean, onlySources: Set<String>? = null) {
+        fun current() = requestId == browseRequestId && generation == browseCache.generation &&
+            _browse.value.cacheKey == state.cacheKey
+        try {
+            val hits = linkedMapOf<Pair<String, String>, Manga>()
+            val sources = state.searchSources.filterKeys { onlySources != null && it !in onlySources }.toMutableMap()
+            val failed = mutableSetOf<String>()
+            val queried = mutableSetOf<String>()
+            var requested: Map<String, Int>? = onlySources?.associateWith { 0 }
+            var loadedRound = 0
+            for (round in 0..state.page) {
+                if (!current()) throw CancellationException("Superseded browse")
+                val result = repository.searchAll(state.query.trim(), requested, forceRefresh = forceRefresh)
+                if (!current()) throw CancellationException("Superseded browse")
+                queried += result.sources.keys
+                failed += result.sources.values.filter { it.error != null }.map { it.sourceId }
+                result.hits.forEach { hits[dev.mangaflow.data.federatedMangaIdentity(it)] = it }
+                sources.putAll(result.sources)
+                loadedRound = round
+                requested = result.sources.values.filter { it.error == null && it.hasMore && it.nextPage != null }
+                    .associate { it.sourceId to it.nextPage!! }
+                if (requested.isEmpty()) break
+            }
+            val oldHits = state.sourceMatches.values.flatten().ifEmpty { state.items }
+            val retained = oldHits.filter {
+                val source = dev.mangaflow.data.federatedMangaIdentity(it).first
+                source in failed || source !in queried
+            }
+            // A failed source keeps its previous complete range. Healthy sources replace
+            // their own whole ranges, so one unavailable site cannot freeze every other site.
+            val replacements = hits.values.filter {
+                val source = dev.mangaflow.data.federatedMangaIdentity(it).first
+                source !in failed || retained.none { old -> dev.mangaflow.data.federatedMangaIdentity(old).first == source }
+            }
+            val groups = withContext(Dispatchers.Default) {
+                FederatedSearchGrouper(state.query).group((retained + replacements).distinctBy {
+                    dev.mangaflow.data.federatedMangaIdentity(it)
+                }, state.sourceMatches)
+            }
+            if (!current()) return
+            val next = sources.values.filter { it.error == null && it.hasMore && it.nextPage != null }
+                .associate { it.sourceId to it.nextPage!! }
+            val refreshed = _browse.value.copy(items = groups.map { it.manga },
+                sourceMatches = groups.associate { it.manga.id to it.matches },
+                sourceChoiceIds = groups.filter { it.needsChoice }.map { it.manga.id }.toSet(),
+                searchSources = sources.toMap(), sourceNextPages = next, hasMore = next.isNotEmpty(),
+                page = if (onlySources == null) loadedRound else maxOf(state.page, loadedRound),
+                loading = false, refreshing = false, loadingMore = false,
+                error = if (failed.isEmpty()) null else "部分来源更新失败，保留这些来源的旧列表：" +
+                    sources.values.filter { it.sourceId in failed }.joinToString("；") { it.sourceName + "：" + it.error },
+                failedPage = if (failed.isEmpty()) null else 0, updatedAt = wallTimeMillis(), fromCache = retained.isNotEmpty())
+            _browse.value = refreshed
+            val snapshot = BrowseSnapshot(refreshed.cacheKey, refreshed.items, refreshed.page, refreshed.hasMore,
+                refreshed.updatedAt, refreshed.sourceMatches, refreshed.sourceNextPages,
+                refreshed.sourceChoiceIds, refreshed.searchSources)
+            browseCache.remember(snapshot, generation)
+            browseCache.write(snapshot, generation)
+        } catch (cancel: CancellationException) { throw cancel
+        } catch (failure: Exception) {
+            if (current()) _browse.update { it.copy(loading = false, refreshing = false, loadingMore = false,
+                error = "更新未完成，保留此前列表。" + (failure.message ?: "请重试。"), failedPage = 0,
+                fromCache = it.items.isNotEmpty()) }
+        }
     }
 
     private suspend fun loadFederatedBrowse(state: BrowseState, page: Int, requestId: Long, generation: Long,
@@ -735,6 +821,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                             loading = pending && noHits && current.items.isEmpty(),
                             refreshing = pending && page == 0 && current.items.isNotEmpty(),
                             loadingMore = pending && retain, page = page,
+                            fromCache = if (keepExisting) current.fromCache else false,
                             error = if (failedEmpty)
                                 "部分来源暂时不可用，可重试；其他来源没有返回匹配作品。" else null,
                             failedPage = if (failedEmpty) page else null,
@@ -757,11 +844,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private fun isFresh(updatedAt: Long, state: BrowseState): Boolean {
-        val ttl = when {
-            state.isSearch || state.mode != DiscoveryMode.RANKING -> 15 * 60_000L
-            state.period == RankPeriod.DAY || state.period == RankPeriod.WEEK -> 30 * 60_000L
-            else -> 60 * 60_000L
-        }
+        val ttl = contentCachePreferences(application).freshMillis(when {
+            state.isSearch -> ContentCacheKind.SEARCH
+            state.mode == DiscoveryMode.RANKING -> ContentCacheKind.RANKING
+            else -> ContentCacheKind.DISCOVERY
+        })
         return wallTimeMillis() - updatedAt in 0 until ttl
     }
 
@@ -795,13 +882,13 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     viewModelScope.launch {
                         if (!clearingMetadata && requestId == metricsRequestId &&
                             metricJobs[manga.id] === job && job.isActive) {
-                            publishMetrics(manga.id, metricsRepository.cached(manga.id))
+                            publishMetrics(manga.id, metricsRepository.latestMetrics(manga.id))
                         }
                     }
                 }
                 if (!clearingMetadata && requestId == metricsRequestId &&
                     metricJobs[manga.id] === job && job.isActive) {
-                    publishMetrics(manga.id, metricsRepository.cached(manga.id))
+                    publishMetrics(manga.id, metricsRepository.latestMetrics(manga.id))
                 }
             } catch (cancel: CancellationException) {
                 throw cancel

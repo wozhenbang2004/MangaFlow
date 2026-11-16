@@ -1,6 +1,8 @@
 package dev.mangaflow.data.sources
 
 import dev.mangaflow.platform.*
+import dev.mangaflow.experience.ContentCacheKind
+import dev.mangaflow.experience.ContentCachePreferences
 
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -42,7 +44,11 @@ import com.fleeksoft.ksoup.nodes.Document
  * Public HTTPS pages and chapterimage batches only; no account or HTTP mirror.
  * The bounded string unpacker decodes the page's public data without executing JS.
  */
-class MangaBzBodySource : BodySource {
+class MangaBzBodySource(
+    private val cachePreferences: () -> ContentCachePreferences = { ContentCachePreferences() },
+) : BodySource {
+    private fun freshNanos(kind: ContentCacheKind): Long =
+        cachePreferences().freshMillis(kind).coerceIn(0L, Long.MAX_VALUE / 1_000_000L) * 1_000_000L
     override val info = BodySourceInfo("mangabz", "MangaBZ", "简中", HOME, "$HOME/favicon.ico")
     private val http = SourceHttp(sourceId = info.id)
     private val networkSlots = Semaphore(2)
@@ -95,7 +101,8 @@ class MangaBzBodySource : BodySource {
     private suspend fun loadDetail(id: String, force: Boolean): MangaDetail {
         val cacheKey = id + (currentCoroutineContext()[ChapterDownloadTransport]?.cacheKey?.let { "@download/$it" } ?: "@network/" + DownloadRoutingStore.sourceRevision(info.id))
         if (!force) synchronized(mangaBzBodySourceStateLock) {
-            catalogs[cacheKey]?.takeIf { (monotonicTimeMillis() * 1_000_000L) - it.at in 0L until CATALOG_TTL }?.detail
+            catalogs[cacheKey]?.takeIf { (monotonicTimeMillis() * 1_000_000L) - it.at in 0L until
+                freshNanos(ContentCacheKind.DETAILS) }?.detail
         }?.let { return it }
         val document = document(mangaUrl(id))
         val title = document.selectFirst(".detail-info-title")?.ownText()?.trim().orEmpty()
@@ -154,7 +161,8 @@ class MangaBzBodySource : BodySource {
                 ?: throw SourceException("MangaBZ 没有返回本章页数，未生成不完整的图片清单。", "$HOME/m${ref.chapterId}/")
             val now = (monotonicTimeMillis() * 1_000_000L)
             val cached = synchronized(mangaBzBodySourceStateLock) {
-                imageLists[key]?.takeUnless { forceRefresh || it.urls.size != count || now - it.at !in 0L until IMAGE_TTL }
+                imageLists[key]?.takeUnless { forceRefresh || it.urls.size != count || now - it.at !in 0L until
+                    freshNanos(ContentCacheKind.PAGE_MANIFEST) }
             }
             val images = cached ?: ChapterImages(now, arrayOfNulls(count)).also { rememberImages(key, it) }
             // The upstream endpoint returns 2 images (or 15 when its cache is ready).
@@ -259,8 +267,6 @@ class MangaBzBodySource : BodySource {
         private const val HOME = "https://mangabz.com"
         private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0"
         private const val MAX_PAGES = 1200
-        private const val CATALOG_TTL = 300_000_000_000L
-        private const val IMAGE_TTL = 120_000_000_000L
         private val DIGITS = Regex("[0-9]{1,15}")
         private val MANGA_PATH = Regex("/([0-9]{1,15})bz/?")
         private val CHAPTER_PATH = Regex("/m([0-9]{1,15})/?")

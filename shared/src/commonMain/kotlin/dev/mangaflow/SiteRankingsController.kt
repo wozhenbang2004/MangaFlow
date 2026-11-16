@@ -1,6 +1,7 @@
 package dev.mangaflow
 
 import dev.mangaflow.data.*
+import dev.mangaflow.experience.ContentCacheKind
 import dev.mangaflow.platform.wallTimeMillis
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -99,13 +100,17 @@ class SiteRankingsController(
         selectionChanges++
         restored = true
         val old = mutable.value
-        if (old.entries.isNotEmpty() && old.entries.size <= 600)
+        if (!repository.contentCachePolicy().enabled) snapshots.clear()
+        if (repository.contentCachePolicy().enabled && old.entries.isNotEmpty() && old.entries.size <= 600)
             snapshots[old.selection.key] = old.copy(loading = false, refreshing = false, loadingMore = false, error = null)
         while (snapshots.size > 12) snapshots.remove(snapshots.keys.first())
         selections[selection.site] = selection
         request++
         job?.cancel()
-        mutable.value = snapshots[selection.key] ?: SiteRankingsState(selection)
+        mutable.value = snapshots[selection.key]?.takeIf {
+            val policy = repository.contentCachePolicy()
+            policy.enabled && wallTimeMillis() - it.fetchedAt in 0L..policy.retentionMillis
+        } ?: SiteRankingsState(selection)
         persistSelection(selection)
         if (visible && (mutable.value.entries.isEmpty() || stale(mutable.value))) load()
     }
@@ -116,7 +121,7 @@ class SiteRankingsController(
     }
 
     private fun stale(state: SiteRankingsState): Boolean {
-        val ttl = if (state.selection.kind == SiteRankingKind.TRENDING) 300_000L else 1_800_000L
+        val ttl = repository.contentCachePolicy().freshMillis(ContentCacheKind.RANKING)
         return wallTimeMillis() - state.fetchedAt !in 0 until ttl
     }
 

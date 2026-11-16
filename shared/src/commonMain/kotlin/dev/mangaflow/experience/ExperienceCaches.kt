@@ -3,6 +3,7 @@ package dev.mangaflow.experience
 import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
 import dev.mangaflow.platform.storage.StorageLock
+import dev.mangaflow.platform.monotonicTimeMillis
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,24 +21,45 @@ internal class ExperienceMemoryCache(private val cache: MemoryCache) : MemoryCac
     private val hardLimit = minOf(cache.maxSize, 512L * EXPERIENCE_MIB)
     private var limit = minOf(hardLimit, (total * .18).toLong())
     private var revision = -1L
+    private var idleMillis = 0L
+    private val accessed = mutableMapOf<MemoryCache.Key, Long>()
     override val size: Long get() = cache.size
     override val maxSize: Long get() = synchronized(lock) { limit }
     override val keys: Set<MemoryCache.Key> get() = cache.keys
-    override fun get(key: MemoryCache.Key): MemoryCache.Value? = cache[key]
+    override fun get(key: MemoryCache.Key): MemoryCache.Value? = synchronized(lock) {
+        val now = monotonicTimeMillis()
+        val last = accessed[key]
+        if (idleMillis > 0L && last != null && now - last >= idleMillis) {
+            accessed.remove(key); cache.remove(key); null
+        } else cache[key]?.also { accessed[key] = now }
+    }
     override fun set(key: MemoryCache.Key, value: MemoryCache.Value) = synchronized(lock) {
         cache[key] = value
+        accessed[key] = monotonicTimeMillis()
         cache.trimToSize(limit)
+        accessed.keys.retainAll(cache.keys)
+        Unit
     }
-    override fun remove(key: MemoryCache.Key) = cache.remove(key)
+    override fun remove(key: MemoryCache.Key) = synchronized(lock) { accessed.remove(key); cache.remove(key) }
     override fun trimToSize(size: Long) = synchronized(lock) { cache.trimToSize(minOf(size, limit)) }
-    override fun clear() = cache.clear()
-    fun applyBudget(fraction: Double, manualBytes: Long?, version: Long) = synchronized(lock) {
+    override fun clear() = synchronized(lock) { accessed.clear(); cache.clear() }
+    fun trimExpired(): Unit = synchronized(lock) {
+        if (idleMillis > 0L) {
+            val now = monotonicTimeMillis()
+            accessed.filterValues { now - it >= idleMillis }.keys.toList().forEach { cache.remove(it); accessed.remove(it) }
+        }
+        accessed.keys.retainAll(cache.keys)
+        Unit
+    }
+    fun applyBudget(fraction: Double, manualBytes: Long?, version: Long, idleMinutes: Int = 0) = synchronized(lock) {
         if (version < revision) return@synchronized
         revision = version
+        idleMillis = idleMinutes.coerceIn(0, 120) * 60_000L
         val protectedLimit = (total * fraction).toLong().coerceAtLeast(0L)
         limit = minOf(hardLimit, manualBytes ?: protectedLimit,
             if (fraction <= .10) protectedLimit else hardLimit)
         cache.trimToSize(limit)
+        trimExpired()
     }
 }
 

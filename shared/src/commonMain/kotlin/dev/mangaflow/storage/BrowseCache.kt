@@ -17,6 +17,7 @@ import dev.mangaflow.json.JSONObject
 import dev.mangaflow.platform.storage.StorageFile as File
 import dev.mangaflow.platform.sha256
 import dev.mangaflow.platform.AtomicLong
+import dev.mangaflow.experience.contentCachePreferences
 
 data class BrowseSnapshot(
     val key: String,
@@ -32,6 +33,8 @@ data class BrowseSnapshot(
 
 /** Disposable public lists only. Favorites, reading positions and downloads live elsewhere. */
 class BrowseCache(context: Context) {
+    private val application = context.applicationContext
+    private val policy get() = contentCachePreferences(application)
     private val directory = File(context.applicationContext.cacheDir, "browse-cache")
     private val memory = LinkedHashMap<String, BrowseSnapshot>(MAX_ENTRIES)
     private val memoryLock = StorageLock()
@@ -41,11 +44,13 @@ class BrowseCache(context: Context) {
     val generation: Long get() = epoch.get()
 
     fun cached(key: String): BrowseSnapshot? = synchronized(memoryLock) {
+        if (!policy.enabled) { memory.clear(); return@synchronized null }
         memory.remove(key)?.takeIf { usableTime(it.updatedAt) }?.also { memory[key] = it }
     }
 
     suspend fun read(key: String, generation: Long): BrowseSnapshot? {
         cached(key)?.let { return if (generation == epoch.get()) it else null }
+        if (!policy.storeOnDisk) return null
         return withContext(Dispatchers.IO) {
             diskLock.withLock {
                 if (generation != epoch.get()) return@withLock null
@@ -126,18 +131,20 @@ class BrowseCache(context: Context) {
 
     /** Small memory updates never wait on JSON encoding or disk I/O. */
     fun remember(snapshot: BrowseSnapshot, generation: Long) {
+        if (!policy.enabled) return
         if (!withinBounds(snapshot)) return
         synchronized(memoryLock) {
             if (generation != epoch.get()) return
             memory.remove(snapshot.key)
             memory[snapshot.key] = snapshot
-            while (memory.size > MAX_ENTRIES || memory.values.sumOf { it.items.size + it.sourceMatches.values.sumOf(List<Manga>::size) } > MAX_MEMORY_ITEMS) {
+            while (memory.size > policy.snapshotMemoryEntries || memory.values.sumOf { it.items.size + it.sourceMatches.values.sumOf(List<Manga>::size) } > MAX_MEMORY_ITEMS) {
                 memory.remove(memory.keys.first())
             }
         }
     }
 
     suspend fun write(snapshot: BrowseSnapshot, generation: Long): Unit = withContext(Dispatchers.IO) {
+        if (!policy.storeOnDisk) return@withContext
         // Keep the last complete cached page range rather than truncating and skipping manga.
         if (!withinBounds(snapshot) || generation != epoch.get()) return@withContext
         // Superseded requests should not encode a large range merely to be rejected after IO.
@@ -168,7 +175,7 @@ class BrowseCache(context: Context) {
         }.toString().encodeToByteArray()
         if (encoded.size > MAX_FILE_BYTES) return@withContext
         diskLock.withLock {
-            if (generation != epoch.get()) return@withLock
+            if (generation != epoch.get() || !policy.storeOnDisk) return@withLock
             // A later page or refresh can finish while this write is waiting for IO.
             if (synchronized(memoryLock) { memory[snapshot.key]?.let { it !== snapshot } == true }) return@withLock
             runCatching {
@@ -209,7 +216,8 @@ class BrowseCache(context: Context) {
         var bytes = 0L
         files.forEachIndexed { index, file ->
             bytes += file.length()
-            if (index >= MAX_ENTRIES || bytes > MAX_DISK_BYTES) file.delete()
+            if (index >= policy.snapshotMemoryEntries || bytes > policy.snapshotDiskMiB * 1_048_576L ||
+                wallTimeMillis() - file.lastModified() > policy.retentionMillis) file.delete()
         }
     }
 
@@ -220,7 +228,7 @@ class BrowseCache(context: Context) {
     }
 
     private fun usableTime(updatedAt: Long): Boolean =
-        wallTimeMillis() - updatedAt in -CLOCK_SKEW_MS..MAX_STALE_MS && updatedAt > 0
+        policy.enabled && wallTimeMillis() - updatedAt in -CLOCK_SKEW_MS..policy.retentionMillis && updatedAt > 0
 
     private fun withinBounds(snapshot: BrowseSnapshot): Boolean = snapshot.items.size <= MAX_ITEMS &&
         snapshot.sourceMatches.size <= MAX_ITEMS && snapshot.sourceMatches.values.sumOf(List<Manga>::size) <= MAX_SOURCE_HITS &&
@@ -246,9 +254,7 @@ class BrowseCache(context: Context) {
         val SOURCE_ID_PATTERN = Regex("[a-z][a-z0-9_-]{0,39}")
         const val MAX_PAGE = 100_000
         const val MAX_FILE_BYTES = 1024L * 1024
-        const val MAX_DISK_BYTES = 8L * 1024 * 1024
         const val CLOCK_SKEW_MS = 5L * 60_000
-        const val MAX_STALE_MS = 7L * 24 * 60 * 60_000
     }
 }
 
