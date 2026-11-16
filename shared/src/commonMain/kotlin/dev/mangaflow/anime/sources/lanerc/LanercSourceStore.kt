@@ -95,7 +95,11 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         return runtime.call(id, "danmu", JSONArray(listOf(payloadJson)), expectedRevision).value?.toString() ?: "[]"
     }
 
-    /** Explicit install grants execution only to this known HTTPS reference and its stored bytes. */
+    /**
+     * Optional extensions remain explicit. The repository registers its native adapters without
+     * downloads; opening anime must never turn a remote directory into executable bootstrap code.
+     * A known URL is not an integrity guarantee: pin downloaded bytes before validation executes JS.
+     */
     suspend fun install(id: String) = download(id, update = false)
     suspend fun update(id: String) = download(id, update = true)
 
@@ -123,6 +127,7 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             val code = fetchPluginText(application, descriptor.scriptUrl)
             require(code.encodeToByteArray().size in 1..MAX_CODE_BYTES) { "脚本文件过大或为空。" }
             val digest = animeHash(code)
+            if (digest != descriptor.observedDigest) throw LanercPackageIntegrityException()
             val version = Regex("(?im)(?:version|版本)\\s*[:=]\\s*['\"]?([A-Za-z0-9._-]{1,48})")
                 .find(code)?.groupValues?.get(1) ?: digest.take(12)
             val next = LanercInstalledPackage(id, code, digest, version, expected?.enabled ?: true,
@@ -141,8 +146,11 @@ class LanercSourceStore private constructor(context: PlatformContext) {
             }
         } catch (cancel: CancellationException) { throw cancel }
         catch (failure: Exception) {
-            val message = if (failure is LanercCapabilityException) failure.message ?: "该来源需要尚未支持的宿主能力。"
-                else "来源下载、校验或保存失败；已安装版本仍然保留，可重试。"
+            val message = when (failure) {
+                is LanercPackageIntegrityException -> "来源脚本与内置校验记录不一致，已阻止执行；已安装版本仍然保留，需更新应用中的来源记录后再试。"
+                is LanercCapabilityException -> failure.message ?: "该来源需要尚未支持的宿主能力。"
+                else -> "来源下载、校验或保存失败；已安装版本仍然保留，可重试。"
+            }
             mutableState.value = mutableState.value.map { if (it.id == id) it.copy(error = message) else it }
             throw IllegalStateException(message)
         }
@@ -305,3 +313,6 @@ class LanercSourceStore private constructor(context: PlatformContext) {
         }
     }
 }
+
+/** Kept distinct so a changed remote script is not presented as a retryable network failure. */
+private class LanercPackageIntegrityException : IllegalStateException()

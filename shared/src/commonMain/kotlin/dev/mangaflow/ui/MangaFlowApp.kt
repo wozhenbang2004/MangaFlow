@@ -1423,6 +1423,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         contentTopPadding = chromePadding,
                                         sourceBackdrop = searchBackdrop, sourceRegistry = model.bodySources,
                                         sourcePlugins = model.sourcePlugins, sourceRepository = model.repository,
+                                        animeController = model.services.anime,
                                         active = rootActive && !searchVisible,
                                         onOpenDownloads = { changeSection(Section.DOWNLOADS) })
                                 }

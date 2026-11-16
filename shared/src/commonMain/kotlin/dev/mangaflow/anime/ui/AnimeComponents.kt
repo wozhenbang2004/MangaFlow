@@ -40,7 +40,9 @@ import dev.mangaflow.ui.motion.motionPress
 internal fun animeEpisodeNumber(value: Double): String =
     if (value % 1.0 == 0.0) value.toLong().toString() else value.toString()
 
-internal fun animeEpisodeLabel(episode: AnimeEpisode): String = when (episode.kind) {
+internal fun animeEpisodeLabel(episode: AnimeEpisode): String =
+    if (episode.subjectId.startsWith("native:")) episode.title.ifBlank { "来源剧集" }
+    else when (episode.kind) {
     AnimeEpisodeKind.MAIN -> "第 " + animeEpisodeNumber(episode.number) + " 集"
     AnimeEpisodeKind.SPECIAL -> "特别篇 " + animeEpisodeNumber(episode.number)
     AnimeEpisodeKind.OPENING -> "片头 " + animeEpisodeNumber(episode.number)

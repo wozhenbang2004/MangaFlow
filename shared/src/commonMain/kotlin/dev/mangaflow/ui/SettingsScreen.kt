@@ -1,5 +1,7 @@
 package dev.mangaflow.ui
 
+import dev.mangaflow.anime.AnimeController
+import dev.mangaflow.anime.ui.AnimeSourceManager
 import dev.mangaflow.background.ApplicationOperations
 import dev.mangaflow.background.ApplicationOperation
 import dev.mangaflow.background.ApplicationOperationKind
@@ -52,6 +54,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.outlined.PlayCircleOutline
 import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDownward
@@ -177,6 +180,7 @@ fun SettingsScreen(
     sourcePlugins: SourcePluginStore? = null,
     sourceRepository: dev.mangaflow.data.UnifiedMangaRepository? = null,
     onOpenDownloads: () -> Unit = {},
+    animeController: AnimeController? = null,
 ) {
     val libraryReady by libraryStore.ready.collectAsStateWithLifecycle()
     if (!libraryReady) {
@@ -235,6 +239,10 @@ fun SettingsScreen(
     var webDavNotice by remember { mutableStateOf<String?>(null) }
     var expandedSetting by rememberSaveable { mutableStateOf<String?>(null) }
     var showBodySources by remember { mutableStateOf(false) }
+    var showAnimeSources by remember { mutableStateOf(false) }
+    LaunchedEffect(screenActive) {
+        if (!screenActive) showAnimeSources = false
+    }
     var showNetworkDownloads by remember { mutableStateOf(false) }
     var showExperience by remember { mutableStateOf(false) }
     val toggleSetting: (String) -> Unit = { expandedSetting = if (expandedSetting == it) null else it }
@@ -413,6 +421,12 @@ fun SettingsScreen(
                             showBodySources = true
                         }
                     }
+                    if (animeController != null) {
+                        SettingsLinkRow("动漫源", "内容来源与线路", Icons.Outlined.PlayCircleOutline,
+                            inlineDetail = true, compact = true) {
+                            showAnimeSources = true
+                        }
+                    }
                     SettingsDisclosure("备份与同步", if (backupBusy != null) "正在处理…" else "本地文件 · WebDAV",
                         Icons.Outlined.CloudSync, expandedSetting == "backup", { toggleSetting("backup") }) {
                         Column {
@@ -580,6 +594,12 @@ fun SettingsScreen(
     if (showBodySources && sourceRegistry != null) {
         BodySourceSettingsSheet(sourceRegistry, sourceBackdrop, plugins = sourcePlugins,
             onDismiss = { showBodySources = false }, repository = sourceRepository)
+    }
+
+    animeController?.let { controller ->
+        val animeState by controller.state.collectAsStateWithLifecycle()
+        AnimeSourceManager(showAnimeSources && screenActive, animeState, controller, storageBackdrop,
+            onDismiss = { showAnimeSources = false })
     }
 
     NetworkDownloadDialog(showNetworkDownloads, sourceBackdrop, onDismiss = { showNetworkDownloads = false },

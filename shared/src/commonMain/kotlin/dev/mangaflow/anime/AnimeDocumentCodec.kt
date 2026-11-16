@@ -15,10 +15,20 @@ internal object AnimeDocumentCodec {
         val ids = json.optJSONObject("externalIds") ?: JSONObject()
         val id = json.getString("id")
         val nativeId = id.removePrefix("bangumi:")
-        require(id.startsWith("bangumi:") && nativeId.toIntOrNull()?.let { it > 0 && it.toString() == nativeId } == true) {
-            "番剧记录缺少有效的条目身份。"
+        if (id.startsWith("native:")) {
+            val source = ids.optString("native-source")
+            require(Regex("anime-[a-z0-9-]+").matches(source) &&
+                Regex("native:${Regex.escape(source)}:[a-f0-9]{64}").matches(id) &&
+                ids.keys().asSequence().toSet() == setOf("native-source")) {
+                "原始来源条目身份无效，不能作为标准番剧恢复。"
+            }
+        } else {
+            require(id.startsWith("bangumi:") && nativeId.toIntOrNull()?.let { it > 0 && it.toString() == nativeId } == true) {
+                "番剧记录缺少有效的条目身份。"
+            }
+            require(!ids.has("bangumi") || ids.getString("bangumi") == nativeId) { "番剧外部身份与主条目不一致。" }
+            require(!ids.has("native-source")) { "标准番剧不能冒用原始来源身份。" }
         }
-        require(!ids.has("bangumi") || ids.getString("bangumi") == nativeId) { "番剧外部身份与主条目不一致。" }
         return AnimeSubject(id = id, title = json.getString("title"),
             originalTitle = json.optString("original"), coverUrl = json.optString("cover"),
             description = json.optString("description"),
@@ -50,6 +60,9 @@ internal object AnimeDocumentCodec {
         }
         require(episodes.all { it.subjectId == subject.id && it.number.isFinite() && it.id.isNotBlank() })
         require(episodes.map { it.id }.distinct().size == episodes.size)
+        if (subject.id.startsWith("native:")) require(episodes.all {
+            Regex("${Regex.escape(subject.id)}:episode:[a-f0-9]{64}").matches(it.id)
+        }) { "原始剧集身份与所属条目不一致。" }
         return AnimeDetail(subject, episodes)
     }
 }

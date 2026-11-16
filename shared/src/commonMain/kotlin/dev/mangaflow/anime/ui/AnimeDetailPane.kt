@@ -34,6 +34,7 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
     onSources: (AnimeEpisode?) -> Unit, onTracking: () -> Unit,
     modifier: Modifier = Modifier, active: Boolean = true) {
     val subject = detail.subject
+    val native = subject.externalIds["native-source"] != null
     val entry = state.library.firstOrNull { it.subject.id == subject.id }
     var episodeTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
     var descriptionExpanded by rememberSaveable(subject.id) { mutableStateOf(false) }
@@ -45,14 +46,15 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
     var episodeMenuOwner by remember { mutableStateOf<String?>(null) }
     var trackingAfterStatus by remember { mutableStateOf(false) }
     LaunchedEffect(active) { if (!active) { statusOpen = false; trackingAfterStatus = false } }
-    val main = detail.episodes.filter { it.kind == AnimeEpisodeKind.MAIN }
-    val extra = detail.episodes.filter { it.kind != AnimeEpisodeKind.MAIN }
+    // Native catalog order is authoritative; an unknown number is not a special episode.
+    val main = if (native) detail.episodes else detail.episodes.filter { it.kind == AnimeEpisodeKind.MAIN }
+    val extra = if (native) emptyList() else detail.episodes.filter { it.kind != AnimeEpisodeKind.MAIN }
     LaunchedEffect(main.isEmpty(), extra.isNotEmpty()) {
         if (main.isEmpty() && extra.isNotEmpty()) episodeTab = 1
     }
     val episodes = (if (episodeTab == 0 || extra.isEmpty()) main else extra)
         .let { if (episodeReversed) it.asReversed() else it }
-        .filter { episodeQuery.isBlank() || animeEpisodeNumber(it.number).contains(episodeQuery.trim()) ||
+        .filter { episodeQuery.isBlank() || (!native && animeEpisodeNumber(it.number).contains(episodeQuery.trim())) ||
             it.title.contains(episodeQuery.trim(), ignoreCase = true) }
     val resume = entry?.resume?.takeUnless { it.completed }?.let { progress -> detail.episodes.firstOrNull { it.id == progress.episodeId } }
     val first = resume ?: main.firstOrNull { it.id !in entry?.completedEpisodeIds.orEmpty() } ?: main.firstOrNull() ?: extra.firstOrNull()
@@ -123,7 +125,7 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                                 CompactMenuAction(Icons.Outlined.Check, animeStatusLabel(status),
                                     onClick = { statusOpen = false; controller.setWatchStatus(subject.id, status) })
                             }
-                            CompactMenuAction(Icons.Outlined.Sync, "核对追番进度",
+                            if (!native) CompactMenuAction(Icons.Outlined.Sync, "核对追番进度",
                                 onClick = { trackingAfterStatus = true; statusOpen = false })
                         }
                     }
@@ -222,6 +224,8 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
 private fun AnimeEpisodeCell(episode: AnimeEpisode, completed: Boolean, resume: Boolean, matched: Int,
     backdrop: HazeState, active: Boolean, onPlay: () -> Unit, onSources: () -> Unit, onCompleted: () -> Unit,
     onMenuPresenceChange: (Boolean) -> Unit, modifier: Modifier = Modifier) {
+    val native = episode.subjectId.startsWith("native:")
+    val unknownNumber = native && episode.kind == AnimeEpisodeKind.OTHER && episode.number == 0.0
     val interaction = remember(episode.id) { MutableInteractionSource() }
     val colors = MaterialTheme.colorScheme
     var menuVisible by remember(episode.id) { mutableStateOf(false) }
@@ -234,10 +238,10 @@ private fun AnimeEpisodeCell(episode: AnimeEpisode, completed: Boolean, resume: 
             .clickable(interactionSource = interaction, indication = null, role = Role.Button, onClick = onPlay)
             .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(animeEpisodeNumber(episode.number), Modifier.widthIn(min = 28.dp),
+            if (!unknownNumber) Text(animeEpisodeNumber(episode.number), Modifier.widthIn(min = 28.dp),
                 style = MaterialTheme.typography.titleSmall, color = colors.onSurfaceVariant)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(if (episode.kind == AnimeEpisodeKind.MAIN) episode.title.ifBlank { animeEpisodeLabel(episode) }
+                Text(if (native || episode.kind == AnimeEpisodeKind.MAIN) episode.title.ifBlank { animeEpisodeLabel(episode) }
                     else animeEpisodeLabel(episode) + " · " + episode.title, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodyMedium)
                 if (resume) AnimeQuietLabel("续看")

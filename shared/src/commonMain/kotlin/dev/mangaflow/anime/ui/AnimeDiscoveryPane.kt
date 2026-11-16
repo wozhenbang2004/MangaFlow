@@ -30,7 +30,7 @@ import dev.mangaflow.ui.platform.localToday
 @Composable
 internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController, backdrop: HazeState,
     scrolls: AnimeDiscoveryScrolls, onOpen: (AnimeSubject) -> Unit,
-    onChooseReference: (AnimeSourceTitle, Boolean) -> Unit, onManageSources: () -> Unit, active: Boolean,
+    onChooseReference: (AnimeSourceTitle, Boolean) -> Unit, active: Boolean,
     contentBottomPadding: Dp = 24.dp) {
     fun open(item: AnimeDiscoveryItem) {
         item.subject?.let(onOpen) ?: item.reference?.let { onChooseReference(it, false) }
@@ -39,10 +39,7 @@ internal fun AnimeDiscovery(state: AnimeScreenState, controller: AnimeController
         when (tab) {
             AnimeDiscoveryTab.HOME -> AnimeDiscoveryHome(state, controller, scrolls, contentBottomPadding,
                 onOpen = ::open, onChooseReference = onChooseReference)
-            AnimeDiscoveryTab.SOURCES -> AnimeSourceBrowsePane(controller, backdrop, scrolls,
-                columns = state.discoveryColumns, active = active && state.discoveryTab == tab,
-                onManageSources = onManageSources, onChooseTitle = onChooseReference,
-                contentBottomPadding = contentBottomPadding)
+            AnimeDiscoveryTab.SOURCES -> Unit
             else -> {
                 val key = animeDiscoveryFeedKey(tab)
                 val feed = state.discoveryFeeds[key]
@@ -64,6 +61,7 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
     scrolls: AnimeDiscoveryScrolls, contentBottomPadding: Dp, onOpen: (AnimeDiscoveryItem) -> Unit,
     onChooseReference: (AnimeSourceTitle, Boolean) -> Unit) {
     val latest by controller.sourceBrowse.latest.collectAsStateWithLifecycle()
+    var expandedUpdates by remember { mutableStateOf(false) }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
         LazyVerticalGrid(GridCells.Fixed(columns), state = scrolls.grid("home"), modifier = Modifier.fillMaxSize(),
@@ -87,10 +85,9 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
                 }
             }
             item(key = "source-update-heading", span = { GridItemSpan(maxLineSpan) }) {
-                AnimeDiscoverySectionHeading("片源更新", "AGE · 来源标注", refreshing = latest.loading,
+                AnimeDiscoverySectionHeading("最近更新", "AGE · 更新标注", refreshing = latest.loading,
                     onMore = {
-                        controller.sourceBrowse.selectSource("anime-age")
-                        controller.selectDiscoveryTab(AnimeDiscoveryTab.SOURCES)
+                        expandedUpdates = !expandedUpdates
                     })
             }
             if (latest.error != null) item(key = "source-update-error", span = { GridItemSpan(maxLineSpan) }) {
@@ -99,7 +96,7 @@ private fun AnimeDiscoveryHome(state: AnimeScreenState, controller: AnimeControl
             if (latest.items.isEmpty()) item(key = "source-update-empty", span = { GridItemSpan(maxLineSpan) }) {
                 AnimeDiscoveryInlineStatus(if (latest.loading) "正在读取更新" else if (latest.error == null) "来源暂无更新" else "")
             }
-            else items(latest.items.take(if (columns == 1) 3 else columns), key = { "update:" + it.sourceId + ":" + it.id }) { title ->
+            else items(latest.items.take(if (expandedUpdates) Int.MAX_VALUE else if (columns == 1) 3 else columns), key = { "update:" + it.sourceId + ":" + it.id }) { title ->
                 AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = { onChooseReference(title, true) })
             }
         }

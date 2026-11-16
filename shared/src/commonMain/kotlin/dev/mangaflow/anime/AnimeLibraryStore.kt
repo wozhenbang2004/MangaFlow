@@ -272,6 +272,13 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         val bindings = objects(json.getJSONArray("bindings")).map(::decodeBinding)
         require(bindings.all { it.subjectId in entries && it.catalog.sourceId.isNotBlank() && it.catalog.id.isNotBlank() })
         require(bindings.map { it.subjectId to it.catalog.sourceId }.distinct().size == bindings.size)
+        require(bindings.all { binding ->
+            val subject = entries.getValue(binding.subjectId).subject
+            val source = subject.externalIds["native-source"]
+            source == null || (binding.catalog.sourceId == source && subject.id ==
+                "native:$source:${dev.mangaflow.anime.sources.animeHash(binding.catalog.id + "\n" + binding.catalog.url)}")
+        }) { "原始来源绑定与条目身份不一致。" }
+
         val progressRows = objects(json.getJSONArray("progress")).map(::decodeProgress)
         val progress = progressRows.associateBy { it.episodeId }
         require(progress.size == progressRows.size && progress.values.all { it.episodeId.isNotBlank() &&

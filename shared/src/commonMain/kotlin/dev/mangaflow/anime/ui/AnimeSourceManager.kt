@@ -54,13 +54,13 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                         verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         if (tab == 0) item {
                             AnimeSectionTitle("内置来源", "TvTFun · AGE · GiriGiriLove · LMM")
-                            AnimeQuietLabel("扩展脚本与内置来源共同搜索，实际播放在选集时确认。", Modifier.padding(bottom = 12.dp))
+                            AnimeQuietLabel("内建来源已随应用准备；扩展来源可在此管理。", Modifier.padding(bottom = 12.dp))
                         }
                         items(listings, key = { it.id }) { item ->
                             val busy = item.id in state.sourceOperationIds
                             AnimeSelection(item.name, when {
                                 busy -> "正在处理"
-                                item.error != null -> item.error
+                                item.error != null -> "需要处理 · 点按查看"
                                 item.installed -> (if (item.enabled) "已启用" else "已暂停") + " · " + item.version
                                 item.kind.name == "VIDEO" -> "可安装的视频来源"
                                 item.kind.name == "BROWSE" -> "浏览资料 · 可安装"
@@ -137,8 +137,15 @@ internal fun AnimeSourceManager(visible: Boolean, state: AnimeScreenState, contr
                         }
                     }
                 }
-                if (state.notice != null) Text(state.notice, Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (state.notice != null && selected?.error == null) {
+                    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text(state.notice, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        MotionIconButton(onClick = controller::dismissNotice, modifier = Modifier.size(44.dp),
+                            tooltip = "关闭提示") { Icon(Icons.Outlined.Close, "关闭提示", Modifier.size(18.dp)) }
+                    }
+                }
             }
         }
     }

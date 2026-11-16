@@ -68,12 +68,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             observePlayer(it)
         }
 
+    private var searchMetadataHasMore = false
     private var browseGeneration = 0L
     private var discoverySequence = 0L
     private var discoveryDate: String? = null
     private val discoveryRequests = mutableMapOf<String, Long>()
     private val discoveryJobs = mutableMapOf<String, Job>()
     private var detailGeneration = 0L
+    private var retryNativeReference: AnimeSourceTitle? = null
     private var searchGeneration = 0L
     private var previewGeneration = 0L
     private var resolveGeneration = 0L
@@ -148,9 +150,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 library.state.collect { stored ->
                     if (stored.restoreEpoch != restoreEpoch) {
                         restoreEpoch = stored.restoreEpoch
+                        ++detailGeneration
+                        detailJob?.cancel()
+                        boundCatalogJob?.cancel()
+                        retryNativeReference = null
                         stopPlayback(discardCheckpoint = true)
                         reviewSnapshots.clear()
-                        mutableState.update { it.copy(reviews = emptyList()) }
+                        mutableState.update { it.copy(reviews = emptyList(), detailLoading = false,
+                            detailError = if (it.detail != null) "本机记录已恢复，请重新打开番剧以读取恢复后的关联。" else null) }
                     }
                     mutableState.update { it.copy(
                         library = stored.entries.values.sortedWith(compareByDescending<AnimeLibraryEntry> { entry -> entry.pinned }
@@ -196,6 +203,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     if (prepared?.option?.sourceId in changed) clearPreparation()
                     rebuildOptions()
                     changed.forEach(::refreshSource)
+                    // A query owns an enabled-source/revision snapshot, not just its text.
+                    mutableState.value.query.takeIf { it.isNotBlank() }?.let { browseSearch(it) }
                 }
                 projectRoutes()
             }
@@ -237,42 +246,99 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         val generation = ++browseGeneration
         browseJob?.cancel()
         val before = mutableState.value
+        if (!append) searchMetadataHasMore = false
         if (query.isBlank()) {
-            mutableState.update { it.copy(query = "", catalog = emptyList(), catalogPage = 0,
-                catalogHasMore = false, catalogLoading = false, catalogLoadingMore = false,
-                catalogError = null, catalogMoreError = null) }
+            mutableState.update { it.copy(query = "", catalog = emptyList(), unifiedSearch = emptyList(),
+                searchProviders = emptyList(), catalogPage = 0, catalogHasMore = false, catalogLoading = false,
+                catalogLoadingMore = false, catalogError = null, catalogMoreError = null) }
             return
         }
-        val page = if (append) before.catalogPage.toLong() + 1 else 1L
-        val retain = query == before.query
         mutableState.update { it.copy(query = query, catalogLoading = !append, catalogLoadingMore = append,
             catalogError = if (append) it.catalogError else null, catalogMoreError = null,
-            catalog = if (retain) it.catalog else emptyList(),
-            catalogPage = if (retain) it.catalogPage else 0, catalogHasMore = if (retain) it.catalogHasMore else false) }
+            catalog = if (append) it.catalog else emptyList(),
+            unifiedSearch = if (append) it.unifiedSearch else emptyList(),
+            searchProviders = if (append) it.searchProviders else emptyList(),
+            catalogPage = if (append) it.catalogPage else 0, catalogHasMore = false) }
         browseJob = scope.launch {
-            try {
-                require(page in 1..Int.MAX_VALUE.toLong()) { "分页位置已超出来源支持范围。" }
-                if (!append) metadata.cachedBrowse(AnimeBrowseMode.POPULAR, query, 1, null, "", null)?.let { cached ->
-                    if (generation == browseGeneration && mutableState.value.catalog.isEmpty()) mutableState.update {
-                        it.copy(catalog = cached.items, catalogPage = cached.page, catalogHasMore = cached.hasMore)
-                    }
-                }
-                val result = metadata.browse(AnimeBrowseMode.POPULAR, query, page.toInt(), null, "", null,
-                    forceRefresh = !append)
-                check(result.page == page.toInt()) { "来源返回的页码与请求不一致。" }
-                if (generation == browseGeneration) mutableState.update {
-                    val added = result.items.filter { item -> !append || it.catalog.none { old -> old.id == item.id } }
-                    it.copy(catalog = (if (append) it.catalog + added else result.items).distinctBy(AnimeSubject::id),
-                        catalogPage = result.page, catalogHasMore = result.hasMore,
-                        catalogLoading = false, catalogLoadingMore = false, catalogError = null, catalogMoreError = null)
-                }
-            } catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Exception) {
-                if (generation == browseGeneration) mutableState.update { it.copy(catalogLoading = false,
-                    catalogLoadingMore = false,
-                    catalogError = if (append) it.catalogError else failure.message ?: "搜索未能完成，请重试。",
-                    catalogMoreError = if (append) failure.message ?: "这一页未能加载，请重试。" else null) }
+            sources.extensions.ready.await()
+            if (generation != browseGeneration) return@launch
+            val providers = sources.providers
+            val previousResults = before.searchProviders.associateBy { it.providerId }
+            val requests = providers.filter { !append || previousResults[it.id]?.let { result ->
+                result.hasMore || result.error != null || result.page == 0
+            } != false }
+            var metadataHasMore = false
+            // Metadata retains its own page cursor; a failed source retries its failed page, not the next one.
+            val metadataRequested = !append || before.catalogMoreError != null || before.catalogError != null ||
+                before.catalogPage == 0 || searchMetadataHasMore
+            mutableState.update { state -> state.copy(searchProviders = providers.map { provider ->
+                val old = if (append) previousResults[provider.id] else null
+                (old ?: AnimeSourceResult(provider.id, provider.name)).copy(
+                    loading = provider in requests && !append, loadingMore = provider in requests && append, error = null)
+            }) }
+            fun publish() {
+                if (generation != browseGeneration) return
+                mutableState.update { it.copy(unifiedSearch = groupAnimeSearch(it.catalog, it.searchProviders)) }
             }
+            coroutineScope {
+                if (metadataRequested) launch {
+                    val page = if (append) before.catalogPage.toLong() + 1 else 1L
+                    try {
+                        require(page in 1..Int.MAX_VALUE.toLong()) { "分页位置已超出来源支持范围。" }
+                        if (!append) metadata.cachedBrowse(AnimeBrowseMode.POPULAR, query, 1, null, "", null)?.let { cached ->
+                            if (generation == browseGeneration) {
+                                mutableState.update { it.copy(catalog = cached.items) }
+                                publish()
+                            }
+                        }
+                        val result = metadata.browse(AnimeBrowseMode.POPULAR, query, page.toInt(), null, "", null,
+                            forceRefresh = !append)
+                        check(result.page == page.toInt()) { "来源返回的页码与请求不一致。" }
+                        if (generation != browseGeneration) return@launch
+                        metadataHasMore = result.hasMore
+                        searchMetadataHasMore = result.hasMore
+                        mutableState.update { it.copy(catalog = ((if (append) it.catalog else emptyList()) + result.items)
+                            .distinctBy(AnimeSubject::id), catalogPage = result.page, catalogError = null, catalogMoreError = null) }
+                    } catch (cancel: CancellationException) { throw cancel }
+                    catch (failure: Exception) {
+                        if (generation == browseGeneration) mutableState.update { it.copy(
+                            catalogError = if (append) it.catalogError else failure.message ?: "番剧索引暂未响应。",
+                            catalogMoreError = if (append) failure.message ?: "番剧索引这一页未能加载。" else null) }
+                    }
+                    publish()
+                }
+                requests.forEach { provider -> launch {
+                    val previous = if (append) previousResults[provider.id] else null
+                    val page = (previous?.page?.toLong() ?: 0L) + 1L
+                    val revision = sourceRevision(provider.id)
+                    try {
+                        require(page in 1..Int.MAX_VALUE.toLong()) { "分页位置已超出来源支持范围。" }
+                        val found = provider.search(query, page.toInt()).distinctBy { it.id to it.url }
+                        check(found.all { it.sourceId == provider.id }) { "来源返回了不同来源的条目。" }
+                        check(sources.provider(provider.id) != null && sourceRevision(provider.id) == revision) {
+                            "来源已更新或停用，请重新搜索。"
+                        }
+                        val oldItems = previous?.items.orEmpty()
+                        val added = found.filter { item -> oldItems.none { it.id == item.id && it.url == item.url } }
+                            .map { it.copy(sourceRevision = discoverySourceRevision(provider.id)) }
+                        if (generation == browseGeneration) mutableState.update { state -> state.copy(
+                            searchProviders = state.searchProviders.map { if (it.providerId != provider.id) it else
+                                AnimeSourceResult(provider.id, provider.name, oldItems + added, page = page.toInt(),
+                                    hasMore = provider.supportsSearchPagination && added.isNotEmpty()) }) }
+                    } catch (cancel: CancellationException) { throw cancel }
+                    catch (failure: Exception) {
+                        if (generation == browseGeneration) mutableState.update { state -> state.copy(
+                            searchProviders = state.searchProviders.map { if (it.providerId != provider.id) it else
+                                (previous ?: AnimeSourceResult(provider.id, provider.name)).copy(loading = false,
+                                    loadingMore = false, error = failure.message ?: "这个来源暂未响应。") }) }
+                    }
+                    publish()
+                } }
+            }
+            if (generation == browseGeneration) mutableState.update { it.copy(catalogLoading = false,
+                catalogLoadingMore = false, catalogHasMore = metadataHasMore || it.searchProviders.any { result ->
+                    result.hasMore || result.error != null
+                } || it.catalogMoreError != null || it.catalogError != null) }
         }
     }
 
@@ -445,6 +511,23 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     fun open(subject: AnimeSubject) = openDetail(subject, resumeEpisodeId = null)
 
+    /** Search grouping supplies candidates, never a persisted work/episode association. */
+    fun openSearchGroup(group: AnimeSearchGroup) {
+        val subject = group.subject ?: return
+        open(subject)
+        stageSearchCandidates(subject.id, group.sources)
+    }
+
+    fun stageSearchCandidates(subjectId: String, candidates: List<AnimeSourceTitle>) {
+        if (mutableState.value.detail?.subject?.id != subjectId) return
+        val current = candidates.filter { title -> sources.provider(title.sourceId) != null &&
+            (title.sourceRevision == null || title.sourceRevision == discoverySourceRevision(title.sourceId)) }
+        sourceQuery = mutableState.value.detail?.subject?.title.orEmpty()
+        mutableState.update { state -> state.copy(sourceResults = current.groupBy { it.sourceId }.map { (id, items) ->
+            AnimeSourceResult(id, sources.provider(id)?.name ?: id, items.distinctBy { it.id to it.url })
+        }) }
+    }
+
     fun resume(subjectId: String) {
         val entry = library.state.value.entries[subjectId] ?: return
         val resume = entry.resume?.takeUnless { it.completed }
@@ -452,9 +535,29 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         else openDetail(entry.subject, resume?.episodeId)
     }
 
-    private fun openDetail(subject: AnimeSubject, resumeEpisodeId: String?) {
+    fun sourceSubject(title: AnimeSourceTitle): AnimeSubject = AnimeSubject(
+        id = "native:${title.sourceId}:${dev.mangaflow.anime.sources.animeHash(title.id + "\n" + title.url)}",
+        title = title.title, coverUrl = title.coverUrl, year = title.year,
+        externalIds = mapOf("native-source" to title.sourceId),
+    )
+
+    fun openSourceTitle(title: AnimeSourceTitle) = openDetail(sourceSubject(title), null, title)
+
+    private fun nativeEpisodeId(subject: AnimeSubject, episode: AnimeSourceEpisode): String =
+        "${subject.id}:episode:${dev.mangaflow.anime.sources.animeHash(episode.group + "\n" + episode.id)}"
+
+    private fun nativeDetail(subject: AnimeSubject, catalog: AnimeSourceCatalog, group: String): AnimeDetail =
+        AnimeDetail(subject, catalog.episodes.filter { it.group == group }.map { episode ->
+            AnimeEpisode(nativeEpisodeId(subject, episode), subject.id, episode.title,
+                episode.number ?: 0.0, if (episode.number == null) AnimeEpisodeKind.OTHER else episode.kind)
+        })
+
+    private fun openDetail(subject: AnimeSubject, resumeEpisodeId: String?, nativeReference: AnimeSourceTitle? = null) {
+        val nativeOpeningReference = nativeReference ?: retryNativeReference?.takeIf { sourceSubject(it).id == subject.id }
+        retryNativeReference = nativeOpeningReference
         closePlayback()
         val generation = ++detailGeneration
+        val openingRestoreEpoch = library.state.value.restoreEpoch
         detailJob?.cancel()
         boundCatalogJob?.cancel()
         relatedJob?.cancel()
@@ -476,6 +579,49 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             previewCatalog = null, previewLoading = false, sourceError = null, selectedEpisodeId = null,
             sourceGroups = emptyMap(), preferredSourceId = null,
         ) }
+        if (subject.externalIds["native-source"] != null) {
+            detailJob = scope.launch {
+                try {
+                    library.awaitReady()
+                    sources.extensions.ready.await()
+                    val sourceId = subject.externalIds.getValue("native-source")
+                    val saved = library.state.value.bindings.firstOrNull { it.subjectId == subject.id && it.catalog.sourceId == sourceId }
+                    val reference = nativeOpeningReference ?: saved?.catalog ?: error("原始来源记录未找到，请重新搜索打开。")
+                    check(sourceSubject(reference).id == subject.id) { "来源条目身份已变化。" }
+                    val revision = discoverySourceRevision(sourceId)
+                    check(nativeOpeningReference == null || reference.sourceRevision == null || reference.sourceRevision == revision) { "来源已更新，请重新搜索。" }
+                    val provider = sources.provider(sourceId) ?: error("这个来源已停用或未安装。")
+                    val catalog = provider.catalog(reference)
+                    check(catalog.title.sourceId == sourceId && catalog.title.id == reference.id && catalog.title.url == reference.url) {
+                        "原始目录身份已变化，请重新搜索。"
+                    }
+                    check(discoverySourceRevision(sourceId) == revision && sources.provider(sourceId) != null) { "来源已经变化。" }
+                    if (!currentDetail(generation, subject.id)) return@launch
+                    val groups = catalog.episodes.map { it.group }.distinct()
+                    val resumeGroup = resumeEpisodeId?.let { id -> catalog.episodes.firstOrNull { nativeEpisodeId(subject, it) == id }?.group }
+                    val group = resumeGroup ?: saved?.selectedGroup?.takeIf { it in groups } ?: groups.firstOrNull()
+                        ?: error("这个来源暂无剧集。")
+                    val binding = AnimeSourceBinding(subject.id, reference.copy(sourceRevision = revision), preferred = true, selectedGroup = group)
+                    // Intrinsic native ownership only, never a guessed Bangumi/cross-source association.
+                    library.edit(subject, rememberUndo = false, editBindings = {
+                        check(currentDetail(generation, subject.id) && library.state.value.restoreEpoch == openingRestoreEpoch &&
+                            discoverySourceRevision(sourceId) == revision && sources.provider(sourceId) != null) {
+                            "来源或页面已经变化，请重新打开。"
+                        }
+                        listOf(binding)
+                    })
+                    if (!currentDetail(generation, subject.id)) return@launch
+                    retryNativeReference = null
+                    mutableState.update { it.copy(detail = nativeDetail(subject, catalog, group), detailLoading = false,
+                        sourceBindings = listOf(binding), sourceCatalogs = listOf(catalog)) }
+                    rebuildOptions()
+                } catch (cancel: CancellationException) { throw cancel }
+                catch (failure: Exception) { if (currentDetail(generation, subject.id)) mutableState.update {
+                    it.copy(detailLoading = false, detailError = failure.message ?: "来源目录未能加载。")
+                } }
+            }
+            return
+        }
         // Source catalogues have independent ownership and do not wait for the metadata service.
         boundCatalogJob = scope.launch {
             try { library.awaitReady(); sources.extensions.ready.await(); loadBoundCatalogs(AnimeDetail(subject, emptyList()), generation) }
@@ -511,6 +657,7 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     fun closeDetail() {
+        retryNativeReference = null
         closePlayback()
         resumeRequest = null
         ++detailGeneration
@@ -666,6 +813,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     fun bindPreviewSource() {
         val detail = mutableState.value.detail ?: return
+        if (detail.subject.externalIds["native-source"] != null) {
+            notice("来源独有条目保留原始身份，不能自动关联其他来源。")
+            return
+        }
         val catalog = mutableState.value.previewCatalog ?: return
         val expectedRevision = previewSourceRevision
         if (previewSourceId != catalog.title.sourceId || sources.provider(catalog.title.sourceId) == null ||
@@ -709,6 +860,10 @@ class AnimeController(private val context: PlatformContext, private val scope: C
 
     fun unlinkSource(sourceId: String) {
         val detail = mutableState.value.detail ?: return
+        if (detail.subject.externalIds["native-source"] == sourceId) {
+            notice("这是该条目的原始来源，不能解除自身归属；可在来源设置中停用。")
+            return
+        }
         mutate {
             library.edit(detail.subject, editBindings = { bindings -> bindings.filterNot { it.catalog.sourceId == sourceId } })
             if (mutableState.value.detail?.subject?.id == detail.subject.id) {
@@ -775,7 +930,14 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun rebuildOptions() {
-        val detail = mutableState.value.detail ?: return
+        var detail = mutableState.value.detail ?: return
+        val nativeSource = detail.subject.externalIds["native-source"]
+        val nativeBinding = library.state.value.bindings.firstOrNull { it.subjectId == detail.subject.id && it.catalog.sourceId == nativeSource }
+        val nativeCatalog = mutableState.value.sourceCatalogs.firstOrNull { it.title.sourceId == nativeSource }
+        if (nativeBinding != null && nativeCatalog != null && nativeBinding.selectedGroup != null) {
+            detail = nativeDetail(detail.subject, nativeCatalog, nativeBinding.selectedGroup)
+            mutableState.update { it.copy(detail = detail) }
+        }
         val bindings = library.state.value.bindings.filter { it.subjectId == detail.subject.id }
         val catalogs = mutableState.value.sourceCatalogs
         val preferred = bindings.firstOrNull { it.preferred }?.catalog?.sourceId
@@ -787,8 +949,9 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                 val group = binding.selectedGroup ?: catalog.episodes.map { it.group }.distinct().singleOrNull()
                     ?: return@flatMap emptyList()
                 val inGroup = catalog.episodes.filter { it.group == group }
-                val explicit = binding.episodeMappings[canonical.id]?.let { id -> inGroup.singleOrNull { it.id == id } }
-                val matches = explicit?.let(::listOf) ?: inGroup.filter {
+                val explicit = if (nativeSource != null) inGroup.singleOrNull { nativeEpisodeId(detail.subject, it) == canonical.id }
+                    else binding.episodeMappings[canonical.id]?.let { id -> inGroup.singleOrNull { it.id == id } }
+                val matches = explicit?.let(::listOf) ?: if (nativeSource != null) emptyList() else inGroup.filter {
                     it.kind == canonical.kind && it.number != null && it.number == canonical.number
                 }
                 matches.map { episode -> AnimeEpisodeOption(binding.catalog.sourceId,
@@ -1410,6 +1573,11 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     fun reviewTracking(providerId: String, remoteSubjectId: String? = null) {
+        if (mutableState.value.detail?.subject?.externalIds?.get("native-source") != null) {
+            notice("来源独有条目只保留本机进度；确认标准番剧身份前不向追番服务写入。")
+            return
+        }
+
         val detail = mutableState.value.detail ?: return
         if (detail.episodes.isEmpty() || mutableState.value.syncing) return
         val account = mutableState.value.accounts.firstOrNull { it.providerId == providerId }

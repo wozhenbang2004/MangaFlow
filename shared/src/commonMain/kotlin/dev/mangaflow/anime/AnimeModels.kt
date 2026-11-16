@@ -225,6 +225,8 @@ data class AnimeScreenState(
     val discoveryColumns: Int? = null,
     val query: String = "",
     val catalog: List<AnimeSubject> = emptyList(),
+    val unifiedSearch: List<AnimeSearchGroup> = emptyList(),
+    val searchProviders: List<AnimeSourceResult> = emptyList(),
     val catalogLoading: Boolean = false,
     val catalogError: String? = null,
     val detail: AnimeDetail? = null,

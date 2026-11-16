@@ -443,15 +443,17 @@ private fun AnimePlayerEpisodes(episodes: List<AnimeEpisode>, currentId: String?
     var searchVisible by remember { mutableStateOf(false) }
     val scroll = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val main = episodes.filter { it.kind == AnimeEpisodeKind.MAIN }
-    val extra = episodes.filter { it.kind != AnimeEpisodeKind.MAIN }
+    val native = episodes.firstOrNull()?.subjectId?.startsWith("native:") == true
+    val main = if (native) episodes else episodes.filter { it.kind == AnimeEpisodeKind.MAIN }
+    val extra = if (native) emptyList() else episodes.filter { it.kind != AnimeEpisodeKind.MAIN }
     LaunchedEffect(currentId) {
-        episodes.firstOrNull { it.id == currentId }?.let { group = if (it.kind == AnimeEpisodeKind.MAIN) 0 else 1 }
+        episodes.firstOrNull { it.id == currentId }?.let { group = if (native || it.kind == AnimeEpisodeKind.MAIN) 0 else 1 }
         query = ""
     }
     val selected = if (group == 1 && extra.isNotEmpty()) extra else main
     val shown = (if (reversed) selected.asReversed() else selected).filter {
-        query.isBlank() || animeEpisodeNumber(it.number).contains(query.trim()) || it.title.contains(query.trim(), ignoreCase = true)
+        query.isBlank() || (!it.subjectId.startsWith("native:") && animeEpisodeNumber(it.number).contains(query.trim())) ||
+            it.title.contains(query.trim(), ignoreCase = true)
     }
     LaunchedEffect(currentId, group, reversed) {
         val index = shown.indexOfFirst { it.id == currentId }
@@ -471,7 +473,7 @@ private fun AnimePlayerEpisodes(episodes: List<AnimeEpisode>, currentId: String?
             MotionIconButton(onClick = {
                 query = ""
                 episodes.firstOrNull { it.id == currentId }?.let { current ->
-                    group = if (current.kind == AnimeEpisodeKind.MAIN) 0 else 1
+                    group = if (native || current.kind == AnimeEpisodeKind.MAIN) 0 else 1
                     val ordered = (if (group == 0) main else extra).let { if (reversed) it.asReversed() else it }
                     val index = ordered.indexOfFirst { it.id == currentId }
                     if (index >= 0) scope.launch { scroll.scrollToItem(index) }
