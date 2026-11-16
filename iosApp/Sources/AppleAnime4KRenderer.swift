@@ -120,7 +120,7 @@ private final class MangaFlowOriginalVideoRenderer: NSObject, AppleAnimeEnhancem
         listener?.enhancementChanged(mode: mode, phase: mode == "OFF" ? "OFF" : "UNAVAILABLE",
             detail: mode == "OFF" ? nil : reason, inputWidth: 0, inputHeight: 0, outputWidth: 0, outputHeight: 0)
     }
-    func setVideoScale(scale: String) { host.setScale(scale) }
+    func setVideoScale(scale_: String) { host.setScale(scale_) }
     func setForeground(foreground: Bool) { host.setForeground(foreground) }
     func setSurfaceAttached(attached: Bool) { host.setSurfaceAttached(attached) }
     func seekStarted() {}
@@ -272,10 +272,10 @@ private final class MangaFlowAnime4KRenderer: NSObject, AppleAnimeEnhancementRen
         evaluate()
     }
 
-    func setVideoScale(scale: String) {
-        guard !disposed, self.scale != scale else { return }
-        self.scale = scale
-        host.setScale(scale)
+    func setVideoScale(scale_: String) {
+        guard !disposed, self.scale != scale_ else { return }
+        self.scale = scale_
+        host.setScale(scale_)
         invalidateProcessing(removeOutput: false, retainFrame: true)
         evaluate()
     }
