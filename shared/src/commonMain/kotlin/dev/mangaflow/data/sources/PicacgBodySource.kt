@@ -322,7 +322,12 @@ class PicacgBodySource(private val context: PlatformContext) : BodySource, BodyS
             throw SourceException("哔咔返回格式暂不兼容。", HOME, cause = failure)
         }
         if (response.statusCode == 401 || result.optString("code") == "401") {
-            if (requireLogin && session == requestSession) { session = ""; _signedIn.value = false }
+            if (requireLogin && session == requestSession) {
+                session = ""
+                _signedIn.value = false
+                // Without this cleanup every restart resurrects an expired native session.
+                runCatching { deleteSecret(context, SECRET_KEY) }
+            }
             throw SourceException("哔咔会话过期，请重新登录。", HOME, httpStatus = 401)
         }
         val code = result.optInt("code", response.statusCode)
