@@ -171,7 +171,34 @@ internal fun AnimePlayerSettings(
                                     modifier = Modifier.fillMaxWidth(), controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
                             }
                             if (playback.videoWidth != null && playback.videoHeight != null) item {
-                                AnimeQuietLabel(playback.videoWidth.toString() + " × " + playback.videoHeight)
+                                AnimeQuietLabel("视频 " + playback.videoWidth + " × " + playback.videoHeight)
+                            }
+                            if (AnimePlayerCapability.VIDEO_ENHANCEMENT in capabilities ||
+                                state.settings.videoEnhancement != AnimeVideoEnhancementMode.OFF) {
+                                item {
+                                    AnimeSectionTitle("Anime4K", animeEnhancementLabel(playback.videoEnhancement.phase))
+                                    MotionTabs(state.settings.videoEnhancement.ordinal, listOf("原画", "轻量", "精细"),
+                                        onSelect = { controller.updatePlaybackSettings(state.settings.copy(
+                                            videoEnhancement = AnimeVideoEnhancementMode.entries[it])) },
+                                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Anime4K 画质增强" },
+                                        controlHeight = 44.dp, treatment = MotionTabTreatment.Soft)
+                                }
+                                item {
+                                    AnimeQuietLabel(when (state.settings.videoEnhancement) {
+                                        AnimeVideoEnhancementMode.OFF -> "本机 GPU 实时增强动漫画面，不改原视频。"
+                                        AnimeVideoEnhancementMode.FAST -> "轻量处理线条与放大；优先减轻 GPU 负担。"
+                                        AnimeVideoEnhancementMode.QUALITY -> "更细致地处理线条与放大；GPU 负担更高。"
+                                    })
+                                }
+                                val enhancement = playback.videoEnhancement
+                                enhancement.detail?.takeIf(String::isNotBlank)?.let { detail ->
+                                    item { AnimeQuietLabel(detail) }
+                                }
+                                if (enhancement.inputWidth != null && enhancement.inputHeight != null &&
+                                    enhancement.outputWidth != null && enhancement.outputHeight != null) item {
+                                    AnimeQuietLabel("处理 " + enhancement.inputWidth + " × " + enhancement.inputHeight +
+                                        " → " + enhancement.outputWidth + " × " + enhancement.outputHeight)
+                                }
                             }
                             if (state.playbackResolutions.isNotEmpty()) {
                                 item { AnimeSectionTitle("来源画质") }
@@ -191,7 +218,7 @@ internal fun AnimePlayerSettings(
                                 }
                             }
                             if (state.playbackResolutions.isEmpty() && videoTracks.isEmpty()) item {
-                                AnimeQuietLabel("这个资源没有提供可选择的清晰度。")
+                                AnimeQuietLabel("片源没有提供其他清晰度。")
                             }
                         }
                         AnimePlayerPanel.AUDIO, AnimePlayerPanel.SUBTITLES -> {
@@ -313,6 +340,15 @@ internal fun animeScaleLabel(scale: AnimeVideoScale): String = when (scale) {
     AnimeVideoScale.FIT -> "适应"
     AnimeVideoScale.FILL -> "拉伸"
     AnimeVideoScale.ZOOM -> "填满"
+}
+
+private fun animeEnhancementLabel(phase: AnimeVideoEnhancementPhase): String = when (phase) {
+    AnimeVideoEnhancementPhase.OFF -> "原画"
+    AnimeVideoEnhancementPhase.WAITING -> "等待画面"
+    AnimeVideoEnhancementPhase.CONFIGURED -> "已配置"
+    AnimeVideoEnhancementPhase.ACTIVE -> "已在处理画面"
+    AnimeVideoEnhancementPhase.UNAVAILABLE -> "当前保持原画"
+    AnimeVideoEnhancementPhase.FAILED -> "增强失败"
 }
 
 internal fun animeSpeedLabel(speed: Float): String =

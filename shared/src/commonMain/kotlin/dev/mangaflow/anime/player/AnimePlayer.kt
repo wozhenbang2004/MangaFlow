@@ -32,7 +32,7 @@ enum class AnimeVideoScale { FIT, FILL, ZOOM }
 enum class AnimeTrackKind { AUDIO, SUBTITLE, VIDEO }
 enum class AnimePlayerCapability {
     AUDIO_TRACKS, SUBTITLE_TRACKS, VIDEO_TRACKS, AUTOMATIC_AUDIO_TRACK,
-    VIDEO_SCALE, VOLUME, PICTURE_IN_PICTURE, BACKGROUND_AUDIO, BUFFER_CONTROL,
+    VIDEO_SCALE, VOLUME, PICTURE_IN_PICTURE, BACKGROUND_AUDIO, BUFFER_CONTROL, VIDEO_ENHANCEMENT,
 }
 
 data class AnimePlayerTrack(
@@ -51,6 +51,7 @@ data class AnimePlayerOptions(
     val bufferStartMs: Int = 1_500,
     val bufferRebufferMs: Int = 3_000,
     val automaticRecoveryAttempts: Int = 2,
+    val videoEnhancement: AnimeVideoEnhancementMode = AnimeVideoEnhancementMode.OFF,
 ) {
     fun requireValid() {
         require(bufferStartMs >= 0 && bufferRebufferMs >= 0 && bufferMinMs >= 0 && bufferMaxMs > 0) {
@@ -89,6 +90,9 @@ data class AnimePlayerState(
     val downloadBytesPerSecond: Long = -1L,
     val videoWidth: Int? = null,
     val videoHeight: Int? = null,
+    val videoEnhancement: AnimeVideoEnhancementState = AnimeVideoEnhancementState(),
+    /** A local renderer failure is not evidence that another provider should be selected. */
+    val sourceRecoveryAllowed: Boolean = true,
 ) {
     val ended: Boolean get() = phase == AnimePlayerPhase.ENDED
     val isPlaying: Boolean get() = phase == AnimePlayerPhase.READY && playWhenReady && !isBuffering
@@ -157,6 +161,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
                     mutableState.value = mutableState.value.copy(
                         sessionGeneration = mutableState.value.sessionGeneration + 1,
                         phase = AnimePlayerPhase.RELEASED, playWhenReady = false, isBuffering = false,
+                        videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement),
                     )
                 }
             }
@@ -187,6 +192,9 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             capabilities = previous.capabilities,
             videoScale = previous.videoScale, volume = previous.volume,
             inPictureInPicture = previous.inPictureInPicture,
+            videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement,
+                if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF
+                else AnimeVideoEnhancementPhase.WAITING),
         )
         opening = playerScope.launch(Dispatchers.Main.immediate) {
             try {
@@ -246,6 +254,13 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         command(fatal = false) {
             val previous = this.options
             this.options = options
+            if (previous.videoEnhancement != options.videoEnhancement) {
+                mutableState.value = mutableState.value.copy(videoEnhancement = AnimeVideoEnhancementState(
+                    options.videoEnhancement,
+                    if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF
+                    else AnimeVideoEnhancementPhase.WAITING,
+                ))
+            }
             configureNative(previous, options)
             applyForegroundPolicy()
         }
@@ -313,6 +328,9 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             capabilities = mutableState.value.capabilities,
             videoScale = mutableState.value.videoScale, volume = mutableState.value.volume,
             inPictureInPicture = mutableState.value.inPictureInPicture,
+            videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement,
+                if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF
+                else AnimeVideoEnhancementPhase.WAITING),
         )
     }
 
@@ -327,6 +345,7 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
             mutableState.value = mutableState.value.copy(
                 sessionGeneration = mutableState.value.sessionGeneration + 1,
                 phase = AnimePlayerPhase.RELEASED, playWhenReady = false, isBuffering = false,
+                videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement),
             )
             playerScope.cancel()
         }
@@ -339,9 +358,10 @@ internal abstract class SessionAnimePlayer(applicationScope: CoroutineScope) : A
         if (isCurrent(generation)) mutableState.value = update(mutableState.value)
     }
 
-    protected fun fail(generation: Long, failure: Throwable) {
+    protected fun fail(generation: Long, failure: Throwable, sourceRecoveryAllowed: Boolean = true) {
         publish(generation) {
-            it.copy(phase = AnimePlayerPhase.ERROR, isBuffering = false, error = readablePlayerError(failure))
+            it.copy(phase = AnimePlayerPhase.ERROR, isBuffering = false, error = readablePlayerError(failure),
+                sourceRecoveryAllowed = sourceRecoveryAllowed)
         }
     }
 

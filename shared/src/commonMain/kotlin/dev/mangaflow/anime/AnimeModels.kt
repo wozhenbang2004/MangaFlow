@@ -1,6 +1,7 @@
 package dev.mangaflow.anime
 
 import dev.mangaflow.net.DownloadRouteSnapshot
+import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
 
 /** Canonical subject identities never share the manga library's keys or progress. */
 data class AnimeSubject(
@@ -198,6 +199,7 @@ data class AnimePlaybackSettings(
     val bufferStartMs: Int = 1_500,
     val bufferRebufferMs: Int = 3_000,
     val automaticRecoveryAttempts: Int = 2,
+    val videoEnhancement: AnimeVideoEnhancementMode = AnimeVideoEnhancementMode.OFF,
 ) {
     fun validate(): AnimePlaybackSettings {
         require(skipOpeningSeconds >= 0 && skipEndingSeconds >= 0) { "跳过时长不能小于零。" }

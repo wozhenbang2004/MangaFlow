@@ -1,5 +1,18 @@
 # Third-party notices
 
+## Anime4K video enhancement
+
+The player includes the original Restore CNN S/M and Upscale CNN x2 S/M
+shaders by bloc97 (Copyright (c) 2019-2021 bloc97, MIT), pinned to commit
+7684e9586f8dcc738af08a1cdceb024cc184f426:
+https://github.com/bloc97/Anime4K/tree/7684e9586f8dcc738af08a1cdceb024cc184f426 .
+All shader coefficients and embedded copyright/license headers are retained.
+MangaFlow's light/fine profiles combine Restore S + Upscale S and Restore M +
+Upscale M. Android adapts the shader passes to Media3/OpenGL ES; Windows uses
+the existing mpv GPU shader hooks. These are application profiles, not the
+complete upstream Mode A/B/C presets. The complete MIT text is packaged as
+licenses/ANIME4K_LICENSE.txt. No upstream demonstration artwork is bundled.
+
 ## Windows native caption integration
 
 Java Native Access (JNA) 5.19.1 is used only by the Windows application to apply

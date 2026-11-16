@@ -1,5 +1,41 @@
 # Third-party notices
 
+## Anime4K video enhancement
+
+MangaFlow embeds the complete Anime4K Restore CNN S/M and Upscale CNN x2 S/M
+GLSL sources from bloc97/Anime4K commit
+`7684e9586f8dcc738af08a1cdceb024cc184f426` (MIT):
+https://github.com/bloc97/Anime4K/tree/7684e9586f8dcc738af08a1cdceb024cc184f426 .
+The four source paths are `glsl/Restore/Anime4K_Restore_CNN_S.glsl`,
+`glsl/Restore/Anime4K_Restore_CNN_M.glsl`,
+`glsl/Upscale/Anime4K_Upscale_CNN_x2_S.glsl` and
+`glsl/Upscale/Anime4K_Upscale_CNN_x2_M.glsl`. Their original copyright,
+license and coefficient text remain in `Anime4KShaderLibrary.kt`;
+the license is also retained at `third_party/anime4k/LICENSE.txt`.
+The source collection includes Restore v4.0 and Upscale v3.2 descriptions;
+the pinned commit, not a blanket algorithm version label, identifies it.
+
+Desktop passes the original sources to the existing mpv GPU hooks.
+Android adapts the fixed multi-pass source dialect to Media3/OpenGL ES;
+iOS adapts it to Metal compute. Signed floating-point intermediate values
+and the original CNN coefficients are retained. The two application profiles
+combine Restore S + Upscale S and Restore M + Upscale M; these are not the
+complete upstream Mode A/B/C presets. Viewport conditions and actual native
+color/format support are explicit platform behaviors, not a guarantee of
+identical output, native 4K detail or measured real-time performance.
+
+The iOS GLSL-to-Metal and compute-pipeline adaptation is derived from
+imxieyi/Anime4KMetal commit `c46b8652a203d259ffbc3d39f21aa54263e11584`
+(Copyright 2021 Yi Xie, Apache-2.0), specifically `Shared/MPVShader.swift`
+and `Shared/Anime4K.swift`:
+https://github.com/imxieyi/Anime4KMetal/tree/c46b8652a203d259ffbc3d39f21aa54263e11584 .
+The modified files are `iosApp/Sources/Anime4KMetalShader.swift` and
+`iosApp/Sources/Anime4KMetalPipeline.swift`. MangaFlow uses its own existing
+routed AVPlayerItem and surface lifecycle, asynchronous preparation and
+explicit fallback; it does not incorporate the upstream demonstration
+player or its video assets. The complete Apache-2.0 license is retained at
+`third_party/anime4k-metal/LICENSE.txt` and packaged in the iOS application.
+
 ## Optional built-in adult manga sources
 
 MangaFlow's two opt-in adult catalogue adapters are compiled into the reader,

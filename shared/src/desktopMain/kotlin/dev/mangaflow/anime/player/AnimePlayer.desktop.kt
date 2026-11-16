@@ -18,8 +18,18 @@ private class DesktopAnimePlayer(
     scope: CoroutineScope,
 ) : RoutedNativeAnimePlayer(scope) {
     override val supportsBufferControl = true
+    override val supportsVideoEnhancement = true
     private var warming = true
     private var videoBeforeBackground: String? = null
+    private var enhancementMediaReady = false
+    private val enhancement = DesktopAnimeVideoEnhancement(
+        context = context,
+        scope = playerScope,
+        isCurrentSession = { handle, generation, mode ->
+            isCurrent(generation) && engine.value?.impl === handle && options.videoEnhancement == mode
+        },
+        update = { generation, value -> publish(generation) { it.copy(videoEnhancement = value) } },
+    )
 
     override suspend fun createBackend(): MediampPlayer {
         var pending: MediampPlayer? = null
@@ -51,11 +61,17 @@ private class DesktopAnimePlayer(
 
     override fun onMediaOpeningNative() {
         warming = true
+        enhancementMediaReady = false
+        applyVideoEnhancement()
         applyBufferPolicy()
         setForegroundNative(foreground || state.value.inPictureInPicture, options.backgroundAudio)
     }
 
-    override fun onMediaReadyNative() = onPlaybackStateNative()
+    override fun onMediaReadyNative() {
+        enhancementMediaReady = true
+        applyVideoEnhancement()
+        onPlaybackStateNative()
+    }
 
     override fun onPlaybackStateNative() {
         if (warming && state.value.phase == AnimePlayerPhase.READY && !state.value.isBuffering) {
@@ -64,7 +80,19 @@ private class DesktopAnimePlayer(
         }
     }
 
-    override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) = applyBufferPolicy()
+    override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {
+        applyBufferPolicy()
+        applyVideoEnhancement()
+    }
+
+    private fun applyVideoEnhancement() {
+        enhancement.configure(
+            handle = engine.value?.impl as? MPVHandle,
+            generation = nativeGeneration,
+            mode = options.videoEnhancement,
+            mediaReady = enhancementMediaReady,
+        )
+    }
 
     override fun setForegroundNative(foreground: Boolean, backgroundAudio: Boolean) {
         val handle = engine.value?.impl as? MPVHandle ?: return
@@ -101,6 +129,12 @@ private class DesktopAnimePlayer(
     }
 
     override fun releaseNative() {
+        enhancement.release()
+        enhancementMediaReady = false
+        mutableState.value = state.value.copy(videoEnhancement = AnimeVideoEnhancementState(
+            mode = options.videoEnhancement,
+            phase = AnimeVideoEnhancementPhase.OFF,
+        ))
         videoBeforeBackground = null
         warming = true
         super.releaseNative()

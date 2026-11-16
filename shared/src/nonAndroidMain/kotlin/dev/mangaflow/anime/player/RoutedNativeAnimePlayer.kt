@@ -55,6 +55,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
     private var subtitleTracks = emptyList<SubtitleTrack>()
     protected open val externalSubtitles: Boolean = true
     protected open val supportsBufferControl: Boolean = false
+    protected open val supportsVideoEnhancement: Boolean = false
     protected abstract suspend fun createBackend(): MediampPlayer
     protected open fun validateAsset(asset: AnimePlaybackAsset) {}
     protected open fun validateLocalMedia(lease: AnimeLocalMediaLease) {}
@@ -96,6 +97,7 @@ internal abstract class RoutedNativeAnimePlayer(scope: CoroutineScope) : Session
         publish(generation) { it.copy(capabilities = buildSet {
             add(AnimePlayerCapability.BACKGROUND_AUDIO)
             if (supportsBufferControl) add(AnimePlayerCapability.BUFFER_CONTROL)
+            if (supportsVideoEnhancement) add(AnimePlayerCapability.VIDEO_ENHANCEMENT)
             if (native.features[VideoAspectRatio] != null) add(AnimePlayerCapability.VIDEO_SCALE)
             if (native.features[AudioLevelController] != null) add(AnimePlayerCapability.VOLUME)
             if (metadata?.audioTracks != null) add(AnimePlayerCapability.AUDIO_TRACKS)

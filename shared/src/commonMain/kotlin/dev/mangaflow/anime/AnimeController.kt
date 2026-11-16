@@ -989,6 +989,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
     }
 
     private fun recoverPlayback(owner: ActivePlayback) {
+        val playback = playerInstance?.state?.value
+        if (playback != null && belongsTo(owner, playback) && !playback.sourceRecoveryAllowed) return
         if (owner.localMedia != null || !mutableState.value.settings.automaticSourceRecovery || active !== owner ||
             pending != null || mutableState.value.resolving) return
         if (sourceRecoveryAttempts >= mutableState.value.settings.automaticRecoveryAttempts) return
@@ -1006,8 +1008,15 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         else active?.preparationAttempted = false
     }
 
-    private fun playerOptions(settings: AnimePlaybackSettings) = AnimePlayerOptions(settings.backgroundAudio,
-        settings.bufferMinMs, settings.bufferMaxMs, settings.bufferStartMs, settings.bufferRebufferMs, settings.automaticRecoveryAttempts)
+    private fun playerOptions(settings: AnimePlaybackSettings) = AnimePlayerOptions(
+        backgroundAudio = settings.backgroundAudio,
+        bufferMinMs = settings.bufferMinMs,
+        bufferMaxMs = settings.bufferMaxMs,
+        bufferStartMs = settings.bufferStartMs,
+        bufferRebufferMs = settings.bufferRebufferMs,
+        automaticRecoveryAttempts = settings.automaticRecoveryAttempts,
+        videoEnhancement = settings.videoEnhancement,
+    )
 
     fun setSleepTimer(minutes: Int?, atEpisodeEnd: Boolean = false) {
         if (minutes != null && minutes <= 0) { notice("睡眠计时需要大于零的分钟数。"); return }

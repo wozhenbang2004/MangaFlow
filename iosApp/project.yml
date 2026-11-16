@@ -27,6 +27,12 @@ targets:
         buildPhase: resources
       - path: ../third_party/unicode/LICENSE.txt
         buildPhase: resources
+      - path: ../third_party/anime4k
+        type: folder
+        buildPhase: resources
+      - path: ../third_party/anime4k-metal
+        type: folder
+        buildPhase: resources
     info:
       path: Info.plist
       properties:

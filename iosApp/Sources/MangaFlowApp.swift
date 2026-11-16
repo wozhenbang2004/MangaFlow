@@ -4,6 +4,10 @@ import MangaFlowShared
 
 @main
 struct MangaFlowApp: App {
+    init() {
+        AppleAnimeEnhancementBridge.shared.registerFactory(factory: MangaFlowAnime4KFactory())
+    }
+
     var body: some Scene {
         WindowGroup {
             MangaFlowView()

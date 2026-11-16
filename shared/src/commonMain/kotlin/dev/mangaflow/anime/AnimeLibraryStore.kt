@@ -2,6 +2,7 @@ package dev.mangaflow.anime
 
 import dev.mangaflow.json.JSONArray
 import dev.mangaflow.json.JSONObject
+import dev.mangaflow.anime.player.AnimeVideoEnhancementMode
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.storage.StorageAtomicFile
@@ -350,6 +351,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("bufferMinMs", value.bufferMinMs).put("bufferMaxMs", value.bufferMaxMs)
         .put("bufferStartMs", value.bufferStartMs).put("bufferRebufferMs", value.bufferRebufferMs)
         .put("automaticRecoveryAttempts", value.automaticRecoveryAttempts)
+        .put("videoEnhancement", value.videoEnhancement.name)
 
     private fun decodeSettings(json: JSONObject): AnimePlaybackSettings {
         val defaults = AnimePlaybackSettings()
@@ -366,6 +368,9 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             bufferStartMs = json.optInt("bufferStartMs", defaults.bufferStartMs),
             bufferRebufferMs = json.optInt("bufferRebufferMs", defaults.bufferRebufferMs),
             automaticRecoveryAttempts = json.optInt("automaticRecoveryAttempts", defaults.automaticRecoveryAttempts),
+            videoEnhancement = AnimeVideoEnhancementMode.entries.firstOrNull {
+                it.name == json.optString("videoEnhancement")
+            } ?: defaults.videoEnhancement,
         ).validate()
     }
 

@@ -1,3 +1,24 @@
+## Anime4K GPU enhancement · 2026-11-16 (ANIME4K-01–06)
+
+Current user correction, exact message identifier unavailable, recorded 2026-11-16 UTC:
+
+> 那那个四K还是要做的呀，它那个是要需要CPU还是显卡呀，这个东西啊？原来是没有4K片源就对了，哦，原来如此啊，我还以为你说是支持4K片源，原来是我们自己把1080变成4K，那很屌啊这个技术，好吧？这个技术肯定是非常重要的
+
+Anime4K is required in the authorized player scope. This supersedes the earlier assistant suggestion to defer it. Clarification: native 4K sources and local upscaling are independent capabilities; this request is not evidence that 4K sources do not exist. The adopted Anime4K CNN shaders run on the local GPU, with CPU orchestration and the existing video decoder. An x2 upscale turns 1920×1080 into 3840×2160, but does not recover the original master or make every input/output a 4K stream.
+
+| ID | Required behavior and source-level acceptance |
+| --- | --- |
+| ANIME4K-01 · Actual algorithm | Adapt the complete upstream Anime4K Restore CNN S/M and Upscale CNN x2 S/M sources at `7684e9586f8dcc738af08a1cdceb024cc184f426`. Preserve weights, all dependent passes, signed floating-point intermediate textures and license notices. Ordinary sharpening, scaling or a toggle without a rendering path cannot satisfy this requirement. |
+| ANIME4K-02 · Platform integration | Android uses the existing Media3 player/effect pipeline; Windows uses the existing libmpv GPU shader hooks; iOS uses a Metal renderer consuming the same routed AVPlayerItem. No second URL resolver, network path, media session, progress identity or cloud service is introduced. |
+| ANIME4K-03 · Choice and persistence | Place `Anime4K` inside the existing `画面与清晰度` panel, with the retained MotionTabs and `原画 / 轻量 / 精细` choices. Default is original video. Persist the explicit choice through the anime settings and existing backup. The two profiles use S/S and M/M respectively; they are MangaFlow combinations, not claims of upstream Mode A/B/C equivalence. |
+| ANIME4K-04 · Honest feedback | Distinguish off, waiting, configured, actual processing, unavailable and failed. Configuration acceptance alone is not evidence of a processed frame. Show processing dimensions only when actually known; keep source resolution separate. No unconditional 4K/FPS/quality badge, invented GPU usage or claim of device smoothness. |
+| ANIME4K-05 · Continuity and recovery | Settings and GPU work are guarded by current native attempt, source/asset/session and surface lifecycle. Preserve pause/seek/speed/volume and exact route ownership. Unsupported HDR/protected/native formats or an enhancement failure retain/recover original playback with an explicit local reason; never classify that as a bad source or spend automatic source-recovery attempts. |
+| ANIME4K-06 · Delivery boundary | Complete the shared controls and all three real backends in one reviewed latest-main batch. No tests, local builds, probes or UI automation; confirm ordinary CI activation only. Compilation, installed output, visual parity, thermal behavior and sustained real-time processing remain unverified until actual artifact evidence. |
+
+UIX scope is the existing video-settings disclosure: one labeled section, one 44dp retained selector, a short secondary state/detail and actual dimensions where available. Reuse `AnimeSectionTitle`, `MotionTabs`, `AnimeQuietLabel` and the current PANEL; no new card, dialog stack, shader-code editor or always-visible player badge. The source-quality selector retains its separate meaning. Native GPU kernels are functional processing, not replacement UI components. The reference/implementation inventory and remaining larger Lanerc scope stay in [the existing ledger](docs/anime/lanerc-port.md).
+
+Source checkpoint: all six requirements now have corresponding shared/platform code and packaged attribution. Integrated source review closed stale program callbacks, failed-context cleanup, renderer/source recovery misclassification, reported-resolution ambiguity and iOS background native-layer attachment. The three platform implementations retain their documented differences: Android explicit x2 with observed drawing submissions; desktop configuration read-back and periodic color checks; iOS viewport-dependent x2 with completed/presented frame acknowledgement. The existing selector/state/disclosure sources are reused; visual, input, motion, accessibility and performance acceptance remain unverified under this project's source-only delivery boundary. The broader Lanerc request remains open at its explicit ledger entries.
+
 ## Decoded cache feedback and icon-led experience controls · 2026-11-16 (EXPERIENCE-FEEDBACK-01–06)
 
 Latest user feedback, recorded 2026-11-16 Asia/Shanghai; exact message identifier unavailable:

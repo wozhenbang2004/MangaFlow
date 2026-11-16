@@ -108,6 +108,15 @@ internal class AndroidAnimePlayer(
     private var lastPlaybackError: PlaybackException? = null
     private var progressiveFallbackUsed = false
     private var progressiveFallback: (() -> MediaSource)? = null
+    private var preparedMedia: MediaSource? = null
+    private var enhancementRevision = 0L
+    private var enhancementRecoveryUsed = false
+    private var nativeVideoRecoveryPending = false
+    private var nativeVideoRecoveryFailed = false
+    private var nativeVideoOnly = false
+    private var nativeVideoRestored = false
+    private var nativeVideoFallbackPhase = AnimeVideoEnhancementPhase.FAILED
+    private var nativeVideoFallbackDetail: String? = null
     private var receivedBytes = AtomicLong(0L)
     private var lastSampleBytes = 0L
     private var lastSampleAt = 0L
@@ -124,6 +133,7 @@ internal class AndroidAnimePlayer(
             AnimePlayerCapability.VIDEO_TRACKS, AnimePlayerCapability.AUTOMATIC_AUDIO_TRACK,
             AnimePlayerCapability.VIDEO_SCALE, AnimePlayerCapability.VOLUME,
             AnimePlayerCapability.BACKGROUND_AUDIO, AnimePlayerCapability.BUFFER_CONTROL,
+            AnimePlayerCapability.VIDEO_ENHANCEMENT,
         ))
     }
 
@@ -300,7 +310,20 @@ internal class AndroidAnimePlayer(
     }
 
     private fun prepareMedia(generation: Long, media: MediaSource, unsupportedSubtitle: Boolean = false) {
-        val exo = ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
+        val exo = createEngine()
+        try { connectEngine(generation, exo) } catch (failure: Throwable) {
+            runCatching { exo.release() }
+            throw failure
+        }
+        preparedMedia = media
+        if (unsupportedSubtitle) publish(generation) {
+            it.copy(notice = "部分外挂字幕格式无法由当前设备读取；可换用内嵌字幕或其他线路")
+        }
+        prepareOnEngine(generation, exo, media)
+    }
+
+    private fun createEngine(): ExoPlayer =
+        ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
             .setLoadControl(DefaultLoadControl.Builder()
                 .setBufferDurationsMs(options.bufferMinMs, options.bufferMaxMs, options.bufferStartMs, options.bufferRebufferMs)
                 .setTargetBufferBytes(64 * 1024 * 1024)
@@ -310,21 +333,57 @@ internal class AndroidAnimePlayer(
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
-        engine.value = exo
+
+    private fun connectEngine(generation: Long, exo: ExoPlayer) {
         val observer = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) { synchronize(generation, exo) }
             override fun onPlayerError(error: PlaybackException) { recoverOrFail(generation, exo, error) }
-            override fun onRenderedFirstFrame() { publish(generation) { it.copy(firstFrameRendered = true) } }
-            override fun onTracksChanged(tracks: Tracks) { publishTracks(generation, tracks) }
+            override fun onRenderedFirstFrame() {
+                if (!isCurrent(generation) || engine.value !== exo || nativeVideoRecoveryFailed) return
+                if (nativeVideoOnly) nativeVideoRestored = true
+                publish(generation) { it.copy(firstFrameRendered = true,
+                    videoEnhancement = if (nativeVideoOnly && options.videoEnhancement != AnimeVideoEnhancementMode.OFF)
+                        it.videoEnhancement.copy(phase = nativeVideoFallbackPhase, detail = nativeVideoFallbackDetail)
+                    else it.videoEnhancement,
+                ) }
+            }
+            override fun onTracksChanged(tracks: Tracks) {
+                if (!isCurrent(generation) || engine.value !== exo || nativeVideoRecoveryFailed) return
+                publishTracks(generation, tracks)
+                if (!nativeVideoOnly && tracks.groups.any { group ->
+                    group.type == C.TRACK_TYPE_VIDEO && (0 until group.length).any { index ->
+                        group.isTrackSelected(index) && group.getTrackFormat(index).drmInitData != null
+                    }
+                }) {
+                    // The Media3 effect path does not support protected content. Returning to
+                    // its native renderer does not grant a license or add DRM playback support.
+                    recoverNativeVideo(generation, exo, AnimeVideoEnhancementPhase.UNAVAILABLE,
+                        "受保护视频保持原生播放；Anime4K 不处理 DRM 内容")
+                }
+            }
+        }
+        exo.addListener(observer)
+        val existingSession = session
+        try {
+            if (existingSession == null) {
+                session = MediaSession.Builder(context, exo).setId("mangaflow-anime").build().also {
+                    AnimePlaybackSessions.attach(context, this, it)
+                }
+            } else {
+                // A failed GL backend can change without replacing the app's session/token, route,
+                // asset identity, offline lease, playback-history owner or media-service attachment.
+                existingSession.setPlayer(exo)
+            }
+        } catch (failure: Throwable) {
+            exo.removeListener(observer)
+            throw failure
         }
         listener = observer
-        exo.addListener(observer)
-        session = MediaSession.Builder(context, exo).setId("mangaflow-anime").build().also {
-            AnimePlaybackSessions.attach(context, this, it)
-        }
-        if (unsupportedSubtitle) publish(generation) {
-            it.copy(notice = "部分外挂字幕格式无法由当前设备读取；可换用内嵌字幕或其他线路")
-        }
+        engine.value = exo
+    }
+
+    private fun prepareOnEngine(generation: Long, exo: ExoPlayer, media: MediaSource) {
+        applyVideoEnhancement(generation, exo)
         exo.setMediaSource(media)
         exo.seekTo(state.value.positionMs)
         exo.playbackParameters = PlaybackParameters(state.value.speed)
@@ -332,6 +391,7 @@ internal class AndroidAnimePlayer(
         exo.playWhenReady = state.value.playWhenReady
         setForegroundNative(foreground || state.value.inPictureInPicture, options.backgroundAudio)
         exo.prepare()
+        polling?.cancel()
         polling = playerScope.launch(Dispatchers.Main.immediate) {
             while (isActive && isCurrent(generation)) {
                 synchronize(generation, exo)
@@ -340,8 +400,121 @@ internal class AndroidAnimePlayer(
         }
     }
 
+    private fun applyVideoEnhancement(generation: Long, exo: ExoPlayer) {
+        val revision = ++enhancementRevision
+        val mode = options.videoEnhancement
+        val phase = when {
+            mode == AnimeVideoEnhancementMode.OFF -> AnimeVideoEnhancementPhase.OFF
+            nativeVideoOnly || nativeVideoRecoveryPending || nativeVideoRecoveryFailed -> nativeVideoFallbackPhase
+            else -> AnimeVideoEnhancementPhase.WAITING
+        }
+        publish(generation) { it.copy(videoEnhancement = AnimeVideoEnhancementState(
+            mode = mode, phase = phase,
+            detail = if (mode != AnimeVideoEnhancementMode.OFF &&
+                (nativeVideoOnly || nativeVideoRecoveryPending || nativeVideoRecoveryFailed)) {
+                if (nativeVideoRestored || nativeVideoRecoveryFailed) nativeVideoFallbackDetail
+                else "正在恢复原生画面，等待首帧"
+            } else null,
+        )) }
+        // Once a VideoGraph itself fails, an empty effect list still retains that GL graph.
+        // This replacement backend deliberately never enables it again during this attempt.
+        if (nativeVideoOnly || nativeVideoRecoveryPending || nativeVideoRecoveryFailed) return
+        try {
+            val effects = if (mode == AnimeVideoEnhancementMode.OFF) emptyList() else listOf(
+                AndroidAnime4KEffect(mode) { observation, programIsCurrent ->
+                    // The callback originates on Media3's GL thread. Both backend and mode
+                    // revision must still own this observation when Main finally consumes it.
+                    playerScope.launch(Dispatchers.Main.immediate) {
+                        if (!isCurrent(generation) || engine.value !== exo || enhancementRevision != revision ||
+                            options.videoEnhancement != mode || nativeVideoOnly || !programIsCurrent()) return@launch
+                        publish(generation) { it.copy(videoEnhancement = observation) }
+                    }
+                },
+            )
+            // Required once BEFORE prepare even for OFF, so ordinary setting changes can
+            // replace the effect list in place. ContentFrame uses setVideoSurfaceView and
+            // supplies output dimensions automatically in Media3 1.11.1.
+            exo.setVideoEffects(effects)
+        } catch (failure: Exception) {
+            recoverNativeVideo(generation, exo, AnimeVideoEnhancementPhase.FAILED,
+                "Anime4K 未能启用，本次播放已退回原画；重新打开媒体可重试")
+        }
+    }
+
+    private fun recoverNativeVideo(
+        generation: Long,
+        exo: ExoPlayer,
+        phase: AnimeVideoEnhancementPhase = AnimeVideoEnhancementPhase.FAILED,
+        detail: String = "图形处理已停止，本次播放已退回原画；重新打开媒体可重试",
+    ): Boolean {
+        if (!isCurrent(generation) || engine.value !== exo || nativeVideoOnly || enhancementRecoveryUsed) return false
+        enhancementRecoveryUsed = true
+        nativeVideoRecoveryPending = true
+        nativeVideoRestored = false
+        enhancementRevision++
+        nativeVideoFallbackPhase = phase
+        nativeVideoFallbackDetail = detail
+        recovery?.cancel()
+        recoveryNotice = "正在恢复原生画面"
+        publish(generation) { it.copy(
+            phase = AnimePlayerPhase.OPENING, isBuffering = true, error = null, notice = recoveryNotice,
+            videoEnhancement = AnimeVideoEnhancementState(options.videoEnhancement,
+                if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF) AnimeVideoEnhancementPhase.OFF else phase,
+                "正在恢复原生画面，等待首帧".takeIf { options.videoEnhancement != AnimeVideoEnhancementMode.OFF }),
+        ) }
+        // Dispatch (not immediate) also lets a synchronous pre-prepare failure finish installing
+        // the current media first. This recovery never consumes a provider/network retry.
+        recovery = playerScope.launch(Dispatchers.Main) {
+            if (!isCurrent(generation) || engine.value !== exo) return@launch
+            var replacement: ExoPlayer? = null
+            try {
+                val media = requireNotNull(preparedMedia)
+                val position = exo.currentPosition.takeIf { it >= 0L } ?: state.value.positionMs
+                val playing = state.value.playWhenReady
+                val parameters = exo.trackSelectionParameters
+                val speed = state.value.speed
+                val volume = state.value.volume
+                val fresh = createEngine()
+                replacement = fresh
+                polling?.cancel()
+                polling = null
+                listener?.let { exo.removeListener(it) }
+                nativeVideoOnly = true
+                connectEngine(generation, fresh)
+                runCatching { exo.release() }
+                lastPlaybackError = null
+                fresh.trackSelectionParameters = parameters
+                publish(generation) { it.copy(positionMs = position, playWhenReady = playing,
+                    speed = speed, volume = volume, firstFrameRendered = false) }
+                nativeVideoRecoveryPending = false
+                prepareOnEngine(generation, fresh, media)
+            } catch (failure: Throwable) {
+                if (failure is kotlinx.coroutines.CancellationException) throw failure
+                if (engine.value !== replacement) runCatching { replacement?.release() }
+                failNativeVideoRecovery(generation, failure)
+            }
+        }
+        return true
+    }
+
+    private fun failNativeVideoRecovery(generation: Long, failure: Throwable) {
+        if (!isCurrent(generation)) return
+        nativeVideoRecoveryPending = false
+        nativeVideoRecoveryFailed = true
+        nativeVideoFallbackPhase = AnimeVideoEnhancementPhase.FAILED
+        nativeVideoFallbackDetail = "原生画面未能恢复，请重试当前媒体"
+        runCatching { engine.value?.pause() }
+        publish(generation) { it.copy(videoEnhancement = it.videoEnhancement.copy(
+            phase = if (options.videoEnhancement == AnimeVideoEnhancementMode.OFF)
+                AnimeVideoEnhancementPhase.OFF else AnimeVideoEnhancementPhase.FAILED,
+            detail = nativeVideoFallbackDetail.takeIf { options.videoEnhancement != AnimeVideoEnhancementMode.OFF },
+        )) }
+        fail(generation, IOException("原生画面未能恢复，请重试当前媒体", failure), sourceRecoveryAllowed = false)
+    }
+
     private fun synchronize(generation: Long, exo: ExoPlayer) {
         if (!isCurrent(generation) || engine.value !== exo) return
+        if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed) return
         if (exo.playerError != null) return // The typed error callback alone owns recovery/error publication.
         val now = SystemClock.elapsedRealtime()
         val elapsed = now - lastSampleAt
@@ -373,8 +546,19 @@ internal class AndroidAnimePlayer(
                 notice = if (phase == AnimePlayerPhase.READY && exo.playbackState != Player.STATE_BUFFERING &&
                     previous.notice == recoveryNotice) null else previous.notice,
                 downloadBytesPerSecond = if (localLease == null) speed else -1L,
-                videoWidth = exo.videoSize.width.takeIf { it > 0 },
-                videoHeight = exo.videoSize.height.takeIf { it > 0 },
+                // videoSize can describe the effect output. Source quality must come from
+                // the decoder format, never the 2x render target or a guessed fallback.
+                videoWidth = exo.videoFormat?.width?.takeIf { it > 0 },
+                videoHeight = exo.videoFormat?.height?.takeIf { it > 0 },
+                videoEnhancement = previous.videoEnhancement.let { enhancement ->
+                    if (enhancement.phase in setOf(AnimeVideoEnhancementPhase.OFF,
+                            AnimeVideoEnhancementPhase.UNAVAILABLE, AnimeVideoEnhancementPhase.FAILED)) {
+                        val width = exo.videoFormat?.width?.takeIf { it > 0 }
+                        val height = exo.videoFormat?.height?.takeIf { it > 0 }
+                        enhancement.copy(inputWidth = width, inputHeight = height,
+                            outputWidth = width, outputHeight = height)
+                    } else enhancement
+                },
             )
         }
         if (exo.playbackState == Player.STATE_READY) recoveryNotice = null
@@ -382,7 +566,17 @@ internal class AndroidAnimePlayer(
 
     private fun recoverOrFail(generation: Long, exo: ExoPlayer, error: PlaybackException) {
         if (!isCurrent(generation) || engine.value !== exo || lastPlaybackError === error) return
+        if (nativeVideoRecoveryPending || nativeVideoRecoveryFailed) return
         lastPlaybackError = error
+        // Until its first actual frame, this engine is still the one bounded graphics-recovery
+        // attempt. An asynchronous failure here must not mark the source bad or spend its retries.
+        if (nativeVideoOnly && !nativeVideoRestored) {
+            failNativeVideoRecovery(generation, error)
+            return
+        }
+        if (error.errorCode in setOf(PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSOR_INIT_FAILED,
+                PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED) &&
+            recoverNativeVideo(generation, exo)) return
         val responseCode = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode
         val retryableNetwork = error.errorCode in setOf(
             PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
@@ -414,7 +608,9 @@ internal class AndroidAnimePlayer(
                 val playing = state.value.playWhenReady
                 if (tryProgressive) {
                     progressiveFallbackUsed = true
-                    exo.setMediaSource(requireNotNull(progressiveFallback).invoke())
+                    val revised = requireNotNull(progressiveFallback).invoke()
+                    preparedMedia = revised
+                    exo.setMediaSource(revised)
                 }
                 exo.seekTo(position)
                 exo.playWhenReady = playing
@@ -482,8 +678,17 @@ internal class AndroidAnimePlayer(
     override fun setVolumeNative(volume: Float) { engine.value?.volume = volume }
 
     override fun configureNative(previous: AnimePlayerOptions, next: AnimePlayerOptions) {
+        if (previous.videoEnhancement != next.videoEnhancement) {
+            val exo = engine.value
+            if (exo != null) applyVideoEnhancement(nativeGeneration, exo)
+            else mutableState.value = mutableState.value.copy(videoEnhancement = AnimeVideoEnhancementState(
+                next.videoEnhancement, if (next.videoEnhancement == AnimeVideoEnhancementMode.OFF)
+                    AnimeVideoEnhancementPhase.OFF else AnimeVideoEnhancementPhase.WAITING,
+            ))
+        }
         if (engine.value != null && previous.copy(backgroundAudio = next.backgroundAudio,
-                automaticRecoveryAttempts = next.automaticRecoveryAttempts) != next) {
+                automaticRecoveryAttempts = next.automaticRecoveryAttempts,
+                videoEnhancement = next.videoEnhancement) != next) {
             mutableState.value = mutableState.value.copy(notice = "新的缓冲参数将在下次打开媒体时生效")
         }
     }
@@ -547,6 +752,15 @@ internal class AndroidAnimePlayer(
         lastPlaybackError = null
         progressiveFallbackUsed = false
         progressiveFallback = null
+        preparedMedia = null
+        enhancementRevision++
+        enhancementRecoveryUsed = false
+        nativeVideoRecoveryPending = false
+        nativeVideoRecoveryFailed = false
+        nativeVideoOnly = false
+        nativeVideoRestored = false
+        nativeVideoFallbackPhase = AnimeVideoEnhancementPhase.FAILED
+        nativeVideoFallbackDetail = null
         trackBindings.clear()
         trackGroups = emptyList()
         trackRevision = 0L
