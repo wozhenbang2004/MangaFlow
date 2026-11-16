@@ -602,24 +602,31 @@ fun ReaderScreen(
             }
         }
     }
-    val displayedPages = pages.mapIndexed { index, page ->
-        pageRepairs[index]?.page?.takeIf { it.index == page.index } ?: page
+    val repairSnapshot = pageRepairs.toMap()
+    val displayedPages = remember(pages, repairSnapshot) {
+        pages.mapIndexed { index, page ->
+            repairSnapshot[index]?.page?.takeIf { it.index == page.index } ?: page
+        }
     }
-    val displayedResolve: ReaderPageResolver = { page, onBytes ->
-        if (page.sourceRouteId.isNotBlank()) page else resolvePage(page, onBytes)
+    // Keep callbacks stable: AdjacentPagePrefetch observes their identity, and a fresh
+    // lambda on every reader recomposition would repeatedly cancel in-flight warmups.
+    val displayedResolve: ReaderPageResolver = remember(resolvePage) {
+        { page, onBytes -> if (page.sourceRouteId.isNotBlank()) page else resolvePage(page, onBytes) }
     }
-    val displayedRetry: ReaderPageResolver = { page, onBytes ->
-        if (page.sourceRouteId.isNotBlank()) page else retryPage(page, onBytes)
+    val displayedRetry: ReaderPageResolver = remember(retryPage) {
+        { page, onBytes -> if (page.sourceRouteId.isNotBlank()) page else retryPage(page, onBytes) }
     }
-    val displayedPrefetch: suspend (Page) -> Page? = { page ->
-        if (page.sourceRouteId.isNotBlank()) page else prefetchPage(page)
+    val displayedPrefetch: suspend (Page) -> Page? = remember(prefetchPage) {
+        { page -> if (page.sourceRouteId.isNotBlank()) page else prefetchPage(page) }
     }
     val displayedScriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page? =
-        { page, budget, work ->
-            if (page.sourceRouteId.isNotBlank()) page else scriptPrefetch(page, budget, work)
+        remember(scriptPrefetch) {
+            { page, budget, work ->
+                if (page.sourceRouteId.isNotBlank()) page else scriptPrefetch(page, budget, work)
+            }
         }
-    LaunchedEffect(storageCache, pageRepairs.toMap()) {
-        pageRepairs.values.forEach { repair ->
+    LaunchedEffect(storageCache, repairSnapshot) {
+        repairSnapshot.values.forEach { repair ->
             storageCache.registerPages(manga.id, chapterId, repair.variant.sourceId,
                 listOf(repair.page), repair.headers)
         }
