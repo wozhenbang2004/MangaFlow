@@ -6,9 +6,11 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import dev.mangaflow.typography.MangaFontScene
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -49,6 +51,29 @@ private val DarkColors = darkColorScheme(
     surfaceContainer = Color(0xFF242427), surfaceContainerLow = Color(0xFF1D1D20),
     surfaceContainerHigh = Color(0xFF2B2B2F),
 )
+
+/** Small evidence-backed status marks; selection and actions keep the theme's primary. */
+@Immutable
+internal data class MangaStatusColors(
+    val success: Color,
+    val activity: Color,
+    val waiting: Color,
+    val error: Color,
+    val neutral: Color,
+)
+
+@Composable
+internal fun mangaStatusColors(): MangaStatusColors {
+    val colors = MaterialTheme.colorScheme
+    val dark = colors.surface.luminance() < .5f
+    return MangaStatusColors(
+        success = if (dark) Color(0xFF8FD1A8) else Color(0xFF32754F),
+        activity = colors.primary,
+        waiting = if (dark) Color(0xFFE2BB78) else Color(0xFF8D641F),
+        error = colors.error,
+        neutral = colors.onSurfaceVariant,
+    )
+}
 
 /** UI chrome retains its own family; titles, prose and numeric text opt into their scene at the leaf. */
 private fun readerTypography(family: FontFamily): Typography {

@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import dev.mangaflow.experience.*
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionBusyIndicator
 import kotlin.math.roundToInt
 
 /** Adapts the reader's CacheWorkRow/CacheOccupancy into this same retained settings surface. */
@@ -49,7 +50,8 @@ internal fun ExperienceResourceOverview(usage: ExperienceUsage, appliedBudget: E
             ResourceAllocation(Icons.Outlined.Image, "图片内存", usage.memoryBytes,
                 target.imageMemoryBudgetBytes, Modifier.weight(1f), enabled, draft) { onOpen("cache") }
             ResourceAllocation(Icons.Outlined.Storage, "缓存磁盘", forecast.diskCurrentBytes,
-                target.diskBudgetBytes, Modifier.weight(1f), enabled, draft) { onOpen("cache") }
+                target.diskBudgetBytes, Modifier.weight(1f), enabled, draft,
+                resizePending = usage.diskResizePending) { onOpen("cache") }
         }
     }
 }
@@ -74,25 +76,40 @@ private fun ResourceMetricRow(icon: ImageVector, title: String, value: String, t
 
 @Composable
 private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, budget: Long?,
-    modifier: Modifier, enabled: Boolean, draft: Boolean, onClick: () -> Unit) {
+    modifier: Modifier, enabled: Boolean, draft: Boolean, resizePending: Boolean = false, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val statusColors = mangaStatusColors()
     val fraction = if (used != null && used >= 0L && budget != null && budget > 0L)
         (used.toDouble() / budget).coerceIn(0.0, 1.0).toFloat() else null
     val overBudget = used != null && budget != null && budget >= 0L && used > budget
-    val accent = colors.primary
+    val known = used != null && used >= 0L && budget != null && budget >= 0L
+    val accent = when {
+        resizePending || overBudget -> statusColors.waiting
+        !known || budget == 0L -> statusColors.neutral
+        else -> colors.primary
+    }
     MotionTextButton(onClick, enabled = enabled, contentPadding = PaddingValues(vertical = 6.dp),
         modifier = modifier.heightIn(min = 52.dp).semantics(mergeDescendants = true) {
             contentDescription = "$title，当前 ${resourceBytes(used)}，" + (if (draft) "草稿预算 " else "现用预算 ") + resourceBytes(budget) +
                 if (overBudget) {
                     if (draft) "，低于当前占用，应用后按缓存规则回收" else "，当前高于预算，在用内容释放后回收"
-                } else ""
+                } else if (resizePending) "，现用磁盘容量仍在等待调整" else if (!known) "，尚无完整采样"
+                else if (budget == 0L) { if (draft) "，草稿将关闭此项缓存预算" else "，此项缓存预算已关闭" } else ""
         }) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Icon(icon, null, Modifier.size(20.dp), tint = accent)
                 Text(resourceBytes(used), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
-                if (overBudget) Icon(Icons.Outlined.Schedule, null, Modifier.size(14.dp), tint = accent)
-                else if (draft) Icon(Icons.Outlined.Edit, null, Modifier.size(14.dp), tint = accent)
+                Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+                    val mark = when {
+                        resizePending || overBudget -> Icons.Outlined.Schedule
+                        !known -> Icons.Outlined.HelpOutline
+                        budget == 0L -> Icons.Outlined.Block
+                        draft -> Icons.Outlined.Edit
+                        else -> null
+                    }
+                    if (mark != null) Icon(mark, null, Modifier.size(14.dp), tint = accent)
+                }
             }
             Text("/ " + resourceBytes(budget), Modifier.padding(start = 26.dp),
                 style = MaterialTheme.typography.labelSmall, color = if (draft) accent else colors.onSurfaceVariant)
@@ -111,13 +128,14 @@ private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, bu
 internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, draftIdleMinutes: Int,
     enabled: Boolean, clearing: Boolean, onClear: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val statusColors = mangaStatusColors()
     val memory = usage.memoryCache
     var details by remember { mutableStateOf(false) }
     val expiry = memory?.idleMinutes?.let { if (it == 0) "∞" else "$it min" } ?: "—"
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Icon(Icons.Outlined.Image, "解码内存", Modifier.size(20.dp), tint = colors.primary)
+            Icon(Icons.Outlined.Image, "解码内存", Modifier.size(20.dp), tint = colors.onSurfaceVariant)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(resourceBytes(memory?.bytes) + " / " + resourceBytes(memory?.limit),
                     style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
@@ -126,9 +144,9 @@ internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, draftIdleMinut
                         color = colors.onSurfaceVariant)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Icon(Icons.Outlined.Schedule, null, Modifier.size(15.dp),
-                            tint = if (memory != null && memory.idleMinutes > 0) colors.primary else colors.onSurfaceVariant)
+                            tint = colors.onSurfaceVariant)
                         Text(expiry, style = MaterialTheme.typography.labelSmall,
-                            color = if (memory != null && memory.idleMinutes > 0) colors.primary else colors.onSurfaceVariant,
+                            color = colors.onSurfaceVariant,
                             modifier = Modifier.semantics {
                                 contentDescription = memory?.idleMinutes?.let {
                                     if (it == 0) "时间过期关闭，仅按容量淘汰" else "闲置 $it 分钟到期回收"
@@ -150,16 +168,26 @@ internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, draftIdleMinut
             }
             MotionIconButton(onClick = onClear, enabled = enabled && !clearing,
                 modifier = Modifier.size(44.dp), tooltip = "释放可复用的解码图片内存") {
-                Icon(if (clearing) Icons.Outlined.HourglassEmpty else Icons.Outlined.CleaningServices,
-                    "释放解码缓存", Modifier.size(20.dp), tint = colors.primary)
+                if (clearing) MotionBusyIndicator(Modifier.size(20.dp).semantics { contentDescription = "正在清理解码缓存" },
+                    color = statusColors.activity, strokeWidth = 1.5.dp)
+                else Icon(Icons.Outlined.CleaningServices, "释放解码缓存", Modifier.size(20.dp), tint = colors.primary)
             }
         }
         ExperienceReveal(details) {
             fun released(entries: Long?, bytes: Long?) = if (entries == null || bytes == null) "—"
                 else "$entries 项 · " + resourceBytes(bytes)
-            ResourceValue(Icons.Outlined.Schedule, "到期回收", released(memory?.expiredEntries, memory?.expiredBytes))
-            ResourceValue(Icons.Outlined.SwapHoriz, "容量淘汰", released(memory?.evictedEntries, memory?.evictedBytes))
-            ResourceValue(Icons.Outlined.CleaningServices, "清空回收", released(memory?.clearedEntries, memory?.clearedBytes))
+            fun removalMark(entries: Long?) = when {
+                entries == null -> Icons.Outlined.HelpOutline
+                entries > 0L -> Icons.Outlined.CheckCircle
+                else -> Icons.Outlined.Remove
+            }
+            fun removalColor(entries: Long?) = if (entries != null && entries > 0L) statusColors.success else statusColors.neutral
+            ResourceValue(Icons.Outlined.Schedule, "到期回收", released(memory?.expiredEntries, memory?.expiredBytes),
+                removalMark(memory?.expiredEntries), removalColor(memory?.expiredEntries))
+            ResourceValue(Icons.Outlined.SwapHoriz, "容量淘汰", released(memory?.evictedEntries, memory?.evictedBytes),
+                removalMark(memory?.evictedEntries), removalColor(memory?.evictedEntries))
+            ResourceValue(Icons.Outlined.CleaningServices, "清空回收", released(memory?.clearedEntries, memory?.clearedBytes),
+                removalMark(memory?.clearedEntries), removalColor(memory?.clearedEntries))
             ResourceValue(Icons.Outlined.History, "最近回收", memory?.lastReclaimedAtMillis?.let {
                 cacheInterval((memory.sampledAtMillis - it).coerceAtLeast(0L)) + "前"
             } ?: "—")
@@ -185,6 +213,7 @@ private fun cacheInterval(millis: Long): String = when {
 internal fun ExperienceDeviceDetails(usage: ExperienceUsage) {
     val r = usage.resources
     val device = r.device
+    val statusColors = mangaStatusColors()
     ResourceValue(Icons.Outlined.Devices, "设备", device.deviceModel ?: "—")
     ResourceValue(Icons.Outlined.DesktopWindows, "系统",
         listOfNotNull(device.platformName, device.osVersion).joinToString(" · ").ifBlank { "—" })
@@ -199,6 +228,13 @@ internal fun ExperienceDeviceDetails(usage: ExperienceUsage) {
     } ?: "—")
     ResourceValue(Icons.Outlined.Memory, "RAM · 可用 / 总量",
         resourceBytes(r.availableMemoryBytes) + " / " + resourceBytes(r.totalMemoryBytes))
+    ResourceValue(Icons.Outlined.Memory, "内存压力", when (r.memoryPressure) {
+        true -> "较高"; false -> "正常"; null -> "—"
+    }, statusIcon = when (r.memoryPressure) {
+        true -> Icons.Outlined.WarningAmber; false -> Icons.Outlined.CheckCircle; null -> Icons.Outlined.HelpOutline
+    }, statusColor = when (r.memoryPressure) {
+        true -> statusColors.waiting; false -> statusColors.success; null -> statusColors.neutral
+    })
     ResourceValue(Icons.Outlined.Storage, "磁盘 · 可用 / 总量",
         resourceBytes(r.freeDiskBytes) + " / " + resourceBytes(r.totalDiskBytes))
     ResourceValue(Icons.Outlined.Speed, "CPU · 应用 / 系统",
@@ -207,12 +243,26 @@ internal fun ExperienceDeviceDetails(usage: ExperienceUsage) {
         (r.batteryPercent?.let { "$it%" } ?: "—") + when (r.charging) { true -> " · 充电"; false -> " · 未充电"; null -> "" })
     ResourceValue(Icons.Outlined.Thermostat, "温度压力", when (r.thermalPressure) {
         0 -> "正常"; 1 -> "升高"; 2 -> "较高"; 3 -> "严重"; else -> "—"
+    }, statusIcon = when (r.thermalPressure) {
+        0 -> Icons.Outlined.CheckCircle
+        1, 2 -> Icons.Outlined.WarningAmber
+        3 -> Icons.Outlined.ErrorOutline
+        else -> Icons.Outlined.HelpOutline
+    }, statusColor = when (r.thermalPressure) {
+        0 -> statusColors.success
+        1, 2 -> statusColors.waiting
+        3 -> statusColors.error
+        else -> statusColors.neutral
     })
     ResourceValue(Icons.Outlined.NetworkCheck, "网络", when (r.networkAvailable) {
         false -> "离线"; true -> when (r.metered) { true -> "在线 · 计费"; false -> "在线 · 非计费"; null -> "在线 · 计费未知" }
         null -> "—"
+    }, statusIcon = when (r.networkAvailable) {
+        true -> Icons.Outlined.CheckCircle; false -> Icons.Outlined.WifiOff; null -> Icons.Outlined.HelpOutline
+    }, statusColor = when (r.networkAvailable) {
+        true -> statusColors.success; false -> statusColors.waiting; null -> statusColors.neutral
     })
-    Text("— 表示平台未提供；CPU 用量来自实际采样。",
+    Text("— 表示平台未提供；状态来自最近采样。网络在线仅表示系统连接，不代表每个来源可达。",
         Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
@@ -331,14 +381,21 @@ private fun ResourceEstimateLine(icon: ImageVector, label: String, value: String
 }
 
 @Composable
-internal fun ResourceValue(icon: ImageVector, label: String, value: String) {
+internal fun ResourceValue(icon: ImageVector, label: String, value: String,
+    statusIcon: ImageVector? = null, statusColor: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
     Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Icon(icon, null, Modifier.padding(top = 1.dp).size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, Modifier.weight(1.35f), style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface)
+        Row(Modifier.weight(1.35f), verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(value, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface)
+            if (statusIcon != null) Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+                Icon(statusIcon, null, Modifier.size(13.dp), tint = statusColor)
+            }
+        }
     }
 }
 

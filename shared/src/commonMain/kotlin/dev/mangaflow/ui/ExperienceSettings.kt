@@ -55,6 +55,7 @@ import dev.mangaflow.ui.motion.MotionSlider
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionButton
+import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.MotionTabs
@@ -97,6 +98,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     val navigationScroll = rememberScrollState()
     val focus = LocalFocusManager.current
     val colors = MaterialTheme.colorScheme
+    val statusColors = mangaStatusColors()
     fun reload() {
         baseline = store.overrides.value
         baselineMode = store.state.value.mode
@@ -143,6 +145,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
         val candidate = draft
         val expectedMode = baselineMode
         val expected = baseline
+        notice = null
         applying = true
         applyScope.launch {
             try {
@@ -228,7 +231,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                                 active && pendingExit == null, editor.pending) { group ->
                                 selectCategory(group, forecast = group == "resources")
                             }
-                            if (preview.protections.isNotEmpty()) ExperienceProtectionSummary(preview.protections)
+                            if (preview.protections.isNotEmpty()) ExperienceProtectionSummary(preview.protections, dirty)
                             Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                                 ExperienceCategoryNavigation(shownCategory, draft, active && pendingExit == null) { selectCategory(it) }
                             }
@@ -247,7 +250,7 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                                     active && pendingExit == null, editor.pending, showDraftImpact = !pinnedImpact) { group ->
                                     selectCategory(group, forecast = group == "resources")
                                 }
-                                if (preview.protections.isNotEmpty()) ExperienceProtectionSummary(preview.protections)
+                                if (preview.protections.isNotEmpty()) ExperienceProtectionSummary(preview.protections, dirty)
                                 ExperienceCategoryNavigation(shownCategory, draft, active && pendingExit == null) { selectCategory(it) }
                                 ExperienceReveal(showLegend) { ExperienceNavigationLegend() }
                             }
@@ -264,15 +267,39 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                         ExperienceDraftImpact(liveUsage, savedBudget, preview, editor.pending)
                     if (notice != null || conflict) Text(notice ?: "设置已在其他入口改变，请重新载入",
                         Modifier.fillMaxWidth().padding(vertical = 4.dp), style = MaterialTheme.typography.labelSmall,
-                        color = colors.error)
+                        color = if (conflict) statusColors.waiting else statusColors.error)
                     Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(if (dirty) Icons.Outlined.Edit else Icons.Outlined.CheckCircle,
-                            if (dirty) "有未应用的修改" else "配置已应用", Modifier.size(18.dp),
-                            tint = if (dirty) colors.primary else colors.onSurfaceVariant)
-                        Text(when { applying -> "应用中"; pendingExit != null -> "尚未应用"; editor.pending -> "编辑中"; dirty -> "草稿"; else -> "" },
+                        val stateColor = when {
+                            applying -> statusColors.activity
+                            conflict -> statusColors.waiting
+                            notice != null -> statusColors.error
+                            pendingExit != null -> statusColors.waiting
+                            dirty -> colors.primary
+                            else -> statusColors.success
+                        }
+                        val stateLabel = when {
+                            applying -> "应用中"
+                            conflict -> "需要重新载入"
+                            notice != null -> "尚未保存"
+                            pendingExit != null -> "尚未应用"
+                            editor.pending -> "编辑中"
+                            dirty -> "草稿"
+                            else -> "当前配置已保存"
+                        }
+                        Box(Modifier.size(18.dp).semantics { contentDescription = stateLabel }, contentAlignment = Alignment.Center) {
+                            if (applying) MotionBusyIndicator(Modifier.size(18.dp), color = stateColor, strokeWidth = 1.5.dp)
+                            else Icon(when {
+                                conflict -> Icons.Outlined.SyncProblem
+                                notice != null -> Icons.Outlined.ErrorOutline
+                                pendingExit != null -> Icons.Outlined.PauseCircleOutline
+                                dirty -> Icons.Outlined.Edit
+                                else -> Icons.Outlined.CheckCircle
+                            }, null, Modifier.size(18.dp), tint = stateColor)
+                        }
+                        Text(if (applying || conflict || notice != null || pendingExit != null || dirty) stateLabel else "",
                             Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-                            color = if (dirty) colors.primary else colors.onSurfaceVariant,
+                            color = stateColor,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         if (pendingExit != null) MotionIconButton(onClick = { pendingExit = null }, enabled = active,
                             modifier = Modifier.size(44.dp), tooltip = "继续编辑") {
@@ -307,16 +334,17 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
 }
 
 @Composable
-private fun ExperienceProtectionSummary(protections: List<String>) {
+private fun ExperienceProtectionSummary(protections: List<String>, draft: Boolean) {
+    val statusColors = mangaStatusColors()
     var expanded by remember { mutableStateOf(false) }
     Column {
         MotionTextButton(onClick = { expanded = !expanded }, contentPadding = PaddingValues(horizontal = 4.dp),
             modifier = Modifier.heightIn(min = 44.dp).semantics {
-                contentDescription = "${protections.size} 项运行保护；点击查看"
+                contentDescription = (if (draft) "草稿预览" else "当前策略") + "，${protections.size} 项约束；点击查看"
             }) {
-            Icon(Icons.Outlined.Shield, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+            Icon(Icons.Outlined.Shield, null, Modifier.size(18.dp), tint = statusColors.waiting)
             Spacer(Modifier.width(6.dp))
-            Text(protections.size.toString(), color = MaterialTheme.colorScheme.primary,
+            Text(protections.size.toString(), color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.labelMedium)
         }
         ExperienceReveal(expanded) {
@@ -406,7 +434,8 @@ private fun ExperienceNavigationLegend() {
         ResourceValue(Icons.Outlined.Download, "后台", "下载与任务让行")
         ResourceValue(Icons.Outlined.Storage, "缓存", "容量、时效与清理")
         ResourceValue(Icons.Outlined.DeveloperBoard, "设备", "硬件、观测与保护")
-        ExperienceHint("实测是当前占用；≈ 是配置情景估算，不是硬上限。点数值查看口径；— 表示未知。蓝点表示自定义，修改后点“应用”保存。")
+        ExperienceHint("绿点／勾表示对应状态已确认，蓝色表示处理或编辑，时钟／暂停的琥珀色表示等待或约束，红色表示失败，问号／— 表示未知。蓝点仍表示自定义，修改后点“应用”保存。")
+        ExperienceHint("实测是当前占用；≈ 是配置情景估算，不是硬上限或安全保证。点数值查看口径；缓存占满不等于故障。")
     }
 }
 
@@ -444,6 +473,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
     val uiScope = rememberCoroutineScope()
     var clearingMemory by remember { mutableStateOf(false) }
     var cacheNotice by remember { mutableStateOf<String?>(null) }
+    var cacheClearFailed by remember { mutableStateOf(false) }
     val focus = LocalFocusManager.current
     var detail by rememberSaveable { mutableStateOf<String?>(null) }
     var cacheTab by rememberSaveable { mutableStateOf("images") }
@@ -675,15 +705,25 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                     if (active && !clearingMemory) uiScope.launch {
                         clearingMemory = true
                         cacheNotice = null
+                        cacheClearFailed = false
                         try {
                             val released = store.clearDecodedMemory().await()
                             cacheNotice = "已释放 " + experienceCacheSize(released) + " 缓存引用"
                         } catch (cancelled: CancellationException) { throw cancelled }
-                        catch (_: Exception) { cacheNotice = "清理未完成，请重试" }
+                        catch (_: Exception) { cacheClearFailed = true; cacheNotice = "清理未完成，请重试" }
                         finally { clearingMemory = false }
                     }
             }
-            cacheNotice?.let { ExperienceHint(it) }
+            cacheNotice?.let {
+                val statusColors = mangaStatusColors()
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(if (cacheClearFailed) Icons.Outlined.ErrorOutline else Icons.Outlined.CheckCircle, null,
+                        Modifier.size(15.dp), tint = if (cacheClearFailed) statusColors.error else statusColors.success)
+                    Text(it, style = MaterialTheme.typography.labelSmall,
+                        color = if (cacheClearFailed) statusColors.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             ExperienceNumber("内存缓存上限", custom.memoryMiB, automaticMemoryBytes?.let { (it / EXPERIENCE_MIB).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() }, 1..512, "MB",
                 editor, active && expanded == "cache", effective = usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, automaticLabel = "模式预算") {
                 change(custom.copy(memoryMiB = it))
@@ -709,8 +749,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String,
                 val entries by downloads.entries.collectAsStateWithLifecycle()
                 ExperienceBudgetRow("离线已保存", experienceCacheSize(entries.sumOf { it.downloadedBytes }))
             }
-            if (usage.diskResizePending) ExperienceHint("等待在用原图释放后应用容量")
-            usage.cacheError?.let { ExperienceHint(it) }
+            if (usage.diskResizePending) ResourceValue(Icons.Outlined.Storage, "容量调整", "等待在用原图释放",
+                statusIcon = Icons.Outlined.Schedule, statusColor = mangaStatusColors().waiting)
+            usage.cacheError?.let { Text(it, Modifier.padding(vertical = 4.dp),
+                style = MaterialTheme.typography.labelSmall, color = mangaStatusColors().error) }
             ExperienceNumber("磁盘图片保留", custom.contentCache.imageRetentionHours, 0, 0..720, "小时",
                 editor, active && expanded == "cache", effective = appliedCustom.contentCache.imageRetentionHours,
                 automaticLabel = "默认值") { change(custom.copy(contentCache = custom.contentCache.copy(imageRetentionHours = it ?: 0))) }
