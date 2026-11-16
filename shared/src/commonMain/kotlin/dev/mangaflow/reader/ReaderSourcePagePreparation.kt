@@ -57,8 +57,7 @@ internal suspend fun prepareReaderSourcePage(
     val release = storage.protectReading(workId, variant.storageId, owner)
     try {
         return withPrefetchImageInactivity(token,
-            policy.state.value.recovery.imageTimeoutSeconds.coerceAtLeast(1).toLong() * 1000L,
-            sourceFailureAllowed = variant.sourceId != "jmcomic") {
+            policy.state.value.recovery.imageTimeoutSeconds.coerceAtLeast(1).toLong() * 1000L) {
             storage.registerPages(workId, variant.storageId, variant.sourceId, listOf(page), headers)
             withContext(ReaderPreparationWorkContext(token)) {
                 if (retry) invalidateScriptImage(owner, variant.storageId, page.sourceImageToken)
@@ -66,13 +65,9 @@ internal suspend fun prepareReaderSourcePage(
                 val native = if (local.url.startsWith("file:")) local else {
                     val script = resolveScriptPage(context, owner, variant.storageId, local, work = token)
                     val materialized = materializeScriptPage(context, owner, variant.storageId, script, work = token, retry = retry)
-                    if (variant.sourceId == "jmcomic") token.during(PrefetchStage.DOWNLOADING) {
-                        policy.withImageAdmission(reader = true, source = variant.sourceId,
-                            onWaiting = { token.admission(PrefetchStage.DOWNLOADING, it) }) {
-                            materializeJmPage(context, owner, variant.storageId, materialized,
-                                onBytes = token::onBytes, retry = retry) ?: materialized
-                        }
-                    } else materialized
+                    if (variant.sourceId == "jmcomic")
+                        materializeJmPage(context, owner, variant.storageId, materialized, retry = retry) ?: materialized
+                    else materialized
                 }
                 currentCoroutineContext().ensureActive()
                 storage.registerPages(workId, variant.storageId, variant.sourceId, listOf(native), headers)

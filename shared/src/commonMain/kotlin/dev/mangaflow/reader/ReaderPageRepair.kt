@@ -16,7 +16,6 @@ import dev.mangaflow.data.plugins.invalidateScriptImage
 import dev.mangaflow.data.plugins.scriptSourceImageEpoch
 import dev.mangaflow.data.sources.materializeJmPage
 import dev.mangaflow.experience.ExperiencePolicyStore
-import dev.mangaflow.experience.PrefetchStage
 import dev.mangaflow.experience.PrefetchImageInactivityException
 import dev.mangaflow.experience.ExperienceAdmissionDeferred
 import dev.mangaflow.net.DownloadRoutingStore
@@ -225,16 +224,9 @@ internal class ReaderPageRepairController(
         if (local.url.startsWith("file:")) return local
         val script = resolveScriptPage(context, owner, variant.storageId, local, work = token)
         val materialized = materializeScriptPage(context, owner, variant.storageId, script, onBytes = onBytes, work = token, retry = retry)
-        return if (variant.sourceId == "jmcomic") {
-            if (token == null) policy.withImageAdmission(true, variant.sourceId) {
-                materializeJmPage(context, owner, variant.storageId, materialized, onBytes = onBytes, retry = retry) ?: materialized
-            } else token.during(PrefetchStage.DOWNLOADING) {
-                policy.withImageAdmission(true, variant.sourceId, onWaiting = { token.admission(PrefetchStage.DOWNLOADING, it) }) {
-                    materializeJmPage(context, owner, variant.storageId, materialized,
-                        onBytes = { count -> onBytes?.invoke(count); token.onBytes(count) }, retry = retry) ?: materialized
-                }
-            }
-        } else materialized
+        return if (variant.sourceId == "jmcomic")
+            materializeJmPage(context, owner, variant.storageId, materialized, onBytes = onBytes, retry = retry) ?: materialized
+        else materialized
     }
 
     /** Automatic work is allowed only for an already confirmed exact relation. */

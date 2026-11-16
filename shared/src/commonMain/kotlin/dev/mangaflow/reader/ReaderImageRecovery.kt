@@ -54,6 +54,7 @@ import dev.mangaflow.experience.PrefetchStage
 import dev.mangaflow.experience.PrefetchImageInactivityException
 import dev.mangaflow.net.DownloadRouteException
 import dev.mangaflow.data.plugins.ScriptImageRefreshRequired
+import dev.mangaflow.data.sources.JmImageRefreshRequired
 import dev.mangaflow.storage.DownloadStorageException
 import dev.mangaflow.storage.DownloadPhase
 import dev.mangaflow.platform.wallTimeMillis
@@ -82,7 +83,7 @@ internal fun isReaderPrefetchFailure(failure: Throwable): Boolean {
         val current = cause ?: return true
         if (current is CancellationException || current is PrefetchBudgetExceeded || current is PrefetchPromoted ||
             current is ExperienceAdmissionDeferred || current is OutOfMemoryError || current is DownloadRouteException ||
-            current is ScriptImageRefreshRequired || current is DownloadStorageException) return false
+            current is ScriptImageRefreshRequired || current is JmImageRefreshRequired || current is DownloadStorageException) return false
         if (current is PrefetchImageInactivityException && !current.sourceFailure) return false
         if (Regex("(?i)ENOSPC|no space left|disk full|磁盘空间不足|存储空间不足").containsMatchIn(current.message.orEmpty())) return false
         cause = current.cause
@@ -113,7 +114,7 @@ internal fun readerPrefetchErrorLabel(failure: Throwable): String {
         chain.any { it is PrefetchPromoted } -> "交由当前页继续"
         chain.any { it is OutOfMemoryError } -> "内存保护暂缓"
         chain.any { it is DownloadRouteException } -> "线路配置暂不可用"
-        chain.any { it is ScriptImageRefreshRequired } -> "来源版本已变化，请重新读取"
+        chain.any { it is ScriptImageRefreshRequired || it is JmImageRefreshRequired } -> "来源版本已变化，请重新读取"
         chain.any { it is DownloadStorageException } -> "本机存储暂不可用"
         chain.filterIsInstance<PrefetchImageInactivityException>().firstOrNull()?.sourceFailure == false -> "准备资源等待超时"
         chain.any { it is PrefetchImageInactivityException } -> "等待图片新数据超时"

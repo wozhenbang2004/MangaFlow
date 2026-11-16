@@ -10,6 +10,7 @@ import dev.mangaflow.data.chapterSourceMangaId
 import dev.mangaflow.data.ReaderSourceStandby
 import dev.mangaflow.data.ReaderSourceStandbyPhase
 import dev.mangaflow.data.sources.materializeJmPage
+import dev.mangaflow.data.sources.prefetchJmPage
 import dev.mangaflow.data.plugins.resolveScriptPage
 import dev.mangaflow.data.plugins.materializeScriptPage
 import dev.mangaflow.data.plugins.prefetchScriptPage
@@ -532,14 +533,7 @@ fun ReaderScreen(
                 val resolved = resolveScriptPage(adultImageContext, owner, readingChapterId, local, work = work)
                 val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved, onBytes = onBytes, work = work)
                 if (dev.mangaflow.data.SourceKeys.decodeChapter(owner, readingChapterId).sourceId == "jmcomic")
-                    if (work == null) experience.withImageAdmission(reader = true, source = "jmcomic") {
-                        materializeJmPage(adultImageContext, owner, readingChapterId, materialized, onBytes = onBytes) ?: materialized
-                    } else work.during(PrefetchStage.DOWNLOADING) {
-                        experience.withImageAdmission(reader = true, source = "jmcomic", onWaiting = { work.admission(PrefetchStage.DOWNLOADING, it) }) {
-                            materializeJmPage(adultImageContext, owner, readingChapterId, materialized,
-                                onBytes = { count -> onBytes?.invoke(count); work.onBytes(count) }) ?: materialized
-                        }
-                    }
+                    materializeJmPage(adultImageContext, owner, readingChapterId, materialized, onBytes = onBytes) ?: materialized
                 else materialized
             }
         }
@@ -554,9 +548,12 @@ fun ReaderScreen(
         remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId, downloadStore, adultImageContext) {
             { page, budget, work ->
                 val local = downloadStore.resolvePrefetchPage(manga.id, readingChapterId, page)
-                if (local == null || local.url.startsWith("file:")) local else
-                    prefetchScriptPage(adultImageContext, chapterSourceMangaId(manga.id, chapter),
-                        readingChapterId, local, budget, work)
+                if (local == null || local.url.startsWith("file:")) local else {
+                    val owner = chapterSourceMangaId(manga.id, chapter)
+                    if (dev.mangaflow.data.SourceKeys.decodeChapter(owner, readingChapterId).sourceId == "jmcomic")
+                        prefetchJmPage(adultImageContext, owner, readingChapterId, local, budget, work)
+                    else prefetchScriptPage(adultImageContext, owner, readingChapterId, local, budget, work)
+                }
             }
         }
     val retryPage: ReaderPageResolver = remember(manga.id, chapterId, sourceIdentity, repository, downloadStore, adultImageContext) {
@@ -590,14 +587,8 @@ fun ReaderScreen(
                 val materialized = materializeScriptPage(adultImageContext, owner, readingChapterId, resolved,
                     onBytes = onBytes, work = work, retry = true)
                 if (dev.mangaflow.data.SourceKeys.decodeChapter(owner, readingChapterId).sourceId == "jmcomic")
-                    if (work == null) experience.withImageAdmission(reader = true, source = "jmcomic") {
-                        materializeJmPage(adultImageContext, owner, readingChapterId, materialized, onBytes = onBytes, retry = true) ?: materialized
-                    } else work.during(PrefetchStage.DOWNLOADING) {
-                        experience.withImageAdmission(reader = true, source = "jmcomic", onWaiting = { work.admission(PrefetchStage.DOWNLOADING, it) }) {
-                            materializeJmPage(adultImageContext, owner, readingChapterId, materialized,
-                                onBytes = { count -> onBytes?.invoke(count); work.onBytes(count) }, retry = true) ?: materialized
-                        }
-                    }
+                    materializeJmPage(adultImageContext, owner, readingChapterId, materialized,
+                        onBytes = onBytes, retry = true) ?: materialized
                 else materialized
             }
         }
@@ -2501,7 +2492,7 @@ internal fun AdjacentPagePrefetch(
                     if (experience.estimatedPageBytes(resource.url) > byteWindow.remaining) break
                     val windowBytes = byteWindow
                     val token = token(index, PrefetchStage.DOWNLOADING)
-                    if (sourceId.startsWith("js_")) {
+                    if (sourceId.startsWith("js_") || sourceId == "jmcomic") {
                         val job = requestScope.launch(start = CoroutineStart.LAZY) {
                             val owned = currentCoroutineContext()[Job]
                             try {
@@ -2539,9 +2530,8 @@ internal fun AdjacentPagePrefetch(
                         job.start()
                         continue
                     }
-                    if (sourceId == "jmcomic" || !resource.url.startsWith("https:")) {
-                        // The native JM decryptor remains foreground-owned.
-                        end(index, PrefetchStage.DOWNLOADING, ReaderPreparationPhase.DEFERRED, "此来源在实际阅读时恢复原图")
+                    if (!resource.url.startsWith("https:")) {
+                        end(index, PrefetchStage.DOWNLOADING, ReaderPreparationPhase.DEFERRED, "此来源需进入阅读后准备")
                         allTickets[index to PrefetchStage.DOWNLOADING]?.let { tracker?.finish(it) }
                         originalFinished += index
                         continue
@@ -2943,9 +2933,9 @@ private fun ReaderPageImage(
                 if (idle >= waitLimit) {
                     attempt.stopped = true
                     val observed = if (waitingForPrefetch) attemptPrefetch?.work?.snapshot() else preparationWork.snapshot()
-                    // The native JM call includes its mutex and image processing. Its SDK owns
-                    // actual transport deadlines; this outer wait cannot diagnose source failure.
-                    val sourceTimeout = sourceId != "jmcomic" && readerTimeoutIsSource(observed, pageTransfer)
+                    // Native mutex waits and image processing have separate stages; only
+                    // admitted transport inactivity can count as a source timeout.
+                    val sourceTimeout = readerTimeoutIsSource(observed, pageTransfer)
                     error = if (sourceTimeout) "本页连接超时" else "本页准备等待超时"
                     sourceFailure(if (sourceTimeout)
                         IllegalStateException("本页连接超时") else null)

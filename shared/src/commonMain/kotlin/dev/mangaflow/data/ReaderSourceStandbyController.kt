@@ -4,6 +4,7 @@ import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
 import dev.mangaflow.data.plugins.prefetchScriptPage
 import dev.mangaflow.data.plugins.scriptSourceImageEpoch
+import dev.mangaflow.data.sources.prefetchJmPage
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.PrefetchBudgetExceeded
 import dev.mangaflow.experience.PrefetchByteBudget
@@ -553,7 +554,7 @@ internal class ReaderSourceStandbyController(
                                         pageStages[index] = ReaderSourceStandbyPhase.CHECKING
                                         token.queued(PrefetchStage.CHECKING)
                                         publish()
-                                        val cached = if (!variant.sourceId.startsWith("js_")) preflightReaderPage(
+                                        val cached = if (!variant.sourceId.startsWith("js_") && variant.sourceId != "jmcomic") preflightReaderPage(
                                             context, input, headers, variant.sourceId, limits.previewWidth, limits.previewHeight, warmMemory = false,
                                             work = token, maxWidthPx = limits.previewWidth, maxHeightPx = limits.previewHeight,
                                         ) else null
@@ -562,8 +563,7 @@ internal class ReaderSourceStandbyController(
                                             pageStages[index] = ReaderSourceStandbyPhase.QUEUED
                                             publish()
                                             if (variant.sourceId == "jmcomic") {
-                                                stopped[index] = Stopped("此来源暂不支持后台原图准备，切源后按需加载", false)
-                                                null
+                                                prefetchJmPage(context, owner, variant.storageId, input, ticket, token)
                                             } else if (variant.sourceId.startsWith("js_")) {
                                                 prefetchScriptPage(context, owner, variant.storageId, input, ticket, token)
                                             } else {

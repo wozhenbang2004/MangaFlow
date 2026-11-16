@@ -6,6 +6,7 @@ import dev.mangaflow.data.ChapterDownloadTransport
 import dev.mangaflow.data.Page
 import dev.mangaflow.data.SourceException
 import dev.mangaflow.data.SourceKeys
+import dev.mangaflow.data.sources.nativeJmImageEpoch
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.PrefetchByteBudget
 import dev.mangaflow.experience.PrefetchStage
@@ -67,6 +68,7 @@ private val sourceEpochOverrides = mutableMapOf<String, String>()
 private val imageSessionJobs = mutableMapOf<String, MutableSet<Job>>()
 
 fun scriptSourceImageEpoch(context: PlatformContext, sourceId: String): String {
+    if (sourceId == "jmcomic") return nativeJmImageEpoch(context)
     if (!sourceId.startsWith("js_")) return "initial"
     return synchronized(imageStateLock) { sourceEpochOverrides[sourceId] }
         ?: context.getSharedPreferences("mangaflow_script_image_sessions").getString("epoch_$sourceId", "initial").orEmpty()

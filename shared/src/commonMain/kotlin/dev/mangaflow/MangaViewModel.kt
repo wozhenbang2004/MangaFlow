@@ -22,6 +22,9 @@ import dev.mangaflow.reader.readerManifestFingerprint
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.data.approximateReaderPage
 import dev.mangaflow.data.plugins.prefetchScriptPage
+import dev.mangaflow.data.sources.prefetchJmPage
+import dev.mangaflow.data.sources.JmImageRefreshRequired
+import dev.mangaflow.data.plugins.ScriptImageRefreshRequired
 import dev.mangaflow.data.plugins.scriptSourceImageEpoch
 import dev.mangaflow.experience.PrefetchWork
 import dev.mangaflow.experience.withPrefetchImageInactivity
@@ -75,6 +78,7 @@ import dev.mangaflow.data.FederatedSearchGrouper
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.storage.DownloadEntry
 import dev.mangaflow.storage.DownloadStatus
+import dev.mangaflow.storage.DownloadStorageException
 import dev.mangaflow.storage.DownloadStore
 import dev.mangaflow.storage.DownloadStore.Companion.LOCAL_SOURCE_URL
 import dev.mangaflow.storage.LibraryStore
@@ -2875,10 +2879,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                                             }
                                             if (!currentSession() || !policy.state.value.crossChapter) return@withPrefetchImageInactivity
                                             if (source == "jmcomic") {
-                                                item.deferred = "此来源原图需进入下一话后准备"
-                                                return@withPrefetchImageInactivity
-                                            }
-                                            if (source.startsWith("js_")) {
+                                                item.original = prefetchJmPage(application, owner, chapter.id, available,
+                                                    item.ticket, item.work)
+                                                item.original?.let { item.cacheKey = readerPageCacheKey(it, headers, source) }
+                                            } else if (source.startsWith("js_")) {
                                                 item.original = prefetchScriptPage(application, owner, chapter.id, available,
                                                     item.ticket, item.work)
                                             } else {
@@ -2905,6 +2909,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                                     catch (cancel: CancellationException) { throw cancel }
                                     catch (_: PrefetchBudgetExceeded) { item.deferred = "下一话准备窗口容量已用完" }
                                     catch (_: ExperienceAdmissionDeferred) { item.deferred = "当前页优先，下一话准备暂缓" }
+                                    catch (_: JmImageRefreshRequired) { item.deferred = "来源会话已变化，下一话需重新准备" }
+                                    catch (_: ScriptImageRefreshRequired) { item.deferred = "来源会话已变化，下一话需重新准备" }
+                                    catch (_: DownloadStorageException) { item.deferred = "本机存储暂不可用，下一话稍后准备" }
+                                    catch (_: DownloadRouteException) { item.deferred = "线路配置暂不可用，下一话稍后准备" }
                                     catch (_: OutOfMemoryError) { item.deferred = "内存压力下暂缓下一话准备" }
                                     catch (_: Exception) { item.failure = "下一话图片准备失败，翻章时可重试" }
                                     finally { item.done = true; publish() }

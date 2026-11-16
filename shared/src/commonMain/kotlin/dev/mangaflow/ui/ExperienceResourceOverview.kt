@@ -156,7 +156,7 @@ internal fun ExperienceForecastDetails(usage: ExperienceUsage, budget: Experienc
     ResourceValue(Icons.Outlined.Calculate, "配置情景峰值",
         resourceRange(f.estimatedProcessPeakLowBytes, f.estimatedProcessPeakHighBytes))
     ResourceValue(Icons.Outlined.Image, "可复用图片预算", resourceBytes(f.imageMemoryBudgetBytes))
-    ResourceValue(Icons.Outlined.Code, "脚本缓冲预算", resourceBytes(f.encodedMemoryBudgetBytes))
+    ResourceValue(Icons.Outlined.Code, "原图处理预算", resourceBytes(f.encodedMemoryBudgetBytes))
     ResourceValue(Icons.Outlined.PhotoSizeSelectLarge, "并行解码估算",
         resourceRange(f.decodeWorkingLowBytes, f.decodeWorkingHighBytes))
     ResourceValue(Icons.Outlined.Storage, "磁盘 · 当前 / 预算",

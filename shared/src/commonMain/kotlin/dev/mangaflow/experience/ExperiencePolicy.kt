@@ -71,6 +71,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var prefetchReserved = 0L
     private var prefetchStreamingBytes = 0L
     private var materializationStreamingBytes = 0L
+    private var materializationReservedBytes = 0L
     private var queued = 0
     private var nextTicket = 0L
     private val pageQueue = linkedMapOf<Long, String>()
@@ -870,7 +871,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     internal fun estimatedPageBytes(key: String): Long = synchronized(lock) { measurements.estimate(key) }
     internal fun acceptPrefetchChunk(bytes: Long, memoryBacked: Boolean = false) = synchronized(lock) {
         if (bytes > mutableState.value.prefetchBytes - prefetchStreamingBytes ||
-            memoryBacked && bytes > mutableState.value.materializationBytes - materializationStreamingBytes)
+            memoryBacked && bytes > mutableState.value.materializationBytes - materializationStreamingBytes - materializationReservedBytes)
             throw PrefetchBudgetExceeded()
         prefetchStreamingBytes += bytes
         if (memoryBacked) materializationStreamingBytes += bytes
@@ -878,6 +879,25 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     internal fun releasePrefetchBytes(bytes: Long, memoryBacked: Boolean = false) = synchronized(lock) {
         prefetchStreamingBytes -= bytes
         if (memoryBacked) materializationStreamingBytes -= bytes
+    }
+    /** Temporary image working-set reservation, independent from transferred/original-window bytes. */
+    internal fun reserveMaterialization(bytes: Long, optional: Boolean): () -> Unit = synchronized(lock) {
+        require(bytes >= 0L && bytes <= Long.MAX_VALUE - materializationReservedBytes)
+        if (optional && bytes > mutableState.value.materializationBytes - materializationStreamingBytes - materializationReservedBytes)
+            throw PrefetchBudgetExceeded()
+        // A reservation is not evidence of allocated/resident bytes. Keep the observed usage
+        // and forecast basis unchanged while sharing this allowance with real script buffers.
+        materializationReservedBytes += bytes
+        var held = true
+        val release: () -> Unit = {
+            synchronized(lock) {
+                if (held) {
+                    held = false
+                    materializationReservedBytes -= bytes
+                }
+            }
+        }
+        release
     }
     internal fun canWritePrefetch(): Boolean = synchronized(lock) {
         mutableState.value.prefetchBytes > 0L && diskCache?.acceptsPrefetchWrites != false

@@ -80,7 +80,8 @@ fun estimateExperienceResources(budget: ExperienceBudget, usage: ExperienceUsage
             if (sampleCount == 0) add("读几页后，按实际解码样本估算；没有用固定单页大小代填。")
             if (processBase == null) add("应用完整内存占用暂不可得；堆内存不能代替进程总量。")
             if (imageBudget == null || usage.memoryBytes == null) add("图片缓存尚未完成采样，配置影响暂不可计算。")
-            add("区间使用近期解码 P90／最大样本 × 解码并发，再加当前进程、未填满的图片缓存与脚本缓冲预算。")
+            add("区间使用近期解码 P90／最大样本 × 解码并发，再加当前进程、未填满的图片缓存与原图处理缓冲预算。")
+            add("JM 还原的临时内存预留属于预算，不冒充已实测驻留；它与压缩缓冲共享原图处理额度。")
             val tileDecodes = ExperienceRuntimeField.TILE_DECODES.effectiveValue(budget, usage)
             add(if (tileDecodes == null) "这是同类内容的情景估算；原生图片引擎管理的瓦片驻留和临时峰值尚无完整样本。"
                 else "这是同类内容的情景估算；长图瓦片单独使用 $tileDecodes 路解码，其驻留和临时峰值尚无完整样本。")
