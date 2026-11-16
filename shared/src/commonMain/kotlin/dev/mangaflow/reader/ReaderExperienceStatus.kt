@@ -247,8 +247,8 @@ internal fun ReaderExperienceStatus(
                             ReaderStatusSection.SOURCES -> "备用页按各来源阅读位置估算，不能视为同一页或已自动补图。小图驻留与原图已备分别统计。"
                             ReaderStatusSection.CACHE -> "这里是应用共享图片缓存，不是当前章节用量或应用全部内存。在用图片和离线内容有各自保护。"
                         })
-                        StatusValue("策略上限", "前 ${budget.prefetchAhead} · 后 ${budget.prefetchBehind} 页")
-                        StatusValue("备用上限", "${budget.standbySources} 源 · 每源 ${budget.standbyPages} 页")
+                        StatusValue("配置窗口", "前 ${budget.prefetchAhead} · 后 ${budget.prefetchBehind} 页")
+                        StatusValue("备用配置", "${budget.standbySources} 源 · 每源 ${budget.standbyPages} 页")
                         StatusExplanation(budget.reason)
                     }
                 }

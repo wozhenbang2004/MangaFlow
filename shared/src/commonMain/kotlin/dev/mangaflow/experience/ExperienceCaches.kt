@@ -15,11 +15,9 @@ import okio.Path
 import okio.SYSTEM
 
 /** Coil 3.2 has a read-only maximum. Enforce a live maximum around its existing LRU. */
-internal class ExperienceMemoryCache(private val cache: MemoryCache) : MemoryCache {
+internal class ExperienceMemoryCache(private val cache: MemoryCache, private val automaticTotal: Long) : MemoryCache {
     private val lock = StorageLock()
-    private val total = (cache.maxSize / .32).toLong()
-    private val hardLimit = minOf(cache.maxSize, 512L * EXPERIENCE_MIB)
-    private var limit = minOf(hardLimit, (total * .18).toLong())
+    private var limit = (automaticTotal * .18).toLong().coerceAtLeast(0L)
     private var revision = -1L
     private var idleMillis = 0L
     private val accessed = mutableMapOf<MemoryCache.Key, Long>()
@@ -54,10 +52,9 @@ internal class ExperienceMemoryCache(private val cache: MemoryCache) : MemoryCac
     fun applyBudget(fraction: Double, manualBytes: Long?, version: Long, idleMinutes: Int = 0) = synchronized(lock) {
         if (version < revision) return@synchronized
         revision = version
-        idleMillis = idleMinutes.coerceIn(0, 120) * 60_000L
-        val protectedLimit = (total * fraction).toLong().coerceAtLeast(0L)
-        limit = minOf(hardLimit, manualBytes ?: protectedLimit,
-            if (fraction <= .10) protectedLimit else hardLimit)
+        idleMillis = idleMinutes.coerceAtLeast(0) * 60_000L
+        val protectedLimit = (automaticTotal * fraction).toLong().coerceAtLeast(0L)
+        limit = manualBytes?.coerceAtLeast(0L) ?: protectedLimit
         cache.trimToSize(limit)
         trimExpired()
     }

@@ -35,16 +35,16 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import dev.mangaflow.data.plugins.scriptImageEvents
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 
@@ -94,7 +94,11 @@ class UnifiedMangaRepository(
     private data class RefreshRun(val eligibilityGeneration: Long, val job: Deferred<Unit>)
     private val refreshes = mutableMapOf<String, RefreshRun>()
     private val refreshedAt = mutableMapOf<String, Long>()
-    private val slots = Semaphore(2)
+    @Volatile private var sourceCheckPreferences = SourceCheckPreferences()
+    private var admittedSourceChecks = 0
+    private val sourceCheckPulse = MutableStateFlow(0L)
+    private val mutableSourceCheckActive = MutableStateFlow(0)
+    val sourceCheckActive = mutableSourceCheckActive.asStateFlow()
     private val _catalogRevision = MutableStateFlow(0L)
     val catalogRevision = _catalogRevision.asStateFlow()
     private val _sourceErrors = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
@@ -102,7 +106,8 @@ class UnifiedMangaRepository(
     private val _sourceDiscovery = MutableStateFlow<Map<String, Map<String, SourceDiscoveryResult>>>(emptyMap())
     val sourceDiscovery = _sourceDiscovery.asStateFlow()
     private data class DiscoveryRun(val signature: String, val generation: Long,
-        val eligibilityGeneration: Long, val job: Deferred<Unit>)
+        val eligibilityGeneration: Long, val configuration: String, val cacheEpoch: Long,
+        val sourceIds: Set<String>, val job: Deferred<Unit>)
     private val discoveries = mutableMapOf<String, DiscoveryRun>()
     private data class DiscoveryIdentity(val work: Manga, val aliases: List<String>, val conflictingIds: Set<String>)
     private val discoveryIdentities = LinkedHashMap<String, DiscoveryIdentity>()
@@ -399,10 +404,76 @@ class UnifiedMangaRepository(
         return result
     }
 
+    fun configureSourceChecks(preferences: SourceCheckPreferences) {
+        require(preferences.concurrency > 0 && preferences.timeoutSeconds > 0 &&
+            preferences.intervalMinutes > 0 && preferences.retries >= 0)
+        synchronized(unifiedMangaRepositoryStateLock) {
+            sourceCheckPreferences = preferences
+            sourceCheckPulse.value += 1L
+        }
+    }
+
+    /** A restored library cannot inherit automatic writes from a pre-restore source batch. */
+    fun invalidateSourceChecks() {
+        synchronized(unifiedMangaRepositoryStateLock) {
+            discoveryCacheEpoch++
+            discoveries.values.toList().forEach { it.job.cancel() }
+            discoveries.clear()
+            discoveryCompleted.clear()
+            discoveryIdentities.clear()
+            identityCatalogAttempts.clear()
+            refreshes.values.toList().forEach { it.job.cancel() }
+            refreshes.clear()
+            refreshedAt.clear()
+            _sourceDiscovery.value = emptyMap()
+            _sourceErrors.value = emptyMap()
+        }
+    }
+
+    /** Resizing changes admission for subsequent work, without replacing a live semaphore. */
+    private suspend fun <T> withSourceCheckSlot(block: suspend () -> T): T {
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val pulse = sourceCheckPulse.value
+            val entered = synchronized(unifiedMangaRepositoryStateLock) {
+                if (admittedSourceChecks < sourceCheckPreferences.concurrency) {
+                    admittedSourceChecks++
+                    mutableSourceCheckActive.value = admittedSourceChecks
+                    true
+                } else false
+            }
+            if (entered) break
+            sourceCheckPulse.first { it != pulse }
+        }
+        try { return block() }
+        finally {
+            synchronized(unifiedMangaRepositoryStateLock) {
+                admittedSourceChecks--
+                mutableSourceCheckActive.value = admittedSourceChecks
+                sourceCheckPulse.value += 1L
+            }
+        }
+    }
+
     /** Start independent source discovery; the existing work and readable directory stay visible. */
     fun discoverSources(work: Manga, aliases: List<String> = emptyList(), force: Boolean = false,
-        conflictingIds: Set<String> = emptySet()) =
+        conflictingIds: Set<String> = emptySet()): Unit {
         startDiscovery(work, aliases, force, conflictingIds, cachedOnly = false)
+    }
+
+    /** The OS/app scheduler awaits this same owner; it never launches an unobserved second scan. */
+    suspend fun checkSources(work: Manga, aliases: List<String> = emptyList(), force: Boolean = true,
+        failedOnly: Boolean = false, includePrimary: Boolean = true) {
+        startDiscovery(work, aliases, force, emptySet(), cachedOnly = false,
+            failedOnly = failedOnly, includePrimary = includePrimary, preserveIdentity = true)?.await()
+    }
+
+    fun retryFailedSources(work: Manga, aliases: List<String> = emptyList(),
+        conflictingIds: Set<String> = emptySet(), sourceId: String? = null,
+        failedSourceIds: Set<String> = emptySet()) {
+        startDiscovery(work, aliases, true, conflictingIds, cachedOnly = false,
+            failedOnly = true, includePrimary = true, onlySourceId = sourceId, failedSourceIds = failedSourceIds)
+    }
 
     /** A READY identity callback only reconsiders retained candidates, never searches every source again. */
     fun reconsiderSourceCandidates(work: Manga, aliases: List<String> = emptyList(),
@@ -413,62 +484,86 @@ class UnifiedMangaRepository(
         val work = identity.work
         val baseline = loadedSourceDetail(work.id) ?: if (work.sourceId == "copy") copy.cachedDetail(work.id) else null
         return SourceDiscoveryIdentity.signature(work, identity.aliases, baseline) +
-            "\u0000" + identity.conflictingIds.sorted().joinToString("|")
+            "\u0000" + identity.conflictingIds.sorted().joinToString("|") + "\u0000" + sourceConfigurationKey()
     }
 
     private fun startDiscovery(work: Manga, aliases: List<String>, force: Boolean,
-        conflictingIds: Set<String>, cachedOnly: Boolean) {
-        if (work.sourceUrl == dev.mangaflow.storage.DownloadStore.LOCAL_SOURCE_URL || work.title.isBlank()) return
+        conflictingIds: Set<String>, cachedOnly: Boolean, failedOnly: Boolean = false,
+        includePrimary: Boolean = false, onlySourceId: String? = null,
+        preserveIdentity: Boolean = false, failedSourceIds: Set<String> = emptySet(),
+        onlySourceIds: Set<String>? = null): Deferred<Unit>? {
+        if (work.sourceUrl == dev.mangaflow.storage.DownloadStore.LOCAL_SOURCE_URL || work.title.isBlank()) return null
         reconcileSourceDiscovery(work.id)
-        val identity = DiscoveryIdentity(work, (work.alternativeTitles + aliases).distinct(), conflictingIds)
-        val signature = discoverySignature(identity)
+        var identity = DiscoveryIdentity(work, (work.alternativeTitles + aliases).distinct(), conflictingIds)
+        var signature = discoverySignature(identity)
         synchronized(unifiedMangaRepositoryStateLock) {
             val eligibility = sourceEligibility
-            if (eligibility.ids.isEmpty()) return
+            if (eligibility.ids.isEmpty()) return null
+            if (preserveIdentity) discoveryIdentities[work.id]?.let { known ->
+                identity = known
+                signature = discoverySignature(known)
+            }
             // Late metadata joins this foreground generation; it must not restart source requests.
             discoveryIdentities[work.id] = identity
             if (force) identityCatalogAttempts.removeAll { it.workId == work.id }
             while (discoveryIdentities.size > 64) discoveryIdentities.remove(discoveryIdentities.keys.first())
-            if (cachedOnly && discoveries[work.id] == null && discoveryCompleted[work.id]?.first == signature) return
-            if (cachedOnly && _sourceDiscovery.value[work.id].isNullOrEmpty()) return
-            discoveries.filterKeys { it != work.id }.toList().forEach { (otherWorkId, run) ->
-                discoveries.remove(otherWorkId)
-                discoveryGenerations[otherWorkId] = (discoveryGenerations[otherWorkId] ?: 0L) + 1L
-                run.job.cancel()
-            }
+            if (cachedOnly && discoveries[work.id] == null && discoveryCompleted[work.id]?.first == signature) return null
+            if (cachedOnly && _sourceDiscovery.value[work.id].isNullOrEmpty()) return null
             val active = discoveries[work.id]
-            if (active?.job?.isActive == true && !force) return
+            val live = active?.takeIf { it.job.isActive && it.configuration == sourceConfigurationKey() &&
+                it.cacheEpoch == discoveryCacheEpoch }
+            if (cachedOnly && live != null) return live.job
             val completed = discoveryCompleted[work.id]
-            val elapsed = repositoryNanoTime() - (completed?.second ?: 0L)
-            if (!cachedOnly && !force && active == null && completed?.first == signature &&
-                elapsed in 0L until freshNanos(ContentCacheKind.DISCOVERY)) return
+            val previous = _sourceDiscovery.value[work.id].orEmpty()
+            val now = wallTimeMillis()
+            val targets = sources.filter { info ->
+                info.id in eligibility.ids && (!info.adult || info.id == work.sourceId) &&
+                    (previous[info.id]?.nextRetryAt ?: 0L) <= now &&
+                    (includePrimary || info.id != work.sourceId) &&
+                    (onlySourceId == null || info.id == onlySourceId) &&
+                    (onlySourceIds == null || info.id in onlySourceIds) &&
+                    (!failedOnly || onlySourceId != null || info.id in failedSourceIds ||
+                        previous[info.id]?.status == SourceDiscoveryStatus.FAILED) &&
+                    (force || completed?.first != signature || previous[info.id]?.let { row ->
+                        row.checkedAt <= 0L || now - row.checkedAt !in 0L until
+                            copy.contentCachePolicy().freshMillis(ContentCacheKind.DISCOVERY,
+                                row.status == SourceDiscoveryStatus.FAILED)
+                    } != false)
+            }
+            if (live != null) {
+                val missing = targets.mapTo(mutableSetOf()) { it.id } - live.sourceIds
+                if (missing.isEmpty()) return live.job
+                // Join the current owner first, then acquire only genuinely uncovered targets.
+                // In particular, a catalogue-only foreground scan cannot certify the primary.
+                return scope.async {
+                    live.job.await()
+                    val followup = synchronized(unifiedMangaRepositoryStateLock) {
+                        if (live.cacheEpoch != discoveryCacheEpoch || live.configuration != sourceConfigurationKey() ||
+                            live.eligibilityGeneration != sourceEligibility.generation)
+                            throw CancellationException("来源检查上下文已更新。")
+                        startDiscovery(work, aliases, true, conflictingIds, cachedOnly = false,
+                            failedOnly = failedOnly, includePrimary = includePrimary, onlySourceId = onlySourceId,
+                            preserveIdentity = true, failedSourceIds = failedSourceIds, onlySourceIds = missing)
+                    }
+                    followup?.await()
+                    Unit
+                }
+            }
+            if (!cachedOnly && targets.isEmpty()) return null
             active?.job?.cancel()
             val generation = (discoveryGenerations[work.id] ?: 0L) + 1L
             discoveryGenerations[work.id] = generation
             val cacheEpoch = discoveryCacheEpoch
+            val configuration = sourceConfigurationKey()
             var processedSignature = signature
             val job = scope.async(start = CoroutineStart.LAZY) {
                 if (!cachedOnly) supervisorScope {
-                    sources.filter { it.id != work.sourceId && it.id in eligibility.ids }.map { info ->
+                    targets.map { info ->
                         async {
                             ensureEligibility(eligibility, info.id)
                             publishDiscovery(work.id, generation,
-                                SourceDiscoveryResult(info.id, info.name, SourceDiscoveryStatus.SEARCHING))
-                            try {
-                                slots.withPermit {
-                                    withTimeout(25_000L) { discoverOneSource(work, identity.aliases, info, generation, force, eligibility) }
-                                }
-                            } catch (cancel: CancellationException) {
-                                if (cancel is kotlinx.coroutines.TimeoutCancellationException) {
-                                    publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name,
-                                        SourceDiscoveryStatus.FAILED, retainedSourceCount(work.id, info.id),
-                                        "该来源响应超时，已保留上次可用章节。"))
-                                } else throw cancel
-                            } catch (failure: Exception) {
-                                publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name,
-                                    SourceDiscoveryStatus.FAILED, retainedSourceCount(work.id, info.id),
-                                    failure.message ?: "该来源暂时不可用，已保留上次可用章节。"))
-                            }
+                                SourceDiscoveryResult(info.id, info.name, SourceDiscoveryStatus.QUEUED))
+                            checkOneSource(work, identity.aliases, info, generation, force, eligibility)
                         }
                     }.forEach { it.await() }
                 }
@@ -476,13 +571,24 @@ class UnifiedMangaRepository(
                 reconsiderCachedCandidates(latest, generation, eligibility)
                 processedSignature = discoverySignature(latest)
             }
-            discoveries[work.id] = DiscoveryRun(signature, generation, eligibility.generation, job)
+            discoveries[work.id] = DiscoveryRun(signature, generation, eligibility.generation,
+                configuration, cacheEpoch, targets.mapTo(mutableSetOf()) { it.id }, job)
             job.invokeOnCompletion { failure ->
                 val lateIdentity = synchronized(unifiedMangaRepositoryStateLock) {
                     if (discoveries[work.id]?.job !== job) return@synchronized null
                     discoveries.remove(work.id)
-                    if (failure != null || cacheEpoch != discoveryCacheEpoch ||
-                        eligibility.generation != sourceEligibility.generation) return@synchronized null
+                    if (failure != null || cacheEpoch != discoveryCacheEpoch || configuration != sourceConfigurationKey() ||
+                        eligibility.generation != sourceEligibility.generation) {
+                        _sourceDiscovery.update { current ->
+                            val rows = current[work.id] ?: return@update current
+                            current + (work.id to rows.mapValues { (_, row) ->
+                                if (row.status in setOf(SourceDiscoveryStatus.QUEUED, SourceDiscoveryStatus.SEARCHING,
+                                        SourceDiscoveryStatus.RETRYING)) row.copy(status = SourceDiscoveryStatus.FAILED,
+                                    message = "检查已中断，已保留上次目录；可单独重试。") else row
+                            })
+                        }
+                        return@synchronized null
+                    }
                     discoveryCompleted[work.id] = processedSignature to repositoryNanoTime()
                     while (discoveryCompleted.size > 64) discoveryCompleted.remove(discoveryCompleted.keys.first())
                     // Coalesce a real metadata revision that arrived during the bounded cache pass.
@@ -491,6 +597,7 @@ class UnifiedMangaRepository(
                 lateIdentity?.let { reconsiderSourceCandidates(it.work, it.aliases, it.conflictingIds) }
             }
             job.start()
+            return job
         }
     }
 
@@ -534,7 +641,9 @@ class UnifiedMangaRepository(
                 if (attempt) try {
                     // Only the retained, newly identifiable candidate needs its native directory.
                     // Existing catalog stripes/TTL coalesce it; no source search is restarted.
-                    slots.withPermit { withTimeout(25_000L) { detailSource(info.id, candidate.id) } }
+                    withSourceCheckSlot { withTimeout(sourceCheckPreferences.timeoutSeconds.toLong() * 1_000L) {
+                        detailSource(info.id, candidate.id)
+                    } }
                 } catch (cancel: CancellationException) {
                     if (cancel !is kotlinx.coroutines.TimeoutCancellationException) throw cancel
                 } catch (_: Exception) {
@@ -579,9 +688,67 @@ class UnifiedMangaRepository(
     }
 
     private fun retainedSourceCount(workId: String, sourceId: String): Int =
-        unified.linkedSources(workId).filter { it.manga.sourceId == sourceId }.sumOf {
+        if (SourceKeys.decodeManga(workId).sourceId == sourceId)
+            (cachedSourceDetail(workId) ?: if (sourceId == "copy") copy.cachedDetail(workId) else null)?.chapters?.size ?: 0
+        else unified.linkedSources(workId).filter { it.manga.sourceId == sourceId }.sumOf {
             cachedSourceDetail(it.manga.id)?.chapters?.size ?: 0
         }
+
+    private suspend fun checkOneSource(work: Manga, aliases: List<String>, info: BodySourceInfo,
+        generation: Long, force: Boolean, eligibility: SourceEligibility) {
+        val preferences = sourceCheckPreferences
+        val started = repositoryNanoTime()
+        var attempt = 1L
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            ensureEligibility(eligibility, info.id)
+            if (!isCurrentDiscovery(work.id, generation)) throw CancellationException("来源配置已改变。")
+            try {
+                withSourceCheckSlot {
+                    if (!isCurrentDiscovery(work.id, generation)) throw CancellationException("来源配置已改变。")
+                    publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name,
+                        SourceDiscoveryStatus.SEARCHING, attempt = attempt.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()))
+                    withTimeout(preferences.timeoutSeconds.toLong() * 1_000L) {
+                        discoverOneSource(work, aliases, info, generation, force || attempt > 1L, eligibility)
+                    }
+                }
+                _sourceDiscovery.value[work.id]?.get(info.id)?.let { result ->
+                    publishDiscovery(work.id, generation, result.copy(
+                        attempt = attempt.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                        elapsedMillis = (repositoryNanoTime() - started) / 1_000_000L))
+                }
+                return
+            } catch (failure: Exception) {
+                if (failure is CancellationException && failure !is kotlinx.coroutines.TimeoutCancellationException) throw failure
+                currentCoroutineContext().ensureActive()
+                val response = failure as? SourceException
+                val retryable = failure !is DownloadRouteException &&
+                    response?.httpStatus !in setOf(209, 210, 400, 401, 403, 404, 410, 422, 429) &&
+                    (response?.retryAfterSeconds ?: 0L) == 0L &&
+                    listOf("验证", "登录", "登陆", "付费", "不兼容", "尚未安装", "已移除").none {
+                        failure.message?.contains(it) == true
+                    }
+                val message = if (failure is kotlinx.coroutines.TimeoutCancellationException)
+                    "该来源响应超时，已保留上次可用章节。"
+                    else failure.message ?: "该来源暂时不可用，已保留上次可用章节。"
+                val elapsed = (repositoryNanoTime() - started) / 1_000_000L
+                if (!retryable || attempt > preferences.retries.toLong()) {
+                    val cooldown = (response?.retryAfterSeconds ?: 0L).coerceIn(0L, (Long.MAX_VALUE - wallTimeMillis()) / 1_000L)
+                    publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name,
+                        SourceDiscoveryStatus.FAILED, retainedSourceCount(work.id, info.id), message,
+                        attempt = attempt.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), elapsedMillis = elapsed,
+                        nextRetryAt = if (cooldown > 0L) wallTimeMillis() + cooldown * 1_000L else 0L))
+                    return
+                }
+                // Backoff owns no admission slot, so another source can make progress immediately.
+                publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name,
+                    SourceDiscoveryStatus.RETRYING, retainedSourceCount(work.id, info.id), message,
+                    attempt = attempt.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), elapsedMillis = elapsed))
+                delay(1_000L)
+                attempt++
+            }
+        }
+    }
 
     private suspend fun discoverOneSource(work: Manga, aliases: List<String>,
         info: BodySourceInfo, generation: Long, force: Boolean, eligibility: SourceEligibility) {
@@ -589,6 +756,13 @@ class UnifiedMangaRepository(
         fun report(status: SourceDiscoveryStatus, message: String = "", candidates: List<Manga> = emptyList(), chapters: Int = 0) =
             publishDiscovery(work.id, generation, SourceDiscoveryResult(info.id, info.name, status, chapters, message, candidates))
         val settings = unified.settings(work.id)
+        if (info.id == work.sourceId) {
+            val loaded = detailSource(info.id, work.id, forceRefresh = force)
+            ensureEligibility(eligibility, info.id)
+            report(SourceDiscoveryStatus.LINKED, chapters = loaded.chapters.size)
+            _catalogRevision.update { it + 1L }
+            return
+        }
         if (info.id in settings.excludedSources) {
             report(SourceDiscoveryStatus.DISABLED, "已由你移除此来源，不会自动重新关联。")
             return
@@ -605,6 +779,10 @@ class UnifiedMangaRepository(
                 }
                 val loaded = detailSource(info.id, link.manga.id, forceRefresh = force)
                 ensureEligibility(eligibility, info.id)
+                // Only upgrade automatically created links; a user's independent numbering stays theirs.
+                if (isCurrentDiscovery(work.id, generation) && link.association == "automatic" && !link.sameChapterSystem &&
+                    SourceDiscoveryIdentity.chapterSystemMatches(loadedSourceDetail(work.id), loaded))
+                    unified.confirmChapterSystem(work.id, link)
                 count += loaded.chapters.size
                 _sourceErrors.update { errors ->
                     errors + (work.id to (errors[work.id].orEmpty() - link.manga.id))
@@ -699,6 +877,8 @@ class UnifiedMangaRepository(
     private fun isCurrentDiscovery(workId: String, generation: Long): Boolean = synchronized(unifiedMangaRepositoryStateLock) {
         discoveryGenerations[workId] == generation &&
             discoveries[workId]?.eligibilityGeneration == sourceEligibility.generation &&
+            discoveries[workId]?.configuration == sourceConfigurationKey() &&
+            discoveries[workId]?.cacheEpoch == discoveryCacheEpoch &&
             discoveries[workId]?.job?.isActive == true
     }
 
@@ -714,6 +894,7 @@ class UnifiedMangaRepository(
 
     private fun associatedDiscovery(workId: String, result: SourceDiscoveryResult,
         settings: UnifiedWorkSettings): SourceDiscoveryResult {
+        if (result.sourceId == SourceKeys.decodeManga(workId).sourceId) return result
         if (result.sourceId in settings.excludedSources) return result.copy(
             status = SourceDiscoveryStatus.DISABLED, message = "已由你移除此来源，不会自动重新关联。",
             candidates = emptyList())
@@ -723,7 +904,7 @@ class UnifiedMangaRepository(
             else result
         val retained = retainedSourceCount(workId, result.sourceId)
         return when (result.status) {
-            SourceDiscoveryStatus.SEARCHING, SourceDiscoveryStatus.FAILED ->
+            SourceDiscoveryStatus.QUEUED, SourceDiscoveryStatus.SEARCHING, SourceDiscoveryStatus.RETRYING, SourceDiscoveryStatus.FAILED ->
                 result.copy(chapters = retained, candidates = emptyList())
             else -> result.copy(status = SourceDiscoveryStatus.LINKED, chapters = retained,
                 message = if (result.status == SourceDiscoveryStatus.LINKED) result.message else "已关联此来源。",
@@ -735,8 +916,20 @@ class UnifiedMangaRepository(
         synchronized(unifiedMangaRepositoryStateLock) {
             if (discoveryGenerations[workId] != generation ||
                 discoveries[workId]?.eligibilityGeneration != sourceEligibility.generation ||
+                discoveries[workId]?.configuration != sourceConfigurationKey() ||
+                discoveries[workId]?.cacheEpoch != discoveryCacheEpoch ||
                 result.sourceId !in sourceEligibility.ids) return
-            val associated = associatedDiscovery(workId, result, unified.settings(workId))
+            val old = _sourceDiscovery.value[workId]?.get(result.sourceId)
+            val pending = result.status in setOf(SourceDiscoveryStatus.QUEUED, SourceDiscoveryStatus.SEARCHING,
+                SourceDiscoveryStatus.RETRYING)
+            val success = result.status in setOf(SourceDiscoveryStatus.LINKED, SourceDiscoveryStatus.NO_MATCH,
+                SourceDiscoveryStatus.NEEDS_CONFIRMATION)
+            val stamped = result.copy(checkedAt = if (pending) old?.checkedAt ?: 0L else wallTimeMillis(),
+                lastSuccessAt = if (success) wallTimeMillis() else old?.lastSuccessAt ?: 0L,
+                attempt = result.attempt.takeIf { it > 0 } ?: old?.attempt ?: 0,
+                chapters = if (pending) maxOf(result.chapters, old?.chapters ?: 0) else result.chapters)
+            val associated = if (result.sourceId == SourceKeys.decodeManga(workId).sourceId) stamped
+                else associatedDiscovery(workId, stamped, unified.settings(workId))
             _sourceDiscovery.update { current ->
                 LinkedHashMap(current).apply {
                     remove(workId)
@@ -1050,7 +1243,7 @@ class UnifiedMangaRepository(
         val links = unified.linkedSources(base.manga.id)
         val baseline = loadedSourceDetail(base.manga.id)
             ?: if (base.manga.sourceId == "copy") copy.cachedDetail(base.manga.id) else null
-        if (baseline != null) links.filter { !it.sameChapterSystem && it.confirmedAt > 0L }.forEach { link ->
+        if (baseline != null) links.filter { it.association == "automatic" && !it.sameChapterSystem && it.confirmedAt > 0L }.forEach { link ->
             val candidate = loadedSourceDetail(link.manga.id) ?: return@forEach
             if (SourceDiscoveryIdentity.chapterSystemMatches(baseline, candidate))
                 unified.confirmChapterSystem(base.manga.id, link)
@@ -1063,6 +1256,9 @@ class UnifiedMangaRepository(
 
     private fun startRefresh(workId: String, force: Boolean): Deferred<Unit>? = synchronized(unifiedMangaRepositoryStateLock) {
         val eligibility = sourceEligibility
+        discoveries[workId]?.takeIf { it.eligibilityGeneration == eligibility.generation &&
+            it.configuration == sourceConfigurationKey() && it.cacheEpoch == discoveryCacheEpoch && it.job.isActive }
+            ?.let { return@synchronized it.job }
         refreshes[workId]?.takeIf { it.eligibilityGeneration == eligibility.generation && it.job.isActive }
             ?.let { return@synchronized it.job }
         refreshes[workId]?.job?.cancel()
@@ -1079,7 +1275,7 @@ class UnifiedMangaRepository(
                 links.map { link ->
                     async {
                         try {
-                            slots.withPermit {
+                            withSourceCheckSlot {
                                 ensureEligibility(eligibility, link.manga.sourceId)
                                 if (useDiskCache() && cachedSourceDetail(link.manga.id) == null) {
                                     catalogStore?.read(link.manga.id)?.let {
@@ -1088,7 +1284,9 @@ class UnifiedMangaRepository(
                                         _catalogRevision.update { value -> value + 1 }
                                     }
                                 }
-                                withTimeout(25_000L) { detailSource(link.manga.sourceId, link.manga.id, forceRefresh = force) }
+                                withTimeout(sourceCheckPreferences.timeoutSeconds.toLong() * 1_000L) {
+                                    detailSource(link.manga.sourceId, link.manga.id, forceRefresh = force)
+                                }
                                 ensureEligibility(eligibility, link.manga.sourceId)
                             }
                             null

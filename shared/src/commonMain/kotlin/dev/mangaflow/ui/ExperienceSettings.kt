@@ -210,7 +210,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                         ExperienceNumber("传输并发", custom.prefetchRequests, budget.goal.prefetchRequests, 1..12, "个",
                             editor, active && expanded == "reading" && detail == "reading-advanced" && custom.prefetchMode != PrefetchMode.OFF,
                             effective = budget.prefetchRequests) { change(custom.copy(prefetchRequests = it)) }
-                        ExperienceNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 4..512, "MB",
+                        ExperienceNumber("原图预取窗口", custom.prefetchMiB, (budget.goal.prefetchBytes / EXPERIENCE_MIB).toInt(), 1..512, "MB",
                             editor, active && expanded == "reading" && detail == "reading-advanced" && custom.prefetchMode != PrefetchMode.OFF,
                             effective = (budget.prefetchBytes / EXPERIENCE_MIB).toInt()) { change(custom.copy(prefetchMiB = it)) }
                         ExperienceBudgetRow("邻页 / 跨章", experienceCacheSize(budget.adjacentPrefetchBytes) + " / " +
@@ -225,7 +225,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 }) {
                 ExperienceBudgetRow("窗口目标", budget.goal.prefetchAhead.toString() + " 待读 · " + budget.goal.prefetchBehind + " 回看")
                 ExperienceHint("待读和回看跟随实际翻页方向，不固定为屏幕左右。窗口是候选页数，解析、传输、解码各有并发上限；原图存磁盘，临近预览进内存。")
-                ExperienceHint("环形箭头表示跟随目标，笔形表示手动上限；≤ 是受保护后的当前上限。目标与手动值不等于正在执行的数量。")
+                ExperienceHint("环形箭头表示跟随目标，笔形表示手动值，直接输入不设业务上限；“当前”只在暂停等实际状态不同时显示。配置数量不等于正在执行的数量。")
             }
         }
 
@@ -271,7 +271,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             ExperienceNumber("每源附近预热", custom.standbyPages, 1, 1..4, "页",
                 editor, active && expanded == "sources", effective = budget.standbyPages) { change(custom.copy(standbyPages = it ?: 1)) }
             ExperienceNumber("备用原图窗口", custom.standbyMiB,
-                (minOf(budget.goal.prefetchBytes / 4L, 12L * EXPERIENCE_MIB) / EXPERIENCE_MIB).toInt(), 1..128, "MB",
+                (budget.goal.prefetchBytes / 4L / EXPERIENCE_MIB).toInt(), 1..128, "MB",
                 editor, active && expanded == "sources", effective = (budget.standbyPrefetchBytes / EXPERIENCE_MIB).toInt()) {
                 change(custom.copy(standbyMiB = it))
             }
@@ -291,7 +291,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 ExperienceBudgetRow("模式目标", "备用至多 " + budget.goal.standbySources + " 源")
                 ExperienceHint("提前准备已关联的同章备用来源，预取可发现请求和图片错误。章节对齐不代表每一页相同，不会仅按页码替换图片；切换版本保留独立位置。")
                 ExperienceHint("不同来源并行准备，当前位置优先；限流或预算用尽会显示原因。磁盘原图与内存预览遵循“缓存与离线”的独立保留策略。")
-                ExperienceHint("备用窗口最多占总预取预算的一半，给当前来源留出空间。翻页后只释放已退出窗口且结束的任务额度；磁盘旧原图仍按缓存策略回收。")
+                ExperienceHint("未指定容量时自动分配备用窗口；手动容量按输入独立保留。翻页后只释放已退出窗口且结束的任务额度；磁盘旧原图仍按缓存策略回收。")
             }
         }
 
@@ -316,7 +316,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                     change(custom.copy(downloadPages = null, sourcePages = null, chapters = null,
                         yieldToReading = true, allowBackgroundDownloads = true))
                 }) {
-                ExperienceHint("每源从一个请求开始，按真实反馈调整；限流时等待恢复。上限只限制新请求，正在传输的页面继续完成。")
+                ExperienceHint("未指定每源并发时按真实反馈调整；手动并发直接生效。服务端限流时按实际回执等待，正在传输的页面继续完成。")
                 ExperienceHint(when (platformKind) {
                     PlatformKind.DESKTOP -> "退出应用后停止下载，重新打开后核对并续传。"
                     PlatformKind.IOS -> "在系统允许的延长执行时段内继续；系统暂停或强制退出后，重新打开续传。"
@@ -333,12 +333,12 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
             if (cacheTab == "images") {
             ExperienceBudgetRow("解码内存", cacheUsage(usage.memoryBytes, usage.memoryLimit))
-            ExperienceNumber("内存缓存上限", custom.memoryMiB, usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, 16..512, "MB",
+            ExperienceNumber("内存缓存上限", custom.memoryMiB, usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, 1..512, "MB",
                 editor, active && expanded == "cache", effective = usage.memoryLimit?.let { (it / EXPERIENCE_MIB).toInt() }, automaticLabel = "当前可用上限") {
                 change(custom.copy(memoryMiB = it))
             }
             ExperienceBudgetRow("图片磁盘", cacheUsage(usage.diskBytes, usage.diskLimit))
-            ExperienceNumber("磁盘缓存上限", custom.diskMiB, (budget.goal.diskCacheBytes / EXPERIENCE_MIB).toInt(), 32..8192, "MB",
+            ExperienceNumber("磁盘缓存上限", custom.diskMiB, (budget.goal.diskCacheBytes / EXPERIENCE_MIB).toInt(), 1..8192, "MB",
                 editor, active && expanded == "cache", effective = (budget.diskCacheBytes / EXPERIENCE_MIB).toInt()) {
                 change(custom.copy(diskMiB = it))
             }
@@ -413,8 +413,8 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 custom.memoryMiB != null || custom.diskMiB != null || custom.contentCache != ContentCachePreferences(), onRestore = {
                     closeEditor(); change(custom.copy(memoryMiB = null, diskMiB = null, contentCache = ContentCachePreferences()))
                 }) {
-                ExperienceHint("用量 / 上限；— 表示尚未取得。内存缓存只包含可复用的解码图像，上限受可用资源保护。磁盘缓存可自动回收，离线章节独立保存；可回收内容在缓存管理中清理。")
-                ExperienceHint("预读离开窗口会取消未完成任务，完成的图片按内存闲置、磁盘保留与总空间规则回收。列表另受每份600条、总内存2400条等结构上限保护；资料仓库也有有限条目上限，防止无界增长。")
+                ExperienceHint("用量 / 上限；— 表示尚未取得。内存缓存只包含可复用的解码图像，手动容量按输入保存。磁盘缓存可自动回收，离线章节独立保存；可回收内容在缓存管理中清理。")
+                ExperienceHint("预读离开窗口会取消未完成任务，完成的图片按内存闲置、磁盘保留与总空间规则回收。列表快照按设置的份数与磁盘容量淘汰；阅读记录、收藏和离线章节独立保存。")
             }
         }
 
@@ -498,13 +498,13 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 }) {
                 ExperienceHint(budget.reason)
                 if (budget.protections.isNotEmpty()) ExperienceHint(budget.protections.joinToString(" · "))
-                ExperienceHint("系统省电、严重温度与内存保护始终生效，恢复保留缓冲时间。计费网络及计费未知时，额外预热按当前预算收敛。")
+                ExperienceHint("自动项按实际资源调整；手动值保留。断网、系统暂停或存储失败会显示真实原因；计费网络按你选择的开关执行。")
             }
         }
     }
 }
 
-private class ExperienceEditor {
+internal class ExperienceEditor {
     var field by mutableStateOf<String?>(null)
 }
 
@@ -527,11 +527,13 @@ private fun ExperienceReveal(expanded: Boolean, content: @Composable ColumnScope
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-private fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range: IntRange, unit: String,
+internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range: IntRange, unit: String,
     editor: ExperienceEditor, active: Boolean, effective: Int? = null, automaticLabel: String = "模式目标", onChange: (Int?) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val selected = value ?: automatic
-    val current = (selected ?: range.first).coerceIn(range)
+    val current = (selected ?: range.first).coerceAtLeast(range.first)
+    // The slider is a shortcut; the numeric editor accepts every representable value.
+    val sliderMaximum = maxOf(range.last, current)
     val editing = active && editor.field == title
     val focus = LocalFocusManager.current
     var draft by remember { mutableStateOf("") }
@@ -541,8 +543,8 @@ private fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range:
     fun commit() {
         if (!acceptsInput()) return
         val parsed = draft.toIntOrNull()
-        if (parsed == null) { invalid = true; return }
-        val accepted = parsed.coerceIn(range)
+        if (parsed == null || parsed < range.first) { invalid = true; return }
+        val accepted = parsed
         draft = accepted.toString()
         sliding = accepted.toFloat()
         invalid = false
@@ -557,7 +559,7 @@ private fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range:
                     if (active) {
                         focus.clearFocus(force = true)
                         if (editing) editor.field = null else {
-                            draft = selected?.coerceIn(range)?.toString().orEmpty()
+                            draft = selected?.toString().orEmpty()
                             sliding = current.toFloat()
                             invalid = false
                             editor.field = title
@@ -579,7 +581,7 @@ private fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range:
                                 null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
                         }
                         if (selected != null && effective != null && effective != selected)
-                            Text("≤" + effective, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                            Text("当前 " + effective, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     }
                 }
             }
@@ -599,7 +601,7 @@ private fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range:
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 BasicTextField(draft, onValueChange = {
-                    if (acceptsInput() && it.length <= 5 && it.all(Char::isDigit)) { draft = it; invalid = false }
+                    if (acceptsInput() && it.length <= Int.MAX_VALUE.toString().length && it.all(Char::isDigit)) { draft = it; invalid = false }
                 }, singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
                     cursorBrush = SolidColor(colors.onSurface),
@@ -610,7 +612,7 @@ private fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range:
                         .semantics { contentDescription = title + "数值，单位" + unit },
                     decorationBox = { input ->
                         Box {
-                            if (draft.isEmpty()) Text("输入上限", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                            if (draft.isEmpty()) Text("输入数值", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
                             input()
                         }
                     })
@@ -627,11 +629,11 @@ private fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range:
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(if (value == null) "跟随" + automaticLabel else "手动上限",
+                    Text(if (value == null) "跟随" + automaticLabel else "手动值 · 直接输入不设业务上限",
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                     Text(automaticLabel + " " + (automatic?.toString()?.plus(" " + unit) ?: "尚未取得"),
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    Text("当前上限 " + (effective?.toString()?.plus(" " + unit) ?: "尚未取得"),
+                    Text("当前值 " + (effective?.toString()?.plus(" " + unit) ?: "尚未取得"),
                         style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 }
                 MotionIconButton(onClick = {
@@ -644,12 +646,12 @@ private fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range:
                     Icon(Icons.Outlined.Sync, "恢复" + title + "跟随" + automaticLabel, Modifier.size(18.dp))
                 }
             }
-            if (invalid) Text("请输入 " + range.first + "–" + range.last, style = MaterialTheme.typography.labelSmall, color = colors.error)
+            if (invalid) Text("请输入不小于 " + range.first + " 的有效整数", style = MaterialTheme.typography.labelSmall, color = colors.error)
             MotionSlider(sliding, onValueChange = {
                 if (acceptsInput()) { sliding = it; draft = it.roundToInt().toString(); invalid = false }
-            }, valueRange = range.first.toFloat()..range.last.toFloat(), onValueChangeFinished = {
+            }, valueRange = range.first.toFloat()..sliderMaximum.toFloat(), onValueChangeFinished = {
                 if (acceptsInput()) {
-                    val accepted = sliding.roundToInt().coerceIn(range)
+                    val accepted = sliding.roundToInt().coerceAtLeast(range.first)
                     draft = accepted.toString()
                     onChange(accepted)
                 }

@@ -424,7 +424,8 @@ private suspend fun inspectReaderPage(
         kotlin.math.ceil(original.width * scale).toLong() * kotlin.math.ceil(original.height * scale).toLong()
     } ?: (size.width.toLong() * size.height)
     val decodeLimit = minOf((loader.memoryCache?.maxSize ?: 0L) / 4L, 24L * EXPERIENCE_MIB)
-    if (!work.isForeground && estimatedPixels * 4L > decodeLimit)
+    val manualPreview = policy.overrides.value.let { it.decodedPrefetchPages != null || it.memoryMiB != null }
+    if (!work.isForeground && !manualPreview && estimatedPixels * 4L > decodeLimit)
         return ReaderPagePreflight(ReaderPagePreflightStatus.DEFERRED, dimensions, key)
     val request = readerPageRequest(context, page, headers, source)
         .prefetchPriority(PrefetchByteBudget(0L), source, work)
@@ -463,8 +464,11 @@ internal fun initializeExperienceImages(context: PlatformContext) {
     val policy = ExperiencePolicyStore.get(app)
     DownloadRoutingStore.get(app)
     SingletonImageLoader.setSafe { imageContext ->
-        val memory = ExperienceMemoryCache(MemoryCache.Builder().maxSizePercent(imageContext, .32)
-            .weakReferencesEnabled(false).build())
+        // Resolve Coil's platform memory estimate once, then let the policy own the live LRU
+        // size. A fixed backing maximum would silently truncate a later manual allocation.
+        val automaticTotal = (MemoryCache.Builder().maxSizePercent(imageContext, .32).build().maxSize / .32).toLong()
+        val memory = ExperienceMemoryCache(MemoryCache.Builder().maxSizeBytes(Long.MAX_VALUE)
+            .weakReferencesEnabled(false).build(), automaticTotal)
         val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
         val disk = ExperienceDiskCache(StorageFile(cacheDirectory(app), "image-cache").nativePath,
             policy.state.value.diskCacheBytes, policy::refreshCacheUsage, storage::cacheWorkFinished)

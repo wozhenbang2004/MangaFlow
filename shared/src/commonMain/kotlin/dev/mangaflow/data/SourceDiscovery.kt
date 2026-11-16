@@ -1,6 +1,6 @@
 package dev.mangaflow.data
 
-enum class SourceDiscoveryStatus { SEARCHING, LINKED, NO_MATCH, NEEDS_CONFIRMATION, FAILED, DISABLED }
+enum class SourceDiscoveryStatus { QUEUED, SEARCHING, RETRYING, LINKED, NO_MATCH, NEEDS_CONFIRMATION, FAILED, DISABLED }
 
 data class SourceDiscoveryResult(
     val sourceId: String,
@@ -11,6 +11,12 @@ data class SourceDiscoveryResult(
     val candidates: List<Manga> = emptyList(),
     /** Null until a projected catalogue can show this source's actual chapter coverage. */
     val alignedChapters: Int? = null,
+    /** Completion and previous success are separate: a failed check never erases usable data. */
+    val checkedAt: Long = 0L,
+    val lastSuccessAt: Long = 0L,
+    val attempt: Int = 0,
+    val elapsedMillis: Long = 0L,
+    val nextRetryAt: Long = 0L,
 )
 
 /** Candidate ordering is never evidence. Full identities and the two actual directories are checked. */

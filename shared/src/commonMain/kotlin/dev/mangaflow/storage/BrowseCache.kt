@@ -137,7 +137,7 @@ class BrowseCache(context: Context) {
             if (generation != epoch.get()) return
             memory.remove(snapshot.key)
             memory[snapshot.key] = snapshot
-            while (memory.size > policy.snapshotMemoryEntries || memory.values.sumOf { it.items.size + it.sourceMatches.values.sumOf(List<Manga>::size) } > MAX_MEMORY_ITEMS) {
+            while (memory.size > policy.snapshotMemoryEntries) {
                 memory.remove(memory.keys.first())
             }
         }
@@ -246,7 +246,6 @@ class BrowseCache(context: Context) {
         const val VERSION = 1
         const val MAX_ENTRIES = 24
         const val MAX_ITEMS = 600
-        const val MAX_MEMORY_ITEMS = 2_400
         const val MAX_SOURCE_HITS = 3_600
         const val MAX_SOURCES = 64
         const val MAX_SOURCE_NAME_LENGTH = 120

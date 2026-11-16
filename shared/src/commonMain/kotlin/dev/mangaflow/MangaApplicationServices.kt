@@ -10,6 +10,7 @@ import dev.mangaflow.data.CopyMangaRepository
 import dev.mangaflow.data.MangaMetricsRepository
 import dev.mangaflow.data.ReviewRepository
 import dev.mangaflow.data.SiteRankingsRepository
+import dev.mangaflow.data.SourceCheckController
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.plugins.ScriptBodySource
 import dev.mangaflow.data.plugins.ScriptSourcePackage
@@ -85,6 +86,8 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val sourcePlugins = SourcePluginStore.get(application)
     val starterSources = StarterSourceInstaller(application, sourcePlugins, scope)
     val library = LibraryStore(application)
+    val sourceChecks = SourceCheckController(application, repository, library, operations,
+        prepareSources = ::awaitSourcesReady)
     val downloads = DownloadStore.get(application)
     val updates = UpdateManager.get(application)
     val community = CopyCommunityRepository(copyRepository)
@@ -200,6 +203,7 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     }
 
     fun resumePending() {
+        sourceChecks.resume()
         downloads.resumePendingDownloads()
         preparations.resumePending()
         readingOutbox.resume()

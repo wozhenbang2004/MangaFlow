@@ -1781,6 +1781,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             domainOptions = sourceDomainOptions(first), sourceDomain = sourceDomain(first),
         )
         refreshSourceOverview()
+        discoverWorkSources(work)
     }
 
     private fun sourceIdentityReviews(work: Manga): List<ReviewSource> =
@@ -1794,9 +1795,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private fun isAdultSource(sourceId: String): Boolean =
         bodySources.entries.value.any { it.source.id == sourceId && it.adult }
 
-    private fun discoverWorkSources(work: Manga, force: Boolean = false, metadataOnly: Boolean = false) {
+    private fun discoverWorkSources(work: Manga, force: Boolean = false, metadataOnly: Boolean = false,
+        onlySourceId: String? = null) {
         if (work.sourceId == "catalog") return
         if (isAdultSource(work.sourceId)) return
+        if (!metadataOnly) services.sourceChecks.watch(work)
         val ready = sourceIdentityReviews(work)
         val aliases = sourceAliases(work)
         val ids = (work.externalIds.toList() + ready.flatMap { source ->
@@ -1812,7 +1815,10 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         }.toMap()
         val identity = work.copy(alternativeTitles = aliases, externalIds = unique)
         if (metadataOnly) repository.reconsiderSourceCandidates(identity, aliases, conflicts)
-        else repository.discoverSources(identity, aliases, force, conflicts)
+        else if (force) repository.retryFailedSources(identity, aliases, conflicts, onlySourceId,
+            _sourceManagement.value?.takeIf { it.work.id == work.id }?.discovery.orEmpty()
+                .filter { it.status == SourceDiscoveryStatus.FAILED }.map { it.sourceId }.toSet())
+        else repository.discoverSources(identity, aliases, false, conflicts)
     }
 
     private fun sourceDomainOptions(sourceId: String): List<String> =
@@ -1828,7 +1834,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         val discovered = repository.sourceDiscovery.value[work.id].orEmpty()
         val chapters = _detail.value?.takeIf { it.manga.id == work.id }?.detail?.chapters
             ?: _reading.value?.takeIf { it.manga.id == work.id }?.chapters.orEmpty()
-        val results = repository.sources.map { source ->
+        val results = repository.sources.filter { isAdultSource(it.id) == isAdultSource(work.sourceId) }.map { source ->
             val linked = source.id == work.sourceId || settings.links.any {
                 it.manga.sourceId == source.id && it.confirmedAt > 0L
             }
@@ -1847,12 +1853,18 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
             when {
                 source.id in settings.excludedSources -> SourceDiscoveryResult(source.id, source.name,
                     SourceDiscoveryStatus.DISABLED, message = "已取消关联，可手动重新添加")
+                source.id !in repository.enabledSources() && source.id != work.sourceId -> SourceDiscoveryResult(source.id, source.name,
+                    SourceDiscoveryStatus.DISABLED, message = "已在漫画源设置中停用")
+                discovery?.status in listOf(SourceDiscoveryStatus.QUEUED, SourceDiscoveryStatus.SEARCHING,
+                    SourceDiscoveryStatus.RETRYING, SourceDiscoveryStatus.FAILED) -> discovery!!.copy(
+                        chapters = maxOf(existingChapters, discovery.chapters), alignedChapters = alignedChapters)
+                discovery?.status == SourceDiscoveryStatus.LINKED -> discovery.copy(
+                    chapters = maxOf(existingChapters, discovery.chapters), alignedChapters = alignedChapters)
                 primaryFailure != null -> SourceDiscoveryResult(source.id, source.name, SourceDiscoveryStatus.FAILED,
                     chapters = existingChapters, message = primaryFailure)
                 linkedFailure != null -> SourceDiscoveryResult(source.id, source.name, SourceDiscoveryStatus.FAILED,
                     chapters = existingChapters, message = "$linkedFailure 已保留上次目录。")
-                discovery?.status in listOf(SourceDiscoveryStatus.SEARCHING, SourceDiscoveryStatus.FAILED) ||
-                    !linked && discovery?.status == SourceDiscoveryStatus.NEEDS_CONFIRMATION -> discovery!!.copy(chapters = existingChapters)
+                !linked && discovery?.status == SourceDiscoveryStatus.NEEDS_CONFIRMATION -> discovery!!.copy(chapters = existingChapters)
                 linked -> SourceDiscoveryResult(source.id, source.name, SourceDiscoveryStatus.LINKED,
                     chapters = existingChapters, alignedChapters = alignedChapters)
                 else -> discovered[source.id] ?: SourceDiscoveryResult(source.id, source.name,
@@ -1862,19 +1874,19 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
         _sourceManagement.update { if (it?.work?.id == work.id) it.copy(
             linked = settings.links.filter { it.confirmedAt > 0L }.map { link -> link.manga },
             preferredSource = settings.preferredSources.firstOrNull() ?: work.sourceId,
-            discovery = results, scanning = discovered.values.any { result -> result.status == SourceDiscoveryStatus.SEARCHING },
+            discovery = results, scanning = discovered.values.any { result -> result.status in setOf(
+                SourceDiscoveryStatus.QUEUED, SourceDiscoveryStatus.SEARCHING, SourceDiscoveryStatus.RETRYING) },
             domainOptions = sourceDomainOptions(it.sourceId), sourceDomain = sourceDomain(it.sourceId)) else it }
     }
 
     fun retrySourceDiscovery() {
         val work = _sourceManagement.value?.work ?: _detail.value?.manga ?: return
-        if (_detail.value?.takeIf { it.manga.id == work.id }?.error != null) retryDetail()
         discoverWorkSources(work, force = true)
-        viewModelScope.launch {
-            try { repository.refreshLinked(work.id); refreshUnifiedProjection() }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Exception) { messages.send(failure.message ?: "来源刷新失败，已保留上次目录。") }
-        }
+    }
+
+    fun retrySourceCheck(sourceId: String) {
+        val work = _sourceManagement.value?.work ?: return
+        discoverWorkSources(work, force = true, onlySourceId = sourceId)
     }
 
     fun chooseBodySource(sourceId: String) {

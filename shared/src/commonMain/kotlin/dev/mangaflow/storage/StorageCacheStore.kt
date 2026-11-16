@@ -101,7 +101,7 @@ class StorageCacheStore private constructor(context: PlatformContext) {
         val changed = synchronized(lock) {
             if (version < retentionVersion) return
             retentionVersion = version
-            val next = hours.coerceIn(0, 720) * 3_600_000L
+            val next = hours.coerceAtLeast(0) * 3_600_000L
             (next != retentionMillis).also { retentionMillis = next }
         }
         if (changed) requestMaintenance()

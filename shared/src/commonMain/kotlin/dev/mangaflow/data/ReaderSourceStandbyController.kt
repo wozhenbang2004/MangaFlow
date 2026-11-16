@@ -328,11 +328,11 @@ internal class ReaderSourceStandbyController(
                     val target = approximateReaderPage(at.index, at.count, pages.size)
                     val wanted = buildList {
                         add(target)
-                        for (offset in 1 until limits.pages) {
+                        for (offset in 1 until minOf(limits.pages, pages.size)) {
                             val next = target + offset * at.direction
                             if (next in pages.indices) add(next)
                         }
-                        for (offset in 1 until limits.pages) {
+                        for (offset in 1 until minOf(limits.pages, pages.size)) {
                             val previous = target - offset * at.direction
                             if (size < limits.pages && previous in pages.indices) add(previous)
                         }

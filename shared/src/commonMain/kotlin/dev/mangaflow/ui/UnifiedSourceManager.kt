@@ -25,6 +25,9 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -49,6 +52,10 @@ import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.SourceManagementState
 import dev.mangaflow.data.Manga
 import dev.mangaflow.data.sourceDisplayName
+import dev.mangaflow.data.SourceCheckPreferences
+import dev.mangaflow.data.SourceCheckScheduleState
+import dev.mangaflow.ui.motion.motionInputGate
+import kotlinx.coroutines.delay
 import dev.mangaflow.ui.motion.MotionBottomSheet
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
@@ -72,6 +79,10 @@ internal fun UnifiedSourceManager(
     onRetryAll: () -> Unit = {},
     onChooseDomain: (String) -> Unit = {},
     onChooseSource: (String) -> Unit = {},
+    checkPreferences: SourceCheckPreferences = SourceCheckPreferences(),
+    checkSchedule: SourceCheckScheduleState = SourceCheckScheduleState(),
+    onCheckPreferences: (SourceCheckPreferences) -> Unit = {},
+    onRetrySource: (String) -> Unit = {},
 ) {
     var sourcePage by remember(state.work.id) { mutableStateOf<String?>(null) }
     var source by remember(state.work.id) { mutableStateOf(state.sourceId) }
@@ -82,6 +93,10 @@ internal fun UnifiedSourceManager(
     var requestedSearch by remember(state.work.id) { mutableStateOf<Pair<String, String>?>(null) }
     var domainChanged by remember(state.work.id) { mutableStateOf(false) }
     var attaching by remember(state.work.id) { mutableStateOf<Manga?>(null) }
+    val editor = remember { ExperienceEditor() }
+    val now by produceState(wallTimeMillis()) {
+        while (true) { delay(1_000L); value = wallTimeMillis() }
+    }
     val colors = MaterialTheme.colorScheme
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
@@ -91,7 +106,8 @@ internal fun UnifiedSourceManager(
         val rows = linkedMapOf<String, SourceOverviewEntry>()
         state.discovery.forEach { result ->
             rows[result.sourceId] = SourceOverviewEntry(result.sourceId, result.sourceName,
-                result.status.name, result.chapters, result.message, result.candidates, result.alignedChapters)
+                result.status.name, result.chapters, result.message, result.candidates, result.alignedChapters,
+                result.checkedAt, result.lastSuccessAt, result.attempt, result.elapsedMillis, result.nextRetryAt)
         }
         associated.forEach { manga ->
             val previous = rows[manga.sourceId]
@@ -106,7 +122,8 @@ internal fun UnifiedSourceManager(
         }
         rows.values.sortedBy { if (it.status == "NEEDS_CONFIRMATION") 0 else 1 }
     }
-    val checking = state.scanning || overview.any { it.status == "SEARCHING" }
+    val runningStates = setOf("QUEUED", "SEARCHING", "RETRYING")
+    val checking = state.scanning || overview.any { it.status in runningStates }
     val pendingCount = overview.count { it.status == "NEEDS_CONFIRMATION" }
     val selectedOverview = overview.firstOrNull { it.id == source }
     val matchesQuery = state.sourceId == source && state.query.trim() == query.trim()
@@ -133,6 +150,7 @@ internal fun UnifiedSourceManager(
             keyboard?.hide(); focus.clearFocus()
             sourcePage = null; manual = false; attaching = null
             sourcePickerOpen = false; errorDetailsSource = null
+            editor.field = null
         }
     }
     val openSource: (String, Boolean) -> Unit = { id, needsSearch ->
@@ -173,7 +191,7 @@ internal fun UnifiedSourceManager(
                             .motionPress(sourceInteraction, pressedScale = .985f) else Modifier),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text(if (sourcePage == null) "来源" else state.sources.firstOrNull { it.first == source }?.second
+                        Text(if (sourcePage == null) "来源" else if (sourcePage == "@checks") "来源检查" else state.sources.firstOrNull { it.first == source }?.second
                             ?: selectedOverview?.name ?: sourceDisplayName(source),
                             fontSize = 16.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
@@ -187,6 +205,10 @@ internal fun UnifiedSourceManager(
                     MotionIconButton(enabled = !checking && !state.connecting, onClick = onRetryAll) {
                         Icon(Icons.Outlined.Refresh, "重试失败的来源检查", Modifier.size(19.dp))
                     }
+                if (sourcePage == null) MotionIconButton(enabled = !state.connecting,
+                    onClick = { editor.field = null; sourcePage = "@checks" }) {
+                    Icon(Icons.Outlined.Tune, "来源检查设置", Modifier.size(19.dp))
+                }
                 MotionIconButton(onClick = { keyboard?.hide(); focus.clearFocus(); dismiss() }) {
                     Icon(Icons.Outlined.Close, "关闭正文来源", Modifier.size(20.dp))
                 }
@@ -200,12 +222,23 @@ internal fun UnifiedSourceManager(
                 LazyColumn(Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    if (page == "overview") {
-                        if (checking || pendingCount > 0) item(key = "summary") {
+                    if (page == "@checks") {
+                        item(key = "check-settings") {
+                            SourceCheckSettings(checkPreferences, checkSchedule, editor, pageActive,
+                                now, onCheckPreferences)
+                        }
+                    } else if (page == "overview") {
+                        item(key = "summary") {
                             Row(Modifier.fillMaxWidth().heightIn(min = 28.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 if (checking) MotionBusyIndicator(Modifier.size(12.dp), strokeWidth = 1.2.dp)
-                                Text(if (pendingCount > 0) "待确认 $pendingCount 个来源" else "检查中",
+                                else Icon(Icons.Outlined.Schedule, null, Modifier.size(13.dp), tint = colors.onSurfaceVariant)
+                                Text(if (checking) buildList {
+                                    add("${overview.count { it.status == "SEARCHING" }} 请求中")
+                                    overview.count { it.status == "QUEUED" }.takeIf { it > 0 }?.let { add("$it 排队") }
+                                    overview.count { it.status == "RETRYING" }.takeIf { it > 0 }?.let { add("$it 复查") }
+                                }.joinToString(" · ") else if (pendingCount > 0) "$pendingCount 待确认"
+                                else if (checkPreferences.enabled) "${checkPreferences.intervalMinutes} 分钟自动检查" else "自动检查已关闭",
                                     fontSize = 12.sp,
                                     color = if (pendingCount > 0) colors.primary else colors.onSurfaceVariant)
                             }
@@ -218,14 +251,16 @@ internal fun UnifiedSourceManager(
                                     if (row.alignedChapters > 0) "已对齐 ${row.alignedChapters}" else "暂无重合"
                                 else -> sourceStatusLabel(row.status)
                             }
-                            val canChoose = row.status !in setOf("LINKED", "SEARCHING", "DISABLED") &&
+                            val canChoose = row.status !in runningStates && row.status != "DISABLED" &&
                                 !state.connecting && pageActive
                             val interaction = remember(row.id) { MutableInteractionSource() }
                             Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp))
                                 .clickable(interactionSource = interaction, indication = null, enabled = canChoose,
                                     role = Role.Button, onClickLabel = if (row.status == "NEEDS_CONFIRMATION")
                                         "查看${row.name}的待确认版本" else "查找${row.name}的版本") {
-                                    if (row.id == state.work.sourceId) onRetryAll()
+                                    if (row.status == "LINKED") errorDetailsSource =
+                                        if (errorDetailsSource == row.id) null else row.id
+                                    else if (row.id == state.work.sourceId) onRetrySource(row.id)
                                     else {
                                         feedback.perform(FeelEvent.Selection)
                                         openSource(row.id, row.status != "NEEDS_CONFIRMATION")
@@ -248,7 +283,7 @@ internal fun UnifiedSourceManager(
                                 }, horizontalArrangement = Arrangement.spacedBy(6.dp),
                                     verticalAlignment = Alignment.CenterVertically) {
                                     val count = when {
-                                        row.status == "LINKED" && row.chapters > 0 -> "${row.chapters}话"
+                                        row.chapters > 0 -> "${row.chapters}话"
                                         row.status == "NEEDS_CONFIRMATION" -> "${row.candidates.size}个候选"
                                         else -> ""
                                     }
@@ -263,17 +298,37 @@ internal fun UnifiedSourceManager(
                                                 interactionSource = detailsInteraction, indication = null,
                                                 role = Role.Button, onClickLabel = "查看${row.name}失败原因",
                                                 onClick = {
-                                                    openSource(row.id, false)
-                                                    errorDetailsSource = row.id
+                                                    errorDetailsSource = if (errorDetailsSource == row.id) null else row.id
                                                 }).padding(horizontal = 2.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                            Text("检查失败", fontSize = 11.sp, color = colors.error, maxLines = 1)
+                                            Text(if (row.chapters > 0) "保留目录" else "检查失败", fontSize = 11.sp,
+                                                color = if (row.chapters > 0) colors.onSurfaceVariant else colors.error, maxLines = 1)
                                             Icon(Icons.Outlined.Info, null, Modifier.size(13.dp), tint = colors.error)
                                         }
                                     } else MotionSwap(statusLabel) { label ->
                                         Text(label, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                             color = if (row.status == "NEEDS_CONFIRMATION") colors.primary else colors.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                            if (errorDetailsSource == row.id) Column(Modifier.fillMaxWidth()
+                                .padding(start = 39.dp, bottom = 6.dp)) {
+                                Text(listOfNotNull(
+                                    row.checkedAt.takeIf { it > 0L }?.let { "检查于${sourceCheckAge(it, now)}" },
+                                    row.lastSuccessAt.takeIf { it > 0L }?.let { "上次成功${sourceCheckAge(it, now)}" },
+                                    row.elapsedMillis.takeIf { it > 0L }?.let { "${it / 1_000}.${it % 1_000 / 100} 秒" },
+                                    row.attempt.takeIf { it > 1 }?.let { "$it 次请求" },
+                                ).joinToString(" · ").ifBlank { "尚无完成记录" },
+                                    fontSize = 11.sp, color = colors.onSurfaceVariant)
+                                if (row.status == "FAILED") {
+                                    Text(row.message, fontSize = 11.sp, lineHeight = 17.sp,
+                                        color = colors.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                                    MotionTextButton(enabled = pageActive && !checking && !state.connecting && row.nextRetryAt <= now,
+                                        onClick = { onRetrySource(row.id) }) {
+                                        Icon(Icons.Outlined.Refresh, null, Modifier.size(14.dp))
+                                        Spacer(Modifier.width(5.dp))
+                                        Text(if (row.nextRetryAt > now) "来源冷却中" else "只重试此来源", fontSize = 11.sp)
                                     }
                                 }
                             }
@@ -390,7 +445,7 @@ internal fun UnifiedSourceManager(
                                 }
                                 if (!state.connecting) MotionIconButton(enabled = pageActive && !state.loading,
                                     modifier = Modifier.size(44.dp), onClick = {
-                                        if (source == state.work.sourceId && !manual) onRetryAll() else search()
+                                        if (!manual) onRetrySource(source) else search()
                                     }) {
                                     Icon(Icons.Outlined.Refresh, "重试这个来源", Modifier.size(18.dp),
                                         tint = colors.onSurfaceVariant)
@@ -424,14 +479,73 @@ private data class SourceOverviewEntry(
     val id: String, val name: String, val status: String,
     val chapters: Int = 0, val message: String = "", val candidates: List<Manga> = emptyList(),
     val alignedChapters: Int? = null,
+    val checkedAt: Long = 0L, val lastSuccessAt: Long = 0L,
+    val attempt: Int = 0, val elapsedMillis: Long = 0L, val nextRetryAt: Long = 0L,
 )
 
 private fun sourceStatusLabel(status: String): String = when (status) {
     "SEARCHING" -> "检查中"
+    "QUEUED" -> "排队中"
+    "RETRYING" -> "等待复查"
     "LINKED" -> "已关联"
     "NO_MATCH" -> "未匹配"
     "NEEDS_CONFIRMATION" -> "待确认"
     "FAILED" -> "检查失败"
     "DISABLED" -> "已停用"
     else -> "尚未检查"
+}
+
+@Composable
+private fun SourceCheckSettings(preferences: SourceCheckPreferences, state: SourceCheckScheduleState,
+    editor: ExperienceEditor, active: Boolean, now: Long, onChange: (SourceCheckPreferences) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val defaults = SourceCheckPreferences()
+    Column(Modifier.fillMaxWidth().motionInputGate(active), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        SettingsToggle("自动检查并更新", preferences.enabled, Icons.Outlined.Sync) {
+            onChange(preferences.copy(enabled = it))
+        }
+        ExperienceNumber("检查周期", preferences.intervalMinutes, defaults.intervalMinutes, 1..120, "分钟",
+            editor, active, automaticLabel = "默认") {
+            onChange(preferences.copy(intervalMinutes = it ?: defaults.intervalMinutes))
+        }
+        ExperienceNumber("检查并发", preferences.concurrency, defaults.concurrency, 1..16, "个",
+            editor, active, automaticLabel = "默认") {
+            onChange(preferences.copy(concurrency = it ?: defaults.concurrency))
+        }
+        ExperienceNumber("每源超时", preferences.timeoutSeconds, defaults.timeoutSeconds, 1..120, "秒",
+            editor, active, automaticLabel = "默认") {
+            onChange(preferences.copy(timeoutSeconds = it ?: defaults.timeoutSeconds))
+        }
+        ExperienceNumber("失败复查", preferences.retries, defaults.retries, 0..8, "次",
+            editor, active, automaticLabel = "默认") {
+            onChange(preferences.copy(retries = it ?: defaults.retries))
+        }
+        Text("书架、阅读记录与当前普通作品。按身份核对更新来源及章节，保留手动关联、排除和阅读位置。",
+            fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp))
+        Text(if (platformKind == PlatformKind.ANDROID)
+            "应用运行时按设置检查；系统后台最短约 15 分钟，省电与网络状态可能推迟。"
+            else if (platformKind == PlatformKind.IOS)
+                "应用运行及系统允许的后台时段内检查，重新打开会补查过期项目。"
+            else "应用运行时按周期检查，重新打开会补查过期项目。",
+            fontSize = 11.sp, lineHeight = 17.sp, color = colors.onSurfaceVariant)
+        if (state.running) Text("${state.checkedWorks} / ${state.totalWorks} 部已检查",
+            fontSize = 11.sp, color = colors.onSurfaceVariant)
+        else if (state.lastCompletedAt > 0L) Text("最近完成${sourceCheckAge(state.lastCompletedAt, now)}",
+            fontSize = 11.sp, color = colors.onSurfaceVariant)
+        if (preferences.enabled && state.nextCheckAt > now) Text(
+            "下次约 ${(state.nextCheckAt - now + 59_999L) / 60_000L} 分钟后",
+            fontSize = 11.sp, color = colors.onSurfaceVariant)
+        state.error?.let { Text(it, fontSize = 11.sp, lineHeight = 17.sp, color = colors.error) }
+    }
+}
+
+private fun sourceCheckAge(at: Long, now: Long): String {
+    val seconds = (now - at).coerceAtLeast(0L) / 1_000L
+    return when {
+        seconds < 60L -> "刚刚"
+        seconds < 3_600L -> "${seconds / 60L} 分钟前"
+        seconds < 86_400L -> "${seconds / 3_600L} 小时前"
+        else -> "${seconds / 86_400L} 天前"
+    }
 }

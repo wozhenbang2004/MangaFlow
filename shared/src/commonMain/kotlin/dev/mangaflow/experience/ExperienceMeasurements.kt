@@ -36,23 +36,23 @@ internal fun encodeExperienceOverrides(o: ExperienceOverrides) = buildJsonObject
 
 internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = runCatching {
     val json = Json.parseToJsonElement(value ?: return ExperienceOverrides()).jsonObject
-    fun int(key: String, min: Int, max: Int) = json[key]?.jsonPrimitive?.intOrNull?.coerceIn(min, max)
+    fun int(key: String, min: Int) = json[key]?.jsonPrimitive?.intOrNull?.coerceAtLeast(min)
     fun bool(key: String, default: Boolean) = json[key]?.jsonPrimitive?.booleanOrNull ?: default
     ExperienceOverrides(
         prefetchMode = PrefetchMode.entries.firstOrNull { it.name == json["prefetch"]?.jsonPrimitive?.content } ?: PrefetchMode.SMART,
-        ahead = int("ahead", 0, 40), behind = int("behind", 0, 8), prefetchRequests = int("requests", 1, 12),
-        prefetchMiB = int("bytesMiB", 4, 512), crossChapter = bool("cross", true), allowMeteredPrefetch = bool("metered", false),
-        readerRequests = int("reader", 1, 4), resolveRequests = int("resolve", 1, 8), decodeRequests = int("decode", 1, 4),
-        downloadPages = int("pages", 1, maximumBackgroundPageParallelism),
-        sourcePages = int("source", 1, 8), chapters = int("chapters", 1, 4), yieldToReading = bool("yield", true),
-        memoryMiB = int("memoryMiB", 16, 512), diskMiB = int("diskMiB", 32, 8192),
+        ahead = int("ahead", 0), behind = int("behind", 0), prefetchRequests = int("requests", 1),
+        prefetchMiB = int("bytesMiB", 1), crossChapter = bool("cross", true), allowMeteredPrefetch = bool("metered", false),
+        readerRequests = int("reader", 1), resolveRequests = int("resolve", 1), decodeRequests = int("decode", 1),
+        downloadPages = int("pages", 1),
+        sourcePages = int("source", 1), chapters = int("chapters", 1), yieldToReading = bool("yield", true),
+        memoryMiB = int("memoryMiB", 1), diskMiB = int("diskMiB", 1),
         refresh = RefreshPreference.entries.firstOrNull { it.name == json["refresh"]?.jsonPrimitive?.content },
-        refreshHz = int("hz", 30, 360), batteryProtection = bool("battery", true), allowBackgroundDownloads = bool("background", true),
-        decodedPrefetchPages = int("decodedPages", 0, 8),
+        refreshHz = int("hz", 1), batteryProtection = bool("battery", true), allowBackgroundDownloads = bool("background", true),
+        decodedPrefetchPages = int("decodedPages", 0),
         sourceRecovery = SourceRecoveryMode.entries.firstOrNull { it.name == json["sourceRecovery"]?.jsonPrimitive?.content },
         browseWarmup = bool("browseWarmup", true),
-        standbySources = int("standbySources", 1, 4), standbyPages = int("standbyPages", 1, 4) ?: 1,
-        standbyMiB = int("standbyMiB", 1, 128),
+        standbySources = int("standbySources", 1), standbyPages = int("standbyPages", 1) ?: 1,
+        standbyMiB = int("standbyMiB", 1),
         standbyMemoryWarmup = bool("standbyMemory", true),
         readerStatusPlacement = ReaderStatusPlacement.entries.firstOrNull { it.name == json["readerStatus"]?.jsonPrimitive?.content }
             ?: ReaderStatusPlacement.BOTTOM,

@@ -5,7 +5,7 @@ enum class PrefetchMode { SMART, OFF, MANUAL }
 enum class RefreshPreference { SYSTEM, INTERACTION, MANUAL }
 enum class SourceRecoveryMode { OFF, BALANCED, AGGRESSIVE }
 
-/** Null means follow the selected goal. Overrides are ceilings, never protection bypasses. */
+/** Null follows the adaptive goal. Explicit values are the user's requested allocation, without a product ceiling. */
 data class ExperienceOverrides(
     val prefetchMode: PrefetchMode = PrefetchMode.SMART,
     val ahead: Int? = null,
@@ -38,7 +38,7 @@ data class ExperienceOverrides(
     val contentCache: ContentCachePreferences = ContentCachePreferences(),
 )
 
-/** Selected mode's intent, before manual ceilings and live resource protection. */
+/** Selected mode's automatic intent; explicit allocations are applied independently. */
 data class ExperienceGoalBudget(
     val prefetchAhead: Int = 6,
     val prefetchBehind: Int = 1,
@@ -94,9 +94,10 @@ data class ExperienceBudget(
     val goal: ExperienceGoalBudget = ExperienceGoalBudget(),
 ) {
     val standbyPrefetchBytes: Long get() = if (standbySources > 0)
-        minOf(standbyBytes ?: minOf(prefetchBytes / 4L, 12L * EXPERIENCE_MIB), prefetchBytes / 2L) else 0L
-    val nextChapterPrefetchBytes: Long get() = if (crossChapter) minOf(prefetchBytes / 4L, 12L * EXPERIENCE_MIB) else 0L
-    val adjacentPrefetchBytes: Long get() = prefetchBytes - nextChapterPrefetchBytes - standbyPrefetchBytes
+        standbyBytes ?: (prefetchBytes / 4L) else 0L
+    val nextChapterPrefetchBytes: Long get() = if (crossChapter) prefetchBytes / 4L else 0L
+    val adjacentPrefetchBytes: Long get() = (prefetchBytes - nextChapterPrefetchBytes -
+        (if (standbyBytes == null) standbyPrefetchBytes else 0L)).coerceAtLeast(0L)
 }
 
 /** Only actual sensors are populated. JVM heap is labelled separately from physical RAM. */

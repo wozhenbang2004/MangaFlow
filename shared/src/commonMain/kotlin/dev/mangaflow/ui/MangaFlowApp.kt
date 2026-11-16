@@ -559,10 +559,15 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         focusMangaId = copySyncFocus,
     )
     sourceManagement?.let { state ->
+        val checkPreferences by model.services.sourceChecks.preferences.collectAsState()
+        val checkSchedule by model.services.sourceChecks.state.collectAsState()
         UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
             onSearch = model::searchBodySource, onAttach = { candidate -> model.attachBodySource(state.work.id, candidate) },
             onRetryAll = model::retrySourceDiscovery, onChooseDomain = model::chooseSourceDomain,
-            onChooseSource = model::chooseBodySource)
+            onChooseSource = model::chooseBodySource,
+            checkPreferences = checkPreferences, checkSchedule = checkSchedule,
+            onCheckPreferences = model.services.sourceChecks::updatePreferences,
+            onRetrySource = model::retrySourceCheck)
     }
     sourceResumeChoice?.let { choice ->
         SourceResumePrompt(choice, drawerBackdrop, onChoose = model::confirmSourceResumeChoice,
@@ -1036,7 +1041,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     it.status == dev.mangaflow.data.SourceDiscoveryStatus.NEEDS_CONFIRMATION
                                 } ?: 0,
                                 sourcesChecking = sourceDiscovery[current.state.manga.id]?.values?.any {
-                                    it.status == dev.mangaflow.data.SourceDiscoveryStatus.SEARCHING
+                                    it.status in setOf(dev.mangaflow.data.SourceDiscoveryStatus.QUEUED,
+                                        dev.mangaflow.data.SourceDiscoveryStatus.SEARCHING,
+                                        dev.mangaflow.data.SourceDiscoveryStatus.RETRYING)
                                 } == true,
                                 sourceError = sourceOperation.error ?: sourceCatalogErrors[current.state.manga.id]
                                     ?.values?.takeIf { it.isNotEmpty() }?.joinToString("；"),

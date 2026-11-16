@@ -32,7 +32,7 @@ import dev.mangaflow.data.plugins.protectScriptPageHeaders
 import dev.mangaflow.data.plugins.restoreScriptPageHeaders
 import dev.mangaflow.data.plugins.scriptImageOwner
 import dev.mangaflow.data.plugins.ScriptImageRefreshRequired
-import dev.mangaflow.experience.maximumBackgroundPageParallelism
+import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.data.sources.JmDownloadSession
 import dev.mangaflow.data.sources.createJmDownloadSession
 import dev.mangaflow.net.DownloadCategory
@@ -65,8 +65,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -128,8 +126,6 @@ class DownloadStore private constructor(context: Context) {
     private val reconcileLock = Mutex()
     private val pageWriteVersions = mutableMapOf<String, MutableMap<Int, Long>>()
     private var entryOrder = emptyList<String>()
-    // Background workers leave one transfer slot available for the current reader.
-    private val transferSlots = Semaphore(maximumBackgroundPageParallelism + 1)
     private val _entries = MutableStateFlow<List<DownloadEntry>>(emptyList())
     val entries: StateFlow<List<DownloadEntry>> = _entries.asStateFlow()
     private val initialized = CompletableDeferred<Unit>()
@@ -795,7 +791,7 @@ class DownloadStore private constructor(context: Context) {
                 ).also(::save)
                 val pending = pageTransfers[key] ?: scope.async(start = CoroutineStart.LAZY) {
                     try {
-                        transferSlots.withPermit { transferPage(routed, key, client, jm) }
+                        ExperiencePolicyStore.get(context).withSavedTransferAdmission { transferPage(routed, key, client, jm) }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failure: Exception) {

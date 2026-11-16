@@ -12,11 +12,12 @@ import dev.mangaflow.net.networkFailureKind
 import dev.mangaflow.experience.AdmissionWait
 import dev.mangaflow.experience.ExperienceAdmissionDeferred
 import dev.mangaflow.experience.ExperiencePolicyStore
-import dev.mangaflow.experience.maximumBackgroundPageParallelism
 import dev.mangaflow.platform.storage.StorageLock
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
@@ -88,33 +89,58 @@ internal suspend fun runChapterDownload(context: PlatformContext, id: String, wo
                 val visited = mutableSetOf<Int>()
                 var deferredWait: ExperienceAdmissionDeferred? = null
                 coroutineScope {
-                    repeat(maximumBackgroundPageParallelism) { slot ->
-                        launch {
-                            while (true) {
-                                currentCoroutineContext().ensureActive()
-                                if (selection.withLock { deferredWait != null }) break
-                                try {
-                                    // Only new optional requests wait. In-flight pages finish safely even
-                                    // when a sibling returns its chapter to the durable scheduler.
-                                    val downloaded = experience.withBackgroundPageAdmission(source,
-                                        maxWaitMillis = 30_000L, onWaiting = { waiting("page-$slot", it) }) {
-                                        val index = selection.withLock {
-                                            val current = store.record(id)
-                                            if (deferredWait != null || current == null || current.workId != workId ||
-                                                current.entry.status in setOf(DownloadStatus.PAUSED, DownloadStatus.COMPLETED, DownloadStatus.FAILED)) null
-                                            else store.nextPageIndex(id, workId, visited)?.also { visited += it }
-                                        } ?: return@withBackgroundPageAdmission false
-                                        store.downloadPage(id, workId, index, client, jm)
-                                            ?: return@withBackgroundPageAdmission false
-                                        true
+                    val changed = Channel<Unit>(Channel.CONFLATED)
+                    val workers = mutableListOf<Job>()
+                    val configuration = launch {
+                        experience.state.map { it.backgroundPages }.distinctUntilChanged().collect {
+                            changed.trySend(Unit)
+                        }
+                    }
+                    try {
+                        while (true) {
+                            val desired = minOf(maxOf(1, experience.state.value.backgroundPages), record.pages.size)
+                            while (workers.size < desired) {
+                                val slot = workers.size
+                                workers += launch {
+                                    while (true) {
+                                        currentCoroutineContext().ensureActive()
+                                        if (selection.withLock { deferredWait != null }) break
+                                        try {
+                                            // Only new optional requests wait. In-flight pages finish safely even
+                                            // when a sibling returns its chapter to the durable scheduler.
+                                            val downloaded = experience.withBackgroundPageAdmission(source,
+                                                maxWaitMillis = 30_000L, onWaiting = { waiting("page-$slot", it) }) {
+                                                val index = selection.withLock {
+                                                    val current = store.record(id)
+                                                    if (deferredWait != null || current == null || current.workId != workId ||
+                                                        current.entry.status in setOf(DownloadStatus.PAUSED, DownloadStatus.COMPLETED, DownloadStatus.FAILED)) null
+                                                    else store.nextPageIndex(id, workId, visited)?.also { visited += it }
+                                                } ?: return@withBackgroundPageAdmission false
+                                                store.downloadPage(id, workId, index, client, jm)
+                                                    ?: return@withBackgroundPageAdmission false
+                                                true
+                                            }
+                                            if (!downloaded) break
+                                        } catch (deferred: ExperienceAdmissionDeferred) {
+                                            selection.withLock { if (deferredWait == null) deferredWait = deferred }
+                                            break
+                                        }
                                     }
-                                    if (!downloaded) break
-                                } catch (deferred: ExperienceAdmissionDeferred) {
-                                    selection.withLock { if (deferredWait == null) deferredWait = deferred }
-                                    break
+                                }.also { worker ->
+                                    // Completion handlers run after isCompleted becomes observable.
+                                    // A finally signal can be consumed before the job reaches that state.
+                                    worker.invokeOnCompletion { changed.trySend(Unit) }
                                 }
                             }
+                            val settled = workers.all { it.isCompleted }
+                            val done = selection.withLock { deferredWait != null ||
+                                store.nextPageIndex(id, workId, visited) == null }
+                            if (settled && done) break
+                            changed.receive()
                         }
+                    } finally {
+                        configuration.cancel()
+                        changed.close()
                     }
                 }
                 currentCoroutineContext().ensureActive()

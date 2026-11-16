@@ -2226,11 +2226,14 @@ internal fun AdjacentPagePrefetch(
                     if (count <= 0) return emptyList()
                     val step = if (forward) direction else -direction
                     val edge = if (step > 0) window.last else window.first
-                    if (groups == null) return (1..count).map { edge + step * it }
+                    if (groups == null) {
+                        val available = if (step > 0) pages.lastIndex - edge else edge
+                        return (1..minOf(count, available.coerceAtLeast(0))).map { edge + step * it }
+                    }
                     val owner = groups.indexOfFirst { it.contains(edge) }
                     if (owner < 0) return emptyList()
                     val selected = mutableListOf<Int>()
-                    for (offset in 1..count) {
+                    for (offset in 1..minOf(count, groups.size)) {
                         val spread = groups.getOrNull(owner + step * offset) ?: break
                         val unit = listOfNotNull(spread.first, spread.second)
                         if (selected.size + unit.size > count) break

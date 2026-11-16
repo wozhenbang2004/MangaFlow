@@ -28,7 +28,7 @@ data class ContentCachePreferences(
 ) {
     val enabled: Boolean get() = storage != ContentCacheStorage.DISABLED
     val storeOnDisk: Boolean get() = storage == ContentCacheStorage.MEMORY_AND_DISK
-    val retentionMillis: Long get() = retentionHours.coerceIn(1, 720) * 3_600_000L
+    val retentionMillis: Long get() = retentionHours.coerceAtLeast(1) * 3_600_000L
     fun freshMillis(kind: ContentCacheKind, failure: Boolean = false): Long {
         if (!enabled || refreshOnOpen) return 0L
         val minutes = if (failure) failureMinutes else when (kind) {
@@ -48,16 +48,16 @@ data class ContentCachePreferences(
                 if (failure) minutes else minOf(minutes, popularityMinutes)
             else -> minutes
         }
-        return metadataMinutes.coerceIn(0, 10_080) * 60_000L
+        return metadataMinutes.coerceAtLeast(0) * 60_000L
     }
     internal fun bounded() = copy(
-        searchMinutes = searchMinutes.coerceIn(0, 10_080), discoveryMinutes = discoveryMinutes.coerceIn(0, 10_080),
-        rankingMinutes = rankingMinutes.coerceIn(0, 10_080), detailMinutes = detailMinutes.coerceIn(0, 10_080),
-        manifestMinutes = manifestMinutes.coerceIn(0, 10_080), scoreMinutes = scoreMinutes.coerceIn(0, 10_080),
-        popularityMinutes = popularityMinutes.coerceIn(0, 10_080), commentMinutes = commentMinutes.coerceIn(0, 10_080),
-        failureMinutes = failureMinutes.coerceIn(0, 60), retentionHours = retentionHours.coerceIn(1, 720),
-        snapshotMemoryEntries = snapshotMemoryEntries.coerceIn(1, 64), snapshotDiskMiB = snapshotDiskMiB.coerceIn(1, 128),
-        memoryIdleMinutes = memoryIdleMinutes.coerceIn(0, 120), imageRetentionHours = imageRetentionHours.coerceIn(0, 720),
+        searchMinutes = searchMinutes.coerceAtLeast(0), discoveryMinutes = discoveryMinutes.coerceAtLeast(0),
+        rankingMinutes = rankingMinutes.coerceAtLeast(0), detailMinutes = detailMinutes.coerceAtLeast(0),
+        manifestMinutes = manifestMinutes.coerceAtLeast(0), scoreMinutes = scoreMinutes.coerceAtLeast(0),
+        popularityMinutes = popularityMinutes.coerceAtLeast(0), commentMinutes = commentMinutes.coerceAtLeast(0),
+        failureMinutes = failureMinutes.coerceAtLeast(0), retentionHours = retentionHours.coerceAtLeast(1),
+        snapshotMemoryEntries = snapshotMemoryEntries.coerceAtLeast(1), snapshotDiskMiB = snapshotDiskMiB.coerceAtLeast(1),
+        memoryIdleMinutes = memoryIdleMinutes.coerceAtLeast(0), imageRetentionHours = imageRetentionHours.coerceAtLeast(0),
     )
 }
 
