@@ -311,9 +311,10 @@ internal fun AnimeWorkspace(
                             BoxWithConstraints(Modifier.fillMaxWidth()) {
                                 val preferred = animePreferredColumns(maxWidth, state.discoveryColumns)
                                 val actualColumns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
+                                val availableWidth = maxWidth
                                 Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                                     MotionTabs(tab, listOf("发现", "追番"), onSelect = { tab = it },
-                                        modifier = Modifier.width(minOf(144.dp, (maxWidth - 112.dp).coerceAtLeast(88.dp))), controlHeight = 44.dp,
+                                        modifier = Modifier.width(minOf(144.dp, (availableWidth - 112.dp).coerceAtLeast(88.dp))), controlHeight = 44.dp,
                                         treatment = MotionTabTreatment.Underline)
                                     Spacer(Modifier.weight(1f))
                                     if (tab == 1) MotionIconButton(onClick = { reviewsVisible = true },
