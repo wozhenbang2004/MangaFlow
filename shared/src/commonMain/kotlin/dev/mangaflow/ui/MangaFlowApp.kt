@@ -559,8 +559,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         focusMangaId = copySyncFocus,
     )
     sourceManagement?.let { state ->
-        val checkPreferences by model.services.sourceChecks.preferences.collectAsState()
-        val checkSchedule by model.services.sourceChecks.state.collectAsState()
+        val checkPreferences by model.services.sourceChecks.preferences.collectAsStateWithLifecycle()
+        val checkSchedule by model.services.sourceChecks.state.collectAsStateWithLifecycle()
         UnifiedSourceManager(state, drawerBackdrop, onDismiss = model::closeSourceManagement,
             onSearch = model::searchBodySource, onAttach = { candidate -> model.attachBodySource(state.work.id, candidate) },
             onRetryAll = model::retrySourceDiscovery, onChooseDomain = model::chooseSourceDomain,
