@@ -259,6 +259,38 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             item("offline") { StorageNavigationRow("离线下载", "独立保存", storageBytes(offlineBytes), Icons.Outlined.Download, true, onDownloads) }
                             if (PanelReadingAvailable) item("models") { StorageNavigationRow("模型与组件", "按需下载", storageBytes(modelStates.values.sumOf { it.bytes } +
                                 runtimeStates.values.sumOf { it.bytes }), Icons.Outlined.Extension, !busy, onModels) }
+                            item("backend-census") {
+                                val inventory = paneSnapshot
+                                if (inventory != null) {
+                                    val buckets = listOf(
+                                        "Coil 原图" to (inventory.items.filter { it.resource.backend == CacheBackend.COIL }
+                                            .sumOf { it.bytes } + inventory.coilUnclassifiedBytes),
+                                        "脚本素材" to inventory.items.filter { it.resource.backend == CacheBackend.SCRIPT }.sumOf { it.bytes },
+                                        "JM 解密" to inventory.items.filter { it.resource.backend == CacheBackend.JM }.sumOf { it.bytes },
+                                        "分镜" to inventory.items.filter { it.resource.backend == CacheBackend.PANEL }.sumOf { it.bytes },
+                                        "番剧" to inventory.areaBytes(CacheArea.ANIME),
+                                        "目录" to inventory.catalogBytes,
+                                        "数据" to inventory.auxiliaryBytes,
+                                    )
+                                    Column(Modifier.fillMaxWidth().padding(vertical = 7.dp),
+                                        verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                        Text("存储构成", style = MaterialTheme.typography.labelMedium,
+                                            color = colors.onSurfaceVariant)
+                                        buckets.filter { it.second > 0L }.chunked(3).forEach { slice ->
+                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                slice.forEach { (name, bytes) ->
+                                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                                                        Text(name, style = MaterialTheme.typography.labelSmall,
+                                                            color = colors.onSurfaceVariant)
+                                                        Text(storageBytes(bytes), style = MaterialTheme.typography.bodySmall)
+                                                    }
+                                                }
+                                                repeat(3 - slice.size) { Spacer(Modifier.weight(1f)) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             item("budget") {
                                 Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Text("索引与写入 ${storageBytes((paneSnapshot?.indexBytes ?: 0L) + (paneSnapshot?.temporaryBytes ?: 0L))}",
