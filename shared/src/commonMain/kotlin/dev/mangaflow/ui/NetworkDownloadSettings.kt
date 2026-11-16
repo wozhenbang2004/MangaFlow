@@ -65,6 +65,8 @@ import dev.mangaflow.net.SourceNetworkSettings
 import dev.mangaflow.net.RelayLinkController
 import dev.mangaflow.net.currentRelayBinding
 import dev.mangaflow.net.NetworkAutoCheckController
+import dev.mangaflow.net.NetworkAutoCheckState
+import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.platform.LocalMangaContext
@@ -99,10 +101,11 @@ internal fun NetworkDownloadSettings(
     val context = LocalMangaContext.current
     val store = remember(context) { DownloadRoutingStore.get(context) }
     val settings by store.state.collectAsStateWithLifecycle()
+    val checkState by autoCheck.state.collectAsStateWithLifecycle()
     when (scene) {
         NetworkDownloadScene.CONNECTION -> DownloadConnectionSettings(
             store, active, environment, suggestedProxy, suggestionRevision, onSuggestionConsumed,
-            proxyEditing, onProxyEditing, connectionSummary, onStartCheck)
+            proxyEditing, onProxyEditing, connectionSummary, onStartCheck, checkState)
         NetworkDownloadScene.CATEGORIES -> BoxWithConstraints(Modifier.fillMaxWidth()) {
             val stacked = maxWidth < 300.dp * LocalMangaWindow.current.fontScale.coerceAtLeast(1f)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -133,7 +136,7 @@ private fun DownloadConnectionSettings(
     store: DownloadRoutingStore, active: Boolean, environment: DownloadNetworkEnvironment?,
     suggestedProxy: DownloadProxyEndpoint?, suggestionRevision: Int, onSuggestionConsumed: () -> Unit,
     proxyEditing: Boolean, onProxyEditing: (Boolean) -> Unit, connectionSummary: @Composable () -> Unit,
-    onStartCheck: () -> Unit,
+    onStartCheck: () -> Unit, checkState: NetworkAutoCheckState,
 ) {
     val settings by store.state.collectAsStateWithLifecycle()
     val context = LocalMangaContext.current
@@ -232,8 +235,19 @@ private fun DownloadConnectionSettings(
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
                 Icon(Icons.Outlined.SwapVert, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
                 Spacer(Modifier.width(8.dp))
-                Text("一键检测", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-                Icon(Icons.Outlined.ChevronRight, "检测全部网络配置", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+                Text(when {
+                    checkState.restoring -> "读取检测记录"
+                    checkState.running -> "检测在后台继续"
+                    checkState.historyOnly -> "上次检测结果"
+                    checkState.rows.isNotEmpty() -> "最近检测结果"
+                    else -> "一键检测"
+                }, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                val checkTime = checkState.finishedAtMillis ?: checkState.startedAtMillis
+                val checkValue = if (checkState.running) "${checkState.completed}/${checkState.total}"
+                    else checkTime?.let { formatInstantMillis(it, "MM-dd HH:mm") }
+                checkValue?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
+                    maxLines = 1, softWrap = false); Spacer(Modifier.width(6.dp)) }
+                Icon(Icons.Outlined.ChevronRight, "查看网络检测", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             }
             MotionTextButton(onClick = { startEditing(false) }, enabled = interactive,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {

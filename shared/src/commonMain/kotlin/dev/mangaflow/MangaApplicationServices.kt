@@ -24,6 +24,7 @@ import dev.mangaflow.data.sources.PicacgBodySource
 import dev.mangaflow.data.sources.createJmBodySource
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.net.RelayLinkController
+import dev.mangaflow.net.NetworkAutoCheckController
 import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.storage.preferences
@@ -74,6 +75,8 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
             MangaDexBodySource(), picacgSource) + listOfNotNull(createJmBodySource(application)),
         catalogStore = readerCatalogs, storageCache = dev.mangaflow.storage.StorageCacheStore.get(application))
     val bodySources = BodySourceRegistry(application, repository.sources)
+    val networkChecks = NetworkAutoCheckController(application, repository, bodySources, operations,
+        prepareSources = ::awaitSourcesReady)
     val sourcePlugins = SourcePluginStore.get(application)
     val starterSources = StarterSourceInstaller(application, sourcePlugins, scope)
     val library = LibraryStore(application)

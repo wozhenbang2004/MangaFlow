@@ -2529,6 +2529,7 @@ private fun ReaderPage(
             // An explicit retry owns a fresh request after this exact old transfer releases.
             if (reload > 0) pendingPrefetch.request.dispose()
             try {
+                // This suspends only this page's handoff; other prefetch jobs keep their own lanes.
                 pendingPrefetch.request.job.await()
                 currentCoroutineContext().ensureActive()
                 if (!attempt.acceptsResult) return@LaunchedEffect
@@ -2735,7 +2736,8 @@ private fun ReaderPage(
                     stage = when {
                         prefetchFailure != null && transportProgress.receivedBytes == 0L -> "预取发现异常 · 正在重新读取"
                         resource == null -> "检查本机与已有下载"
-                        awaitingPrefetch -> "等待已开始的图片请求"
+                        awaitingPrefetch && reload > 0 -> "正在结束本页旧请求"
+                        awaitingPrefetch -> "接续本页预读"
                         resource.url.startsWith("file:") -> "解码本机图片"
                         else -> "请求图片"
                     },

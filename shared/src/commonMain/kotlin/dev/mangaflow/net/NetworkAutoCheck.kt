@@ -1,5 +1,9 @@
 package dev.mangaflow.net
 
+import dev.mangaflow.MangaApplicationServices
+import dev.mangaflow.background.ApplicationOperations
+import dev.mangaflow.background.ApplicationOperationKind
+import dev.mangaflow.background.ApplicationOperationPhase
 import dev.mangaflow.data.UnifiedMangaRepository
 import dev.mangaflow.data.ReviewProviders
 import dev.mangaflow.data.plugins.SourcePluginStore
@@ -8,6 +12,8 @@ import dev.mangaflow.platform.PlatformContext
 import dev.mangaflow.platform.applicationContext
 import dev.mangaflow.platform.monotonicTimeMillis
 import dev.mangaflow.platform.sha256
+import dev.mangaflow.platform.randomUuid
+import dev.mangaflow.platform.wallTimeMillis
 import dev.mangaflow.platform.storage.StorageLock
 import dev.mangaflow.platform.storage.preferences
 import dev.mangaflow.storage.BodySourceRegistry
@@ -17,6 +23,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -26,6 +36,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -76,32 +87,56 @@ data class NetworkAutoCheckState(
     /** Saved changes consume this review; retained measurements remain historical evidence. */
     val applied: Boolean = false,
     val activeProbeIds: Set<String> = emptySet(),
+    val runId: String? = null,
+    val startedAtMillis: Long? = null,
+    val finishedAtMillis: Long? = null,
+    val restoring: Boolean = true,
+    val historyOnly: Boolean = false,
+    val interrupted: Boolean = false,
+    val historySaved: Boolean = true,
+    val selection: Map<String, DownloadRouteMode> = emptyMap(),
+    val applyMessage: String? = null,
 )
 
 data class NetworkAutoApplyResult(val applied: Int, val message: String, val success: Boolean, val stale: Boolean = false)
 
-/** The caller owns the run coroutine. Results never mutate routes until an explicit reviewed apply. */
-class NetworkAutoCheckController(
+/** One application operation owns execution; views only subscribe, stage and explicitly confirm. */
+class NetworkAutoCheckController internal constructor(
     context: PlatformContext,
     repository: UnifiedMangaRepository?,
     registry: BodySourceRegistry?,
+    operations: ApplicationOperations = ApplicationOperations.get(context),
+    prepareSources: suspend () -> Unit = {},
 ) {
-    private val engine = NetworkAutoCheckEngine(context, repository, registry)
+    private val engine = NetworkAutoCheckEngine(context, repository, registry, operations, prepareSources)
     val state: StateFlow<NetworkAutoCheckState> get() = engine.state
-    suspend fun run() = engine.run()
+    fun start(): Boolean = engine.start()
+    suspend fun run() { start() }
     fun cancel() = engine.cancel()
     fun invalidate(reason: String) = engine.invalidate(reason)
     suspend fun apply(selected: Map<String, DownloadRouteMode>): NetworkAutoApplyResult = engine.apply(selected)
-    fun close() = engine.close()
+    fun stage(id: String, mode: DownloadRouteMode?) = engine.stage(id, mode)
+    /** Detaching a presentation must never cancel the accepted application operation. */
+    fun close() = Unit
+    companion object {
+        fun get(context: PlatformContext): NetworkAutoCheckController = MangaApplicationServices.get(context).networkChecks
+    }
 }
 
 private data class AutoFence(val settings: DownloadRoutingSettings, val source: String, val resources: String,
     val network: Long, val environment: DownloadNetworkEnvironment?, val relay: String)
 private data class AutoPlan(val fence: AutoFence, val targets: List<AutoTarget>,
     val candidates: Map<Pair<String, DownloadRouteMode>, AutoCandidate>)
+private class OwnedCheckRun(val generation: Long, val id: String, val startedAt: Long) {
+    var cancelled = false
+    var interrupted = false
+    var finalized = false
+    var stopped: NetworkAutoCheckState? = null
+}
 
 private class NetworkAutoCheckEngine(context: PlatformContext, private val repository: UnifiedMangaRepository?,
-    private val registry: BodySourceRegistry?) {
+    private val registry: BodySourceRegistry?, private val operations: ApplicationOperations,
+    private val prepareSources: suspend () -> Unit) {
     private val app = applicationContext(context)
     private val store = DownloadRoutingStore.get(app)
     private val relay = RelayLinkController.get(app)
@@ -115,23 +150,77 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
     private var runningJob: Job? = null
     private var closed = false
     private var plan: AutoPlan? = null
+    private var activeRun: OwnedCheckRun? = null
+    private val history = NetworkAutoHistoryStore(app)
+    private val restored = CompletableDeferred<Unit>()
     private val releaseNetwork = runCatching { observeDownloadNetworkEnvironment(app) {
         synchronized(lock) { networkRevision++ }
         if (state.value.running || state.value.complete) invalidate("网络环境已变化，请重新检测")
     } }.getOrElse { {} }
 
-    suspend fun run(): Unit = coroutineScope {
-        val ownJob = currentCoroutineContext()[Job]
-        val run = synchronized(lock) {
-            if (closed || runningJob != null || state.value.applying) return@coroutineScope
-            (++generation).also {
-                runningJob = ownJob; plan = null
-                mutableState.value = NetworkAutoCheckState(running = true)
-            }
+    init {
+        operations.scope.launch(Dispatchers.IO) {
+            try {
+                val previous = history.load()
+                operations.ready.first { it }
+                val operation = operations.find(OPERATION_KEY)
+                val recovered = if (operation?.phase == ApplicationOperationPhase.INTERRUPTED) previous.copy(
+                    interrupted = true, historyOnly = true, stale = true,
+                    error = if (previous.rows.isNotEmpty()) "上次检测已中断，已有完整报告仅供查看"
+                        else "上次检测已中断，请重新检测") else previous
+                synchronized(lock) {
+                    if (activeRun == null && state.value.runId == null) mutableState.value = recovered
+                    else mutableState.update { it.copy(restoring = false) }
+                }
+            } finally { restored.complete(Unit) }
         }
+    }
+
+    fun start(): Boolean {
+        if (operations.find(OPERATION_KEY)?.active == true) return false
+        val attempt = synchronized(lock) {
+            if (closed || activeRun != null || state.value.applying) return false
+            val previousState = state.value
+            val previousPlan = plan
+            val accepted = OwnedCheckRun(++generation, randomUuid(), wallTimeMillis()).also {
+                activeRun = it; plan = null
+                mutableState.value = NetworkAutoCheckState(running = true, runId = it.id,
+                    startedAtMillis = it.startedAt, restoring = !restored.isCompleted)
+            }
+            Triple(accepted, previousState, previousPlan)
+        }
+        val accepted = attempt.first
+        val handle = operations.submit<Unit>(OPERATION_KEY, ApplicationOperationKind.NETWORK_CHECK, "网络检测",
+            onTerminal = { finishRun(accepted) }) {
+            restored.await()
+            currentCoroutineContext().ensureActive()
+            val durable = history.begin(accepted.id, accepted.startedAt)
+            updateRun(accepted.generation) { it.copy(restoring = false, historySaved = durable) }
+            execute(accepted)
+            if (!state.value.complete) throw IllegalStateException("网络检测未完整完成")
+        }
+        if (!handle.accepted) {
+            synchronized(lock) {
+                if (activeRun === accepted) {
+                    generation++; activeRun = null; runningJob = null; plan = attempt.third
+                    mutableState.value = attempt.second.copy(restoring = !restored.isCompleted)
+                }
+            }
+            return false
+        }
+        synchronized(lock) {
+            if (activeRun === accepted && generation == accepted.generation) runningJob = handle.result
+            else handle.result.cancel()
+        }
+        return handle.accepted
+    }
+
+    private suspend fun execute(accepted: OwnedCheckRun): Unit = coroutineScope {
+        val run = accepted.generation
         try {
             withContext(Dispatchers.IO) {
                 val frozen = withTimeout(20_000L) {
+                    prepareSources()
                     plugins.ready.await()
                     val captured = store.state.value
                     val fence = captureFence(captured)
@@ -205,26 +294,33 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                     return@withContext
                 }
                 if (!checkCurrent(run, frozen)) return@withContext
-                updateRun(run) { it.copy(completed = it.rows.count(::finished), running = false,
-                    complete = it.rows.all(::finished), activeProbeIds = emptySet()) }
+                updateRun(run) { it.copy(completed = it.rows.count(::finished),
+                    complete = it.rows.all(::finished), activeProbeIds = emptySet(), selection = suggestions(it.rows)) }
             }
         } catch (_: TimeoutCancellationException) {
             stopUnfinished("检查目标准备超时，请重试", stale = false, run = run)
         } catch (cancel: CancellationException) {
-            stopUnfinished("检查已取消，已完成结果保留", stale = false, run)
+            val interrupted = synchronized(lock) {
+                (!accepted.cancelled && !state.value.stale).also { accepted.interrupted = it }
+            }
+            stopUnfinished(if (interrupted) "系统暂停了检测，请重新检测" else "检查已取消，已完成结果保留", stale = false, run)
             throw cancel
         } catch (_: Exception) {
             stopUnfinished("检查计划暂未准备完成，请重试", stale = false, run)
         } finally {
             synchronized(lock) { if (generation == run) runningJob = null }
-            updateRun(run) { it.copy(running = false, activeProbeIds = emptySet()) }
+            updateRun(run) { it.copy(activeProbeIds = emptySet()) }
         }
     }
 
     fun cancel() {
-        val (job, stoppedGeneration) = synchronized(lock) { generation++; (runningJob to generation).also { runningJob = null } }
+        val (job, stoppedGeneration) = synchronized(lock) {
+            activeRun?.cancelled = true
+            generation++; (runningJob to generation).also { runningJob = null }
+        }
         job?.cancel()
         stopUnfinished("检查已取消，已完成结果保留", stale = false, stoppedGeneration)
+        synchronized(lock) { activeRun?.stopped = state.value }
     }
 
     fun invalidate(reason: String) {
@@ -232,20 +328,28 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
         val (job, stoppedGeneration) = synchronized(lock) { generation++; (runningJob to generation).also { runningJob = null } }
         job?.cancel()
         stopUnfinished(reason, stale = true, stoppedGeneration)
+        synchronized(lock) { activeRun?.stopped = state.value }
     }
 
-    fun close() {
-        synchronized(lock) { closed = true }
-        cancel()
-        releaseNetwork()
-        plan = null
+    fun stage(id: String, mode: DownloadRouteMode?) {
+        mutableState.update { before ->
+            if (!before.complete || before.historyOnly || before.stale || before.running || before.applying || before.applied) before
+            else {
+                val row = before.rows.firstOrNull { it.id == id }
+                val result = when (mode) { DownloadRouteMode.DIRECT -> row?.direct; DownloadRouteMode.PROXY -> row?.proxy; else -> null }
+                if (mode == null || mode == row?.currentRoute?.mode) before.copy(selection = before.selection - id)
+                else if (row?.canApply == true && result?.usable == true && result.samples == 2 && !result.confirming)
+                    before.copy(selection = before.selection + (id to mode)) else before
+            }
+        }
     }
 
     suspend fun apply(selected: Map<String, DownloadRouteMode>): NetworkAutoApplyResult = withContext(Dispatchers.IO) {
         val frozen = synchronized(lock) {
-            if (closed || !state.value.complete || state.value.stale || state.value.running || state.value.applying || state.value.applied) null
+            if (closed || !state.value.complete || state.value.historyOnly || state.value.stale || state.value.running || state.value.applying || state.value.applied) null
             else plan?.also { mutableState.update { it.copy(applying = true) } }
         } ?: return@withContext NetworkAutoApplyResult(0, "请先完成本轮检测后再确认设置", false, state.value.stale)
+        val applyingRunId = state.value.runId
         try {
             if (!fresh(frozen)) {
                 markApplyStale("设置、来源、联动会话或网络已变化，请重新检测")
@@ -284,16 +388,23 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                 return@withContext NetworkAutoApplyResult(0, "网络配置已变化，未修改配置", false, true)
             }
             val saved = store.state.value
-            mutableState.update { it.copy(applying = false, applied = true, complete = false, stale = false,
+            val receipt = "已保存 $changed 项；未选的配置键和进行中任务保留，跟随项按新设置继承。Relay 应用状态另行显示。"
+            mutableState.update { it.copy(applied = true, complete = false, stale = false,
+                selection = emptyMap(), applyMessage = receipt,
                 staleReason = null, error = null, rows = it.rows.map { row ->
                     row.copy(currentRoute = autoCurrentRoute(saved, frozen.targets.single { target -> target.id == row.id }))
                 }) }
             plan = null
-            NetworkAutoApplyResult(changed, "已保存 $changed 项；未选的配置键和进行中任务保留，跟随项按新设置继承。Relay 应用状态另行显示。", true)
+            val appliedSnapshot = state.value
+            withContext(NonCancellable) {
+                val durable = history.applied(appliedSnapshot)
+                mutableState.update { if (it.runId == applyingRunId) it.copy(historySaved = durable) else it }
+            }
+            NetworkAutoApplyResult(changed, receipt, true)
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) {
             NetworkAutoApplyResult(0, "设置未能完整保存，请检查存储或重新检测", false)
-        } finally { mutableState.update { it.copy(applying = false) } }
+        } finally { mutableState.update { if (it.runId == applyingRunId) it.copy(applying = false) else it } }
     }
 
     private suspend fun sample(target: AutoTarget, candidate: AutoCandidate,
@@ -324,9 +435,40 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
 
     private fun markApplyStale(reason: String) {
         synchronized(lock) { plan = null }
-        mutableState.update { it.copy(stale = true, complete = false, staleReason = reason, error = null,
+        mutableState.update { it.copy(stale = true, complete = false, staleReason = reason, error = null, selection = emptyMap(),
             rows = it.rows.map { row -> row.copy(recommendation = null) }) }
     }
+
+    private suspend fun finishRun(accepted: OwnedCheckRun) = withContext(NonCancellable + Dispatchers.IO) {
+        restored.await()
+        val terminal = synchronized(lock) {
+            if (accepted.finalized) return@withContext
+            accepted.finalized = true
+            val snapshot = accepted.stopped ?: state.value.takeIf { it.runId == accepted.id }
+                ?: NetworkAutoCheckState(runId = accepted.id, startedAtMillis = accepted.startedAt, restoring = false)
+            val complete = snapshot.complete || snapshot.applied
+            val interrupted = !complete && !accepted.cancelled && !snapshot.stale && (accepted.interrupted || snapshot.error == null)
+            snapshot.copy(running = false, restoring = false, finishedAtMillis = wallTimeMillis(),
+                interrupted = interrupted, activeProbeIds = emptySet(),
+                selection = snapshot.selection.takeIf { complete }.orEmpty(),
+                error = snapshot.error ?: if (interrupted) "系统暂停了检测，请重新检测" else null)
+        }
+        val durable = history.finish(terminal)
+        synchronized(lock) {
+            if (state.value.runId == accepted.id) mutableState.update { current -> current.copy(
+                running = false, restoring = false, finishedAtMillis = terminal.finishedAtMillis,
+                interrupted = terminal.interrupted, historySaved = durable, activeProbeIds = emptySet(),
+                error = current.error ?: terminal.error) }
+            if (activeRun === accepted) activeRun = null
+        }
+    }
+
+    private fun suggestions(rows: List<NetworkAutoRow>): Map<String, DownloadRouteMode> = rows.mapNotNull { row ->
+        val mode = row.recommendation
+        val result = when (mode) { DownloadRouteMode.DIRECT -> row.direct; DownloadRouteMode.PROXY -> row.proxy; else -> null }
+        if (row.canApply && mode != null && mode != row.currentRoute?.mode && result?.usable == true &&
+            result.samples == 2 && !result.confirming) row.id to mode else null
+    }.toMap()
 
     private fun recommended(row: NetworkAutoRow): NetworkAutoRow {
         val direct = row.direct; val proxy = row.proxy
@@ -415,7 +557,7 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                 message = result.message.replace("；等待第二次确认", "") + "；本轮检查未完成")
             else -> result
         }
-        mutableState.update { previous -> if (synchronized(lock) { generation != run }) previous else previous.copy(running = false, complete = false, stale = stale,
+        mutableState.update { previous -> if (synchronized(lock) { generation != run }) previous else previous.copy(running = false, complete = false, stale = stale, selection = emptyMap(),
             staleReason = reason.takeIf { stale }, error = reason.takeUnless { stale }, activeProbeIds = emptySet(),
             rows = previous.rows.map { it.copy(direct = stoppedResult(it.direct), proxy = stoppedResult(it.proxy),
                 recommendation = null, reason = if (finished(it)) it.reason else reason) }) }
@@ -423,5 +565,8 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
     private fun finished(row: NetworkAutoRow): Boolean = row.direct != null && row.proxy != null &&
         !row.direct.confirming && !row.proxy.confirming
     private fun hash(value: String): String = sha256(value.encodeToByteArray()).joinToString("") { it.toUByte().toString(16).padStart(2, '0') }
-    companion object { private val MODES = listOf(DownloadRouteMode.DIRECT, DownloadRouteMode.PROXY) }
+    companion object {
+        private val MODES = listOf(DownloadRouteMode.DIRECT, DownloadRouteMode.PROXY)
+        private const val OPERATION_KEY = "network.connection-check"
+    }
 }

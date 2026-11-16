@@ -31,7 +31,7 @@ import kotlinx.coroutines.withContext
 
 enum class ApplicationOperationKind {
     LOCAL_IMPORT, CACHE_CLEAR, BACKUP_EXPORT, BACKUP_INSPECT, BACKUP_RESTORE,
-    WEBDAV_SAVE, WEBDAV_UPLOAD, WEBDAV_READ, SOURCE_INSTALL,
+    WEBDAV_SAVE, WEBDAV_UPLOAD, WEBDAV_READ, SOURCE_INSTALL, NETWORK_CHECK,
 }
 
 enum class ApplicationOperationPhase {
@@ -285,4 +285,5 @@ private fun operationTitle(kind: ApplicationOperationKind) = when (kind) {
     ApplicationOperationKind.WEBDAV_UPLOAD -> "上传阅读备份"
     ApplicationOperationKind.WEBDAV_READ -> "读取远端备份"
     ApplicationOperationKind.SOURCE_INSTALL -> "安装漫画源"
+    ApplicationOperationKind.NETWORK_CHECK -> "网络检测"
 }

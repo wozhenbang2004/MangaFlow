@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mangaflow.net.*
 import dev.mangaflow.platform.LocalMangaContext
+import dev.mangaflow.platform.formatInstantMillis
 import dev.mangaflow.platform.PlatformKind
 import dev.mangaflow.platform.platformKind
 import dev.mangaflow.reader.panels.PanelRuntimeId
@@ -64,63 +65,66 @@ internal fun NetworkAutoCheckWorkspace(
     val latestActive by rememberUpdatedState(active)
     val colors = MaterialTheme.colorScheme
     val list = rememberLazyListState()
-    var selected by remember(controller) { mutableStateOf<Map<String, DownloadRouteMode>>(emptyMap()) }
-    var appliedChoices by remember(controller) { mutableStateOf<Map<String, DownloadRouteMode>>(emptyMap()) }
+    val selected = state.selection
     var expandedId by remember(controller) { mutableStateOf<String?>(null) }
     var notice by remember(controller) { mutableStateOf<String?>(null) }
     var saving by remember(controller) { mutableStateOf(false) }
-    var starting by remember(controller) { mutableStateOf(false) }
-    val canReview = state.complete && !state.applied && !state.stale && !state.running && !state.applying && !saving
-    fun current(row: NetworkAutoRow) = appliedChoices[row.id] ?: row.currentRoute?.mode
+    val canReview = state.complete && !state.historyOnly && !state.restoring && !state.applied &&
+        !state.stale && !state.running && !state.applying && !saving
+    fun current(row: NetworkAutoRow) = row.currentRoute?.mode
     val changes = state.rows.mapNotNull { row -> recommendationChange(row, current(row))?.let { row.id to it } }.toMap()
     val applicable = selected.filter { (id, mode) -> state.rows.firstOrNull { it.id == id }?.let { row ->
         row.canApply && routeResult(row, mode).verified() && mode != current(row)
     } == true }
     val available = state.rows.count { it.direct.verified() || it.proxy.verified() }
     val metrics = rememberAutoMetrics(state.rows)
-    LaunchedEffect(controller, state.running, state.complete) {
+    LaunchedEffect(controller, state.runId, state.running, state.complete) {
         if (state.running) {
-            selected = emptyMap(); appliedChoices = emptyMap(); expandedId = null; notice = null
-            onReceipt("")
-        } else if (state.complete && !state.stale) {
-            selected = state.rows.mapNotNull { row -> recommendationChange(row, row.currentRoute?.mode)?.let { row.id to it } }.toMap()
+            expandedId = null; notice = null; onReceipt("")
+        } else if (state.complete && !state.historyOnly && !state.stale) {
             list.animateScrollToItem(0)
         }
     }
     fun run() {
-        if (!latestActive || state.running || starting || saving || state.applying) return
-        starting = true; notice = null
-        scope.launch {
-            try { controller.run() }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (_: Exception) { notice = "检测未完成，请重试" }
-            finally { starting = false }
-        }
+        if (!latestActive || state.restoring || state.running || saving || state.applying) return
+        notice = null
+        controller.start()
     }
     fun choose(row: NetworkAutoRow, mode: DownloadRouteMode) {
         if (!latestActive || !canReview || !row.canApply || !routeResult(row, mode).verified()) return
-        selected = if (mode == current(row)) selected - row.id else selected + (row.id to mode)
+        controller.stage(row.id, mode.takeIf { it != current(row) })
         notice = null
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-            if (state.running || starting) MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
-            Text(when {
-                state.stale -> "结果已失效，请重新检测"
-                state.running || starting -> if (state.total > 0) "已检测 ${state.completed}/${state.total}" else "正在准备"
-                state.applied -> "修改已保存"
-                state.complete -> "${state.rows.size} 项 · $available 可用 · ${changes.size} 建议"
-                state.rows.isNotEmpty() -> "已停止 · 保留已完成结果"
-                else -> "分别比较直连与代理"
-            }, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
-                color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (state.running || starting) MotionIconButton(controller::cancel, enabled = active,
+            if (state.running || state.restoring) MotionBusyIndicator(Modifier.size(14.dp), strokeWidth = 1.4.dp)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(when {
+                    state.restoring -> "读取上次检测"
+                    state.running -> if (state.total > 0) "后台检测 ${state.completed}/${state.total}" else "正在准备检测"
+                    state.historyOnly && state.interrupted -> if (state.rows.isEmpty())
+                        "上次检测已中断，请重新检测" else "上次检测中断，显示最近结果"
+                    state.historyOnly -> "上次结果 · 重新检测后可修改"
+                    state.stale -> "结果已失效，请重新检测"
+                    state.applied -> "修改已保存"
+                    state.complete -> "${state.rows.size} 项 · $available 可用 · ${changes.size} 建议"
+                    state.rows.isNotEmpty() -> "已停止 · 保留已完成结果"
+                    else -> "分别比较直连与代理"
+                }, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                val timestamp = state.finishedAtMillis ?: state.startedAtMillis
+                if (timestamp != null && !state.restoring) Text(
+                    (if (state.running || state.finishedAtMillis == null) "开始于 " else "检测于 ") +
+                        formatInstantMillis(timestamp, "MM-dd HH:mm"), style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant, maxLines = 1, softWrap = false)
+            }
+            if (state.running) MotionIconButton(controller::cancel, enabled = active,
                 modifier = Modifier.size(44.dp), tooltip = "停止检测") {
                 Icon(Icons.Outlined.Close, "停止检测", Modifier.size(17.dp))
-            } else if (state.rows.isEmpty()) MotionTextButton(::run, enabled = active && !saving && !state.applying) {
+            } else if (state.rows.isEmpty()) MotionTextButton(::run, enabled = active && !state.restoring && !saving && !state.applying) {
                 Text("一键检测", style = MaterialTheme.typography.labelMedium)
-            } else MotionIconButton(::run, enabled = active && !saving && !state.applying,
+            } else MotionIconButton(::run, enabled = active && !state.restoring && !saving && !state.applying,
                 modifier = Modifier.size(44.dp), tooltip = "重新检测") {
                 Icon(Icons.Outlined.Refresh, "重新检测", Modifier.size(17.dp), tint = colors.onSurfaceVariant)
             }
@@ -146,13 +150,14 @@ internal fun NetworkAutoCheckWorkspace(
                             items(rows, key = { it.id }) { row ->
                                 val value = current(row)
                                 NetworkAutoCheckRow(row, value, selected[row.id], metrics,
-                                    stale = state.stale, active = active, enabled = active && canReview,
+                                    stale = state.stale || state.historyOnly, historical = state.historyOnly,
+                                    active = active, enabled = active && canReview,
                                     expanded = expandedId == row.id,
                                     directRunning = "${row.id}:DIRECT" in state.activeProbeIds,
                                     proxyRunning = "${row.id}:PROXY" in state.activeProbeIds,
                                     steam = steam, onDetails = { expandedId = if (expandedId == row.id) null else row.id },
                                     onToggle = {
-                                        if (row.id in selected) selected = selected - row.id
+                                        if (row.id in selected) controller.stage(row.id, null)
                                         else recommendationChange(row, value)?.let { choose(row, it) }
                                     }, onChoose = { choose(row, it) }, onEvidence = { onEvidence(row.id) },
                                     onSettings = onSettings,
@@ -170,9 +175,10 @@ internal fun NetworkAutoCheckWorkspace(
                 }
             }
         }
-        if (state.error != null || state.staleReason != null || notice != null) Row(
+        if (state.error != null || state.staleReason != null || notice != null || !state.historySaved) Row(
             Modifier.fillMaxWidth().heightIn(min = 36.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(notice ?: if (state.stale) "配置或网络已变化" else "检测未能完成", Modifier.weight(1f),
+            Text(notice ?: if (!state.historySaved) "检测记录未能保存" else if (state.historyOnly) "历史结果不能直接应用"
+                else if (state.stale) "配置或网络已变化" else "检测未能完成", Modifier.weight(1f),
                 style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
             MotionIconButton({ onEvidence(null) }, enabled = active, modifier = Modifier.size(44.dp), tooltip = "查看原因") {
@@ -182,10 +188,12 @@ internal fun NetworkAutoCheckWorkspace(
         if (state.rows.isNotEmpty()) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(when {
+                state.historyOnly -> "历史结果 · 请先重测"
                 state.stale -> "请先重测"
                 state.applied -> "已保存"
                 state.complete -> "已选 ${applicable.size} 项"
-                else -> "检测不修改配置"
+                state.running -> "离开面板后继续检测"
+                else -> "未完成项保留原设置"
             }, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
             MotionButton(onClick = {
                 if (!latestActive || !canReview || applicable.isEmpty()) return@MotionButton
@@ -196,7 +204,6 @@ internal fun NetworkAutoCheckWorkspace(
                         val result = controller.apply(chosen)
                         onReceipt(result.message)
                         notice = if (result.success) "已保存 ${result.applied} 项" else if (result.stale) "配置已变化，未修改" else "未能保存，请查看原因"
-                        if (result.success) { appliedChoices = appliedChoices + chosen; selected = selected - chosen.keys }
                     } catch (cancel: CancellationException) { throw cancel }
                     catch (_: Exception) { notice = "未能保存，请重试" }
                     finally { saving = false }
@@ -267,7 +274,7 @@ private fun NetworkAutoGroupHeading(group: NetworkAutoGroup, count: Int, metrics
 @Composable
 private fun NetworkAutoCheckRow(
     row: NetworkAutoRow, current: DownloadRouteMode?, selected: DownloadRouteMode?, metrics: AutoRowMetrics,
-    stale: Boolean, active: Boolean, enabled: Boolean, expanded: Boolean, directRunning: Boolean, proxyRunning: Boolean,
+    stale: Boolean, historical: Boolean, active: Boolean, enabled: Boolean, expanded: Boolean, directRunning: Boolean, proxyRunning: Boolean,
     steam: PanelRuntimeState, onDetails: () -> Unit, onToggle: () -> Unit, onChoose: (DownloadRouteMode) -> Unit,
     onEvidence: () -> Unit, onSettings: () -> Unit, onPrepareSteam: () -> Unit, onCancelSteam: () -> Unit,
 ) {
@@ -293,7 +300,8 @@ private fun NetworkAutoCheckRow(
                     Text(when (current) { DownloadRouteMode.SYSTEM -> "系统"; DownloadRouteMode.DIRECT -> "直";
                         DownloadRouteMode.PROXY -> "代"; null -> "待设" }, style = MaterialTheme.typography.labelSmall,
                         color = colors.onSurfaceVariant, maxLines = 1, softWrap = false,
-                        modifier = Modifier.semantics { contentDescription = "当前线路，" + (current?.let(::downloadRouteLabel) ?: "跟随默认") })
+                        modifier = Modifier.semantics { contentDescription = (if (historical) "检测时线路，" else "当前线路，") +
+                            (current?.let(::downloadRouteLabel) ?: "跟随默认") })
                     Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null,
                         Modifier.size(12.dp), tint = colors.onSurfaceVariant)
                 }
@@ -402,6 +410,14 @@ internal fun NetworkAutoEvidenceDetails(state: NetworkAutoCheckState, rowId: Str
     val runtimes = remember(context) { PanelRuntimeStore.get(context) }
     val runtimeStates by runtimes.states.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        state.startedAtMillis?.let { Text("开始 · " + formatInstantMillis(it, "yyyy-MM-dd HH:mm"),
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
+        state.finishedAtMillis?.let { Text("结束 · " + formatInstantMillis(it, "yyyy-MM-dd HH:mm"),
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
+        if (state.historyOnly) Text("这是上次保留的检测记录，不能证明当前网络可用，也不能直接应用建议。",
+            style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        if (!state.historySaved) Text("检测记录未能写入本机；当前结果仍可查看，应用重启后可能无法恢复。",
+            style = MaterialTheme.typography.bodySmall, color = colors.error)
         receipt?.takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant) }
         state.staleReason?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
         state.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
