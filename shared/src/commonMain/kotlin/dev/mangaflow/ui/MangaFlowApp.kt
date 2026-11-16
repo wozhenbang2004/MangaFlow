@@ -1334,7 +1334,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onAddCloudFavorite = if (restrictedMode || account.profile == null) null
                                             else model::addCloudMangaToLibrary,
                                         onMoreCloudFavorites = model::moreCloudFavorites,
-                                        onRefreshCloudFavorites = model::refreshCloudFavorites,
+                                        onRefreshCloudFavorites = {
+                                            model.refreshCloudFavorites()
+                                            model.copyShelfSync.checkInBackground()
+                                            model.refreshCopyShelfMetadata()
+                                        },
                                         preferredResumeTargets = if (restrictedMode) emptyMap() else
                                             adoptedResumeTargets.filterValues { it.accountOwner == account.profile?.username },
                                         copySyncState = copyShelfSync.takeIf { !restrictedMode &&
