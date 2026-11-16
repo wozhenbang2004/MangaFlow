@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Four anonymous sources · source complete 2026-11-16
+
+Current user request is “全部接入我需要”, following the explicit anonymous-first source requirement and the four-source findings table. DESIGN ANONYMOUS-SOURCES-01–06 owns the exact scope, decisions and evidence. Baseline main d0212ab includes56a69cc cache/standby/glyph work and the application-owned background network checks; retain both. New source registration is an implementation slice, superseding these candidates' old research-only status.
+
+Root owns GuaziBodySource, source graph registration/names/wordmarks, license/design/state integration and final refs. Separate source owners implemented ManhuarenBodySource, RumanhuaBodySource/RumanhuaPayload and ZaimanhuaBodySource; all have returned files and stopped writing. One independent reviewer read all four sources and the actual pinned upstream contracts. Review corrected Zaimanhua's declared-total/empty-page boundary, Manhuaren's empty cover chapter headers, grouped-count completeness, full-manifest versus unknown-count preview handling and force refresh/revision propagation. New sources use commonMain without optional engines, share exact SourceHttp/source/task routing and the existing reading/download/cache/standby systems, and are dynamically included in network checks. No tests/local builds/probes/fixtures were used.
+
+Current evidence is complete bounded source/diff/whitespace review, not successful provider access or installed appearance/performance. HTTPS compatibility, live image completeness, mainland speed and source-specific service restrictions remain pending actual user evidence. Raw requirements are covered through “全部接入我需要” on2026-11-16; exact message ids are unavailable. Earlier explicit main/three-platform publication approval remains recorded in the cache slice; follow the established single complete latest-main publication flow for this requested source integration, preserving concurrent work with an expected-head guard.
+
+Next exact action: confirm latest main, integrate this one complete source batch, trigger ordinary Android/native CI once and stop without a status-only push or waiting for artifacts. Handle actual compiler/installed feedback on its evidence. Do not rerun earlier cache/network batches, duplicate these adapters as JS sources, ask the user for source credentials or label mainland speed as measured.
+
 ## Retained background network checks · active 2026-11-16
 
 The user's new voice request and exact acceptance are DESIGN NETWORK-AUTO-14–17: an explicitly started one-click check survives leaving the page/app foreground, retains progress and results, and restores the last completed report on reopening; the reader's “等待已开始的图片请求” must be explained against real prefetch concurrency. Root clarified the actual cause and the page-local handoff meaning in commentary. No continuous scanning or automatic route application is added. Existing stop stays explicit.

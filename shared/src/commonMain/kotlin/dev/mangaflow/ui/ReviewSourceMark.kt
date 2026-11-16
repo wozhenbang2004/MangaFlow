@@ -58,11 +58,18 @@ internal fun reviewSourceMarkWidth(size: Dp, fontScale: Float): Dp = size * (1.1
 /** One local typographic source mark, shared by compact badges and full source rows. */
 @Composable
 internal fun CopySourceWordmark(modifier: Modifier = Modifier) {
-    val density = LocalDensity.current
     val onDark = MaterialTheme.colorScheme.onSurface.luminance() > .5f
+    TextSourceWordmark("拷", modifier, reviewSourceAccent("copy", onDark))
+}
+
+/** The existing local wordmark treatment also identifies anonymous body-source entries. */
+@Composable
+internal fun TextSourceWordmark(text: String, modifier: Modifier = Modifier,
+    color: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
+    val density = LocalDensity.current
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
         val side = minOf(maxWidth, maxHeight)
-        Text("拷", color = reviewSourceAccent("copy", onDark),
+        Text(text, color = color,
             style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.SansSerif,
                 fontWeight = FontWeight.Medium, fontSize = with(density) { (side * .86f).toSp() },
                 lineHeight = with(density) { side.toSp() }, letterSpacing = 0.sp),

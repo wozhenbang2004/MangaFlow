@@ -16,6 +16,10 @@ import dev.mangaflow.data.plugins.ScriptSourcePackage
 import dev.mangaflow.data.plugins.SourcePluginStore
 import dev.mangaflow.data.plugins.StarterSourceInstaller
 import dev.mangaflow.data.sources.BaoziBodySource
+import dev.mangaflow.data.sources.GuaziBodySource
+import dev.mangaflow.data.sources.ManhuarenBodySource
+import dev.mangaflow.data.sources.RumanhuaBodySource
+import dev.mangaflow.data.sources.ZaimanhuaBodySource
 import dev.mangaflow.data.sources.KomiicBodySource
 import dev.mangaflow.data.sources.MangaBzBodySource
 import dev.mangaflow.data.sources.MangaDexBodySource
@@ -72,7 +76,8 @@ internal class MangaApplicationServices private constructor(context: PlatformCon
     val repository = UnifiedMangaRepository(copyRepository, unifiedChapters,
         bodySources = listOf(BaoziBodySource(), ManhuaguiBodySource(), MangaBzBodySource(
             cachePreferences = { dev.mangaflow.experience.contentCachePreferences(application) }), komiicSource,
-            MangaDexBodySource(), picacgSource) + listOfNotNull(createJmBodySource(application)),
+            MangaDexBodySource(), picacgSource, GuaziBodySource(), ManhuarenBodySource(),
+            RumanhuaBodySource(), ZaimanhuaBodySource()) + listOfNotNull(createJmBodySource(application)),
         catalogStore = readerCatalogs, storageCache = dev.mangaflow.storage.StorageCacheStore.get(application))
     val bodySources = BodySourceRegistry(application, repository.sources)
     val networkChecks = NetworkAutoCheckController(application, repository, bodySources, operations,

@@ -626,3 +626,13 @@ Komiic origin configuration use Keiyoushi `fc7a827769f612dfa6dccb51e819f5b4eecae
 MangaBZ uses `535ffdbdd84eadab593d515283cb82aa9bf177f5`, all Apache-2.0.
 The exact upstream paths, modified local files and omitted runtime/account/image
 rewriting features are recorded in `third_party/multi-source/ADAPTATION.md`.
+
+Guazi, Manhuaren, Rumanhua and Zaimanhua anonymous adapters additionally adapt
+Keiyoushi/extensions-source `9080fbfd1d02ce2cad0f7466996fa19816f39401`
+(Apache-2.0): Guazimanhua, the shared Dm5 public web contract, MMLook/PageDecrypt,
+and Zaimanhua/DTOs. These are modified common-Kotlin integrations using source-owned
+transport, exact native identities, bounded parsing and normal TLS validation.
+The complete Apache-2.0 license is included at
+`third_party/multi-source/KEIYOUSHI-APACHE-2.0.txt`; the exact file map and omitted
+upstream account, certificate-bypass and HTTP-workaround features are in ADAPTATION.md.
+Unlicensed Venera script text is not bundled or translated verbatim.

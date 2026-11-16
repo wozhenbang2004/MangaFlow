@@ -40,6 +40,14 @@ internal fun BodySourceMark(sourceId: String, sourceName: String, modifier: Modi
         CopySourceWordmark(modifier)
         return
     }
+    val wordmark = when (sourceId) {
+        "guazi" -> "瓜"; "manhuaren" -> "人"; "rumanhua" -> "如"; "zaimanhua" -> "再"
+        else -> null
+    }
+    if (wordmark != null) {
+        TextSourceWordmark(wordmark, modifier.semantics { contentDescription = sourceName })
+        return
+    }
     val colors = MaterialTheme.colorScheme
     val onDark = colors.onSurface.luminance() > .5f
     val tint = if (muted) colors.onSurfaceVariant else when (sourceId) {
