@@ -96,6 +96,8 @@ fun AccountScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val appContext = LocalContext.current
+    var registerNotice by remember { mutableStateOf<String?>(null) }
     var cookieMode by rememberSaveable { mutableStateOf(false) }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -238,11 +240,28 @@ fun AccountScreen(
                     AccountError(message, state.busy, onRetry = if (state.canRetryConnection && !state.savedCredentialPresent) onRefresh else null)
                 }
             }
-            if (!state.savedCredentialPresent) TextButton(
-                onClick = { clearInputs(); cookieMode = !cookieMode }, enabled = active && !busy,
-                modifier = Modifier.heightIn(min = 48.dp),
-                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
-            ) { Text(if (cookieMode) "使用账号密码" else "导入 Cookie / Token", style = MaterialTheme.typography.bodySmall) }
+            if (!state.savedCredentialPresent) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = { clearInputs(); cookieMode = !cookieMode }, enabled = active && !busy,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
+                    ) { Text(if (cookieMode) "使用账号密码" else "导入 Cookie / Token",
+                        style = MaterialTheme.typography.bodySmall) }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = {
+                        clearInputs()
+                        registerNotice = if (openUrl(appContext, "https://www.mangacopy.com/web/login/?url=person/home")) null
+                            else "无法打开注册页面，请检查浏览器"
+                    }, enabled = active && !busy,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                        Text("官网注册", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                registerNotice?.let { Text(it, style = MaterialTheme.typography.labelSmall,
+                    color = colors.error, modifier = Modifier.padding(bottom = 8.dp)) }
+            }
         }
         if (desktop) Box(Modifier.widthIn(max = 480.dp).fillMaxSize().align(Alignment.TopCenter)) {
             DesktopVerticalScrollbar(loginScroll,
