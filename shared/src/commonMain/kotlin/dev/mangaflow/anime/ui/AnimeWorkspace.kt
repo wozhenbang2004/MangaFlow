@@ -1,14 +1,13 @@
 package dev.mangaflow.anime.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
@@ -17,14 +16,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
@@ -36,12 +36,16 @@ import dev.mangaflow.ui.motion.*
 private data class AnimeRoute(val key: String, val depth: Int, val detail: AnimeDetail?)
 private data class AnimePlaybackIntent(val episode: AnimeEpisode, val option: AnimeEpisodeOption? = null)
 private data class AnimeSourceAssociation(val title: AnimeSourceTitle, val subjectId: String)
+private enum class AnimeWorkspacePage(val label: String, val discovery: AnimeDiscoveryTab? = null) {
+    HOME("首页", AnimeDiscoveryTab.HOME), LIBRARY("追番"), RANKING("榜单", AnimeDiscoveryTab.RANKING),
+    SEASON("新番", AnimeDiscoveryTab.SEASON), CALENDAR("番表", AnimeDiscoveryTab.CALENDAR), SOURCES("片源", AnimeDiscoveryTab.SOURCES),
+}
+private enum class AnimeWorkspaceTool { SOURCES, TRACKING, DOWNLOADS }
 
 /** The root owns one controller/player. Pane identity never follows the player's ticking position. */
 @Composable
 internal fun AnimeWorkspace(
     controller: AnimeController,
-    onManga: () -> Unit,
     backdrop: HazeState,
     navigation: @Composable () -> Unit,
     navigationVisible: Boolean = true,
@@ -53,9 +57,14 @@ internal fun AnimeWorkspace(
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
     val playback by controller.player.state.collectAsStateWithLifecycle()
+    val sourceBrowse by controller.sourceBrowse.state.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    val page = if (tab == 1) AnimeWorkspacePage.LIBRARY else
+        AnimeWorkspacePage.entries.first { it.discovery == state.discoveryTab }
     val discoveryScrolls = remember { AnimeDiscoveryScrolls() }
     val libraryScroll = rememberLazyListState()
+    val libraryViewState = rememberAnimeLibraryViewState()
+    val detailState = rememberSaveableStateHolder()
     val detailScrolls = remember { mutableMapOf<String, LazyListState>() }
     var query by rememberSaveable { mutableStateOf(state.query) }
     var consumedSearchRequest by remember { mutableIntStateOf(searchRequest) }
@@ -63,6 +72,10 @@ internal fun AnimeWorkspace(
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
     var searchPresent by remember { mutableStateOf(false) }
     var searchForeground by remember { mutableStateOf<State<Float>?>(null) }
+    var toolsVisible by remember { mutableStateOf(false) }
+    var toolsPresent by remember { mutableStateOf(false) }
+    var layoutPresent by remember { mutableStateOf(false) }
+    var pendingTool by remember { mutableStateOf<AnimeWorkspaceTool?>(null) }
     var sourcesVisible by remember { mutableStateOf(false) }
     var sourceManagerVisible by remember { mutableStateOf(false) }
     var downloadsVisible by remember { mutableStateOf(false) }
@@ -85,6 +98,14 @@ internal fun AnimeWorkspace(
             AnimeRoute("detail:" + (state.detail?.subject?.id ?: openingSubject?.id.orEmpty()), 1, state.detail)
         else -> AnimeRoute("home", 0, null)
     }
+    val resumeDockVisible = !playing && route.depth == 0 && !searchPresent && state.resumeEntry?.resume != null
+    val contentBottomPadding = if (resumeDockVisible) 108.dp else 24.dp
+    val overlayVisible = downloadsVisible || sourceManagerVisible || sourcesVisible || trackingVisible || reviewsVisible
+    val rootActive = active && route.depth == 0 && !searchPresent && !toolsPresent && !layoutPresent && !overlayVisible
+    LaunchedEffect(active, route.key, page) {
+        toolsVisible = false
+        pendingTool = null
+    }
     val currentPlaybackVisibility by rememberUpdatedState(onPlaybackVisibility)
     LaunchedEffect(playing) { currentPlaybackVisibility(playing) }
     DisposableEffect(controller) {
@@ -101,6 +122,9 @@ internal fun AnimeWorkspace(
             playbackFailure = null
             awaitingResolve = false
             controller.closePlayback()
+            controller.closeDetail()
+            toolsVisible = false
+            pendingTool = null
             sourcesVisible = false
             sourceManagerVisible = false
             downloadsVisible = false
@@ -195,6 +219,7 @@ internal fun AnimeWorkspace(
     }
     fun back() {
         when {
+            toolsVisible -> { toolsVisible = false; pendingTool = null }
             downloadsVisible -> downloadsVisible = false
             sourceManagerVisible -> sourceManagerVisible = false
             sourcesVisible -> sourcesVisible = false
@@ -206,9 +231,25 @@ internal fun AnimeWorkspace(
             route.depth == 1 -> { pendingAssociation = null; controller.closeDetail() }
             tab == 0 && state.discoveryTab == AnimeDiscoveryTab.SOURCES && controller.sourceBrowse.state.value.selectedTitle != null ->
                 controller.sourceBrowse.closeTitle()
-            tab == 0 && state.discoveryTab != AnimeDiscoveryTab.HOME -> controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME)
-            tab != 0 -> tab = 0
-            else -> onManga()
+        }
+    }
+
+    fun queueTool(tool: AnimeWorkspaceTool) {
+        pendingTool = tool
+        toolsVisible = false
+    }
+
+    fun finishToolMenu(present: Boolean) {
+        toolsPresent = present
+        if (present) return
+        val next = pendingTool
+        pendingTool = null
+        if (!active || route.depth != 0 || searchExpanded) return
+        when (next) {
+            AnimeWorkspaceTool.SOURCES -> sourceManagerVisible = true
+            AnimeWorkspaceTool.TRACKING -> trackingVisible = true
+            AnimeWorkspaceTool.DOWNLOADS -> downloadsVisible = true
+            null -> Unit
         }
     }
 
@@ -240,7 +281,9 @@ internal fun AnimeWorkspace(
         }
     }
 
-    MotionBackHandler(active && !downloadsVisible && !sourceManagerVisible && !sourcesVisible && !trackingVisible && !reviewsVisible && !searchPresent,
+    val canGoBack = route.depth > 0 ||
+        (page == AnimeWorkspacePage.SOURCES && sourceBrowse.selectedTitle != null)
+    MotionBackHandler(active && canGoBack && !overlayVisible && !searchPresent && !toolsPresent && !layoutPresent,
         state = null, onBack = ::back)
 
     Column(modifier.fillMaxSize()) {
@@ -280,74 +323,79 @@ internal fun AnimeWorkspace(
                         onEpisode = ::play, modifier = Modifier.fillMaxSize())
                 } else {
                     Column(Modifier.fillMaxSize()) {
-                        AnimeWorkspaceHeader(root = shown.depth == 0,
-                            title = shown.detail?.subject?.title ?: openingSubject?.title ?: "番剧",
-                            backdrop = backdrop, navigationVisible = navigationVisible, onManga = onManga,
-                            navigation = {
-                                if (shown.depth == 0) navigation()
-                                else MotionIconButton(onClick = { pendingAssociation = null; controller.closeDetail() }, modifier = Modifier.size(44.dp),
-                                    tooltip = "返回番剧") {
-                                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
-                                }
-                            },
-                            actions = {
-                                Row(Modifier.padding(horizontal = 8.dp).heightIn(min = 44.dp)
-                                    .graphicsLayer { alpha = if (searchExpanded) 0f else
-                                        1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f) }
-                                    .motionInputGate(active && !searchPresent),
-                                    verticalAlignment = Alignment.CenterVertically) {
-                                    MotionIconButton(onClick = { sourceManagerVisible = true }, modifier = Modifier.size(44.dp),
-                                        tooltip = "来源管理") {
-                                        Icon(Icons.Outlined.Extension, "来源管理", Modifier.size(20.dp))
+                        BoxWithConstraints(Modifier.fillMaxWidth()) {
+                            val preferred = animePreferredColumns(maxWidth, state.discoveryColumns)
+                            val actualColumns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
+                            AnimeWorkspaceHeader(root = shown.depth == 0,
+                                title = if (shown.depth == 0) "动漫" else
+                                    shown.detail?.subject?.title ?: openingSubject?.title ?: "动漫详情",
+                                backdrop = backdrop, navigationVisible = navigationVisible,
+                                navigation = {
+                                    if (shown.depth == 0) navigation()
+                                    else MotionIconButton(onClick = { pendingAssociation = null; controller.closeDetail() },
+                                        modifier = Modifier.size(44.dp), tooltip = "返回动漫") {
+                                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                                     }
-                                    MotionIconButton(onClick = { trackingVisible = true }, modifier = Modifier.size(44.dp),
-                                        tooltip = "追番账号") {
-                                        Icon(Icons.Outlined.AccountCircle, "追番账号", Modifier.size(21.dp))
-                                    }
-                                    Spacer(Modifier.size(44.dp))
-                                }
-                            })
-                        if (shown.depth == 0) {
-                            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                                val preferred = animePreferredColumns(maxWidth, state.discoveryColumns)
-                                val actualColumns = animeDiscoveryColumns(maxWidth, state.discoveryColumns)
-                                val availableWidth = maxWidth
-                                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    MotionTabs(tab, listOf("发现", "追番"), onSelect = { tab = it },
-                                        modifier = Modifier.width(minOf(144.dp, (availableWidth - 112.dp).coerceAtLeast(88.dp))), controlHeight = 44.dp,
-                                        treatment = MotionTabTreatment.Underline)
-                                    Spacer(Modifier.weight(1f))
-                                    if (tab == 1) MotionIconButton(onClick = { reviewsVisible = true },
-                                        modifier = Modifier.size(44.dp), tooltip = "复核进度差异") {
-                                        Icon(if (state.reviews.isEmpty()) Icons.Outlined.Sync else Icons.Outlined.SwapHoriz,
-                                            if (state.reviews.isEmpty()) "进度复核" else "待复核 " + state.reviews.size + " 项",
-                                            Modifier.size(20.dp))
-                                    }
-                                    else {
-                                        DiscoveryLayoutControl(preferred, actualColumns, backdrop, active && !searchPresent,
-                                            onChange = controller::setDiscoveryColumns, onPresenceChange = {})
-                                        MotionIconButton(onClick = controller::refreshDiscovery, modifier = Modifier.size(44.dp),
-                                            enabled = state.discoveryFeeds[animeDiscoveryFeedKey(state.discoveryTab)]?.loading != true,
-                                            tooltip = "刷新当前内容") {
-                                            Icon(Icons.Outlined.Refresh, "刷新当前内容", Modifier.size(20.dp))
+                                },
+                                actions = if (shown.depth != 0) null else ({
+                                    Row(Modifier.heightIn(min = 44.dp)
+                                        .graphicsLayer { alpha = if (searchExpanded) 0f else
+                                            1f - (searchForeground?.value ?: 0f).coerceIn(0f, 1f) }
+                                        .motionInputGate(active && route.depth == 0 && !searchPresent && !overlayVisible),
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        if (tab == 0) DiscoveryLayoutControl(preferred, actualColumns, backdrop,
+                                            active && route.depth == 0 && !searchPresent && !toolsPresent && !overlayVisible,
+                                            onChange = controller::setDiscoveryColumns,
+                                            onPresenceChange = { layoutPresent = it })
+                                        Box {
+                                            MotionIconButton(onClick = { pendingTool = null; toolsVisible = !toolsVisible },
+                                                modifier = Modifier.size(44.dp), enabled = !layoutPresent && (toolsVisible || !toolsPresent),
+                                                tooltip = "动漫菜单") {
+                                                Icon(Icons.Outlined.MoreHoriz, "动漫菜单", Modifier.size(21.dp))
+                                            }
+                                            CompactGlassPopover(toolsVisible, backdrop,
+                                                onDismiss = { toolsVisible = false; pendingTool = null },
+                                                onPresenceChange = ::finishToolMenu) {
+                                                if (tab == 0 && page != AnimeWorkspacePage.SOURCES)
+                                                    CompactMenuAction(Icons.Outlined.Refresh, "刷新当前栏目",
+                                                        enabled = state.discoveryFeeds[animeDiscoveryFeedKey(state.discoveryTab)]?.loading != true,
+                                                        onClick = { pendingTool = null; toolsVisible = false; controller.refreshDiscovery() })
+                                                CompactMenuAction(Icons.Outlined.DownloadForOffline, "离线下载",
+                                                    onClick = { queueTool(AnimeWorkspaceTool.DOWNLOADS) })
+                                                CompactMenuAction(Icons.Outlined.AccountCircle, "追番账号",
+                                                    onClick = { queueTool(AnimeWorkspaceTool.TRACKING) })
+                                                CompactMenuAction(Icons.Outlined.Extension, "管理播放来源",
+                                                    onClick = { queueTool(AnimeWorkspaceTool.SOURCES) })
+                                            }
                                         }
+                                        Spacer(Modifier.size(44.dp))
                                     }
-                                }
-                            }
-                            MotionTabContent(tab, Modifier.weight(1f).mangaHazeSource(backdrop)) { pane ->
+                                }))
+                        }
+                        if (shown.depth == 0) {
+                            AnimeWorkspaceNavigation(page, active = rootActive, onSelect = { selected ->
+                                tab = if (selected == AnimeWorkspacePage.LIBRARY) 1 else 0
+                                selected.discovery?.let(controller::selectDiscoveryTab)
+                            })
+                            MotionTabContent(tab, Modifier.weight(1f).mangaHazeSource(backdrop).motionInputGate(rootActive)) { pane ->
                                 if (pane == 0) AnimeDiscovery(state, controller, backdrop, discoveryScrolls, onOpen = ::open,
                                     onChooseReference = ::chooseReference, onManageSources = { sourceManagerVisible = true },
-                                    active = active && tab == 0 && !searchPresent)
+                                    active = rootActive && tab == 0, contentBottomPadding = contentBottomPadding)
                                 else AnimeLibrary(state, libraryScroll, controller, backdrop, onOpen = ::open, onResume = ::resume,
-                                    onDiscover = { tab = 0 }, onReview = { reviewsVisible = true }, onDownloads = { downloadsVisible = true })
+                                    onDiscover = { tab = 0; controller.selectDiscoveryTab(AnimeDiscoveryTab.HOME) },
+                                    onReview = { reviewsVisible = true }, viewState = libraryViewState,
+                                    active = rootActive && tab == 1, contentBottomPadding = contentBottomPadding)
                             }
                         } else if (shown.detail != null) {
-                            AnimeDetailPane(shown.detail, state, controller, backdrop,
-                                remember(shown.detail.subject.id) { detailScrolls.getOrPut(shown.detail.subject.id) { LazyListState() } },
-                                onPlay = ::play,
-                                onOpen = ::open,
-                                onSources = ::showSources,
-                                onTracking = { trackingVisible = true }, modifier = Modifier.weight(1f).mangaHazeSource(backdrop))
+                            Box(Modifier.weight(1f).mangaHazeSource(backdrop)) {
+                                detailState.SaveableStateProvider(shown.key) {
+                                    AnimeDetailPane(shown.detail, state, controller, backdrop,
+                                        remember(shown.detail.subject.id) { detailScrolls.getOrPut(shown.detail.subject.id) { LazyListState() } },
+                                        onPlay = ::play, onOpen = ::open, onSources = ::showSources,
+                                        onTracking = { trackingVisible = true }, modifier = Modifier.fillMaxSize(),
+                                        active = active && shown.key == route.key && !overlayVisible && !searchPresent)
+                                }
+                            }
                         } else Box(Modifier.weight(1f)) {
                             AnimeMessage(if (state.detailLoading) "正在载入番剧" else "番剧详情未取得",
                                 state.detailError ?: openingSubject?.title,
@@ -357,8 +405,8 @@ internal fun AnimeWorkspace(
                     }
                 }
             }
-            if (!playing) ExpandingSearchBar(expanded = searchExpanded, query = query,
-                active = active && !downloadsVisible && !sourceManagerVisible && !sourcesVisible && !trackingVisible && !reviewsVisible, backdrop = backdrop,
+            if (!playing && (route.depth == 0 || searchPresent)) ExpandingSearchBar(expanded = searchExpanded, query = query,
+                active = active && route.depth == 0 && !overlayVisible && !toolsPresent && !layoutPresent, backdrop = backdrop,
                 onExpandedChange = { searchExpanded = it; if (!it) { browseCandidate = null; browseCandidateVideo = false } },
                 onPresenceChange = { searchPresent = it },
                 onForegroundState = { searchForeground = it }, onQuery = { query = it },
@@ -417,11 +465,11 @@ internal fun AnimeWorkspace(
                     }
                 }
             }
-            if (!playing && route.depth == 0 && !searchPresent) state.resumeEntry?.let { entry ->
+            if (resumeDockVisible) state.resumeEntry?.let { entry ->
                 AnimeResumeDock(entry, backdrop, onResume = { resume(entry) },
                     onDismiss = { controller.dismissResume(entry.subject.id) },
                     modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 12.dp)
-                        .motionInputGate(active && !downloadsVisible && !sourcesVisible && !sourceManagerVisible && !trackingVisible && !reviewsVisible))
+                        .motionInputGate(rootActive))
             }
         }
         if (!playing && (state.notice != null || state.canUndo)) AnimeNotice(state.notice, state.canUndo,
@@ -466,231 +514,62 @@ internal fun AnimeWorkspace(
 /** Desktop has a permanent navigation rail, so it must not receive an empty menu surface. */
 @Composable
 private fun AnimeWorkspaceHeader(root: Boolean, title: String, backdrop: HazeState,
-    navigationVisible: Boolean, onManga: () -> Unit, navigation: @Composable () -> Unit,
-    actions: @Composable () -> Unit) {
+    navigationVisible: Boolean, navigation: @Composable () -> Unit,
+    actions: (@Composable () -> Unit)?) {
     val headerModifier = Modifier.windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
         .padding(horizontal = 8.dp, vertical = 2.dp)
-    val mediaSwitch: @Composable () -> Unit = {
-        LiquidGlassSurface(backdrop, Modifier.width(132.dp), cornerRadius = 22.dp,
-            role = GlassSurfaceRole.NAVIGATION) {
-            MotionTabs(1, listOf("漫画", "番剧"), onSelect = { if (it == 0) onManga() },
-                modifier = Modifier.fillMaxWidth(), controlHeight = 44.dp)
-        }
+    val heading: @Composable () -> Unit = {
+        Text(title, style = if (root) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleSmall,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
     if (root && !navigationVisible) {
-        Row(headerModifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+        Row(headerModifier.fillMaxWidth().heightIn(min = 44.dp).semantics { paneTitle = title }, verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            mediaSwitch()
-            Spacer(Modifier.weight(1f))
-            LiquidGlassSurface(backdrop, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION) {
+            Box(Modifier.weight(1f).padding(start = 8.dp)) { heading() }
+            if (actions != null) LiquidGlassSurface(backdrop, cornerRadius = 22.dp, role = GlassSurfaceRole.NAVIGATION) {
                 actions()
             }
         }
     } else PageTitleHeader(title, backdrop, navigation, modifier = headerModifier,
-        leading = if (root) mediaSwitch else null, leadingWidth = if (root) 132.dp else 0.dp,
-        summary = if (root) null else ({
-            Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }), actions = actions)
+        summary = heading, actions = actions)
+}
+
+/** All anime columns are peers. Narrow windows scroll this one row instead of adding a second level. */
+@Composable
+private fun AnimeWorkspaceNavigation(selected: AnimeWorkspacePage, active: Boolean,
+    onSelect: (AnimeWorkspacePage) -> Unit) {
+    val pages = AnimeWorkspacePage.entries
+    val density = LocalDensity.current
+    val scroll = rememberScrollState()
+    val motion = LocalMotionEnabled.current
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 12.dp).motionInputGate(active)) {
+        val viewportWidth = maxWidth
+        val minimum = with(density) { (13.sp.toDp() * 2 + 24.dp).coerceAtLeast(48.dp) * pages.size }
+        val width = viewportWidth.coerceAtMost(480.dp).coerceAtLeast(minimum)
+        LaunchedEffect(selected, width, viewportWidth, density, scroll.maxValue) {
+            val slot = with(density) { width.toPx() / pages.size }
+            val viewport = with(density) { viewportWidth.toPx() }
+            val start = slot * selected.ordinal
+            val end = start + slot
+            val target = when {
+                start < scroll.value -> start.toInt()
+                end > scroll.value + viewport -> (end - viewport).toInt()
+                else -> scroll.value
+            }.coerceIn(0, with(density) { (width - viewportWidth).roundToPx() }.coerceAtLeast(0))
+            if (motion) scroll.animateScrollTo(target) else scroll.scrollTo(target)
+        }
+        Box(Modifier.horizontalScroll(scroll)) {
+            MotionTabs(selected.ordinal, pages.map { it.label }, onSelect = { onSelect(pages[it]) },
+                modifier = Modifier.width(width), controlHeight = 44.dp, treatment = MotionTabTreatment.Underline,
+                foreground = MaterialTheme.colorScheme.onSurface,
+                indicator = MaterialTheme.colorScheme.primary)
+        }
+    }
 }
 
 internal fun animeSubjectSummary(subject: AnimeSubject): String =
     listOfNotNull(subject.year?.toString(), subject.episodeCount?.takeIf { it > 0 }?.let { it.toString() + " 集" })
         .joinToString(" · ").ifBlank { subject.originalTitle.ifBlank { "Bangumi 条目" } }
-
-@Composable
-private fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, controller: AnimeController, backdrop: HazeState,
-    scroll: LazyListState,
-    onPlay: (AnimeEpisode) -> Unit, onOpen: (AnimeSubject) -> Unit,
-    onSources: (AnimeEpisode?) -> Unit, onTracking: () -> Unit,
-    modifier: Modifier = Modifier) {
-    val subject = detail.subject
-    val entry = state.library.firstOrNull { it.subject.id == subject.id }
-    var episodeTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
-    var descriptionExpanded by rememberSaveable(subject.id) { mutableStateOf(false) }
-    var episodeReversed by rememberSaveable(subject.id) { mutableStateOf(false) }
-    var episodeQuery by rememberSaveable(subject.id) { mutableStateOf("") }
-    var episodeSearch by rememberSaveable(subject.id) { mutableStateOf(false) }
-    var statusOpen by remember { mutableStateOf(false) }
-    val main = detail.episodes.filter { it.kind == AnimeEpisodeKind.MAIN }
-    val extra = detail.episodes.filter { it.kind != AnimeEpisodeKind.MAIN }
-    LaunchedEffect(main.isEmpty(), extra.isNotEmpty()) {
-        if (main.isEmpty() && extra.isNotEmpty()) episodeTab = 1
-    }
-    val episodes = (if (episodeTab == 0 || extra.isEmpty()) main else extra)
-        .let { if (episodeReversed) it.asReversed() else it }
-        .filter { episodeQuery.isBlank() || animeEpisodeNumber(it.number).contains(episodeQuery.trim()) ||
-            it.title.contains(episodeQuery.trim(), ignoreCase = true) }
-    val resume = entry?.resume?.takeUnless { it.completed }?.let { progress -> detail.episodes.firstOrNull { it.id == progress.episodeId } }
-    val first = resume ?: main.firstOrNull { it.id !in entry?.completedEpisodeIds.orEmpty() } ?: main.firstOrNull() ?: extra.firstOrNull()
-    val sourceNames = state.sourceBindings.map { binding ->
-        binding.catalog.sourceId to (state.sourceResults.firstOrNull { it.providerId == binding.catalog.sourceId }?.name ?:
-            animeSourceName(binding.catalog.sourceId, state))
-    }
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        val columns = if (maxWidth >= 760.dp) 2 else 1
-        LazyColumn(Modifier.fillMaxSize(), state = scroll, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item(key = "identity") {
-                Row(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.Top) {
-                    AnimePoster(subject, Modifier.width(96.dp).height(138.dp))
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                        Text(subject.title, style = MaterialTheme.typography.titleLarge)
-                        if (subject.originalTitle.isNotBlank() && subject.originalTitle != subject.title)
-                            Text(subject.originalTitle, style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        AnimeQuietLabel(animeSubjectSummary(subject))
-                        if (subject.rating != null || subject.rank != null) AnimeQuietLabel(listOfNotNull(
-                            subject.rating?.takeIf { it > 0 }?.let { it.toString() + " 分" },
-                            subject.rank?.takeIf { it > 0 }?.let { "排名 #" + it }).joinToString(" · "))
-                        if (state.detailFromCache) AnimeQuietLabel(if (state.detailLoading) "已保存的资料 · 正在更新" else "已保存的资料")
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            MotionTextButton(onClick = { controller.setFollowed(subject, entry?.followed != true) },
-                                modifier = Modifier.heightIn(min = 44.dp)) {
-                                Icon(if (entry?.followed == true) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
-                                    null, Modifier.size(17.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text(if (entry?.followed == true) "已追番" else "追番")
-                            }
-                            AnimeSourceStack(sourceNames, onClick = { onSources(null) })
-                        }
-                    }
-                }
-            }
-            item(key = "continue") {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    MotionButton(onClick = { first?.let(onPlay) }, enabled = first != null,
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.onSurface,
-                            contentColor = MaterialTheme.colorScheme.surface)) {
-                        Icon(Icons.Outlined.PlayArrow, null, Modifier.size(20.dp))
-                        Spacer(Modifier.width(7.dp))
-                        Text(if (resume != null) "继续 " + animeEpisodeLabel(resume) + " · " + animeTime(entry?.resume?.positionMs ?: 0L)
-                            else first?.let { "播放 " + animeEpisodeLabel(it) } ?: if (state.detailLoading) "正在载入集数"
-                            else if (state.detailError != null) "集数未取得" else "暂无集数",
-                            maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    }
-                    Box {
-                        MotionTextButton(onClick = { statusOpen = true }, modifier = Modifier.heightIn(min = 44.dp)) {
-                            Text(animeStatusLabel(entry?.status))
-                            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
-                        }
-                        CompactGlassPopover(statusOpen, backdrop = backdrop,
-                            onDismiss = { statusOpen = false }) {
-                            AnimeWatchStatus.entries.forEach { status ->
-                                CompactMenuAction(Icons.Outlined.Check, animeStatusLabel(status),
-                                    onClick = { statusOpen = false; controller.setWatchStatus(subject.id, status) })
-                            }
-                            CompactMenuAction(Icons.Outlined.Sync, "核对追番进度", onClick = { statusOpen = false; onTracking() })
-                        }
-                    }
-                }
-            }
-            if (subject.description.isNotBlank()) item(key = "description") {
-                Column {
-                    Text(subject.description, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = if (descriptionExpanded) Int.MAX_VALUE else 3,
-                        overflow = TextOverflow.Ellipsis)
-                    MotionTextButton(onClick = { descriptionExpanded = !descriptionExpanded },
-                        modifier = Modifier.heightIn(min = 44.dp)) { Text(if (descriptionExpanded) "收起简介" else "展开简介") }
-                }
-            }
-            if (state.detailLoading) item(key = "episode-loading") {
-                AnimeMessage("正在载入集数", "已保存的作品与续看记录会保留。")
-            }
-            if (state.detailError != null) item(key = "episode-error") {
-                AnimeMessage("集数未取得", state.detailError, action = "重试",
-                    onAction = { controller.open(subject) })
-            }
-            if (state.sourceError != null) item(key = "source-error") {
-                AnimeSelection("来源暂未就绪", state.sourceError, false, onClick = { onSources(null) })
-            }
-            item(key = "episodes-heading") {
-                AnimeSectionTitle("选集", action = {
-                    Row {
-                        MotionIconButton(onClick = { episodeSearch = !episodeSearch; if (!episodeSearch) episodeQuery = "" },
-                            modifier = Modifier.size(44.dp), tooltip = "查找集数") {
-                            Icon(Icons.Outlined.Search, "查找集数", Modifier.size(19.dp))
-                        }
-                        MotionIconButton(onClick = { episodeReversed = !episodeReversed }, modifier = Modifier.size(44.dp),
-                            tooltip = if (episodeReversed) "改为正序" else "改为倒序") {
-                            Icon(Icons.Outlined.SwapVert, if (episodeReversed) "倒序，点按切换" else "正序，点按切换", Modifier.size(19.dp))
-                        }
-                        MotionIconButton(onClick = { onSources(null) }, modifier = Modifier.size(44.dp), tooltip = "来源与集数映射") {
-                            Icon(Icons.Outlined.Tune, "来源与集数映射", Modifier.size(19.dp))
-                        }
-                    }
-                })
-                if (episodeSearch) AnimeTextField(episodeQuery, { episodeQuery = it }, "集号或标题",
-                    Modifier.padding(bottom = 6.dp))
-                if (extra.isNotEmpty()) MotionTabs(episodeTab, listOf("正片 " + main.size, "特别篇等 " + extra.size),
-                    onSelect = { episodeTab = it }, modifier = Modifier.widthIn(max = 280.dp).fillMaxWidth(),
-                    controlHeight = 44.dp, treatment = MotionTabTreatment.Underline)
-            }
-            if (episodes.isEmpty() && !state.detailLoading && state.detailError == null) item(key = "empty-episodes") {
-                AnimeMessage(if (episodeQuery.isNotBlank()) "没有匹配的集数" else "这组还没有集数",
-                    if (episodeQuery.isNotBlank()) "试试其他集号或标题。" else "作品资料尚未提供集数时，不按列表位置猜配播放资源。",
-                    action = if (episodeQuery.isNotBlank()) "清除查找" else "查看来源",
-                    onAction = { if (episodeQuery.isNotBlank()) episodeQuery = "" else onSources(null) })
-            }
-            items(episodes.chunked(columns), key = { row -> row.first().id }) { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    row.forEach { episode ->
-                        AnimeEpisodeCell(episode, completed = episode.id in entry?.completedEpisodeIds.orEmpty(),
-                            resume = episode.id == resume?.id,
-                            matched = state.episodeOptions[episode.id].orEmpty().count { it.confirmed },
-                            onPlay = { onPlay(episode) }, onSources = { onSources(episode) },
-                            onCompleted = { controller.setEpisodeCompleted(episode.id, episode.id !in entry?.completedEpisodeIds.orEmpty()) },
-                            modifier = Modifier.weight(1f))
-                    }
-                    if (row.size < columns) Spacer(Modifier.weight(1f))
-                }
-            }
-            if (state.relatedSubjects.isNotEmpty()) {
-                item(key = "related-heading") { AnimeSectionTitle("相关番剧") }
-                items(state.relatedSubjects, key = { "related:" + it.id }) { related ->
-                    AnimeSubjectRow(related, animeSubjectSummary(related), onOpen = { onOpen(related) })
-                }
-            }
-            item(key = "bottom") { Spacer(Modifier.height(20.dp)) }
-        }
-    }
-}
-
-@Composable
-private fun AnimeEpisodeCell(episode: AnimeEpisode, completed: Boolean, resume: Boolean, matched: Int,
-    onPlay: () -> Unit, onSources: () -> Unit, onCompleted: () -> Unit, modifier: Modifier = Modifier) {
-    val interaction = remember(episode.id) { MutableInteractionSource() }
-    val colors = MaterialTheme.colorScheme
-    Row(modifier.heightIn(min = 68.dp).clip(RoundedCornerShape(12.dp))
-        .background(if (resume) colors.onSurface.copy(alpha = .05f) else Color.Transparent),
-        verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.weight(1f).heightIn(min = 68.dp).motionPress(interaction, pressedScale = .99f)
-            .clickable(interactionSource = interaction, indication = null, onClick = onPlay)
-            .padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(animeEpisodeNumber(episode.number), Modifier.widthIn(min = 28.dp),
-                style = MaterialTheme.typography.titleSmall, color = colors.onSurfaceVariant)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(if (episode.kind == AnimeEpisodeKind.MAIN) episode.title.ifBlank { animeEpisodeLabel(episode) }
-                    else animeEpisodeLabel(episode) + " · " + episode.title, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodyMedium)
-                AnimeQuietLabel(listOfNotNull(if (resume) "续看" else null,
-                    if (matched == 0) "待匹配来源" else "已匹配 " + matched + " 个来源").joinToString(" · "))
-            }
-        }
-        MotionIconButton(onClick = onCompleted, modifier = Modifier.size(44.dp),
-            tooltip = if (completed) "取消已看" else "标记已看") {
-            Icon(if (completed) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                if (completed) "已看，点按取消" else "标记已看", Modifier.size(18.dp),
-                tint = colors.onSurfaceVariant.copy(alpha = if (completed) .85f else .4f))
-        }
-        MotionIconButton(onClick = onSources, modifier = Modifier.size(44.dp), tooltip = "本集来源") {
-            Icon(Icons.Outlined.MoreHoriz, "本集来源与映射", Modifier.size(19.dp), tint = colors.onSurfaceVariant)
-        }
-    }
-}
 
 @Composable
 private fun AnimeNotice(notice: String?, canUndo: Boolean, onUndo: () -> Unit, onDismiss: () -> Unit) {

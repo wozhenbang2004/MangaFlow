@@ -17,6 +17,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
@@ -31,7 +32,7 @@ import dev.mangaflow.ui.motion.*
 @Composable
 internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeState,
     scrolls: AnimeDiscoveryScrolls, columns: Int?, active: Boolean, onManageSources: () -> Unit,
-    onChooseTitle: (AnimeSourceTitle, Boolean) -> Unit) {
+    onChooseTitle: (AnimeSourceTitle, Boolean) -> Unit, contentBottomPadding: Dp = 24.dp) {
     val owner = controller.sourceBrowse
     val state by owner.state.collectAsStateWithLifecycle()
     val source = state.sources.firstOrNull { it.id == state.sourceId && it.revision == state.sourceRevision }
@@ -61,7 +62,6 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
                         CompactMenuAction(if (source?.id == item.id) Icons.Outlined.Check else Icons.Outlined.Public,
                             item.name, onClick = { owner.selectSource(item.id); sourceMenu = false })
                     }
-                    CompactMenuAction(Icons.Outlined.Extension, "管理来源", onClick = { sourceMenu = false; onManageSources() })
                 }
             }
             if (state.selectedTitle == null && state.categories.isNotEmpty()) Box(Modifier.widthIn(max = 120.dp)) {
@@ -86,8 +86,10 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
                         tint = if (state.filters.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            MotionIconButton(onClick = onManageSources, modifier = Modifier.size(44.dp), tooltip = "管理来源") {
-                Icon(Icons.Outlined.Extension, "管理来源", Modifier.size(20.dp))
+            if (source != null && state.selectedTitle == null) MotionIconButton(onClick = owner::refresh,
+                enabled = !state.loading && !state.homeLoading && !state.categoriesLoading,
+                modifier = Modifier.size(44.dp), tooltip = "刷新当前来源") {
+                Icon(Icons.Outlined.Refresh, "刷新当前来源", Modifier.size(20.dp))
             }
         }
         if (source == null) AnimeMessage("还没有可浏览的来源", action = "管理来源", onAction = onManageSources)
@@ -96,8 +98,8 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
             order = { (_, snapshot) -> if (snapshot.selectedTitle == null) 0 else 1 }, modifier = Modifier.weight(1f)) { (shownSource, snapshot) ->
             val title = snapshot.selectedTitle
             if (title != null) AnimeSourcePreview(title, shownSource.name, shownSource.videoSource, snapshot,
-                columns, scrolls, onChooseTitle, onOpen = owner::openTitle, onRetry = owner::retryRelated)
-            else AnimeSourceCatalogue(snapshot, columns, scrolls, onOpen = owner::openTitle,
+                columns, scrolls, contentBottomPadding, onChooseTitle, onOpen = owner::openTitle, onRetry = owner::retryRelated)
+            else AnimeSourceCatalogue(snapshot, columns, scrolls, contentBottomPadding, onOpen = owner::openTitle,
                 onRetry = owner::retryPage, onMore = owner::loadMore)
         }
     }
@@ -107,7 +109,7 @@ internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeSt
 
 @Composable
 private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?, scrolls: AnimeDiscoveryScrolls,
-    onOpen: (AnimeSourceTitle) -> Unit, onRetry: () -> Unit, onMore: () -> Unit) {
+    contentBottomPadding: Dp, onOpen: (AnimeSourceTitle) -> Unit, onRetry: () -> Unit, onMore: () -> Unit) {
     val source = state.sources.firstOrNull { it.id == state.sourceId && it.revision == state.sourceRevision }
     val latest = source?.capabilities?.contains("latest") == true
     val filterKey = state.filters.entries.sortedBy { it.key }.joinToString("&") { it.key + "=" + it.value }
@@ -115,15 +117,14 @@ private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?,
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, preferred)
         LazyVerticalGrid(GridCells.Fixed(columns), state = scroll, modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 108.dp),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (state.categoryError != null) item(key = "category-error", span = { GridItemSpan(maxLineSpan) }) {
                 AnimeDiscoveryInlineStatus(state.categoryError, onRetry)
             }
             if (latest || state.categoryKey != null) {
-                item(key = "caption", span = { GridItemSpan(maxLineSpan) }) {
-                    AnimeQuietLabel(if (latest) "最近更新 · 来源标注" else state.categories.firstOrNull { it.key == state.categoryKey }?.title.orEmpty(),
-                        Modifier.padding(vertical = 6.dp))
+                if (latest) item(key = "caption", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeQuietLabel("最近更新 · 来源标注", Modifier.padding(vertical = 6.dp))
                 }
                 if (state.error != null) item(key = "error", span = { GridItemSpan(maxLineSpan) }) {
                     AnimeDiscoveryInlineStatus(state.error, onRetry)
@@ -169,12 +170,13 @@ private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?,
 @Composable
 private fun AnimeSourcePreview(title: AnimeSourceTitle, sourceName: String, videoSource: Boolean,
     state: AnimeSourceBrowseState, preferred: Int?, scrolls: AnimeDiscoveryScrolls,
-    onChooseTitle: (AnimeSourceTitle, Boolean) -> Unit, onOpen: (AnimeSourceTitle) -> Unit, onRetry: () -> Unit) {
+    contentBottomPadding: Dp, onChooseTitle: (AnimeSourceTitle, Boolean) -> Unit,
+    onOpen: (AnimeSourceTitle) -> Unit, onRetry: () -> Unit) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val columns = animeDiscoveryColumns(maxWidth, preferred)
         LazyVerticalGrid(GridCells.Fixed(columns),
             state = scrolls.grid("preview:${title.sourceId}:${title.sourceRevision}:${title.id}"), modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 108.dp),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = contentBottomPadding),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item(key = "subject", span = { GridItemSpan(maxLineSpan) }) {
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -189,10 +191,13 @@ private fun AnimeSourcePreview(title: AnimeSourceTitle, sourceName: String, vide
                 }
             }
             item(key = "open", span = { GridItemSpan(maxLineSpan) }) {
-                MotionButton(onClick = { onChooseTitle(title, videoSource) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                    Icon(Icons.Outlined.Search, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (videoSource) "选择对应番剧与播放来源" else "选择对应番剧")
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    MotionButton(onClick = { onChooseTitle(title, videoSource) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                        Icon(Icons.Outlined.Search, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("选择对应番剧")
+                    }
+                    AnimeQuietLabel(if (videoSource) "核对作品与季度后，再确认来源关联。" else "核对作品与季度后，打开番剧详情。")
                 }
             }
             if (state.related.isNotEmpty() || state.relatedLoading || state.relatedError != null) {

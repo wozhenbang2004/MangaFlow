@@ -27,30 +27,63 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
 
-/** The same list owns collection, history and folder views; navigation keeps its scroll. */
+@Stable
+internal class AnimeLibraryViewState internal constructor(
+    filterState: MutableIntState,
+    folderState: MutableState<String?>,
+    orderState: MutableIntState,
+) {
+    var filter by filterState
+    var folder by folderState
+    var order by orderState
+}
+
+/** Keep view choices above the retained route so details and sibling columns cannot reset them. */
+@Composable
+internal fun rememberAnimeLibraryViewState(): AnimeLibraryViewState {
+    val filter = rememberSaveable { mutableIntStateOf(0) }
+    val folder = rememberSaveable { mutableStateOf<String?>(null) }
+    val order = rememberSaveable { mutableIntStateOf(0) }
+    return remember(filter, folder, order) { AnimeLibraryViewState(filter, folder, order) }
+}
+
+/** Followed works, viewing history and folders share one collection and local filter row. */
 @Composable
 internal fun AnimeLibrary(
     state: AnimeScreenState,
     scroll: LazyListState,
     controller: AnimeController,
     backdrop: HazeState,
+    viewState: AnimeLibraryViewState,
     onOpen: (AnimeSubject) -> Unit,
     onResume: (AnimeLibraryEntry) -> Unit,
     onDiscover: () -> Unit,
     onReview: () -> Unit,
-    onDownloads: () -> Unit,
+    active: Boolean = true,
+    contentBottomPadding: Dp = 24.dp,
 ) {
-    var filter by rememberSaveable { mutableIntStateOf(0) }
-    var folder by rememberSaveable { mutableStateOf<String?>(null) }
-    var order by rememberSaveable { mutableIntStateOf(0) }
     var filterOpen by remember { mutableStateOf(false) }
+    var optionsOpen by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf<String?>(null) }
+    val filterLabels = listOf("全部作品", "已追番", "观看历史")
+    val orderLabels = listOf("最近观看", "作品名称", "年份")
+    val filter = viewState.filter.coerceIn(filterLabels.indices)
+    val folder = viewState.folder
+    val order = viewState.order.coerceIn(orderLabels.indices)
+    LaunchedEffect(active) {
+        if (!active) {
+            filterOpen = false
+            optionsOpen = false
+            selectedId = null
+        }
+    }
     val folders = state.library.map { it.folder }.filter { it.isNotBlank() }.distinct().sorted()
     val entries = state.library.filter { entry ->
         (when (filter) { 1 -> entry.followed; 2 -> entry.resume != null; else -> entry.followed || entry.resume != null }) &&
@@ -65,52 +98,66 @@ internal fun AnimeLibrary(
         }
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            MotionTabs(filter, listOf("全部", "收藏", "历史"), onSelect = { filter = it },
-                modifier = Modifier.width(192.dp), controlHeight = 44.dp, compact = true,
-                treatment = MotionTabTreatment.Soft)
-            Spacer(Modifier.weight(1f))
-            MotionIconButton(onClick = onDownloads, modifier = Modifier.size(44.dp), tooltip = "离线下载") {
-                Icon(Icons.Outlined.DownloadForOffline, "离线下载", Modifier.size(20.dp))
-            }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Box {
-                MotionIconButton(onClick = { filterOpen = true }, modifier = Modifier.size(44.dp), tooltip = "文件夹与排序") {
+                MotionTextButton(onClick = { optionsOpen = false; filterOpen = true }, enabled = active,
+                    modifier = Modifier.heightIn(min = 44.dp)) {
+                    Text(filterLabels[filter], maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.width(4.dp))
+                    Icon(Icons.Outlined.ExpandMore, "筛选追番与历史", Modifier.size(17.dp))
+                }
+                CompactGlassPopover(filterOpen && active, backdrop, onDismiss = { filterOpen = false }, alignToStart = true) {
+                    filterLabels.forEachIndexed { index, label ->
+                        CompactMenuAction(if (filter == index) Icons.Outlined.Check else when (index) {
+                            1 -> Icons.Outlined.BookmarkBorder
+                            2 -> Icons.Outlined.History
+                            else -> Icons.Outlined.VideoLibrary
+                        }, label, onClick = { viewState.filter = index; filterOpen = false })
+                    }
+                }
+            }
+            Text(listOfNotNull(folder?.ifBlank { "未分组" }, orderLabels[order]).joinToString(" · "),
+                Modifier.weight(1f).padding(start = 4.dp, end = 6.dp), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Box {
+                MotionIconButton(onClick = { filterOpen = false; optionsOpen = true }, enabled = active,
+                    modifier = Modifier.size(44.dp), tooltip = "文件夹与排序") {
                     Icon(if (folder == null) Icons.Outlined.FilterList else Icons.Outlined.Folder,
                         "文件夹与排序", Modifier.size(20.dp))
                 }
-                CompactGlassPopover(filterOpen, backdrop, onDismiss = { filterOpen = false }) {
+                CompactGlassPopover(optionsOpen && active, backdrop, onDismiss = { optionsOpen = false }) {
                     AnimeQuietLabel("文件夹", Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
                     CompactMenuAction(if (folder == null) Icons.Outlined.Check else Icons.Outlined.Folder, "全部文件夹",
-                        onClick = { folder = null; filterOpen = false })
+                        onClick = { viewState.folder = null; optionsOpen = false })
                     CompactMenuAction(if (folder == "") Icons.Outlined.Check else Icons.Outlined.FolderOpen, "未分组",
-                        onClick = { folder = ""; filterOpen = false })
+                        onClick = { viewState.folder = ""; optionsOpen = false })
                     folders.forEach { name ->
                         CompactMenuAction(if (folder == name) Icons.Outlined.Check else Icons.Outlined.Folder, name,
-                            onClick = { folder = name; filterOpen = false })
+                            onClick = { viewState.folder = name; optionsOpen = false })
                     }
                     AnimeQuietLabel("排序", Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
-                    listOf("最近观看", "作品名称", "年份").forEachIndexed { index, label ->
+                    orderLabels.forEachIndexed { index, label ->
                         CompactMenuAction(if (order == index) Icons.Outlined.Check else Icons.Outlined.Sort, label,
-                            onClick = { order = index; filterOpen = false })
+                            onClick = { viewState.order = index; optionsOpen = false })
                     }
                 }
             }
         }
-        if (folder != null) Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            AnimeQuietLabel(folder?.ifBlank { "未分组" }.orEmpty(), Modifier.weight(1f))
-            MotionIconButton(onClick = { folder = null }, modifier = Modifier.size(44.dp), tooltip = "清除文件夹筛选") {
-                Icon(Icons.Outlined.Close, "清除文件夹筛选", Modifier.size(16.dp))
-            }
-        }
-        if (entries.isEmpty()) AnimeMessage(if (state.library.isEmpty()) "你的追番从这里开始" else "这里还没有番剧",
-            action = if (folder == null) "去发现" else "查看全部", onAction = {
-                if (folder == null) onDiscover() else folder = null
-            })
-        else LazyColumn(Modifier.fillMaxSize(), state = scroll,
-            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 104.dp)) {
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = scroll,
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 6.dp, bottom = contentBottomPadding)) {
             if (state.reviews.isNotEmpty()) item(key = "reviews") {
-                AnimeSelection("待核对 " + state.reviews.size + " 部", "状态与已看集数逐项选择", false, onReview)
+                AnimeSelection("待核对 " + state.reviews.size + " 项", "状态与已看集数逐项选择", false, onReview)
+            }
+            if (entries.isEmpty()) item(key = "empty-library") {
+                val filtered = filter != 0 || folder != null
+                AnimeMessage(if (state.library.isEmpty()) "你的追番从这里开始"
+                    else if (filtered) "当前筛选下没有番剧" else "这里还没有番剧",
+                    action = if (state.library.isNotEmpty() && filtered) "查看全部" else "去发现", onAction = {
+                        if (state.library.isNotEmpty() && filtered) {
+                            viewState.filter = 0
+                            viewState.folder = null
+                        } else onDiscover()
+                    })
             }
             items(entries, key = { it.subject.id }) { entry ->
                 val subtitle = listOfNotNull(
@@ -128,7 +175,7 @@ internal fun AnimeLibrary(
             }
         }
     }
-    AnimeLibraryEntryPanel(selectedId?.let { id -> state.library.firstOrNull { it.subject.id == id } },
+    AnimeLibraryEntryPanel(selectedId?.takeIf { active }?.let { id -> state.library.firstOrNull { it.subject.id == id } },
         controller, backdrop, folders, onDismiss = { selectedId = null })
 }
 
@@ -202,7 +249,7 @@ private fun AnimeLibraryEntryPanel(entry: AnimeLibraryEntry?, controller: AnimeC
                                 controller.setPinned(shown.subject.id, !shown.pinned); onDismiss()
                             })
                             CompactMenuAction(Icons.Outlined.Folder, shown.folder.ifBlank { "移动到文件夹" }, onClick = { section = 1 })
-                            CompactMenuAction(Icons.Outlined.BookmarkBorder, if (shown.followed) "取消收藏" else "加入收藏", onClick = {
+                            CompactMenuAction(Icons.Outlined.BookmarkBorder, if (shown.followed) "取消追番" else "加入追番", onClick = {
                                 controller.setFollowed(shown.subject, !shown.followed); onDismiss()
                             })
                             CompactMenuAction(Icons.Outlined.History, "清除观看位置", enabled = shown.resume != null,
@@ -218,8 +265,8 @@ private fun AnimeLibraryEntryPanel(entry: AnimeLibraryEntry?, controller: AnimeC
                                 modifier = Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 48.dp)) { Text("保存文件夹") }
                         }
                         else -> {
-                            Text(if (section == 2) "清除这部番的逐集观看位置。收藏和已看标记保留。"
-                                else "移除这部番的本地收藏、观看记录与来源关联。此操作不会删除追番平台的数据。",
+                            Text(if (section == 2) "清除这部番的逐集观看位置。追番和已看标记保留。"
+                                else "移除这部番的本地追番、观看记录与来源关联。此操作不会删除追番平台的数据。",
                                 Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.bodyMedium)
                             MotionButton(onClick = {
                                 if (section == 2) controller.clearWatchHistory(shown.subject.id)

@@ -1,6 +1,14 @@
 # Lanerc feature transfer into MangaFlow
 
-Source implementation checkpoint: 2026-11-16. This document distinguishes implemented application paths from the complete requested inventory. It does not certify installed behavior, source availability, rendering performance or successful packaging.
+Source implementation checkpoint: 2026-11-17. This document distinguishes implemented application paths from the complete requested inventory. It does not certify installed behavior, source availability, rendering performance or successful packaging.
+
+## Independent anime entry and UI correction · 2026-11-17
+
+The user explicitly rejected the previous layered navigation and requested a direct anime sidebar entry without altering the manga experience. DESIGN ANIME-UX-01–08 records the exact correction, adopted layout and source evidence. Existing sibling root routes are retained, with adjacent 漫画/动漫 labels, no media switch inside either page and no extra manga-toolbar width reserved for anime.
+
+Anime now has one visible navigation row: 首页、追番、榜单、新番、番表、片源. The five discovery feeds below remain independent owners; 追番 adds its saved collection/history/folder view at the same application level. Root search, feed layout and one retained More menu replace the scattered global tools. The menu contains accounts, offline downloads and source management; source browsing owns its local refresh. A failed section still retries locally. Pending review remains reachable even when the current library filter is empty.
+
+The detail renderer prioritizes play/resume, work source context and episodes, with description and related works below. Episode management remains exact and available through its local More menu. Saved detail/library choices, source-preview return context, app-owned player, canonical/source/revision authority, offline leases and Anime4K are unchanged in ownership. Actual scene/menu exits gate underlying input and hand off before opening the next panel. Source/diff/contract reviews are complete; current installed visual, motion, system-return and large-font acceptance remains unverified under the existing no-tests/no-local-build boundary.
 
 ## Reference and decisions
 

@@ -1,5 +1,15 @@
 # MangaFlow · current work
 
+## Independent anime navigation and focused UI · source checkpoint 2026-11-17
+
+Current user rejects the anime UI as cluttered and explicitly wants Manga/Anime switched directly in the sidebar, with manga unaffected. Exact wording, supersession and eight design requirements are DESIGN ANIME-UX-01–08. Route DELIVERY after bounded source/IA review; stage SOURCE_COMPLETE. Baseline main b97f1895d7d70410e17aac742353335f75b22b52 already includes separate root routes, the content-rich discovery batch and subsequent compilation/status fixes; do not recreate these owners or repeat completed research.
+
+The current slice removes residual page-level media switches, consolidates anime navigation to one row, scopes global and work-level actions, cleans discovery/library/source hierarchy and puts play/episodes before the long description. Retain canonical matching, all current content feeds, phone3-column default, source revisions, transactional playback, Anime4K and manga state. Root owns AnimeWorkspace/detail/docs/integration; separate navigation/discovery/library file owners are explicitly disjoint. Current-source review only: no tests/local builds/compiles/probes/UI automation or unobserved visual acceptance.
+
+All owners have frozen their bounded files; root and independent reviewers completed the integrated source/interface/identity review. The final source also fixes exit-time input leakage and stale pending menu actions, saves library/detail view choices above scene disposal, and keeps selected navigation visible after real overflow measurement. DESIGN records the source checkpoint and unchanged visual-evidence boundary; docs/anime/lanerc-port.md records the new six-column application entry above its five discovery feeds. No confirmed in-scope source blocker remains.
+
+Next exact action: publish the complete reviewed batch once against latest main with expected-head protection and confirm ordinary Android/native CI activation without waiting for builds/artifacts. Raw feedback is recorded through the latest anime UI/navigation correction on2026-11-17 Asia/Shanghai. Existing source checkpoints below are history; their already-published next actions must not be repeated. Installed behavior/appearance remains pending real artifact feedback. Do not create a separate branch/build, repeat research or send a status-only follow-up push.
+
 ## Experience semantic status refinement · source checkpoint 2026-11-16
 
 Current feedback broadly likes the reader experience organization but explicitly asks for semantic status color, including a small green good/ready dot, and continued detail refinement. Both identical current messages are recorded once in DESIGN STATUSCOLOR-01–06. Route DELIVERY; stage SOURCE_COMPLETE, preserving the published READBAR-01–07 layout and existing experience policy/cache/draft owners. Baseline main2f323f76af34df5bf7bc9e3c1da3556ba435aea4; the isolated MangaFlow_statecolor directory and statecolor_before snapshots match exact remote target blobs. Do not repeat older layout/cache implementation or overwrite concurrent anime discovery/Apple fixes.

@@ -180,8 +180,8 @@ import kotlinx.coroutines.IO
 import kotlinx.coroutines.withContext
 
 private enum class Section(val title: String, val icon: ImageVector) {
-    DISCOVER("发现", Icons.Outlined.Explore), BOARDS("各站榜单", Icons.Outlined.Leaderboard),
-    ANIME("番剧", Icons.Outlined.Tv), LIBRARY("书架", Icons.Outlined.Bookmarks),
+    DISCOVER("漫画", Icons.Outlined.Explore), ANIME("动漫", Icons.Outlined.Tv),
+    BOARDS("各站榜单", Icons.Outlined.Leaderboard), LIBRARY("书架", Icons.Outlined.Bookmarks),
     DOWNLOADS("下载", Icons.Outlined.FileDownload), ACCOUNT("账号", Icons.Outlined.AccountCircle),
     SETTINGS("设置", Icons.Outlined.Settings),
 }
@@ -1178,8 +1178,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             translationY = ((1f - rootOpacity.value) / (1f - MangaMotion.RootEntryAlpha))
                                 .coerceIn(0f, 1f) * 6.dp.toPx()
                         }.motionInputGate(!rootHandoff)) {
-                            val discoveryActionsWidth = (if (ordinaryHistory.isEmpty()) 44.dp else 88.dp) +
-                                (if (restrictedMode) 0.dp else 44.dp) + 16.dp
+                            val discoveryActionsWidth = (if (ordinaryHistory.isEmpty()) 44.dp else 88.dp) + 16.dp
                             val discoveryStacked = maxWidth - 16.dp < 44.dp + 12.dp + discoveryTabsWidth + discoveryActionsWidth
                             val discoveryTabHeight = with(chromeDensity) {
                                 maxOf(44.dp, 14.sp.toDp() * (if (fontScale > 1.3f) 2.6f else 1.3f) + 16.dp)
@@ -1295,7 +1294,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                     }
                                     Section.ANIME -> AnimeWorkspace(
                                         controller = model.services.anime,
-                                        onManga = { changeSection(Section.DISCOVER) },
                                         backdrop = searchBackdrop, navigation = navigation, active = rootActive,
                                         navigationVisible = !desktopNavigationVisible,
                                         searchRequest = animeSearchRequest, backRequest = animeBackRequest,
@@ -1477,10 +1475,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         )
                                     },
                                     recent = {
-                                        if (!restrictedMode) MotionIconButton(
-                                            modifier = Modifier.size(44.dp), tooltip = "切换到番剧",
-                                            onClick = { closeSearch(); changeSection(Section.ANIME) },
-                                        ) { Icon(Icons.Outlined.Tv, "番剧", Modifier.size(21.dp)) }
                                         if (ordinaryHistory.isNotEmpty()) MotionIconButton(
                                             modifier = Modifier.size(36.dp), tooltip = "最近阅读",
                                             onClick = { feedback.perform(FeelEvent.Selection); recentReadingOpen = true },
@@ -1517,10 +1511,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         Row(Modifier.padding(horizontal = 8.dp).height(44.dp)
                                             .motionInputGate(rootActive && chromeReady),
                                             verticalAlignment = Alignment.CenterVertically) {
-                                            if (!restrictedMode) MotionIconButton(
-                                                modifier = Modifier.size(44.dp), tooltip = "切换到番剧",
-                                                onClick = { closeSearch(); changeSection(Section.ANIME) },
-                                            ) { Icon(Icons.Outlined.Tv, "番剧", Modifier.size(21.dp)) }
                                             if (ordinaryHistory.isNotEmpty()) MotionIconButton(modifier = Modifier.size(44.dp), onClick = {
                                                 feedback.perform(FeelEvent.Selection)
                                                 closeSearch()
