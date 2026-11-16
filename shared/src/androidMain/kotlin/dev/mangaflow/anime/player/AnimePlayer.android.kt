@@ -180,13 +180,9 @@ internal class AndroidAnimePlayer(
                 return@forEach
             }
             val extractors = ExtractorsFactory { arrayOf(SubtitleExtractor(subtitleParser.create(format), null)) }
+            // Media3's enableLazyLoadingWithSingleTrack is package-private; subtitle
+            // extraction is supported through its public progressive factory.
             sources += ProgressiveMediaSource.Factory(upstream(), extractors)
-                .enableLazyLoadingWithSingleTrack(
-                    SubtitleExtractor.TRACK_ID,
-                    format.buildUpon().setSampleMimeType(MimeTypes.APPLICATION_MEDIA3_CUES)
-                        .setCodecs(format.sampleMimeType)
-                        .setCueReplacementBehavior(subtitleParser.getCueReplacementBehavior(format)).build(),
-                )
                 .setLoadOnlySelectedTracks(true)
                 .createMediaSource(MediaItem.fromUri(subtitle.url))
         }
