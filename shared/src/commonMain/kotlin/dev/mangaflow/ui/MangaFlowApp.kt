@@ -186,7 +186,7 @@ private enum class Section(val title: String, val icon: ImageVector) {
     SETTINGS("设置", Icons.Outlined.Settings),
 }
 private fun Section.navigationTitle(restricted: Boolean): String =
-    if (this == Section.ACCOUNT && !restricted) "拷贝书架" else title
+    if (this == Section.ACCOUNT && !restricted) "拷贝账号" else title
 /** A new reference owns the motion; cancellation cannot replay a stale destination. */
 private class DrawerAction(val target: DrawerValue, val destination: Section? = null,
     val restricted: Boolean? = null) {
@@ -564,8 +564,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         else -> windowSize.width >= 1060.dp * windowSize.fontScale.coerceAtLeast(1f)
     }
     val profileSections = remember(restrictedMode) {
-        Section.entries.filter { !restrictedMode || it != Section.BOARDS && it != Section.ANIME }
+        Section.entries.filter { destination ->
+            if (restrictedMode) destination != Section.BOARDS && destination != Section.ANIME
+            else destination != Section.ACCOUNT
+        }
     }
+    val highlightedSection = if (!restrictedMode && section == Section.ACCOUNT) Section.LIBRARY else section
     val desktopDestinations = remember(profileSections, restrictedMode) {
         profileSections.map { DesktopDestination(it.navigationTitle(restrictedMode), it.icon) }
     }
@@ -742,7 +746,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
     ) {
     DesktopNavigationWorkspace(
         visible = desktopNavigationVisible, expanded = desktopNavigationWide,
-        destinations = desktopDestinations, selectedIndex = profileSections.indexOf(section).coerceAtLeast(0),
+        destinations = desktopDestinations, selectedIndex = profileSections.indexOf(highlightedSection).coerceAtLeast(0),
         version = "MangaFlow " + platformVersion(LocalContext.current), backdrop = drawerBackdrop,
         onToggle = { desktopNavigationMode = if (desktopNavigationWide) 2 else 1 },
         onNavigate = { index ->
@@ -834,12 +838,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                     Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(drawerScroll)) {
                     CompositionLocalProvider(LocalRippleConfiguration provides null) {
                     MotionNavigationColumn(
-                        selected = profileSections.indexOf(drawerAction?.destination ?: section).coerceAtLeast(0),
+                        selected = profileSections.indexOf(drawerAction?.destination ?: highlightedSection).coerceAtLeast(0),
                         itemCount = profileSections.size,
                     ) { index, itemModifier ->
                         val destination = profileSections[index]
                         val interactions = remember(destination) { MutableInteractionSource() }
-                        val selected = (drawerAction?.destination ?: section) == destination
+                        val selected = (drawerAction?.destination ?: highlightedSection) == destination
                         NavigationDrawerItem(
                             label = {
                                 Row(Modifier.fillMaxWidth().heightIn(min = 56.dp)
@@ -1210,11 +1214,6 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                             val toolbar: @Composable (@Composable () -> Unit) -> Unit = { actions ->
                             Row(Modifier.padding(horizontal = 4.dp).height(44.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
-                                if (current.section == Section.LIBRARY) {
-                                    MotionIconButton(modifier = Modifier.size(44.dp), onClick = { changeSection(Section.ACCOUNT) }) {
-                                        Icon(Icons.Outlined.CloudQueue, "云端书架", Modifier.size(21.dp))
-                                    }
-                                }
                                 actions()
                             }
                             }
@@ -1347,6 +1346,8 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onImportCopy = if (restrictedMode) null else {
                                             { openCopyComparison() }
                                         },
+                                        onOpenAccount = if (restrictedMode) null else { { changeSection(Section.ACCOUNT) } },
+                                        copyShelfAvailable = !restrictedMode,
                                         favorites = ordinaryFavorites, history = ordinaryHistory,
                                         libraryStore = model.library, onOpenPageCollection = model::openPageCollection,
                                         repository = model.repository, opening = libraryOpening, active = rootActive,

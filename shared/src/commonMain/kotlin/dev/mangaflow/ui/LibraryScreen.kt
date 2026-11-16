@@ -66,10 +66,9 @@ import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Sync
-import androidx.compose.material.icons.outlined.Sort
-import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.AccountCircle
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.BookmarkAdd
-import androidx.compose.material.icons.outlined.ViewModule
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material3.Icon
@@ -141,11 +140,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private enum class LibraryToolDestination { COLLECTIONS, STATS, COPY_SYNC }
-private enum class UnifiedShelfScope(val title: String) { ALL("全部"), LOCAL("本机"), COPY("拷贝") }
-private enum class UnifiedShelfSort(val title: String) {
-    RECENT("最近阅读"), COPY_JOINED("加入拷贝"), LOCAL_ADDED("加入本机"), HEAT("热度"), TITLE("名称")
-}
+private enum class LibraryToolDestination { HISTORY, COLLECTIONS, STATS, COPY_SYNC, ACCOUNT }
+private enum class UnifiedShelfScope(val title: String) { LOCAL("本机"), COPY("拷贝") }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -174,6 +170,8 @@ fun LibraryScreen(
     onAddCloudFavorite: ((Manga) -> Unit)? = null,
     onMoreCloudFavorites: (() -> Unit)? = null,
     onRefreshCloudFavorites: (() -> Unit)? = null,
+    onOpenAccount: (() -> Unit)? = null,
+    copyShelfAvailable: Boolean = true,
 ) {
     fun sourceIncluded(sourceId: String): Boolean =
         (includedSourceIds == null || sourceId in includedSourceIds) && sourceId !in excludedSourceIds
@@ -193,18 +191,16 @@ fun LibraryScreen(
     var headerHeightPx by remember(density, topInset) { mutableIntStateOf(with(density) { (48.dp + topInset).roundToPx() }) }
     val headerPadding = with(density) { headerHeightPx.toDp() } + HeaderContentGap
     var showHistory by rememberSaveable { mutableStateOf(false) }
-    var scopeName by rememberSaveable { mutableStateOf(UnifiedShelfScope.ALL.name) }
-    var sortName by rememberSaveable { mutableStateOf(UnifiedShelfSort.RECENT.name) }
-    var sortMenu by remember { mutableStateOf(false) }
-    val shelfScope = UnifiedShelfScope.entries.firstOrNull { it.name == scopeName } ?: UnifiedShelfScope.ALL
-    val shelfSort = UnifiedShelfSort.entries.firstOrNull { it.name == sortName } ?: UnifiedShelfSort.RECENT
+    var scopeName by rememberSaveable { mutableStateOf(UnifiedShelfScope.LOCAL.name) }
+    val shelfScope = if (!copyShelfAvailable) UnifiedShelfScope.LOCAL else
+        UnifiedShelfScope.entries.firstOrNull { it.name == scopeName } ?: UnifiedShelfScope.LOCAL
     var showCollections by rememberSaveable { mutableStateOf(false) }
     var showStats by rememberSaveable { mutableStateOf(false) }
-    var shelfMenuExpanded by remember { mutableStateOf(false) }
     var libraryActionsOpen by remember { mutableStateOf(false) }
     var pendingLibraryTool by remember { mutableStateOf<LibraryToolDestination?>(null) }
-    val shelfTabs = remember { listOf(GlassTabChoice("收藏", Icons.Outlined.Bookmarks), GlassTabChoice("最近阅读", Icons.Outlined.History)) }
-    val preferredShelfWidth = morphGlassTabWidth(shelfTabs)
+    val shelfLabels = remember(copyShelfAvailable) {
+        if (copyShelfAvailable) listOf("本机", "拷贝") else listOf("本机")
+    }
     val storedCollections by libraryStore.pageCollections.collectAsStateWithLifecycle()
     val collections = remember(storedCollections, includedSourceIds, excludedSourceIds) {
         storedCollections.filter { sourceIncluded(it.manga.sourceId) }
@@ -229,10 +225,13 @@ fun LibraryScreen(
         if (motion) spring(MangaMotion.PressDamping, MangaMotion.PressStiffness) else androidx.compose.animation.core.snap(),
         label = "trash-target-press")
     LaunchedEffect(trashArmed) { if (trashArmed) haptics.perform(FeelEvent.Threshold) }
-    val favoritesPosition = rememberLazyGridState()
+    val localBooksPosition = rememberLazyGridState()
+    val copyBooksPosition = rememberLazyGridState()
+    val favoritesPosition = if (shelfScope == UnifiedShelfScope.LOCAL) localBooksPosition else copyBooksPosition
     val historyPosition = rememberLazyListState()
-    LaunchedEffect(active, showHistory) {
-        if (!active || showHistory) favoritesPosition.stopScroll()
+    LaunchedEffect(active, showHistory, shelfScope) {
+        if (!active || showHistory || shelfScope != UnifiedShelfScope.LOCAL) localBooksPosition.stopScroll()
+        if (!active || showHistory || shelfScope != UnifiedShelfScope.COPY) copyBooksPosition.stopScroll()
         if (!active || !showHistory) historyPosition.stopScroll()
     }
     val progressById = remember(scopedHistory) { scopedHistory.associateBy { it.manga.id } }
@@ -255,32 +254,26 @@ fun LibraryScreen(
                 sourceIncluded(it.sourceId) }).distinctBy { it.sourceId to it.id }
     }
     val visibleFavorites = remember(unifiedBooks, localKeys, cloudKeys,
-        shelfScope, shelfSort, scopedHistory, cloudMetadata, libraryStore) {
+        shelfScope, scopedHistory, cloudMetadata, libraryStore) {
         val filtered = unifiedBooks.filter { book ->
+            val key = book.sourceId to book.id
             when (shelfScope) {
-                UnifiedShelfScope.ALL -> true
-                UnifiedShelfScope.LOCAL -> (book.sourceId to book.id) in localKeys
-                UnifiedShelfScope.COPY -> (book.sourceId to book.id) in cloudKeys
+                UnifiedShelfScope.LOCAL -> key in localKeys
+                UnifiedShelfScope.COPY -> key in cloudKeys
             }
         }
         val stable = unifiedBooks.withIndex().associate { (index, manga) -> (manga.sourceId to manga.id) to index }
         fun stableIndex(manga: Manga) = stable[manga.sourceId to manga.id] ?: Int.MAX_VALUE
-        when (shelfSort) {
-            UnifiedShelfSort.RECENT -> filtered.sortedWith(compareByDescending<Manga> {
-                maxOf(progressById[it.id]?.updatedAt ?: 0L, cloudMetadata[it.id]?.readAt ?: 0L)
-            }.thenBy { cloudMetadata[it.id]?.readOrder ?: Int.MAX_VALUE }.thenBy(::stableIndex))
-            UnifiedShelfSort.COPY_JOINED -> filtered.sortedWith(compareBy<Manga> {
-                cloudMetadata[it.id]?.joinedOrder == null && cloudMetadata[it.id]?.joinedAt == null
-            }.thenBy { cloudMetadata[it.id]?.joinedOrder ?: Int.MAX_VALUE }
-                .thenByDescending { cloudMetadata[it.id]?.joinedAt ?: 0L }.thenBy(::stableIndex))
-            UnifiedShelfSort.LOCAL_ADDED -> filtered.sortedWith(compareByDescending<Manga> {
-                libraryStore.favoriteAddedAt(it.id) ?: 0L
-            }.thenBy(::stableIndex))
-            UnifiedShelfSort.HEAT -> filtered.sortedWith(compareByDescending<Manga> {
-                it.totalPopularity ?: it.popularity ?: Long.MIN_VALUE
-            }.thenBy(::stableIndex))
-            UnifiedShelfSort.TITLE -> filtered.sortedWith(compareBy<Manga> { it.title.lowercase() }
-                .thenBy(::stableIndex))
+        when (shelfScope) {
+            UnifiedShelfScope.LOCAL -> filtered.sortedWith(
+                compareByDescending<Manga> { progressById[it.id]?.updatedAt ?: 0L }
+                    .thenByDescending { libraryStore.favoriteAddedAt(it.id) ?: 0L }
+                    .thenBy(::stableIndex))
+            UnifiedShelfScope.COPY -> filtered.sortedWith(
+                compareByDescending<Manga> { cloudMetadata[it.id]?.readAt ?: 0L }
+                    .thenBy { cloudMetadata[it.id]?.readOrder ?: Int.MAX_VALUE }
+                    .thenByDescending { cloudMetadata[it.id]?.joinedAt ?: 0L }
+                    .thenBy(::stableIndex))
         }
     }
     val visibleHistory = remember(scopedHistory, pendingHistory) { scopedHistory.filterNot { it.manga.id in pendingHistory } }
@@ -323,8 +316,8 @@ fun LibraryScreen(
             }
         }
     }
-    LaunchedEffect(active, showHistory) {
-        if (!active) { shelfMenuExpanded = false; libraryActionsOpen = false; pendingLibraryTool = null; sortMenu = false }
+    LaunchedEffect(active, showHistory, shelfScope) {
+        if (!active) { libraryActionsOpen = false; pendingLibraryTool = null }
         managedId = null
         draggedFavorite = null
         dragPoint = Offset.Unspecified
@@ -347,7 +340,7 @@ fun LibraryScreen(
         ChapterHistorySheet(manga, libraryStore, onDismiss = { chapterHistoryManga = null }, onContinue = onContinue)
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-    val shelfWidth = preferredShelfWidth.coerceAtMost((maxWidth - 180.dp).coerceAtLeast(70.dp))
+    val shelfWidth = (maxWidth - 140.dp).coerceAtMost(196.dp).coerceAtLeast(112.dp)
     val historyInset = 16.dp + ((maxWidth - if (desktop) 1040.dp else MangaLayout.ListWidth) / 2f).coerceAtLeast(0.dp)
     Box(Modifier.fillMaxSize().mangaHazeSource(backdrop)
         .background(if (backgroundInParent) Color.Transparent else MaterialTheme.colorScheme.background)) {
@@ -418,57 +411,11 @@ fun LibraryScreen(
                             horizontalArrangement = Arrangement.spacedBy(gap),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            item(key = "unified-shelf-controls", span = {
-                                androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
-                            }) {
-                                Row(Modifier.fillMaxWidth().heightIn(min = 40.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    UnifiedShelfScope.entries.forEach { option ->
-                                        val selected = shelfScope == option
-                                        Surface(shape = RoundedCornerShape(10.dp),
-                                            color = if (selected) MaterialTheme.colorScheme.onSurface.copy(alpha = .08f)
-                                                else Color.Transparent) {
-                                            MotionIconButton(onClick = { scopeName = option.name },
-                                                modifier = Modifier.size(36.dp), enabled = active,
-                                                tooltip = "显示" + option.title + "书架") {
-                                                Icon(when (option) {
-                                                    UnifiedShelfScope.ALL -> Icons.Outlined.ViewModule
-                                                    UnifiedShelfScope.LOCAL -> Icons.Outlined.Bookmarks
-                                                    UnifiedShelfScope.COPY -> Icons.Outlined.Sync
-                                                }, option.title, Modifier.size(17.dp))
-                                            }
-                                        }
-                                    }
-                                    Spacer(Modifier.weight(1f))
-                                    Text(visibleFavorites.size.toString(), style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Box {
-                                        MotionIconButton(onClick = { sortMenu = !sortMenu },
-                                            modifier = Modifier.size(36.dp), enabled = active,
-                                            tooltip = "书架排序：" + shelfSort.title) {
-                                            Icon(Icons.Outlined.Sort, "排序", Modifier.size(17.dp))
-                                        }
-                                        CompactGlassPopover(sortMenu, backdrop, onDismiss = { sortMenu = false },
-                                            maximumWidth = 180.dp) {
-                                            UnifiedShelfSort.entries.forEach { candidate ->
-                                                TextButton(onClick = { sortName = candidate.name; sortMenu = false },
-                                                    modifier = Modifier.fillMaxWidth().heightIn(min = 42.dp),
-                                                    contentPadding = PaddingValues(horizontal = 10.dp)) {
-                                                    Text(candidate.title, Modifier.weight(1f),
-                                                        style = MaterialTheme.typography.bodySmall)
-                                                    if (shelfSort == candidate) Icon(Icons.Outlined.Check,
-                                                        null, Modifier.size(15.dp))
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if (copyNotice != null && importCopy != null) item(key = "copy-new-favorites", span = {
+                            if (shelfScope == UnifiedShelfScope.COPY && copyNotice != null && importCopy != null) item(key = "copy-new-favorites", span = {
                                 androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                             }) { CopyShelfImportHint(copyNotice, active, importCopy) }
-                            if (!cloudComplete && (cloudLoading || cloudError != null || cloudHasMore)) item(
+                            if (shelfScope == UnifiedShelfScope.COPY && !cloudComplete &&
+                                (cloudLoading || cloudError != null || cloudHasMore)) item(
                                 key = "cloud-shelf-status", span = {
                                     androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
                                 }) {
@@ -488,9 +435,18 @@ fun LibraryScreen(
                                     }, Modifier.padding(start = 7.dp), style = MaterialTheme.typography.labelSmall)
                                 }
                             }
-                            if (visibleFavorites.isEmpty() && !cloudLoading) item(key = "empty-collection", span = {
-                                androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
-                            }) { EmptyBookshelf(onDiscover) }
+                            if (visibleFavorites.isEmpty() &&
+                                (shelfScope == UnifiedShelfScope.LOCAL || !cloudLoading && cloudComplete)) item(
+                                key = "empty-collection", span = {
+                                    androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan)
+                                }) {
+                                when {
+                                    shelfScope == UnifiedShelfScope.LOCAL -> EmptyBookshelf(onDiscover)
+                                    onAddCloudFavorite == null && onOpenAccount != null ->
+                                        EmptyMessage("登录拷贝账号", "登录后，这里显示拷贝收藏。", "去登录", onOpenAccount)
+                                    else -> EmptyMessage("拷贝书架还是空的", "在拷贝收藏的漫画会显示在这里。", "去发现", onDiscover)
+                                }
+                            }
                             gridItems(visibleFavorites, key = { it.sourceId + ":" + it.id },
                                 contentType = { "shelf-book" }) { manga ->
                                 val local = (manga.sourceId to manga.id) in localKeys
@@ -624,17 +580,35 @@ fun LibraryScreen(
         }
         }
     }
+        val selectShelf: (Int) -> Unit = { index ->
+            val destination = if (index == 1 && copyShelfAvailable) UnifiedShelfScope.COPY else UnifiedShelfScope.LOCAL
+            if (destination != shelfScope || showHistory) {
+                onCancelOpen()
+                scopeName = destination.name
+                showHistory = false
+            }
+        }
         if (desktop) {
             val stackedTools = maxWidth < 680.dp * density.fontScale.coerceAtLeast(1f)
-            DesktopManagementToolbar("书架", Modifier.align(Alignment.TopCenter)
+            DesktopManagementToolbar(if (showHistory) "最近阅读" else "书架", Modifier.align(Alignment.TopCenter)
                 .onSizeChanged { headerHeightPx = it.height },
                 navigation = navigation, minimumToolsWidth = 680.dp) {
-                MotionTabs(if (showHistory) 1 else 0, listOf("收藏", "最近阅读"),
-                    { index -> if (showHistory != (index == 1)) onCancelOpen(); showHistory = index == 1 },
-                    modifier = if (stackedTools) Modifier.width(260.dp * density.fontScale.coerceAtLeast(1f))
-                        else Modifier.widthIn(max = 320.dp).weight(1f, fill = false),
+                if (showHistory) MotionIconButton(onClick = { showHistory = false },
+                    modifier = Modifier.size(36.dp), tooltip = "返回书架") {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回书架", Modifier.size(19.dp))
+                } else MotionTabs(if (shelfScope == UnifiedShelfScope.LOCAL) 0 else 1, shelfLabels, selectShelf,
+                    modifier = if (stackedTools) Modifier.width(240.dp * density.fontScale.coerceAtLeast(1f))
+                        else Modifier.widthIn(max = 280.dp).weight(1f, fill = false),
                     treatment = MotionTabTreatment.Soft, controlHeight = 36.dp)
                 if (!stackedTools) Spacer(Modifier.weight(1f))
+                if (!showHistory) MotionIconButton(onClick = { onCancelOpen(); showHistory = true },
+                    modifier = Modifier.size(36.dp), tooltip = "最近阅读") {
+                    Icon(Icons.Outlined.History, "最近阅读", Modifier.size(19.dp))
+                }
+                if (onOpenAccount != null) MotionIconButton(onClick = onOpenAccount,
+                    modifier = Modifier.size(36.dp), tooltip = "拷贝账号") {
+                    Icon(Icons.Outlined.AccountCircle, "拷贝账号", Modifier.size(19.dp))
+                }
                 if (onCopySync != null) MotionIconButton(onClick = onCopySync, enabled = active,
                     modifier = Modifier.size(36.dp), tooltip = "查看拷贝差异") {
                     Icon(Icons.Outlined.Sync, "查看拷贝差异", Modifier.size(19.dp))
@@ -649,10 +623,22 @@ fun LibraryScreen(
         } else Column(Modifier.align(Alignment.TopCenter).onSizeChanged { headerHeightPx = it.height }
             .windowInsetsPadding(screenFitContentInsets().only(WindowInsetsSides.Top))
             .padding(horizontal = 8.dp, vertical = 2.dp)) {
-            PageTitleHeader("书架", backdrop, navigation,
+            PageTitleHeader(if (showHistory) "最近阅读" else "书架", backdrop, navigation,
                 leadingWidth = shelfWidth,
                 leading = {
-                    Spacer(Modifier.width(shelfWidth).height(morphGlassTabHeight()))
+                    if (showHistory) Row(Modifier.width(shelfWidth),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        MotionIconButton(onClick = { showHistory = false }, modifier = Modifier.size(40.dp),
+                            tooltip = "返回书架") {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回书架", Modifier.size(19.dp))
+                        }
+                        Text("最近阅读", style = MaterialTheme.typography.labelMedium)
+                    } else LiquidGlassSurface(backdrop, Modifier.width(shelfWidth), cornerRadius = 22.dp,
+                        role = GlassSurfaceRole.NAVIGATION, trackPointer = true) {
+                        MotionTabs(if (shelfScope == UnifiedShelfScope.LOCAL) 0 else 1,
+                            shelfLabels, selectShelf, modifier = Modifier.fillMaxWidth(),
+                            treatment = MotionTabTreatment.Soft, controlHeight = 40.dp)
+                    }
                 },
                 actions = {
                     toolbar {
@@ -660,9 +646,7 @@ fun LibraryScreen(
                             MotionIconButton(onClick = {
                                 pendingLibraryTool = null
                                 libraryActionsOpen = !libraryActionsOpen
-                                shelfMenuExpanded = false
-                            },
-                                enabled = active, modifier = Modifier.size(44.dp)) {
+                            }, enabled = active, modifier = Modifier.size(44.dp)) {
                                 Icon(Icons.Outlined.MoreHoriz, "书架工具", Modifier.size(21.dp),
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
@@ -674,13 +658,20 @@ fun LibraryScreen(
                                         val destination = pendingLibraryTool
                                         pendingLibraryTool = null
                                         if (active) when (destination) {
+                                            LibraryToolDestination.HISTORY -> { onCancelOpen(); showHistory = true }
                                             LibraryToolDestination.COLLECTIONS -> showCollections = true
                                             LibraryToolDestination.STATS -> showStats = true
                                             LibraryToolDestination.COPY_SYNC -> onCopySync?.invoke()
+                                            LibraryToolDestination.ACCOUNT -> onOpenAccount?.invoke()
                                             null -> Unit
                                         }
                                     }
                                 }) {
+                                if (!showHistory) LibraryToolAction(Icons.Outlined.History, "最近阅读",
+                                    visibleHistory.size.toString()) {
+                                    pendingLibraryTool = LibraryToolDestination.HISTORY
+                                    libraryActionsOpen = false
+                                }
                                 LibraryToolAction(Icons.Outlined.Collections, "画面收藏", collections.size.toString()) {
                                     pendingLibraryTool = LibraryToolDestination.COLLECTIONS
                                     libraryActionsOpen = false
@@ -694,20 +685,15 @@ fun LibraryScreen(
                                     pendingLibraryTool = LibraryToolDestination.COPY_SYNC
                                     libraryActionsOpen = false
                                 }
+                                if (onOpenAccount != null) LibraryToolAction(Icons.Outlined.AccountCircle, "拷贝账号") {
+                                    pendingLibraryTool = LibraryToolDestination.ACCOUNT
+                                    libraryActionsOpen = false
+                                }
                             }
                         }
                     }
                 })
         }
-        if (!desktop) MorphGlassTabSelector(backdrop, shelfTabs, if (showHistory) 1 else 0, shelfWidth,
-            maximumHeight = maxHeight,
-            onToggle = { shelfMenuExpanded = !shelfMenuExpanded; libraryActionsOpen = false }, enabled = active,
-            expanded = shelfMenuExpanded, onDismiss = { shelfMenuExpanded = false },
-            onSelect = { index ->
-                shelfMenuExpanded = false
-                if (showHistory != (index == 1)) onCancelOpen()
-                showHistory = index == 1
-            })
         AnimatedVisibility(
             visible = draggedFavorite != null,
             modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 18.dp),
