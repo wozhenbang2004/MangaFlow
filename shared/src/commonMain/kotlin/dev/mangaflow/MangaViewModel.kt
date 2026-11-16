@@ -377,6 +377,8 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     private val reviewPageJobs = mutableMapOf<String, Job>()
     private val reviewOverrides = ConcurrentSet<String>()
     private var accountJob: Job? = null
+    private var accountRestoreRetryJob: Job? = null
+    private var accountRestoreFailures = 0
     private var accountRequestId = 0L
     private var websiteLoginAttempt: Long? = null
     private var accountCleanupFailed = false
@@ -3147,6 +3149,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
     }
 
     private fun authenticate(restoring: Boolean = false, action: suspend () -> AccountProfile?) {
+        if (!restoring) {
+            accountRestoreRetryJob?.cancel()
+            accountRestoreRetryJob = null
+            accountRestoreFailures = 0
+        }
         clearCopyProgress()
         cancelCopyShelfMetadata(clear = true)
         val browserAttempt = websiteLoginAttempt
@@ -3166,6 +3173,11 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                 val profile = action()
                 if (requestId != accountRequestId) return@launch
                 _account.value = AccountUiState(profile = profile, busy = false)
+                if (profile != null) {
+                    accountRestoreFailures = 0
+                    accountRestoreRetryJob?.cancel()
+                    accountRestoreRetryJob = null
+                }
                 copyShelfSync.accountChanged()
                 services.readingOutbox.accountChanged()
                 cloudFavoritesPage = -1
@@ -3182,16 +3194,40 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                         catch (cancel: CancellationException) { throw cancel }
                         catch (_: Exception) { false } else false
                     if (requestId != accountRequestId) return@launch
+                    val retryAllowed = restoring && saved && (failure as? SourceException)
+                        ?.httpStatus !in setOf(400, 401, 403, 422)
                     _account.value = AccountUiState(profile = accountRepository.profile.value, busy = false,
                         error = accountError(failure, "登录暂时未完成，请稍后重试。"),
                         savedCredentialPresent = saved,
                         canRetryConnection = accountRepository.canRetryLogin || (restoring && saved))
+                    if (retryAllowed) scheduleAccountRestore(requestId, failure)
                 }
             }
         }
     }
 
+    /** Retries verification with encrypted saved credentials, never a plaintext password.
+     *  A definitive authentication rejection requires user action; network errors do not. */
+    private fun scheduleAccountRestore(request: Long, failure: Exception) {
+        accountRestoreRetryJob?.cancel()
+        val step = accountRestoreFailures.coerceAtMost(6)
+        accountRestoreFailures++
+        val exponential = (15_000L shl step).coerceAtMost(15L * 60_000L)
+        val retryAfter = ((failure as? SourceException)?.retryAfterSeconds ?: 0L)
+            .coerceIn(0L, 3_600L) * 1_000L
+        accountRestoreRetryJob = viewModelScope.launch {
+            delay(maxOf(exponential, retryAfter))
+            if (request == accountRequestId && _account.value.profile == null &&
+                !_account.value.busy && websiteLoginAttempt == null && !accountCleanupFailed) {
+                restoreAccount()
+            }
+        }
+    }
+
     fun logout() {
+        accountRestoreRetryJob?.cancel()
+        accountRestoreRetryJob = null
+        accountRestoreFailures = 0
         val previousOwner = _account.value.profile?.username
         clearCopyProgress()
         cancelCopyShelfMetadata(clear = true)
