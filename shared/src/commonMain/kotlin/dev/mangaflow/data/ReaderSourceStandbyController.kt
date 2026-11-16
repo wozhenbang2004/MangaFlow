@@ -605,7 +605,7 @@ internal class ReaderSourceStandbyController(
                                 }
                             } catch (timeout: TimeoutCancellationException) {
                                 currentCoroutineContext().ensureActive()
-                                stopped[index] = Stopped("备用图片准备超时，当前来源继续阅读", false)
+                                stopped[index] = Stopped("备用图片超时，30 秒后有限重试（可手动重试）", true)
                             } catch (cancel: CancellationException) { throw cancel }
                             catch (deferred: ExperienceAdmissionDeferred) {
                                 stopped[index] = Stopped(waitingReason(deferred.wait), false, retryWhenWritable = true)
@@ -675,8 +675,9 @@ internal class ReaderSourceStandbyController(
                             publish()
                         }
                         val target = window?.target
-                        if (target != null && target !in pending && target !in prepared &&
-                            stopped[target]?.failed == true && (failures[target] ?: 0) >= 2) return@coroutineScope
+                        // An exhausted current backup page must not kill the whole standby source.
+                        // Keep the session alive for later pages and explicit retry; only this page
+                        // is bounded to two attempts until the reader moves or asks to retry.
                         if (onePass && pending.isEmpty() && window != null && window!!.indices.all {
                                 it in prepared || it in stopped
                             }) return@coroutineScope

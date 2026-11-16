@@ -254,7 +254,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             budget.standbySources == 0 -> "预热暂停"
             else -> "备用 " + budget.standbySources + " 源"
         }, Icons.Outlined.Layers, expanded == "sources", { toggle("sources") },
-            compact = true, modified = custom.sourceRecovery != null || custom.standbySources != null || custom.standbyMiB != null || custom.standbyPages != 1 || !custom.standbyMemoryWarmup) {
+            compact = true, modified = custom.sourceRecovery != null || custom.standbySources != null || custom.standbyMiB != null || custom.standbyPages != 3 || !custom.standbyMemoryWarmup) {
             SettingsChoices(listOf<Pair<SourceRecoveryMode?, String>>(
                 null to "跟随", SourceRecoveryMode.OFF to "关闭",
                 SourceRecoveryMode.BALANCED to "稳健", SourceRecoveryMode.AGGRESSIVE to "积极"), custom.sourceRecovery) {
@@ -268,8 +268,8 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 editor, active && expanded == "sources", effective = budget.standbySources, automaticLabel = "预热模式") {
                 change(custom.copy(standbySources = it))
             }
-            ExperienceNumber("每源附近预热", custom.standbyPages, 1, 1..4, "页",
-                editor, active && expanded == "sources", effective = budget.standbyPages) { change(custom.copy(standbyPages = it ?: 1)) }
+            ExperienceNumber("每源附近预热", custom.standbyPages, 3, 1..12, "页",
+                editor, active && expanded == "sources", effective = budget.standbyPages) { change(custom.copy(standbyPages = it ?: 3)) }
             ExperienceNumber("备用原图窗口", custom.standbyMiB,
                 (budget.goal.prefetchBytes / 4L / EXPERIENCE_MIB).toInt(), 1..128, "MB",
                 editor, active && expanded == "sources", effective = (budget.standbyPrefetchBytes / EXPERIENCE_MIB).toInt()) {
@@ -285,8 +285,8 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
             if (usage.throttledSources > 0) ExperienceHint("限流 · " + usage.throttledSources + " 源")
             ExperienceTools("sources", "多源与补页", active && expanded == "sources", detail, ::toggleDetail,
-                custom.sourceRecovery != null || custom.standbySources != null || custom.standbyMiB != null || custom.standbyPages != 1 || !custom.standbyMemoryWarmup, onRestore = {
-                    closeEditor(); change(custom.copy(sourceRecovery = null, standbySources = null, standbyMiB = null, standbyPages = 1, standbyMemoryWarmup = true))
+                custom.sourceRecovery != null || custom.standbySources != null || custom.standbyMiB != null || custom.standbyPages != 3 || !custom.standbyMemoryWarmup, onRestore = {
+                    closeEditor(); change(custom.copy(sourceRecovery = null, standbySources = null, standbyMiB = null, standbyPages = 3, standbyMemoryWarmup = true))
                 }) {
                 ExperienceBudgetRow("模式目标", "备用至多 " + budget.goal.standbySources + " 源")
                 ExperienceHint("提前准备已关联的同章备用来源，预取可发现请求和图片错误。章节对齐不代表每一页相同，不会仅按页码替换图片；切换版本保留独立位置。")

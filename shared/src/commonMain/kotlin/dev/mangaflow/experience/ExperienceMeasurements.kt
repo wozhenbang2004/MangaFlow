@@ -51,7 +51,7 @@ internal fun decodeExperienceOverrides(value: String?): ExperienceOverrides = ru
         decodedPrefetchPages = int("decodedPages", 0),
         sourceRecovery = SourceRecoveryMode.entries.firstOrNull { it.name == json["sourceRecovery"]?.jsonPrimitive?.content },
         browseWarmup = bool("browseWarmup", true),
-        standbySources = int("standbySources", 1), standbyPages = int("standbyPages", 1) ?: 1,
+        standbySources = int("standbySources", 1), standbyPages = int("standbyPages", 1) ?: 3,
         standbyMiB = int("standbyMiB", 1),
         standbyMemoryWarmup = bool("standbyMemory", true),
         readerStatusPlacement = ReaderStatusPlacement.entries.firstOrNull { it.name == json["readerStatus"]?.jsonPrimitive?.content }

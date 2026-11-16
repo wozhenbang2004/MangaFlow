@@ -472,7 +472,9 @@ fun ReaderScreen(
     }
     LaunchedEffect(sourceIdentity, chapter, pageIndex, pages, standbyActive, loading, error,
         sourcePickerBlocking, chapterChangeRequested, experienceBudget.standbySources) {
-        if (!standbyActive || loading || error != null || pages.isEmpty() ||
+        // A stalled or failed visible image is exactly when spare sources matter. Do not
+        // gate standby preparation on the visible image reaching READY.
+        if (!standbyActive || pages.isEmpty() ||
             sourcePickerBlocking || chapterChangeRequested) return@LaunchedEffect
         // A finite intent delay follows the actual cursor; rapid paging replaces stale work.
         delay(350)
