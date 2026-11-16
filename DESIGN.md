@@ -1,3 +1,18 @@
+## Reader readiness count stability · 2026-11-17 (READCOUNT-01–05)
+
+User report (message `Sentinel_439935cb67b08191979386df5d9c880e`): “关于那个看漫画的时候那个关于体验策略那个栏呢，有bug，就是显示当前阅读了多少个嘛，那个我先配置是16，16。翻页的时候它总是会跳，你知道吗？有时候跳到一，有时候跳到二。它这个会跳啊，它不稳定啊。这肯定是你前端或者什么逻辑的bug啊”. No screenshot or device trace accompanies this report; the precise field and device trigger remain unconfirmed.
+
+- READCOUNT-01: Keep the configured forward/review counts and actual current-window original readiness distinct. Never force the measured count to 16. A partially inspected window displays a `?` and discloses the unknown count; no complete-readiness progress bar is inferred from partial evidence.
+- READCOUNT-02: Offset settling inside the same visible range cannot reverse reading direction and cancel its work. Direction follows the leading visible page anchor, not the trailing edge that changes when an image acquires its real height; fractional position still informs speed estimation. True reverse page turns retain their existing behavior.
+- READCOUNT-03: Separate target-window observation/finished-resource retention from optional-work admission. The new visible page loading can pause work but cannot discard overlapping completed-resource identities. Keep real cancellation, byte limits, foreground promotion and existing cache owners.
+- READCOUNT-04: Freshness follows the configured sampling interval and observed scan duration, not an unrelated fixed four-second timeout. Observations still expire to unknown. Same-tracker layout restarts retire owned activity without erasing recent exact-page artifact checks; stale effect owners cannot publish artifacts into a replacement owner.
+
+- READCOUNT-05: A `PrefetchBudgetExceeded` outcome belongs to the concrete byte-window owner captured by its attempt. A later window with usable remaining bytes may retry that still-targeted page only after its old request settles. Do not wait for unrelated configuration changes, retry repeatedly within the same exhausted window, reset real source-failure retry limits or move in-flight charges to a new budget. This repairs a source-confirmed stop path: old `originalFinished` survived window renewal while the recovery key did not include the actual byte-window owner. It does not establish that this was the phone screenshot's cache-write gate.
+
+Cache-pause wording now says “等待可回收空间；当前阅读和下载受保护”, rather than promising that waiting restores capacity. The existing Cache scope and experience-settings action remain the inspection/capacity-adjustment entries; this does not change the cache owner or establish that protected data caused the reported pause.
+
+Source evidence at main `3e627f7`: the pager supplies fractional offsets; the collector previously used every delta sign as a direction change. `visibleReady=false` emptied `desired`, which also pruned completed resource maps. The tracker expired every artifact after four seconds although cache observation has a user-configurable interval and serial local inspections. These are source-confirmed mechanisms consistent with count drops, not a reproduction of the user's phone. The patch preserves existing READBAR/STATUSCOLOR controls, ownership and manual values. Source/diff review only; no tests, local builds, probes or UI automation. Installed behavior remains pending user feedback.
+
 ## Reader selection, live details and cache meaning · 2026-11-17 (READER-DETAIL-01–06)
 
 Latest user wording, recorded 2026-11-17 Asia/Shanghai; exact message ID unavailable:

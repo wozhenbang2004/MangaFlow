@@ -490,7 +490,8 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     val policy = synchronized(lock) { runtime }
                     if (!policy.automaticCleanup) {
                         val other = snapshot.totalBytes - snapshot.items.filter { it.resource.backend == CacheBackend.COIL }.sumOf { it.bytes } - snapshot.coilUnclassifiedBytes
-                        synchronized(lock) { coil }?.resize((limit - other).coerceAtLeast(0L), synchronized(lock) { budgetVersion })
+                        val publication = synchronized(lock) { budget to budgetVersion }
+                        synchronized(lock) { coil }?.resize((publication.first - other).coerceAtLeast(0L), publication.second)
                         return@launch
                     }
                     val age = synchronized(lock) { retentionMillis }
@@ -503,7 +504,13 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     }
                     if (expired.isNotEmpty()) clear(expired)
                     val afterExpiry = if (expired.isEmpty()) snapshot else snapshot()
-                    var excess = (afterExpiry.totalBytes - limit).coerceAtLeast(0L)
+                    // At exact capacity optional writers are already closed. Trimming only an
+                    // overage can leave that state forever, with no next write to wake eviction.
+                    // Reclaim a bounded refill slice, never protected readers/offline resources.
+                    val refill = if (limit > 0L && afterExpiry.totalBytes >= limit)
+                        minOf(8L * MIB, maxOf(1L, limit / 16L)) else 0L
+                    val cleanupTarget = (limit - refill).coerceAtLeast(0L)
+                    var excess = (afterExpiry.totalBytes - cleanupTarget).coerceAtLeast(0L)
                     if (excess > 0L) {
                         val ageOrder = compareBy<StoredCacheItem> { it.resource.accessedAt.takeIf { at -> at > 0L } ?: it.modifiedAt }
                         val order = when (policy.evictionOrder) {
@@ -523,11 +530,13 @@ class StorageCacheStore private constructor(context: PlatformContext) {
                     synchronized(lock) { animeCache }?.resize(
                         (limit - (beforeVideo.totalBytes - videoBytes)).coerceAtLeast(0L))
                     val current = snapshot()
-                    retryAfterGrace = current.totalBytes > current.budgetBytes &&
+                    retryAfterGrace = current.totalBytes > cleanupTarget &&
                         current.items.any { it.protected && wallTimeMillis() - it.resource.accessedAt in 0L..FILE_HANDOFF_MILLIS }
                     val other = current.totalBytes - current.items.filter { it.resource.backend == CacheBackend.COIL }.sumOf { it.bytes } - current.coilUnclassifiedBytes
                     val disk = synchronized(lock) { coil }
-                    disk?.resize((limit - other).coerceAtLeast(0L), synchronized(lock) { budgetVersion })
+                    // Do not stamp an old scanned budget with a newer publication version.
+                    val publication = synchronized(lock) { budget to budgetVersion }
+                    disk?.resize((publication.first - other).coerceAtLeast(0L), publication.second)
                     mutation.withLock { persist() }
                     error = false
                 } catch (cancel: CancellationException) { throw cancel }

@@ -1,0 +1,110 @@
+package dev.mangaflow.anime.sources
+
+import com.fleeksoft.ksoup.Ksoup
+import dev.mangaflow.json.JSONObject
+import dev.mangaflow.json.JSONArray
+import dev.mangaflow.platform.decodeUrlComponent
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
+import dev.mangaflow.net.HttpUrl
+import io.ktor.http.encodeURLParameter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+/** Original, bounded data-only reader for public Aki player declarations. No JS evaluator,
+ * embedded keys, browser cookies, account tokens or challenge solving. No parser POST is enabled:
+ * available offline evidence does not establish a trusted external parser origin.
+ */
+internal class AnonymousPlayerPages(private val http: AnimeHttp) {
+    suspend fun akiParser(from: String, token: String, page: HttpUrl): HttpUrl? {
+        if (http.sourceId != "anime-native-akianime" || page.host != "www.akianime.com") return null
+        require(from.length <= 128 && token.length in 1..16384)
+        val configUrl = animePublicUrl("https://www.akianime.com/static/js/playerconfig.js")
+        val response = http.request(configUrl, AnimeSourceStage.RESOLVE, referer = anonymousMediaReferer(page.toString()), sameOriginRedirects = true)
+        require(response.url.host == configUrl.host) { "来源播放器配置跳转到其他站点，已停止解析。" }
+        rejectAccessPage(response.text)
+        val list = withContext(Dispatchers.Default) { literalObject(response.text,
+            Regex("\\b(?:MacPlayerConfig\\.)?player_list\\s*=\\s*\\{")) } ?: return null
+        val player = list.optJSONObject(from) ?: return null
+        if (player.optString("ps") != "1") return null
+        val prefix = player.optString("parse")
+        if (prefix.isBlank()) return null
+        val base = animePublicUrl(animeAbsolute(page.toString(), prefix))
+        require(base.host in setOf("www.akianime.com", "akianime.com") && base.port == 443) {
+            "此线路指向尚未确认的外部解析站，未发送播放参数或提交表单，请选择其他线路。"
+        }
+        // Only a declared URL query slot can receive this episode's opaque media token.
+        require(base.queryParameterNames.contains("url") && prefix.endsWith("url=")) {
+            "播放器解析地址格式未确认，未猜测或提交线路参数。"
+        }
+        return animePublicUrl(base.toString() + token.encodeURLParameter())
+    }
+
+    suspend fun akiPublicMedia(page: HttpUrl, html: String): String? {
+        check(http.sourceId == "anime-native-akianime")
+        check(page.host in setOf("www.akianime.com", "akianime.com") && page.port == 443)
+        rejectAccessPage(html)
+        val config = withContext(Dispatchers.Default) { literalObject(html,
+            Regex("\\b(?:var|let|const)\\s+config\\s*=\\s*\\{")) } ?: return null
+        val raw = config.optString("url").takeIf { it.isNotBlank() && it.length <= 16384 } ?: return null
+        // A public media declaration is data; opaque tokens/key/time require an unverified POST
+        // protocol and are deliberately not submitted or evaluated.
+        val media = runCatching { animePublicUrl(animeAbsolute(page.toString(), raw)).toString() }.getOrNull()
+        return media?.takeIf { animeMediaType(it) != null }
+    }
+
+    @OptIn(ExperimentalEncodingApi::class)
+    fun dmbusPublicMedia(page: HttpUrl, html: String): String? {
+        if (http.sourceId != "anime-native-dmbus" || page.host != "hhjx.hhplayer.com" || html.length > 1_048_576) return null
+        val match = Regex("""\b(?:var|let|const)\s+url\s*=\s*("(?:\\.|[^"\\])*")""").find(html) ?: return null
+        val raw = runCatching { JSONArray("[${match.groupValues[1]}]").getString(0) }.getOrNull() ?: return null
+        if (raw.length !in 1..16384) return null
+        val candidates = mutableListOf(raw)
+        runCatching { decodeUrlComponent(raw) }.getOrNull()?.let(candidates::add)
+        runCatching {
+            val normalized = raw.replace('-', '+').replace('_', '/')
+            Base64.decode(normalized + "=".repeat((4 - normalized.length % 4) % 4)).decodeToString(throwOnInvalidSequence = true)
+        }.getOrNull()?.let { decoded ->
+            candidates += decoded
+            runCatching { decodeUrlComponent(decoded) }.getOrNull()?.let(candidates::add)
+        }
+        return candidates.firstNotNullOfOrNull { candidate ->
+            runCatching { animePublicUrl(animeAbsolute(page.toString(), candidate)).toString() }.getOrNull()
+                ?.takeIf { animeMediaType(it) != null }
+        }
+    }
+
+    suspend fun rejectAccessPage(html: String): Unit = withContext(Dispatchers.Default) {
+        val doc = Ksoup.parse(html)
+        if (doc.selectFirst("input[type=password], input[name=gate-answer], form[action*=/captcha/], iframe[src*=captcha], .g-recaptcha, .h-captcha, .cf-turnstile") != null ||
+            html.contains("/cdn-cgi/challenge-platform/") || html.contains("cf-chl-"))
+            throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE,
+                "此线路要求登录或完成原站访问验证，已停止自动解析，请选择其他线路。")
+    }
+
+    private fun literalObject(text: String, startPattern: Regex): JSONObject? {
+        if (text.length > 1_048_576) return null
+        val start = startPattern.find(text)?.range?.last ?: return null
+        var depth = 0
+        var quoted = false
+        var escaped = false
+        for (index in start until minOf(text.length, start + 262144)) {
+            val char = text[index]
+            if (quoted) {
+                if (escaped) escaped = false
+                else if (char == '\\') escaped = true
+                else if (char == '"') quoted = false
+            } else when (char) {
+                '"' -> quoted = true
+                '{' -> depth++
+                '}' -> if (--depth == 0) return runCatching { JSONObject(text.substring(start, index + 1)) }.getOrNull()
+            }
+        }
+        return null
+    }
+}
+
+/** Never persist or forward an opaque parser query/fragment in media, subtitle or frame headers. */
+internal fun anonymousMediaReferer(value: String): String = animePublicUrl(value).let { url ->
+    url.newBuilder().apply { url.queryParameterNames.forEach { name -> removeAllQueryParameters(name) }; fragment(null) }.build().toString()
+}

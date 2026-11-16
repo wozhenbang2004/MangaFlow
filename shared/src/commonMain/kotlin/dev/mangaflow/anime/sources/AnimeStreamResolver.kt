@@ -28,6 +28,9 @@ internal data class ResolvedAnimeStream(
  * remote JavaScript, browser session, cookies or filesystem bridge is exposed.
  */
 internal class AnimeStreamResolver(private val http: AnimeHttp) {
+    private val anonymousPages = AnonymousPlayerPages(http)
+    private fun mediaReferer(value: String): String =
+        if (http.sourceId in setOf("anime-native-akianime", "anime-native-dmbus")) anonymousMediaReferer(value) else value
     suspend fun resolve(rawUrl: String, referer: String): ResolvedAnimeStream = withTimeoutOrNull(45_000L) {
         val visited = mutableSetOf<String>()
         resolvePage(animePublicUrl(rawUrl), animePublicUrl(referer).toString(), visited, 0)
@@ -40,16 +43,19 @@ internal class AnimeStreamResolver(private val http: AnimeHttp) {
         referer: String,
         visited: MutableSet<String>,
         depth: Int,
+        akiDeclaredPage: Boolean = false,
     ): ResolvedAnimeStream? {
-        animeMediaType(url.toString())?.let { return ResolvedAnimeStream(url.toString(), it, referer) }
+        animeMediaType(url.toString())?.let { return ResolvedAnimeStream(url.toString(), it, mediaReferer(referer)) }
         // Public player wrappers frequently carry a declared direct media URL.
         url.queryParameter("url")?.let { nested ->
             val direct = runCatching { animePublicUrl(nested) }.getOrNull()
             if (direct != null && animeMediaType(direct.toString()) != null)
-                return ResolvedAnimeStream(direct.toString(), animeMediaType(direct.toString()), referer)
+                return ResolvedAnimeStream(direct.toString(), animeMediaType(direct.toString()), mediaReferer(referer))
         }
         if (depth > 3 || !visited.add(url.toString())) return null
-        val response = http.request(url, AnimeSourceStage.RESOLVE, referer = referer)
+        val response = http.request(url, AnimeSourceStage.RESOLVE, referer = mediaReferer(referer), sameOriginRedirects = akiDeclaredPage)
+        if (http.sourceId in setOf("anime-native-akianime", "anime-native-dmbus"))
+            anonymousPages.rejectAccessPage(response.text)
         val document = withContext(Dispatchers.Default) { Ksoup.parse(response.text, response.url.toString()) }
         if (document.selectFirst("input[name=gate-answer], form[action*=/captcha/]") != null)
             throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE, "这条线路要求在原站完成访问验证，请选择其他免验证线路。")
@@ -59,12 +65,21 @@ internal class AnimeStreamResolver(private val http: AnimeHttp) {
                 ?: return@mapIndexedNotNull null
             AnimeSubtitle("track-$index", track, element.attr("label").ifBlank { "字幕 ${index + 1}" },
                 element.attr("srclang").takeIf { it.isNotBlank() }, "text/vtt",
-                mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to pageUrl))
+                mapOf("User-Agent" to AnimeHttp.USER_AGENT, "Referer" to mediaReferer(pageUrl)))
         }
         for (element in document.select("video[src], video source[src]")) {
             val candidate = runCatching { animeAbsolute(pageUrl, element.attr("src")) }.getOrNull() ?: continue
             val mime = element.attr("type").takeIf { it in MEDIA_TYPES } ?: animeMediaType(candidate)
-            if (mime != null) return ResolvedAnimeStream(candidate, mime, pageUrl, subtitles)
+            if (mime != null) return ResolvedAnimeStream(candidate, mime, mediaReferer(pageUrl), subtitles)
+        }
+
+        anonymousPages.dmbusPublicMedia(response.url, response.text)?.let { target ->
+            return ResolvedAnimeStream(target, animeMediaType(target), mediaReferer(pageUrl), subtitles)
+        }
+        if (akiDeclaredPage) {
+            anonymousPages.akiPublicMedia(response.url, response.text)?.let { target ->
+                resolvePage(animePublicUrl(target), pageUrl, visited, depth + 1)?.let { return it }
+            }
         }
 
         val frames = mutableListOf<String>()
@@ -80,9 +95,15 @@ internal class AnimeStreamResolver(private val http: AnimeHttp) {
                 val raw = config.text("url", "src", "file")
                 if (raw.isBlank()) continue
                 val decoded = decodePlayerUrl(raw, config.optInt("encrypt")) ?: continue
+                if (http.sourceId == "anime-native-akianime" && response.url.host == "www.akianime.com" &&
+                    !decoded.startsWith("https://") && !decoded.startsWith("//") && !decoded.startsWith("/")) {
+                    val parser = anonymousPages.akiParser(config.optString("from"), decoded, response.url)
+                    if (parser != null) resolvePage(parser, pageUrl, visited, depth + 1, akiDeclaredPage = true)?.let { return it }
+                    continue // An opaque token is not a relative webpage address.
+                }
                 val candidate = runCatching { animeAbsolute(pageUrl, decoded) }.getOrNull() ?: continue
                 val mime = animeMediaType(candidate)
-                if (mime != null) return ResolvedAnimeStream(candidate, mime, pageUrl, subtitles)
+                if (mime != null) return ResolvedAnimeStream(candidate, mime, mediaReferer(pageUrl), subtitles)
                 frames += candidate
             }
             for (match in MEDIA_ASSIGNMENT.findAll(script)) {
@@ -90,7 +111,7 @@ internal class AnimeStreamResolver(private val http: AnimeHttp) {
                 val raw = runCatching { JSONTokener("[$literal]").nextValue() as? JSONArray }
                     .getOrNull()?.optString(0).orEmpty()
                 val candidate = runCatching { animeAbsolute(pageUrl, raw) }.getOrNull() ?: continue
-                animeMediaType(candidate)?.let { return ResolvedAnimeStream(candidate, it, pageUrl, subtitles) }
+                animeMediaType(candidate)?.let { return ResolvedAnimeStream(candidate, it, mediaReferer(pageUrl), subtitles) }
             }
         }
 
@@ -111,6 +132,9 @@ internal class AnimeStreamResolver(private val http: AnimeHttp) {
             }
         }
         if (frameFailure != null) throw frameFailure
+        if (http.sourceId == "anime-native-dmbus" && response.url.host == "hhjx.hhplayer.com" && response.text.contains("OKOK("))
+            throw AnimeSourceException(http.sourceId, AnimeSourceStage.RESOLVE,
+                "这条动漫巴士线路使用尚未接入的动态解析协议，未执行外部脚本或猜测密钥，请选择其他线路。")
         return null
     }
 

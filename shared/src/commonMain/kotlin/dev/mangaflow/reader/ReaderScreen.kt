@@ -2190,6 +2190,9 @@ internal fun AdjacentPagePrefetch(
         val retryAttempts = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
         val retryAfter = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
         val resourceDeferred = mutableSetOf<Pair<Int, PrefetchStage>>()
+        // The concrete byte-window owner is the retry generation, including a promoted
+        // request that finishes after a newer optional window has already been installed.
+        val budgetDeferred = mutableMapOf<Int, PrefetchByteBudget>()
         var recoveryKey: PrefetchRecoveryKey? = null
         val workTokens = mutableMapOf<Int, PrefetchWork>()
         val allTickets = mutableMapOf<Pair<Int, PrefetchStage>, Long>()
@@ -2197,6 +2200,7 @@ internal fun AdjacentPagePrefetch(
         var inspectTargets = emptySet<Int>()
         var inspectVisible = emptySet<Int>()
         fun token(index: Int, stage: PrefetchStage): PrefetchWork {
+            if (stage == PrefetchStage.DOWNLOADING) budgetDeferred.remove(index)
             val ticket = tracker?.begin(index, stage, owner) ?: 0L
             allTickets[index to stage] = ticket
             return PrefetchWork(experience::wakeAdmissions, observe = {
@@ -2207,9 +2211,17 @@ internal fun AdjacentPagePrefetch(
         fun end(index: Int, stage: PrefetchStage, phase: ReaderPreparationPhase, reason: String? = null) {
             allTickets[index to stage]?.let { tracker?.end(index, it, stage, phase, reason) }
         }
-        fun failed(index: Int, stage: PrefetchStage, failure: Throwable) {
+        fun failed(index: Int, stage: PrefetchStage, failure: Throwable, windowBudget: PrefetchByteBudget? = null) {
             val key = index to stage
             val sourceFailure = isReaderPrefetchFailure(failure)
+            if (stage == PrefetchStage.DOWNLOADING) {
+                budgetDeferred.remove(index)
+                var cause: Throwable? = failure
+                repeat(8) {
+                    if (cause is PrefetchBudgetExceeded && windowBudget != null) budgetDeferred[index] = windowBudget
+                    cause = cause?.cause
+                }
+            }
             val reason = readerPrefetchErrorLabel(failure)
             end(index, stage, if (sourceFailure) ReaderPreparationPhase.FAILED else ReaderPreparationPhase.DEFERRED, reason)
             if (sourceFailure) { resourceDeferred -= key; pageFailed(index, reason) } else resourceDeferred += key
@@ -2255,6 +2267,7 @@ internal fun AdjacentPagePrefetch(
             scriptRequests[index]?.cancel()
             checks[index]?.cancel()
         }
+        var previousFirst: Int? = null
         var previousPosition = Float.NaN
         var previousTime = monotonicTimeMillis()
         var lastMove = previousTime
@@ -2265,6 +2278,7 @@ internal fun AdjacentPagePrefetch(
         var byteWindow = PrefetchByteBudget(0L)
         val progressSampler = requestScope.launch {
             var cacheAt = 0L
+            var previousScanMillis = 0L
             while (true) {
                 listOf(PrefetchStage.RESOLVING to resolutionTokens, PrefetchStage.DOWNLOADING to workTokens,
                     PrefetchStage.CHECKING to checkTokens).forEach { (stage, tokens) ->
@@ -2278,14 +2292,18 @@ internal fun AdjacentPagePrefetch(
                 val now = monotonicTimeMillis()
                 if (now - cacheAt >= currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L) {
                     cacheAt = now
+                    val freshnessMillis = currentBudget.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 2_000L +
+                        previousScanMillis * 2L
                     for (index in inspectTargets - inspectVisible) {
                         val retained = retainedPages[index]
                         val resource = retained?.page ?: resolvedPages[index] ?: continue
                         val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
                             retained?.diskCacheKey, memoryKeys[index])
                         if (index in inspectTargets && index !in inspectVisible)
-                            tracker?.artifact(index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident)
+                            tracker?.artifact(index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident,
+                                freshnessMillis = freshnessMillis, owner = owner)
                     }
+                    previousScanMillis = monotonicTimeMillis() - now
                 }
                 tracker?.sample()
                 delay(250L)
@@ -2325,20 +2343,30 @@ internal fun AdjacentPagePrefetch(
                 val promoted = if (window.foregroundActive) (workTokens.filterValues { it.isForeground }.keys +
                     resolutionTokens.filterValues { it.isForeground }.keys +
                     checkTokens.filterValues { it.isForeground }.keys).toSet() else emptySet()
+                // Offset settling/bounce is not a turn in the opposite reading direction.
+                // Use the leading page anchor, not the trailing visible edge: decoding
+                // a tall image can reduce the visible range without any backward turn.
+                val oldFirst = previousFirst
+                val nextDirection = when {
+                    oldFirst == null -> direction
+                    window.first > oldFirst -> 1
+                    window.first < oldFirst -> -1
+                    else -> direction
+                }
+                if (nextDirection != direction) {
+                    (pending() + checks.keys).filter { it !in foreground && it !in promoted }.forEach(::stop)
+                    speed = 0f
+                }
+                direction = nextDirection
                 if (previousPosition.isFinite() && window.position != previousPosition) {
                     val delta = window.position - previousPosition
-                    val nextDirection = if (delta > 0f) 1 else -1
-                    if (nextDirection != direction) {
-                        (pending() + checks.keys).filter { it !in foreground && it !in promoted }.forEach(::stop)
-                        speed = 0f
-                    }
-                    direction = nextDirection
                     val sample = kotlin.math.abs(delta) * 1000f / (now - previousTime).coerceAtLeast(100L)
                     speed = if (speed == 0f) sample else speed * .65f + sample * .35f
                     lastMove = now
                 }
                 if (window.position != previousPosition) previousTime = now
                 previousPosition = window.position
+                previousFirst = window.first
                 val seconds = window.runtime.predictionSeconds ?: when (currentBudget.mode) {
                     ExperienceMode.ECO -> 2; ExperienceMode.AUTO -> 5; ExperienceMode.PERFORMANCE -> 8 }
                 val readyLead = maxOf(1, window.decoded, window.parallel)
@@ -2386,15 +2414,22 @@ internal fun AdjacentPagePrefetch(
                     retryAfter[key] = now
                 }
                 recoveryKey = recovery
-                inspectTargets = desired + visiblePages
+                // Admission can pause while a newly visible page is loading. That does not
+                // remove the overlapping target window or its completed cache evidence.
+                val observationWindow = (aheadTargets + behindTargets).toSet() + visiblePages
+                inspectTargets = observationWindow
                 inspectVisible = visiblePages
                 tracker?.window(owner, window.first, window.last, direction, aheadTargets, behindTargets,
                     networkDesired, memoryWindow, window.foregroundActive,
                     when { !window.enabled -> "阅读暂缓"; !window.visibleReady -> "当前页优先"
                         window.bytes <= 0L -> currentBudget.reason
-                        !writable -> "原图缓存暂缓写入，容量恢复后继续"; else -> null })
-                val retained = desired + foreground + promoted
-                (pending() + checks.keys).filter { it !in retained }.forEach(::stop)
+                        !writable -> "等待可回收空间；当前阅读和下载受保护"; else -> null })
+                val running = desired + foreground + promoted
+                (pending() + checks.keys).filter { it !in running }.forEach(::stop)
+                // Preview preparation can extend beyond the original-image window when
+                // its independent decoded-page setting is larger. Keep that admitted work's
+                // exact resources without inflating the original-readiness target count.
+                val retained = observationWindow + desired + promoted
                 resolvedAttempts.retainAll(retained)
                 resolvedPages.keys.retainAll(retained)
                 originalFinished.retainAll(retained)
@@ -2406,17 +2441,7 @@ internal fun AdjacentPagePrefetch(
                 retryAttempts.keys.removeAll { it.first !in retained }
                 retryAfter.keys.removeAll { it.first !in retained }
                 resourceDeferred.removeAll { it.first !in retained }
-                for ((key, readyAt) in retryAfter.toMap()) {
-                    val (index, stage) = key
-                    if (now < readyAt || index !in desired || !window.visibleReady ||
-                        !window.foregroundActive || stage == PrefetchStage.DOWNLOADING && !writable || index in pending()) continue
-                    when (stage) {
-                        PrefetchStage.RESOLVING -> resolvedAttempts.remove(index)
-                        PrefetchStage.DOWNLOADING -> originalFinished.remove(index)
-                        else -> Unit
-                    }
-                    retryAfter.remove(key)
-                }
+                budgetDeferred.keys.retainAll(retained)
                 if (window.bytes < budgetLimit) {
                     transfers().filter { it !in foreground && it !in promoted }.forEach(::stop)
                 }
@@ -2429,6 +2454,29 @@ internal fun AdjacentPagePrefetch(
                         try { byteWindow.accept(experience.estimatedPageBytes(pages[index].url)) }
                         catch (_: PrefetchBudgetExceeded) { byteWindow.exhaust(); break }
                     }
+                }
+                // A new window can have usable bytes without changing configured limits.
+                // Retry only settled budget failures from an older owner; keep source-failure
+                // retry limits, in-flight ownership and the new window's byte checks intact.
+                budgetDeferred.forEach { (index, failedWindow) ->
+                    if (failedWindow !== byteWindow && index in networkDesired && index !in pending() &&
+                        writable && window.foregroundActive && byteWindow.remaining > 0L &&
+                        experience.estimatedPageBytes(resolvedPages[index]?.url ?: pages[index].url) <= byteWindow.remaining) {
+                        val key = index to PrefetchStage.DOWNLOADING
+                        retryAttempts.remove(key)
+                        retryAfter[key] = now
+                    }
+                }
+                for ((key, readyAt) in retryAfter.toMap()) {
+                    val (index, stage) = key
+                    if (now < readyAt || index !in desired || !window.visibleReady ||
+                        !window.foregroundActive || stage == PrefetchStage.DOWNLOADING && !writable || index in pending()) continue
+                    when (stage) {
+                        PrefetchStage.RESOLVING -> resolvedAttempts.remove(index)
+                        PrefetchStage.DOWNLOADING -> originalFinished.remove(index)
+                        else -> Unit
+                    }
+                    retryAfter.remove(key)
                 }
                 // Resolution owns a small independent queue and never suspends this window collector.
                 for (index in desired) {
@@ -2506,18 +2554,18 @@ internal fun AdjacentPagePrefetch(
                             } catch (cancelled: CancellationException) { throw cancelled }
                             catch (pressure: OutOfMemoryError) {
                                 if (scriptRequests[index] === owned) {
-                                    failed(index, PrefetchStage.DOWNLOADING, pressure)
+                                    failed(index, PrefetchStage.DOWNLOADING, pressure, windowBytes)
                                     originalFinished += index
                                 }
                             }
                             catch (_: PrefetchBudgetExceeded) {
                                 if (scriptRequests[index] === owned) {
-                                    failed(index, PrefetchStage.DOWNLOADING, PrefetchBudgetExceeded())
+                                    failed(index, PrefetchStage.DOWNLOADING, PrefetchBudgetExceeded(), windowBytes)
                                     originalFinished += index
                                 }
                             } catch (failure: Exception) {
                                 if (scriptRequests[index] === owned) {
-                                    failed(index, PrefetchStage.DOWNLOADING, failure)
+                                    failed(index, PrefetchStage.DOWNLOADING, failure, windowBytes)
                                     originalFinished += index
                                 }
                             } finally {
@@ -2560,7 +2608,7 @@ internal fun AdjacentPagePrefetch(
                                 retryAttempts.remove(key); retryAfter.remove(key); resourceDeferred.remove(key)
                                 end(index, PrefetchStage.DOWNLOADING, ReaderPreparationPhase.COMPLETE)
                             } else if (result is ErrorResult) {
-                                failed(index, PrefetchStage.DOWNLOADING, result.throwable)
+                                failed(index, PrefetchStage.DOWNLOADING, result.throwable, windowBytes)
                             }
                             originalFinished += index
                         } catch (cancelled: CancellationException) {
@@ -3111,13 +3159,16 @@ private fun ReaderPageImage(
         LaunchedEffect(attempt, resource, loadedImage, pageVisible) {
             if (!pageVisible || resource == null) return@LaunchedEffect
             while (attempt.acceptsResult) {
+                val started = monotonicTimeMillis()
+                val interval = experience.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L
                 val artifact = inspectReaderPreparedArtifacts(context, resource, headers, sourceId,
                     loadedImage?.diskCacheKey, loadedImage?.memoryCacheKey)
                 if (attempt.acceptsResult) {
-                    preparationTracker?.artifact(page.index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident)
+                    preparationTracker?.artifact(page.index, artifact.originalPresent, artifact.originalBytes, artifact.previewResident,
+                        freshnessMillis = (interval + monotonicTimeMillis() - started) * 2L)
                     preparationTracker?.sample()
                 }
-                delay(experience.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L)
+                delay(interval)
             }
         }
         val imageError = error

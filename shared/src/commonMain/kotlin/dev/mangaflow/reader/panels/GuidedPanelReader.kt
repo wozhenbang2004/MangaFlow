@@ -206,13 +206,15 @@ internal fun GuidedPanelReader(
                 preparationTracker?.handoff(index, waitingForPrefetch)
                 val now = monotonicTimeMillis()
                 val resolved = resource
-                if (resolved != null && now - inspectedAt >= experience.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L) {
+                val interval = experience.state.value.runtime.cacheSampleSeconds.coerceAtLeast(1).toLong() * 1000L
+                if (resolved != null && now - inspectedAt >= interval) {
                     inspectedAt = now
                     val artifactKeys = preparationWork.snapshot()
                     val artifacts = inspectReaderPreparedArtifacts(context, resolved, currentHeaders, currentSource,
                         artifactKeys.diskCacheKey, artifactKeys.memoryCacheKey)
                     if (attempt.acceptsResult) preparationTracker?.artifact(index, artifacts.originalPresent,
-                        artifacts.originalBytes, artifacts.previewResident)
+                        artifacts.originalBytes, artifacts.previewResident,
+                        freshnessMillis = (interval + monotonicTimeMillis() - now) * 2L)
                 }
                 preparationTracker?.sample()
                 delay(250L)

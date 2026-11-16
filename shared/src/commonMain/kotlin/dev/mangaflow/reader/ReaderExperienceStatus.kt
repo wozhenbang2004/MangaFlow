@@ -203,12 +203,13 @@ internal fun ReaderExperienceStatus(
     val sourceStatus = standbySummary(standbyAvailability, standbys, budget)
     val aheadValue = originalReadinessValue(aheadPages)
     val aheadDetail = when {
-        preparation.aheadTarget > 0 -> "已核实 ${preparation.aheadReady} / ${preparation.aheadTarget} 页"
+        preparation.aheadTarget > 0 -> "已核实 ${preparation.aheadReady} / ${preparation.aheadTarget} 页；" +
+            "${aheadPages.count { it.originalPresent == null }} 页待核实"
         preparation.pauseReason != null -> preparation.pauseReason
         preparation.pages.isEmpty() -> "等待建立当前阅读窗口"
         else -> "当前没有前方准备目标"
     }
-    val aheadReserve = fractionReserve(preparation.aheadTarget)
+    val aheadReserve = fractionReserve(preparation.aheadTarget) + "?"
     val sourceStripReserve = fractionReserve(standbys.size)
     val activityReserve = "8".repeat((preparation.pages.size.toLong() * 3L).coerceAtLeast(1L).toString().length)
     fun inspect(section: ReaderStatusSection) {
@@ -234,7 +235,8 @@ internal fun ReaderExperienceStatus(
                         when (section) {
                             ReaderStatusSection.PREPARATION -> StatusMicro(Icons.AutoMirrored.Outlined.MenuBook,
                                 aheadValue, "前方原图", aheadMark, aheadDetail,
-                                progress = if (preparation.aheadTarget > 0) preparation.aheadReady.toFloat() / preparation.aheadTarget else null,
+                                progress = if (preparation.aheadTarget > 0 && aheadPages.none { it.originalPresent == null })
+                                    preparation.aheadReady.toFloat() / preparation.aheadTarget else null,
                                 selected = isSelected)
                             ReaderStatusSection.WORK -> StatusMicro(Icons.Outlined.AccountTree,
                                 if (preparation.pages.isEmpty()) "—" else active.toString(), "当前窗口工作", activityMark,
@@ -543,6 +545,8 @@ private fun ReaderStatusLegend(section: ReaderStatusSection, budget: ExperienceB
 private fun originalReadinessValue(pages: List<ReaderPreparationPage>): String = when {
     pages.isEmpty() -> "—"
     pages.all { it.originalPresent == null } -> "—/${pages.size}"
+    // A partial observation is a lower bound, not a measured drop in cached pages.
+    pages.any { it.originalPresent == null } -> "${pages.count { it.originalPresent == true }}/${pages.size}?"
     else -> "${pages.count { it.originalPresent == true }}/${pages.size}"
 }
 

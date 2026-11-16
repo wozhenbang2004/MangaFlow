@@ -27,7 +27,7 @@ internal data class ReaderPreparationPage(
     val original: ReaderPreparationStep = ReaderPreparationStep(),
     val decode: ReaderPreparationStep = ReaderPreparationStep(),
     val originalPresent: Boolean? = null, val previewResident: Boolean? = null,
-    val originalBytes: Long? = null, val inspectedAt: Long? = null,
+    val originalBytes: Long? = null, val inspectedAt: Long? = null, val freshUntil: Long? = null,
     val receivedBytes: Long = 0L, val expectedBytes: Long? = null,
     val promoted: Boolean = false, val joining: Boolean = false,
 )
@@ -76,7 +76,8 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         roles.forEach { (index, role) ->
             val previous = rows[index] ?: ReaderPreparationPage(index, role)
             fun requested(step: ReaderPreparationStep, wanted: Boolean) = when {
-                !wanted && role != ReaderPreparationRole.VISIBLE -> ReaderPreparationStep()
+                !wanted && role != ReaderPreparationRole.VISIBLE && step.phase != ReaderPreparationPhase.COMPLETE ->
+                    ReaderPreparationStep()
                 wanted && step.phase == ReaderPreparationPhase.SKIPPED -> ReaderPreparationStep(ReaderPreparationPhase.QUEUED)
                 else -> step
             }
@@ -100,7 +101,16 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
         tickets.entries.removeAll { it.value in owned }
         if (this.owner === owner) {
             this.owner = null
-            rows.keys.retainAll(tickets.filterValues { it in activeTickets }.keys.map { it.first }.toSet())
+            // Layout effects can restart without changing this tracker's exact chapter,
+            // page list or headers. Keep only their still-expiring artifact observations;
+            // retiring a job must not erase a separately verified cached original.
+            rows.toMap().forEach { (index, row) ->
+                fun retained(stage: PrefetchStage, step: ReaderPreparationStep) =
+                    if (tickets[index to stage]?.let { it in activeTickets } == true) step else ReaderPreparationStep()
+                rows[index] = row.copy(resolve = retained(PrefetchStage.RESOLVING, row.resolve),
+                    original = retained(PrefetchStage.DOWNLOADING, row.original),
+                    decode = retained(PrefetchStage.CHECKING, row.decode))
+            }
             snapshot = snapshot.copy(active = false)
             publishLocked()
         }
@@ -166,9 +176,12 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
     fun handoff(index: Int, joining: Boolean) = synchronized(lock) {
         rows[index]?.let { rows[index] = it.copy(joining = joining) }; publishLocked()
     }
-    fun artifact(index: Int, original: Boolean?, bytes: Long?, preview: Boolean?) = synchronized(lock) {
+    fun artifact(index: Int, original: Boolean?, bytes: Long?, preview: Boolean?,
+        freshnessMillis: Long = 4_000L, owner: Any? = null) = synchronized(lock) {
+        if (owner != null && this.owner !== owner) return@synchronized
+        val now = monotonicTimeMillis()
         rows[index]?.let { rows[index] = it.copy(originalPresent = original, originalBytes = bytes,
-            previewResident = preview, inspectedAt = monotonicTimeMillis()) }
+            previewResident = preview, inspectedAt = now, freshUntil = now + freshnessMillis) }
     }
     fun sample() = synchronized(lock) { publishLocked() }
     private fun updateStep(index: Int, stage: PrefetchStage, step: ReaderPreparationStep) {
@@ -183,7 +196,7 @@ internal class ReaderPreparationTracker(private val sourceId: String, private va
     private fun publishLocked() {
         val now = monotonicTimeMillis()
         snapshot = snapshot.copy(pages = rows.values.sortedBy { it.pageIndex }.map { row ->
-            if (row.inspectedAt?.let { now - it <= 4_000L } == true) row
+            if (row.freshUntil?.let { now <= it } == true) row
             else row.copy(originalPresent = null, previewResident = null, originalBytes = null)
         })
         mutableState.value = snapshot

@@ -52,6 +52,7 @@ internal class AnimeHttp(
         token: String? = null,
         referer: String? = null,
         allowNotFound: Boolean = false,
+        sameOriginRedirects: Boolean = false,
     ): AnimeHttpResponse {
         var current = animePublicUrl(url.toString())
         val origin = "${current.scheme}://${current.host}:${current.port}"
@@ -82,8 +83,8 @@ internal class AnimeHttp(
                 val target = response.header("Location")?.let(current::resolve)
                     ?: throw AnimeSourceException(sourceId, stage, "来源返回了无效重定向。", response.code)
                 current = animePublicUrl(target.toString())
-                if (token != null && "${current.scheme}://${current.host}:${current.port}" != origin)
-                    throw AnimeSourceException(sourceId, stage, "账号接口跳转到了其他站点，已停止发送凭证。", response.code)
+                if ((token != null || sameOriginRedirects) && "${current.scheme}://${current.host}:${current.port}" != origin)
+                    throw AnimeSourceException(sourceId, stage, "受限接口跳转到了其他站点，已停止请求。", response.code)
                 continue
             }
             if (response.code == 429 || response.code == 503) {
