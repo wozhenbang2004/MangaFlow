@@ -61,7 +61,12 @@ data class AnimeSourceEpisode(
     val playbackData: String? = null,
 )
 
-data class AnimeSourceCatalog(val title: AnimeSourceTitle, val episodes: List<AnimeSourceEpisode>)
+data class AnimeSourceCatalog(
+    val title: AnimeSourceTitle,
+    val episodes: List<AnimeSourceEpisode>,
+    /** Actual partial-read status, not a claim that unavailable entries were deleted. */
+    val notice: String? = null,
+)
 
 data class AnimeSubtitle(
     val id: String,

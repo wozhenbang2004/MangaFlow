@@ -122,6 +122,10 @@ internal fun AnimeSourcesPanel(
                                     }
                                 }
                             }
+                            if (!preview.notice.isNullOrBlank() && state.sourceError == null) item(key = "preview-partial") {
+                                AnimeCatalogNotice(preview, retryEnabled = !state.previewLoading,
+                                    onRetry = { controller.previewSource(preview.title) })
+                            }
                             if (previousBinding != null) item {
                                 AnimeSectionTitle("这将替换原来的来源关联", previousBinding.catalog.title)
                                 Text("替换后重新核对线路与集数映射；观看记录会保留，关联改动可以撤销。",
@@ -147,7 +151,9 @@ internal fun AnimeSourcesPanel(
                             }
                         }
                         if (state.sourceError != null) item {
-                            AnimeMessage("来源目录未取得", state.sourceError, icon = Icons.Outlined.ErrorOutline)
+                            if (preview == null) AnimeMessage("来源目录未取得", state.sourceError, icon = Icons.Outlined.ErrorOutline)
+                            else AnimeDiscoveryInlineStatus("目录更新未完成，仍可选择已加载集数",
+                                retry = { controller.previewSource(preview.title) })
                         }
                     }
                     if (preview != null) MotionButton(onClick = controller::bindPreviewSource,
@@ -226,6 +232,9 @@ internal fun AnimeSourcesPanel(
                                     AnimeQuietLabel(catalogError)
                                     MotionTextButton(onClick = { controller.refreshSource(sourceId) },
                                         modifier = Modifier.heightIn(min = 44.dp)) { Text("重试这个来源的目录") }
+                                }
+                                if (catalogError == null && !catalog.notice.isNullOrBlank()) {
+                                    AnimeCatalogNotice(catalog, onRetry = { controller.refreshSource(sourceId) })
                                 }
                                 sourceGroups.forEach { group ->
                                     val count = catalog.episodes.count { it.group == group }
@@ -393,6 +402,25 @@ private fun AnimeSourceMenu(sourceId: String, state: AnimeScreenState, controlle
             CompactMenuAction(Icons.Outlined.LinkOff, "解除作品关联", destructive = true, onClick = {
                 expanded = false; controller.unlinkSource(sourceId)
             })
+        }
+    }
+}
+
+/** A partial catalogue is usable content with a local retry, never a failed whole-screen state. */
+@Composable
+internal fun AnimeCatalogNotice(catalog: AnimeSourceCatalog, retryEnabled: Boolean = true, onRetry: () -> Unit) {
+    val notice = catalog.notice?.takeIf { it.isNotBlank() } ?: return
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Icon(Icons.Outlined.Info, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(notice, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (catalog.episodes.isNotEmpty()) AnimeQuietLabel("已加载的集数仍可选择")
+        }
+        MotionIconButton(onClick = onRetry, enabled = retryEnabled, modifier = Modifier.size(44.dp),
+            tooltip = "重新读取此来源目录") {
+            Icon(Icons.Outlined.Refresh, "重试未完整加载的目录", Modifier.size(18.dp))
         }
     }
 }

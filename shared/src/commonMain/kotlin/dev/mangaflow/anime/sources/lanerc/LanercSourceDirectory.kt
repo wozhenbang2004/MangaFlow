@@ -50,6 +50,7 @@ internal data class LanercInstalledPackage(
 
 /** Only public script URLs and semantic metadata are packaged; third-party script code is not bundled. */
 val LANERC_SOURCE_DIRECTORY: List<LanercSourceDescriptor> = listOf(
+    LanercSourceDescriptor("anime-native-ani", "AniCh · 内建", LanercSourceKind.VIDEO, "https://anich.sends.eu.org/", "https://anich.sends.eu.org/", emptyList(), setOf("search", "detail", "play"), "", "匿名原生协议；逐集实际线路，不推断未返回的集数或替换选定线路"),
     // Original native adapters. Distinct IDs retain legacy script title/group/episode ownership.
     LanercSourceDescriptor("anime-native-akianime", "AkiAnime · 内建", LanercSourceKind.VIDEO, "https://www.akianime.com/", "https://www.akianime.com/", emptyList(), setOf("search", "detail", "play"), "", "仅第一页关键词搜索；匿名公开线路，验证或加密线路不保证可用"),
     LanercSourceDescriptor("anime-native-dmbus", "动漫巴士 · 内建", LanercSourceKind.VIDEO, "https://dmbus.cc/", "https://dmbus.cc/", emptyList(), setOf("search", "detail", "play"), "", "关键词 page 分页；匿名公开线路，动态加密线路不保证可用"),

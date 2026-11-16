@@ -35,6 +35,10 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
     modifier: Modifier = Modifier, active: Boolean = true) {
     val subject = detail.subject
     val native = subject.externalIds["native-source"] != null
+    val pendingNativeCatalog = state.sourceCatalogs.firstOrNull { catalog ->
+        catalog.title.sourceId == subject.externalIds["native-source"] &&
+            !catalog.notice.isNullOrBlank() && detail.episodes.isEmpty()
+    }
     val entry = state.library.firstOrNull { it.subject.id == subject.id }
     var episodeTab by rememberSaveable(subject.id) { mutableIntStateOf(0) }
     var descriptionExpanded by rememberSaveable(subject.id) { mutableStateOf(false) }
@@ -104,7 +108,8 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                         Spacer(Modifier.width(7.dp))
                         Text(if (resume != null) "继续 " + animeEpisodeLabel(resume) + " · " + animeTime(entry?.resume?.positionMs ?: 0L)
                             else first?.let { "播放 " + animeEpisodeLabel(it) } ?: if (state.detailLoading) "正在载入集数"
-                            else if (state.detailError != null) "集数未取得" else "暂无集数",
+                            else if (state.detailError != null) "集数未取得"
+                            else if (pendingNativeCatalog != null) "等待原线路集数" else "暂无集数",
                             maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     Box {
@@ -152,6 +157,17 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
             if (state.sourceError != null) item(key = "source-error") {
                 AnimeSelection("来源暂未就绪", state.sourceError, false, onClick = { onSources(null) })
             }
+            state.sourceCatalogs.filter { !it.notice.isNullOrBlank() && it != pendingNativeCatalog }.forEach { catalog ->
+                item(key = "partial-catalog:${catalog.title.sourceId}:${catalog.title.id}") {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        if (state.sourceCatalogs.size > 1) AnimeQuietLabel(animeSourceName(catalog.title.sourceId, state))
+                        if (state.sourceCatalogErrors[catalog.title.sourceId] == null)
+                            AnimeCatalogNotice(catalog, onRetry = { controller.refreshSource(catalog.title.sourceId) })
+                        else AnimeDiscoveryInlineStatus("目录更新未完成，仍可选择已加载集数",
+                            retry = { controller.refreshSource(catalog.title.sourceId) })
+                    }
+                }
+            }
             item(key = "episodes-heading") {
                 AnimeSectionTitle("选集", action = {
                     Row {
@@ -172,7 +188,11 @@ internal fun AnimeDetailPane(detail: AnimeDetail, state: AnimeScreenState, contr
                     controlHeight = 44.dp, treatment = MotionTabTreatment.Underline)
             }
             if (episodes.isEmpty() && !state.detailLoading && state.detailError == null) item(key = "empty-episodes") {
-                AnimeMessage(if (episodeQuery.isNotBlank()) "没有匹配的集数" else "这组还没有集数",
+                if (pendingNativeCatalog != null) {
+                    AnimeMessage("所选线路尚未加载完整", pendingNativeCatalog.notice,
+                        action = "继续加载原线路",
+                        onAction = { controller.refreshSource(pendingNativeCatalog.title.sourceId) })
+                } else AnimeMessage(if (episodeQuery.isNotBlank()) "没有匹配的集数" else "这组还没有集数",
                     if (episodeQuery.isNotBlank()) "试试其他集号或标题。" else "作品资料尚未提供集数时，不按列表位置猜配播放资源。",
                     action = if (episodeQuery.isNotBlank()) "清除查找" else "查看来源",
                     onAction = { if (episodeQuery.isNotBlank()) episodeQuery = "" else onSources(null) })

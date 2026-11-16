@@ -598,23 +598,40 @@ class AnimeController(private val context: PlatformContext, private val scope: C
                     }
                     check(discoverySourceRevision(sourceId) == revision && sources.provider(sourceId) != null) { "来源已经变化。" }
                     if (!currentDetail(generation, subject.id)) return@launch
+                    check(library.state.value.restoreEpoch == openingRestoreEpoch) { "资料已恢复，请重新打开目录。" }
                     val groups = catalog.episodes.map { it.group }.distinct()
                     val resumeGroup = resumeEpisodeId?.let { id -> catalog.episodes.firstOrNull { nativeEpisodeId(subject, it) == id }?.group }
-                    val group = resumeGroup ?: saved?.selectedGroup?.takeIf { it in groups } ?: groups.firstOrNull()
-                        ?: error("这个来源暂无剧集。")
-                    val binding = AnimeSourceBinding(subject.id, reference.copy(sourceRevision = revision), preferred = true, selectedGroup = group)
-                    // Intrinsic native ownership only, never a guessed Bangumi/cross-source association.
-                    library.edit(subject, rememberUndo = false, editBindings = {
-                        check(currentDetail(generation, subject.id) && library.state.value.restoreEpoch == openingRestoreEpoch &&
-                            discoverySourceRevision(sourceId) == revision && sources.provider(sourceId) != null) {
-                            "来源或页面已经变化，请重新打开。"
-                        }
-                        listOf(binding)
-                    })
-                    if (!currentDetail(generation, subject.id)) return@launch
+                    // A budgeted/failed read is not evidence that the user's saved line disappeared.
+                    // Keep the binding and pending resume untouched until that exact line is observed.
+                    val preserveSaved = catalog.notice != null && saved != null
+                    val unresolvedResume = catalog.notice != null && resumeEpisodeId != null && resumeGroup == null
+                    val group = when {
+                        preserveSaved -> saved?.selectedGroup
+                        unresolvedResume -> saved?.selectedGroup
+                        else -> resumeGroup ?: saved?.selectedGroup?.takeIf { it in groups } ?: groups.firstOrNull()
+                    }
+                    check(group != null || catalog.notice != null) { "这个来源暂无剧集。" }
+                    val binding = if (preserveSaved) requireNotNull(saved)
+                        else saved?.copy(catalog = reference.copy(sourceRevision = revision), selectedGroup = group)
+                            ?: AnimeSourceBinding(subject.id, reference.copy(sourceRevision = revision), preferred = true, selectedGroup = group)
+                    if (!preserveSaved) {
+                        // Intrinsic native ownership only, never a guessed Bangumi/cross-source association.
+                        library.edit(subject, rememberUndo = false, editBindings = {
+                            check(currentDetail(generation, subject.id) && library.state.value.restoreEpoch == openingRestoreEpoch &&
+                                discoverySourceRevision(sourceId) == revision && sources.provider(sourceId) != null) {
+                                "来源或页面已经变化，请重新打开。"
+                            }
+                            listOf(binding)
+                        })
+                    }
+                    if (!currentDetail(generation, subject.id) || library.state.value.restoreEpoch != openingRestoreEpoch ||
+                        discoverySourceRevision(sourceId) != revision || sources.provider(sourceId) == null) return@launch
                     retryNativeReference = null
-                    mutableState.update { it.copy(detail = nativeDetail(subject, catalog, group), detailLoading = false,
-                        sourceBindings = listOf(binding), sourceCatalogs = listOf(catalog)) }
+                    val shownCatalog = if (catalog.notice != null && (group !in groups || unresolvedResume))
+                        catalog.copy(notice = catalog.notice + " 已保留原线路与续看位置，待对应剧集加载后继续。") else catalog
+                    mutableState.update { it.copy(detail = group?.let { selected -> nativeDetail(subject, shownCatalog, selected) }
+                        ?: AnimeDetail(subject, emptyList()), detailLoading = false,
+                        sourceBindings = listOf(binding), sourceCatalogs = listOf(shownCatalog)) }
                     rebuildOptions()
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (failure: Exception) { if (currentDetail(generation, subject.id)) mutableState.update {
@@ -694,7 +711,8 @@ class AnimeController(private val context: PlatformContext, private val scope: C
             currentDetail(generation, binding.subjectId) && stillBound(binding.subjectId, binding.catalog)
         try {
             val provider = sources.provider(sourceId) ?: error("这个来源当前不可用，可以解除关联。")
-            val catalog = provider.catalog(binding.catalog)
+            val received = provider.catalog(binding.catalog)
+            val catalog = retainPartialCatalog(mutableState.value.sourceCatalogs.firstOrNull { it.title == binding.catalog }, received)
             check(catalog.title.sourceId == sourceId && catalog.title.id == binding.catalog.id &&
                 catalog.title.url == binding.catalog.url) { "来源目录身份已变化，请重新搜索并确认关联。" }
             if (!current()) return
@@ -789,19 +807,27 @@ class AnimeController(private val context: PlatformContext, private val scope: C
         previewJob?.cancel()
         previewSourceId = title.sourceId
         previewSourceRevision = sourceRevision(title.sourceId)
-        mutableState.update { it.copy(previewCatalog = null, previewLoading = true, sourceError = null) }
+        mutableState.update { it.copy(previewCatalog = it.previewCatalog?.takeIf { old -> old.title == title },
+            previewLoading = true, sourceError = null) }
         previewJob = scope.launch {
             try {
                 val provider = sources.provider(title.sourceId) ?: error("这个来源尚未安装。")
                 val catalog = provider.catalog(title)
                 if (generation == previewGeneration && currentDetail(owner, subjectId))
-                    mutableState.update { it.copy(previewCatalog = catalog, previewLoading = false) }
+                    mutableState.update { it.copy(previewCatalog = retainPartialCatalog(it.previewCatalog, catalog), previewLoading = false) }
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 if (generation == previewGeneration && currentDetail(owner, subjectId))
                     mutableState.update { it.copy(previewLoading = false, sourceError = failure.message ?: "来源目录未能读取。") }
             }
         }
+    }
+
+    /** An incomplete refresh cannot erase a previously observed exact native episode/line. */
+    private fun retainPartialCatalog(previous: AnimeSourceCatalog?, current: AnimeSourceCatalog): AnimeSourceCatalog {
+        if (current.notice == null || previous == null || previous.title != current.title) return current
+        val episodes = previous.episodes.associateBy { it.id } + current.episodes.associateBy { it.id }
+        return current.copy(episodes = episodes.values.toList())
     }
 
     fun dismissSourcePreview() {

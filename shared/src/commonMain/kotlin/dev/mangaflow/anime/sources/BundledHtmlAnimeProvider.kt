@@ -108,5 +108,5 @@ internal class BundledHtmlAnimeProvider(
     }
 }
 
-internal val BUNDLED_HTML_ANIME_IDS = setOf("anime-native-akianime", "anime-native-dmbus")
+internal val BUNDLED_HTML_ANIME_IDS = setOf("anime-native-akianime", "anime-native-dmbus", "anime-native-ani")
 internal const val BUNDLED_HTML_ANIME_VERSION = "native-2026-11-16"

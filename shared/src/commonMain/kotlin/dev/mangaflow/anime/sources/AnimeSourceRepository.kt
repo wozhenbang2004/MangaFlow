@@ -37,7 +37,8 @@ class AnimeSourceRepository(context: PlatformContext) {
     val providers: List<AnimeProvider> get() = nativeProviders + extensions.state.value
         .filter { it.installed && it.enabled && it.kind == dev.mangaflow.anime.sources.lanerc.LanercSourceKind.VIDEO }
         .map { listing ->
-            if (listing.id in BUNDLED_HTML_ANIME_IDS) BundledHtmlAnimeProvider(listing.id, requireNotNull(listing.revision))
+            if (listing.id == "anime-native-ani") AniChAnimeProvider(requireNotNull(listing.revision))
+            else if (listing.id in BUNDLED_HTML_ANIME_IDS) BundledHtmlAnimeProvider(listing.id, requireNotNull(listing.revision))
             else dev.mangaflow.anime.sources.lanerc.LanercProvider(extensions, extensions.descriptor(listing.id))
         }
     fun provider(id: String): AnimeProvider? = providers.firstOrNull { it.id == id }

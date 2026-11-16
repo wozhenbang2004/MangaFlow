@@ -31,7 +31,7 @@ open class AnimeSourceException(
     cause: Throwable? = null,
 ) : IllegalStateException(message, cause)
 
-internal data class AnimeHttpResponse(val url: HttpUrl, val code: Int, val text: String)
+internal data class AnimeHttpResponse(val url: HttpUrl, val code: Int, val text: String, val bytes: ByteArray = byteArrayOf())
 
 /**
  * Uses the application's routed, cancellable Ktor transport. One operation keeps one route
@@ -94,7 +94,7 @@ internal class AnimeHttp(
                     response.code, ceil(retry / 1000.0).toLong())
             }
             if (response.code == 404 && allowNotFound)
-                return AnimeHttpResponse(current, response.code, response.text())
+                return AnimeHttpResponse(current, response.code, response.text(), response.bytes)
             if (!response.isSuccessful || response.code in setOf(209, 210)) {
                 val message = when (response.code) {
                     401 -> if (token != null) "账号授权已失效，请重新连接账号。" else "来源要求登录后访问。"
@@ -104,7 +104,7 @@ internal class AnimeHttp(
                 }
                 throw AnimeSourceException(sourceId, stage, message, response.code)
             }
-            return AnimeHttpResponse(current, response.code, response.text())
+            return AnimeHttpResponse(current, response.code, response.text(), response.bytes)
         }
     }
 

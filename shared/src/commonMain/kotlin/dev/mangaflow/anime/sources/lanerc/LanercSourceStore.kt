@@ -87,7 +87,13 @@ class LanercSourceStore private constructor(context: PlatformContext) {
                             installed.copy(optionsKey = key)
                         } else installed
                     }.associateBy { it.id }
-                    if (root.getInt("version") < 3 || restored.any { it.optionsKey.isEmpty() && it.optionsJson != "{}" }) commit(migrated)
+                    // A later application release may add another built-in while storage is
+                    // already v3. Freeze the legacy-owner preference before any removal can run.
+                    val missingLegacyChoices = BUNDLED_HTML_ANIME_IDS.any { id ->
+                        id !in builtIns && migrated[id.replace("anime-native-", "anime-lanerc-")] != null
+                    }
+                    if (root.getInt("version") < 3 || missingLegacyChoices ||
+                        restored.any { it.optionsKey.isEmpty() && it.optionsJson != "{}" }) commit(migrated)
                     else { packages.value = migrated; mutableState.value = project(migrated) }
                 }
             } catch (cancel: CancellationException) { throw cancel }
