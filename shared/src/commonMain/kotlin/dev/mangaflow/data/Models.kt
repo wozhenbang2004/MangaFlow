@@ -55,6 +55,8 @@ data class Page(
     val sourceRevision: String = "",
     val sourceSessionEpoch: String = "",
     val transform: String = "",
+    /** Ephemeral image-source routing identity for a user-selected backup page. */
+    val sourceRouteId: String = "",
 )
 
 interface MangaRepository {

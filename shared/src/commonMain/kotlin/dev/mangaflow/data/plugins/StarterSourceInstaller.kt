@@ -40,7 +40,7 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
     val state = mutableState.asStateFlow()
 
     fun start(retry: Boolean = false): Unit = synchronized(control) {
-        if (job?.isCompleted == false || attempted && !retry) return@synchronized
+        if (job?.isCompleted == false || attempted && !retry && mutableState.value.error == null) return@synchronized
         attempted = true
         val next = scope.launch(start = CoroutineStart.LAZY) { install(prepareExistingEngine = retry) }
         job = next
@@ -59,7 +59,11 @@ internal class StarterSourceInstaller(private val context: PlatformContext,
             val pending = STARTERS.filterNot { store.hasSourceHistory(it.sourceId) }
             val repairs = store.pendingHostRepairs()
             mutableState.value = mutableState.value.copy(completed = STARTERS.size - pending.size, total = STARTERS.size + repairs.size)
-            if (pending.isEmpty() && repairs.isEmpty()) return
+            if (pending.isEmpty() && repairs.isEmpty()) {
+                if (prepareExistingEngine) prepareEngine()
+                mutableState.value = mutableState.value.copy(phase = "来源已准备", error = null)
+                return
+            }
             // Existing-source maintenance can validate an installed engine, but never restores
             // an explicitly removed optional component without the user's retry action.
             if (pending.isNotEmpty() || prepareExistingEngine) prepareEngine()

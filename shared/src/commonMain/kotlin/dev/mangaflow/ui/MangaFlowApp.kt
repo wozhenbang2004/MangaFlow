@@ -425,7 +425,12 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         sourceEntries.filter { it.adult == restrictedMode }
     }
     val usableScopedSources = remember(sourceEntries, sourceSignedIn) {
-        sourceEntries.filter { it.adult && it.enabled && it.isInstalled && !it.removed }.map { it.source }
+        // A built-in PicACG catalogue needs a verified account. Keep it in account/source
+        // settings, but never let a signed-out source poison the anonymous aggregated feed.
+        sourceEntries.filter { entry ->
+            entry.adult && entry.enabled && entry.isInstalled && !entry.removed &&
+                (entry.source.id != "picacg" || sourceSignedIn)
+        }.map { it.source }
     }
     val scopedUnavailableReason = remember(sourceEntries, sourceSignedIn, usableScopedSources) {
         val registered = sourceEntries.filter { it.adult && !it.removed }
@@ -1365,6 +1370,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         onOpenSync = { openCopyComparison() },
                                         onLoginWithPassword = model::loginWithPassword,
                                         onLoginWithCookie = model::loginWithCookie,
+                                        onWebsiteBegin = model::beginWebsiteLogin,
+                                        onWebsiteCancel = model::cancelWebsiteLogin,
+                                        onWebsiteCredential = model::loginWithWebsiteToken,
                                         onLogout = model::logout,
                                         onRefresh = model::refreshAccount,
                                         onMoreFavorites = model::moreCloudFavorites, onMoreHistory = model::moreCloudHistory,

@@ -351,6 +351,11 @@ fun ReaderScreen(
     var currentPageRetrySerial by remember(chapterId) { mutableIntStateOf(0) }
     var currentPageRetryIndex by remember(chapterId) { mutableIntStateOf(-1) }
     var pages by remember(chapterId) { mutableStateOf<List<Page>>(emptyList()) }
+    // Backup images change only this displayed session, not the canonical chapter or history.
+    val pageRepairs = remember(chapterId, chapter.sourceId, chapter.sourceMangaId) {
+        mutableStateMapOf<Int, ReaderPageRepair>()
+    }
+    var repairTarget by remember(chapterId) { mutableStateOf<Int?>(null) }
     var loading by remember(chapterId) { mutableStateOf(true) }
     var error by remember(chapterId) { mutableStateOf<String?>(null) }
     val chapterLoadAttempt = remember(manga.id, chapterId, chapter.sourceId, chapter.sourceMangaId,
@@ -595,6 +600,35 @@ fun ReaderScreen(
                     }
                 else materialized
             }
+        }
+    }
+    val repairSnapshot = pageRepairs.toMap()
+    val displayedPages = remember(pages, repairSnapshot) {
+        pages.mapIndexed { index, page ->
+            repairSnapshot[index]?.page?.takeIf { it.index == page.index } ?: page
+        }
+    }
+    // Keep callbacks stable: AdjacentPagePrefetch observes their identity, and a fresh
+    // lambda on every reader recomposition would repeatedly cancel in-flight warmups.
+    val displayedResolve: ReaderPageResolver = remember(resolvePage) {
+        { page, onBytes -> if (page.sourceRouteId.isNotBlank()) page else resolvePage(page, onBytes) }
+    }
+    val displayedRetry: ReaderPageResolver = remember(retryPage) {
+        { page, onBytes -> if (page.sourceRouteId.isNotBlank()) page else retryPage(page, onBytes) }
+    }
+    val displayedPrefetch: suspend (Page) -> Page? = remember(prefetchPage) {
+        { page -> if (page.sourceRouteId.isNotBlank()) page else prefetchPage(page) }
+    }
+    val displayedScriptPrefetch: suspend (Page, PrefetchByteBudget, PrefetchWork) -> Page? =
+        remember(scriptPrefetch) {
+            { page, budget, work ->
+                if (page.sourceRouteId.isNotBlank()) page else scriptPrefetch(page, budget, work)
+            }
+        }
+    LaunchedEffect(storageCache, repairSnapshot) {
+        repairSnapshot.values.forEach { repair ->
+            storageCache.registerPages(manga.id, chapterId, repair.variant.sourceId,
+                listOf(repair.page), repair.headers)
         }
     }
     val motionEnabled = LocalMotionEnabled.current
@@ -961,9 +995,10 @@ fun ReaderScreen(
                 pages.isNotEmpty() -> key(chapterId, preferences.mode, preferences.doublePage, preferences.coverAlone, manualSingles,
                     preferences.panelLayoutKey) {
                     if (preferences.panelEngine != PanelEngine.OFF) GuidedPanelReader(
-                        pages = pages, headers = headers, resolvePage = resolvePage, retryPage = retryPage,
+                        pages = displayedPages, headers = headers,
+                        resolvePage = displayedResolve, retryPage = displayedRetry,
                         observePageTransfer = observePageTransfer,
-                        sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
+                        sourceId = chapter.sourceId, prefetchPage = displayedPrefetch, scriptPrefetch = displayedScriptPrefetch,
                         sourceName = currentSourceName.orEmpty(), sourceAlternatives = alternativeSources,
                         readySourceVariants = readySourceVariants, onPrefetchFailure = reportPrefetchFailure,
                         externalRetrySerial = currentPageRetrySerial,
@@ -972,6 +1007,7 @@ fun ReaderScreen(
                         onQuickSwitch = { failedIndex, variant ->
                             onQuickReadVariant(chapter, variant, failedIndex, pages.size)
                         },
+                        onRepairPage = { index -> repairTarget = index },
                         onMoreSources = { anchor ->
                             sourceTriggerAnchor = anchor
                             sourceCloseRequested = false; sourceChapter = chapter; controlsVisible = true
@@ -1002,10 +1038,11 @@ fun ReaderScreen(
                         backdrop = readerBackdrop,
                         bottomClearancePx = if (controlsVisible) bottomControlsHeightPx else 0,
                     ) else ChapterPages(
-                        pages = pages, sourceId = chapter.sourceId, prefetchPage = prefetchPage, scriptPrefetch = scriptPrefetch,
+                        pages = displayedPages, sourceId = chapter.sourceId,
+                        prefetchPage = displayedPrefetch, scriptPrefetch = displayedScriptPrefetch,
                         headers = headers,
-                        resolvePage = resolvePage,
-                        retryPage = retryPage,
+                        resolvePage = displayedResolve,
+                        retryPage = displayedRetry,
                         observePageTransfer = observePageTransfer,
                         sourceAlternatives = alternativeSources,
                         readySourceVariants = readySourceVariants, onPrefetchFailure = reportPrefetchFailure,
@@ -1015,6 +1052,7 @@ fun ReaderScreen(
                         onQuickSwitch = { failedIndex, variant ->
                             onQuickReadVariant(chapter, variant, failedIndex, pages.size)
                         },
+                        onRepairPage = { index -> repairTarget = index },
                         onMoreSources = { anchor ->
                             sourceTriggerAnchor = anchor
                             sourceCloseRequested = false
@@ -1160,6 +1198,7 @@ fun ReaderScreen(
                         Text(manga.title, fontFamily = mangaFontFamily(MangaFontScene.WORK_TITLE), color = colors.onSurface, fontSize = 14.sp, fontWeight = FontWeight.Medium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(listOfNotNull(chapter.group.takeIf { hasMultipleGroups }, chapter.title,
+                            pageRepairs[pageIndex]?.let { "补页 · " + it.variant.sourceName + " " + (it.nativeIndex + 1) },
                             currentSourceName.takeIf { chapter.variants.size > 1 }).joinToString(" · "),
                             color = colors.onSurface.copy(alpha = .86f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
@@ -1172,6 +1211,16 @@ fun ReaderScreen(
                         }, contentPadding = PaddingValues(horizontal = 8.dp)) {
                             Text(if (preferences.doublePage) "双页" else "单页", color = colors.onSurface, fontSize = 12.sp)
                         }
+                    }
+                    if (pageRepairs.containsKey(pageIndex)) {
+                        ReaderIcon(Icons.Rounded.Refresh, "恢复本页原图", interactive = controlsVisible,
+                            onClick = {
+                                pageRepairs.remove(pageIndex)
+                                currentPageRetryIndex = pageIndex
+                                currentPageRetrySerial++
+                            })
+                        ReaderIcon(Icons.Rounded.Tune, "调整本页备用来源与对齐", interactive = controlsVisible,
+                            onClick = { repairTarget = pageIndex })
                     }
                     if (desktop) ReaderIcon(Icons.AutoMirrored.Outlined.MenuBook,
                         if (showChapters) "收起章节目录" else "章节目录", interactive = controlsVisible,
@@ -1491,6 +1540,19 @@ fun ReaderScreen(
     }
     }
     }
+    ReaderPageRepairDialog(
+        index = repairTarget, mainPageCount = pages.size, alternatives = alternativeSources,
+        repository = repository, backdrop = readerBackdrop,
+        onApply = { repaired ->
+            if (pages.getOrNull(repaired.primaryIndex) != null) {
+                pageRepairs[repaired.primaryIndex] = repaired
+                currentPageRetryIndex = repaired.primaryIndex
+                currentPageRetrySerial++
+            }
+            repairTarget = null
+        },
+        onDismiss = { repairTarget = null },
+    )
     ReaderPageNavigatorDialog(
         visible = showPageNavigator,
         pages = pages,
@@ -1593,6 +1655,7 @@ private fun ChapterPages(
     sourceAlternatives: List<ChapterVariant>,
     readySourceVariants: Map<String, ReaderSourceStandby>,
     onPrefetchFailure: (Page) -> Unit,
+    onRepairPage: (Int) -> Unit,
     sourceName: String,
     onShowControls: () -> Unit,
     retryTargetIndex: Int,
@@ -1814,6 +1877,7 @@ private fun ChapterPages(
                         pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
                         onQuickSwitch = { variant -> onQuickSwitch(index, variant) },
                         onMoreSources = onMoreSources,
+                        onRepairPage = { onRepairPage(index) },
                         externalRetrySerial = if (index == retryTargetIndex) retryPulse else 0,
                         onLoadChanged = { ready ->
                             if (currentPages.getOrNull(index)?.url == page.url) {
@@ -1975,6 +2039,7 @@ private fun ChapterPages(
                                 pageCount = pages.size, foreground = preferences.theme.foreground(), onShowControls = onShowControls,
                                 onQuickSwitch = { variant -> onQuickSwitch(imageIndex, variant) },
                                 onMoreSources = onMoreSources,
+                                onRepairPage = { onRepairPage(imageIndex) },
                                 externalRetrySerial = if (imageIndex == retryTargetIndex) retryPulse else 0,
                                 onLoadChanged = { ready ->
                                     val url = pages[imageIndex].url
@@ -2567,6 +2632,7 @@ private fun ReaderPage(
     prefetchFailure: String? = null,
     onQuickSwitch: (ChapterVariant) -> Unit = {},
     onMoreSources: (Rect?) -> Unit = {},
+    onRepairPage: () -> Unit = {},
     externalRetrySerial: Int = 0,
     onLoadChanged: (Boolean) -> Unit,
     onHeightMeasured: (Int) -> Unit = {},
@@ -3021,6 +3087,7 @@ private fun ReaderPage(
                     alternatives = sourceAlternatives,
                     readySourceVariants = readySourceVariants,
                     onRetry = { reload++ }, onSwitch = onQuickSwitch, onMore = onMoreSources,
+                    onRepairPage = onRepairPage,
                     onControls = onShowControls,
                     onStop = {
                         attempt.stopped = true; error = "已停止等待"; loading = false; loadChanged(false)

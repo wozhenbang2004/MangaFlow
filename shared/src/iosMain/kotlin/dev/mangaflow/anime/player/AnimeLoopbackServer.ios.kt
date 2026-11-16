@@ -8,6 +8,7 @@ import kotlinx.atomicfu.locks.synchronized
 import kotlinx.cinterop.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -31,7 +32,8 @@ internal actual class AnimeLoopbackServer actual constructor(
                 address.sin_len = sizeOf<sockaddr_in>().convert()
                 address.sin_family = AF_INET.convert()
                 address.sin_port = 0u
-                address.sin_addr.s_addr = inet_addr("127.0.0.1")
+                // Darwin Kotlin/Native does not expose inet_addr; iOS targets are little-endian.
+                address.sin_addr.s_addr = 0x0100007Fu
                 require(bind(descriptor, address.ptr.reinterpret(), sizeOf<sockaddr_in>().convert()) == 0) {
                     "无法绑定本机播放连接"
                 }
@@ -39,7 +41,8 @@ internal actual class AnimeLoopbackServer actual constructor(
                 val length = alloc<socklen_tVar>()
                 length.value = sizeOf<sockaddr_in>().convert()
                 require(getsockname(descriptor, address.ptr.reinterpret(), length.ptr) == 0)
-                ntohs(address.sin_port).toInt()
+                val networkPort = address.sin_port.toInt() and 0xffff
+                ((networkPort and 0xff) shl 8) or (networkPort shr 8)
             }
         } catch (failure: Throwable) {
             platform.posix.close(descriptor)
