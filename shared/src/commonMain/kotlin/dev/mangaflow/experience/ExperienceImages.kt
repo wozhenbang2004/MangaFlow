@@ -218,7 +218,8 @@ private fun readerPageHeaders(page: Page, headers: Map<String, String>): Map<Str
 internal fun readerPageCacheKey(page: Page, headers: Map<String, String>, source: String = ""): String {
     val merged = readerPageHeaders(page, headers)
     val actualSource = page.sourceRouteId.ifBlank { source }
-    val scoped = page.sourceRevision.isNotBlank() || page.sourceSessionEpoch.isNotBlank() ||
+    val scoped = page.sourceRouteId.isNotBlank() || page.sourceRevision.isNotBlank() ||
+        page.sourceSessionEpoch.isNotBlank() ||
         page.sourceImageToken.isNotBlank() || page.headerSecretRef.isNotBlank() ||
         page.headerSecretBinding.isNotBlank() || page.transform.isNotBlank() ||
         merged.keys.any { it !in publicImageHeaders }
