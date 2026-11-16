@@ -8,47 +8,43 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.mangaflow.experience.*
 import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.MotionIconButton
 import kotlin.math.roundToInt
 
 /** Adapts the reader's CacheWorkRow/CacheOccupancy into this same retained settings surface. */
 @Composable
 internal fun ExperienceResourceOverview(usage: ExperienceUsage, appliedBudget: ExperienceBudget,
     previewBudget: ExperienceBudget, draft: Boolean, enabled: Boolean, editing: Boolean = false,
+    showDraftImpact: Boolean = true,
     onOpen: (String) -> Unit) {
     val forecast = remember(appliedBudget, usage) { estimateExperienceResources(appliedBudget, usage) }
     val target = remember(previewBudget, usage, draft, forecast) {
         if (draft) estimateExperienceResources(previewBudget, usage) else forecast
     }
     val colors = MaterialTheme.colorScheme
-    Column(Modifier.fillMaxWidth().padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        ResourceMetricRow(Icons.Outlined.Memory, "应用 " + processMemoryLabel(forecast.processMemoryKind),
+    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        ResourceMetricRow(Icons.Outlined.Memory, "实测",
             resourceBytes(forecast.currentProcessBytes),
-            "观测峰值 " + resourceBytes(forecast.observedProcessPeakBytes), enabled,
+            processMemoryLabel(forecast.processMemoryKind), enabled,
             "当前应用占用 ${resourceBytes(forecast.currentProcessBytes)}，本次同口径观测峰值 ${resourceBytes(forecast.observedProcessPeakBytes)}") { onOpen("resources") }
-        if (draft) MotionTextButton(onClick = { onOpen("resources") }, enabled = enabled,
+        if (draft && showDraftImpact) MotionTextButton(onClick = { onOpen("resources") }, enabled = enabled,
             contentPadding = PaddingValues(0.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
             Box(Modifier.weight(1f)) { ExperienceDraftImpact(usage, appliedBudget, previewBudget, editing) }
-            Spacer(Modifier.width(6.dp))
-            Icon(Icons.Outlined.ChevronRight, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
-        } else ResourceMetricRow(Icons.Outlined.TrendingUp, "情景峰值",
+        } else if (!draft) ResourceMetricRow(Icons.Outlined.Calculate, "≈",
             resourceRange(forecast.estimatedProcessPeakLowBytes, forecast.estimatedProcessPeakHighBytes),
-            if (forecast.estimatedProcessPeakHighBytes != null) "非硬上限" else if (forecast.decodeSampleCount == 0) "待样本" else "数据不足",
+            if (forecast.estimatedProcessPeakHighBytes != null) "峰值" else if (forecast.decodeSampleCount == 0) "待样本" else "未知",
             enabled, "配置情景估算 ${resourceRange(forecast.estimatedProcessPeakLowBytes, forecast.estimatedProcessPeakHighBytes)}，不是应用内存的硬上限",
             accent = colors.primary) { onOpen("resources") }
-        Text(if (draft) "当前占用 / 草稿预算" else "当前占用 / 现用预算",
-            Modifier.padding(top = 5.dp), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             ResourceAllocation(Icons.Outlined.Image, "图片内存", usage.memoryBytes,
                 target.imageMemoryBudgetBytes, Modifier.weight(1f), enabled, draft) { onOpen("cache") }
@@ -65,36 +61,13 @@ private fun ResourceMetricRow(icon: ImageVector, title: String, value: String, t
     MotionTextButton(onClick, enabled = enabled, contentPadding = PaddingValues(0.dp),
         modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
             .semantics(mergeDescendants = true) { contentDescription = description }) {
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val scale = androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f)
-            val stacked = maxWidth < 330.dp * scale
-            val valuesStacked = maxWidth < 270.dp * scale
-            Column(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(icon, null, Modifier.size(18.dp), tint = accent)
-                    Text(title, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (!stacked) Column(horizontalAlignment = Alignment.End) {
-                        Text(value, style = MaterialTheme.typography.bodyMedium, color = accent)
-                        Text(trailing, style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Icon(Icons.Outlined.ChevronRight, null, Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                if (stacked && valuesStacked) Column(Modifier.fillMaxWidth().padding(start = 26.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(value, style = MaterialTheme.typography.bodyMedium, color = accent)
-                    Text(trailing, style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else if (stacked) Row(Modifier.fillMaxWidth().padding(start = 26.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(value, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = accent)
-                    Text(trailing, style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+            Text(title, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(value, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = accent)
+            Text(trailing, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -106,7 +79,7 @@ private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, bu
     val fraction = if (used != null && used >= 0L && budget != null && budget > 0L)
         (used.toDouble() / budget).coerceIn(0.0, 1.0).toFloat() else null
     val overBudget = used != null && budget != null && budget >= 0L && used > budget
-    val accent = if (overBudget) colors.tertiary else colors.primary
+    val accent = colors.primary
     MotionTextButton(onClick, enabled = enabled, contentPadding = PaddingValues(vertical = 6.dp),
         modifier = modifier.heightIn(min = 52.dp).semantics(mergeDescendants = true) {
             contentDescription = "$title，当前 ${resourceBytes(used)}，" + (if (draft) "草稿预算 " else "现用预算 ") + resourceBytes(budget) +
@@ -115,14 +88,14 @@ private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, bu
                 } else ""
         }) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                Icon(icon, null, Modifier.size(15.dp), tint = accent)
-                Text(title, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (overBudget) Icon(Icons.Outlined.Schedule, null, Modifier.size(12.dp), tint = accent)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Icon(icon, null, Modifier.size(20.dp), tint = accent)
+                Text(resourceBytes(used), Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+                if (overBudget) Icon(Icons.Outlined.Schedule, null, Modifier.size(14.dp), tint = accent)
+                else if (draft) Icon(Icons.Outlined.Edit, null, Modifier.size(14.dp), tint = accent)
             }
-            Text(resourceBytes(used) + " / " + resourceBytes(budget),
-                style = MaterialTheme.typography.labelMedium, color = colors.onSurface)
+            Text("/ " + resourceBytes(budget), Modifier.padding(start = 26.dp),
+                style = MaterialTheme.typography.labelSmall, color = if (draft) accent else colors.onSurfaceVariant)
             Box(Modifier.fillMaxWidth().height(3.dp)
                 .background(colors.onSurface.copy(alpha = if (fraction == null) .035f else .08f), CircleShape)) {
                 if (fraction != null) Box(Modifier.fillMaxHeight().fillMaxWidth(fraction)
@@ -130,6 +103,82 @@ private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, bu
             }
         }
     }
+}
+
+/** Values are one cache-owner snapshot; inspecting them never renews an image's idle age. */
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+internal fun ExperienceMemoryCacheSummary(usage: ExperienceUsage, draftIdleMinutes: Int,
+    enabled: Boolean, clearing: Boolean, onClear: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val memory = usage.memoryCache
+    var details by remember { mutableStateOf(false) }
+    val expiry = memory?.idleMinutes?.let { if (it == 0) "∞" else "$it min" } ?: "—"
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Icon(Icons.Outlined.Image, "解码内存", Modifier.size(20.dp), tint = colors.primary)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(resourceBytes(memory?.bytes) + " / " + resourceBytes(memory?.limit),
+                    style = MaterialTheme.typography.bodyMedium, color = colors.onSurface)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(memory?.entries?.let { "$it 项" } ?: "—", style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.Outlined.Schedule, null, Modifier.size(15.dp),
+                            tint = if (memory != null && memory.idleMinutes > 0) colors.primary else colors.onSurfaceVariant)
+                        Text(expiry, style = MaterialTheme.typography.labelSmall,
+                            color = if (memory != null && memory.idleMinutes > 0) colors.primary else colors.onSurfaceVariant,
+                            modifier = Modifier.semantics {
+                                contentDescription = memory?.idleMinutes?.let {
+                                    if (it == 0) "时间过期关闭，仅按容量淘汰" else "闲置 $it 分钟到期回收"
+                                } ?: "内存缓存尚未采样"
+                            })
+                    }
+                    if (memory != null && draftIdleMinutes != memory.idleMinutes) Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.Outlined.Edit, "草稿闲置回收时间", Modifier.size(14.dp), tint = colors.primary)
+                        Text(if (draftIdleMinutes == 0) "∞" else "$draftIdleMinutes min",
+                            style = MaterialTheme.typography.labelSmall, color = colors.primary)
+                    }
+                }
+            }
+            MotionIconButton(onClick = { details = !details }, enabled = enabled,
+                modifier = Modifier.size(44.dp), tooltip = "实际过期、淘汰与清空") {
+                Icon(Icons.Outlined.Info, "实际过期、淘汰与清空", Modifier.size(19.dp),
+                    tint = if (details) colors.primary else colors.onSurfaceVariant)
+            }
+            MotionIconButton(onClick = onClear, enabled = enabled && !clearing,
+                modifier = Modifier.size(44.dp), tooltip = "释放可复用的解码图片内存") {
+                Icon(if (clearing) Icons.Outlined.HourglassEmpty else Icons.Outlined.CleaningServices,
+                    "释放解码缓存", Modifier.size(20.dp), tint = colors.primary)
+            }
+        }
+        ExperienceReveal(details) {
+            fun released(entries: Long?, bytes: Long?) = if (entries == null || bytes == null) "—"
+                else "$entries 项 · " + resourceBytes(bytes)
+            ResourceValue(Icons.Outlined.Schedule, "到期回收", released(memory?.expiredEntries, memory?.expiredBytes))
+            ResourceValue(Icons.Outlined.SwapHoriz, "容量淘汰", released(memory?.evictedEntries, memory?.evictedBytes))
+            ResourceValue(Icons.Outlined.CleaningServices, "清空回收", released(memory?.clearedEntries, memory?.clearedBytes))
+            ResourceValue(Icons.Outlined.History, "最近回收", memory?.lastReclaimedAtMillis?.let {
+                cacheInterval((memory.sampledAtMillis - it).coerceAtLeast(0L)) + "前"
+            } ?: "—")
+            ResourceValue(Icons.Outlined.Timer, "下一到期", when {
+                memory == null -> "—"
+                memory.idleMinutes == 0 -> "∞"
+                memory.nextExpiryAtMillis != null -> cacheInterval((memory.nextExpiryAtMillis - memory.sampledAtMillis).coerceAtLeast(0L))
+                else -> "—"
+            })
+            Text("∞＝只按容量淘汰。时间以最近采样为准；累计仅指本次缓存移出的条目与引用，当前显示图像仍可能占用内存。",
+                Modifier.padding(vertical = 5.dp), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        }
+    }
+}
+
+private fun cacheInterval(millis: Long): String = when {
+    millis < 60_000L -> "${(millis + 999L) / 1_000L} s"
+    millis < 3_600_000L -> "${millis / 60_000L} min"
+    else -> "${millis / 3_600_000L} h"
 }
 
 @Composable
@@ -170,13 +219,12 @@ internal fun ExperienceDeviceDetails(usage: ExperienceUsage) {
 
 @Composable
 internal fun ExperienceForecastDetails(usage: ExperienceUsage, appliedBudget: ExperienceBudget,
-    previewBudget: ExperienceBudget, draft: Boolean, editing: Boolean = false) {
+    previewBudget: ExperienceBudget, draft: Boolean) {
     val applied = remember(appliedBudget, usage) { estimateExperienceResources(appliedBudget, usage) }
     val f = remember(previewBudget, usage) { estimateExperienceResources(previewBudget, usage) }
     ResourceValue(Icons.Outlined.Memory, "应用 " + processMemoryLabel(f.processMemoryKind), resourceBytes(f.currentProcessBytes))
     ResourceValue(Icons.Outlined.TrendingUp, "本次观测峰值", resourceBytes(f.observedProcessPeakBytes))
-    if (draft) ExperienceDraftImpact(usage, appliedBudget, previewBudget, editing)
-    else ResourceValue(Icons.Outlined.Calculate, "现用情景峰值",
+    if (!draft) ResourceValue(Icons.Outlined.Calculate, "现用情景峰值",
         resourceRange(f.estimatedProcessPeakLowBytes, f.estimatedProcessPeakHighBytes))
     if (draft) Text("预算变化 · 现用 → 草稿", Modifier.padding(top = 8.dp, bottom = 4.dp),
         style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -254,32 +302,28 @@ internal fun ExperienceDraftImpact(usage: ExperienceUsage, appliedBudget: Experi
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val stacked = maxWidth < 420.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f)
             if (stacked) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                ResourceEstimateLine("现用估算", currentEstimate, colors.onSurfaceVariant)
-                ResourceEstimateLine("草稿估算", draftEstimate, colors.primary)
+                ResourceEstimateLine(Icons.Outlined.CheckCircle, "现用", "≈ " + currentEstimate, colors.onSurfaceVariant)
+                ResourceEstimateLine(Icons.Outlined.Edit, "草稿", "≈ " + draftEstimate, colors.primary)
             } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("现用估算", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                    Text(currentEstimate, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-                }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("草稿估算", style = MaterialTheme.typography.labelSmall, color = colors.primary)
-                    Text(draftEstimate, style = MaterialTheme.typography.labelMedium, color = colors.primary)
-                }
+                Box(Modifier.weight(1f)) { ResourceEstimateLine(Icons.Outlined.CheckCircle, "现用", "≈ " + currentEstimate, colors.onSurfaceVariant) }
+                Box(Modifier.weight(1f)) { ResourceEstimateLine(Icons.Outlined.Edit, "草稿", "≈ " + draftEstimate, colors.primary) }
             }
         }
-        Text(when {
-            editing -> "数值完成后更新峰值估算"
-            forecast.estimatedProcessPeakHighBytes == null && forecast.decodeSampleCount == 0 -> "待解码样本 · 峰值未知"
-            forecast.estimatedProcessPeakHighBytes == null -> "观测不足 · 峰值未知"
-            else -> "情景峰值 · 非硬上限"
-        }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        val status = when {
+            editing -> "编辑中 · 尚未计入"
+            forecast.estimatedProcessPeakHighBytes == null && forecast.decodeSampleCount == 0 -> "待样本"
+            forecast.estimatedProcessPeakHighBytes == null -> "观测不足"
+            else -> null
+        }
+        if (status != null) Text(status, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
     }
 }
 
 @Composable
-private fun ResourceEstimateLine(label: String, value: String, color: Color) {
+private fun ResourceEstimateLine(icon: ImageVector, label: String, value: String, color: Color) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, Modifier.size(16.dp), tint = color)
         Text(label, style = MaterialTheme.typography.labelSmall, color = color)
         Text(value, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
             color = color, textAlign = androidx.compose.ui.text.style.TextAlign.End)

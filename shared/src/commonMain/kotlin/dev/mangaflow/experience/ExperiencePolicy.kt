@@ -49,6 +49,9 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     private var sampling: Job? = null
     private var memoryCache: ExperienceMemoryCache? = null
     private var diskCache: ExperienceDiskCache? = null
+    private var memoryUsageJob: Job? = null
+    private var memoryRefreshPending = false
+    private var memoryExpiryWatcher: Job? = null
     private var cacheUsageJob: Job? = null
     private var cacheRevision = 0L
     private var sampledDiskBytes = 0L
@@ -356,25 +359,76 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
 
     internal fun attachImageLoader(loader: ImageLoader, memory: ExperienceMemoryCache, disk: ExperienceDiskCache) {
         check(loader.memoryCache === memory && loader.diskCache === disk)
-        synchronized(lock) { memoryCache = memory; diskCache = disk; publish() }
+        synchronized(lock) {
+            memoryCache = memory
+            diskCache = disk
+            memoryExpiryWatcher?.cancel()
+            // One app-owned deadline waits even when the settings/reader observers close.
+            // Empty caches and explicit TTL 0 suspend without a background polling loop.
+            memoryExpiryWatcher = scope.launch {
+                memory.expiryDeadline.collectLatest { deadline ->
+                    if (deadline != null) {
+                        delay((deadline - monotonicTimeMillis()).coerceAtLeast(1L))
+                        refreshMemoryUsage()
+                    }
+                }
+            }
+            publish()
+        }
         refreshCacheUsage()
     }
 
+    /** Decoded cache accounting never waits for a native resource read or filesystem scan. */
+    private fun refreshMemoryUsage() {
+        val job = synchronized(lock) {
+            if (memoryUsageJob != null) {
+                memoryRefreshPending = true
+                return
+            }
+            memoryRefreshPending = false
+            scope.launch(start = CoroutineStart.LAZY) {
+                val owner = currentCoroutineContext()[Job]
+                try {
+                    do {
+                        val memory = synchronized(lock) { memoryCache }
+                        val snapshot = try { memory?.snapshot() }
+                        catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { null }
+                        synchronized(lock) {
+                            if (memoryCache === memory) mutableUsage.value = mutableUsage.value.copy(
+                                memoryBytes = snapshot?.bytes,
+                                memoryLimit = snapshot?.limit,
+                                memoryCacheBasisBytes = memory?.automaticBasisBytes,
+                                memoryCache = snapshot,
+                                observedImageMemoryPeakBytes = maxObserved(mutableUsage.value.observedImageMemoryPeakBytes, snapshot?.bytes),
+                            )
+                        }
+                        val again = synchronized(lock) {
+                            if (memoryRefreshPending) { memoryRefreshPending = false; true }
+                            else { if (memoryUsageJob === owner) memoryUsageJob = null; false }
+                        }
+                    } while (again)
+                } finally {
+                    synchronized(lock) { if (memoryUsageJob === owner) memoryUsageJob = null }
+                }
+            }.also { memoryUsageJob = it }
+        }
+        job.start()
+    }
+
     fun refreshCacheUsage() {
+        refreshMemoryUsage()
         val job = synchronized(lock) {
             // Reader indicators, settings and maintenance share this same local sample.
             // A slow filesystem must not accumulate one refresh job per visible tick.
             if (cacheUsageJob != null) return
             scope.launch(start = CoroutineStart.LAZY) {
                 try {
-                    val caches = synchronized(lock) { memoryCache to diskCache }
-                    val memory = caches.first
-                    val disk = caches.second
-                    memory?.trimExpired()
+                    val disk = synchronized(lock) { diskCache }
                     val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
                     storage.maintenanceTick()
                     val global = storage.sample(overrides.value.runtime.cacheSampleSeconds.toLong() * 1_000L)
-                    val snapshot = listOf(memory?.size, memory?.maxSize, disk?.size, disk?.maxSize)
+                    val imageBytes = disk?.size
                     val pending = disk?.resizePending == true
                     val error = disk?.resizeError
                     val cacheGroups = global.items.groupBy { item ->
@@ -412,16 +466,13 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
                     synchronized(lock) {
                         sampledDiskBytes = global.totalBytes
                         mutableUsage.value = mutableUsage.value.copy(
-                            memoryBytes = snapshot[0], memoryLimit = snapshot[1],
-                            memoryCacheBasisBytes = memory?.automaticBasisBytes,
-                            imageDiskBytes = snapshot[2], diskBytes = global.totalBytes,
+                            imageDiskBytes = imageBytes, diskBytes = global.totalBytes,
                             diskLimit = state.value.diskCacheBytes, diskSampledAtMillis = storage.measuredAtMillis,
                             diskProtectedBytes = (global.totalBytes - global.reclaimableBytes).coerceAtLeast(0L),
                             diskReclaimableBytes = global.reclaimableBytes,
                             diskAreas = cacheAreas,
                             diskResizePending = pending || global.pending || global.totalBytes > state.value.diskCacheBytes,
                             cacheError = error,
-                            observedImageMemoryPeakBytes = maxObserved(mutableUsage.value.observedImageMemoryPeakBytes, snapshot[0]),
                             observedDiskPeakBytes = maxObserved(mutableUsage.value.observedDiskPeakBytes, global.totalBytes),
                         )
                     }
@@ -437,9 +488,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
     /** Drops reusable decoded images only. Visible/native owners and original files retain their lifetimes. */
     fun clearDecodedMemory(): Deferred<Long> = scope.async {
         val memory = synchronized(lock) { memoryCache }
-        val before = memory?.size ?: 0L
-        memory?.clear()
-        val freed = (before - (memory?.size ?: 0L)).coerceAtLeast(0L)
+        val freed = memory?.clearAndMeasure() ?: 0L
         refreshCacheUsage()
         freed
     }
@@ -1165,6 +1214,7 @@ class ExperiencePolicyStore private constructor(context: PlatformContext) {
         val retention = mutableOverrides.value.contentCache
         scope.launch {
             memory?.applyBudget(next.memoryCacheFraction, next.memoryCacheBytes, version, retention.memoryIdleMinutes)
+            refreshMemoryUsage()
             val storage = dev.mangaflow.storage.StorageCacheStore.get(app)
             storage.setBudget(next.diskCacheBytes, version)
             storage.setRetention(retention.imageRetentionHours, version)

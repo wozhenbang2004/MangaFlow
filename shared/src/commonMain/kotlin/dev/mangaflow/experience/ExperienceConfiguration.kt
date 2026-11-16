@@ -134,11 +134,32 @@ data class ExperienceResources(
     val supportedRefreshRates: List<Int> = emptyList(),
 )
 
+/**
+ * Cache-owned bytes and cumulative removals for this cache instance, not process RSS/native tiles.
+ * Timestamps share the platform monotonic clock; they are not wall-clock dates.
+ */
+data class ExperienceMemoryCacheUsage(
+    val bytes: Long,
+    val limit: Long,
+    val entries: Int,
+    val idleMinutes: Int,
+    val sampledAtMillis: Long,
+    val nextExpiryAtMillis: Long?,
+    val lastReclaimedAtMillis: Long?,
+    val expiredEntries: Long,
+    val expiredBytes: Long,
+    val evictedEntries: Long,
+    val evictedBytes: Long,
+    val clearedEntries: Long,
+    val clearedBytes: Long,
+)
+
 data class ExperienceUsage(
     val resources: ExperienceResources = ExperienceResources(),
     val memoryBytes: Long? = null,
     val memoryLimit: Long? = null,
     val memoryCacheBasisBytes: Long? = null,
+    val memoryCache: ExperienceMemoryCacheUsage? = null,
     val materializationBytes: Long = 0L,
     val diskBytes: Long? = null,
     val imageDiskBytes: Long? = null,

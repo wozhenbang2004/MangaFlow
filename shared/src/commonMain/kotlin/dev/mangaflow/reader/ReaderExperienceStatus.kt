@@ -40,6 +40,7 @@ import dev.mangaflow.data.ReaderSourceStandbyAvailabilityPhase
 import dev.mangaflow.data.ReaderSourceStandbyPhase
 import dev.mangaflow.data.approximateReaderPage
 import dev.mangaflow.experience.ExperienceBudget
+import dev.mangaflow.experience.ExperienceMemoryCacheUsage
 import dev.mangaflow.experience.ExperiencePolicyStore
 import dev.mangaflow.experience.ExperienceUsage
 import dev.mangaflow.experience.ReaderStatusPlacement
@@ -794,14 +795,53 @@ private fun CacheOverview(store: ExperiencePolicyStore, expanded: ReaderWork?, e
     memoryIdleMinutes: Int, imageRetentionHours: Int, memoryMiB: Int?, diskMiB: Int?, focused: Boolean,
     onToggle: (ReaderWork) -> Unit) {
     val cache = projectedCacheUsage(store)
-    if (focused) StatusExplanation("应用共享 · 已用 / 当前容量")
-    else StatusSubheading("共享图片缓存", "已用 / 当前容量")
+    val memory = projectedMemoryLifecycle(store)
+    val scope = rememberCoroutineScope()
+    var clearing by remember(store) { mutableStateOf(false) }
+    var clearResult by remember(store) { mutableStateOf<String?>(null) }
+    var clearError by remember(store) { mutableStateOf<String?>(null) }
+    if (!focused) StatusSubheading("图片缓存", "")
     CacheWorkRow(Icons.Outlined.Memory, "解码内存", cache.memoryBytes, cache.memoryLimit,
         false, expanded == ReaderWork.MEMORY, enabled) { onToggle(ReaderWork.MEMORY) }
+    CacheMemoryLifecycle(memory, memoryIdleMinutes, enabled) { onToggle(ReaderWork.MEMORY) }
     if (expanded == ReaderWork.MEMORY) {
+        StatusValue("解码条目", memory?.entries?.toString() ?: "—")
         StatusValue("用户配置", memoryMiB?.let { "$it MB" } ?: "自动")
-        StatusValue("闲置保留", if (memoryIdleMinutes == 0) "按容量回收" else "$memoryIdleMinutes 分钟")
-        StatusExplanation("这是共享解码图片缓存，不是进程内存；当前画面持有的图像另有占用。")
+        val idle = memory?.idleMinutes ?: memoryIdleMinutes
+        StatusValue("闲置过期", if (idle == 0) "关闭 · 按容量淘汰" else "$idle 分钟")
+        StatusValue("容量淘汰", memory?.let { "${it.evictedEntries} 项 · ${experienceCacheSize(it.evictedBytes)}" } ?: "—")
+        StatusValue("到期清理", memory?.let { "${it.expiredEntries} 项 · ${experienceCacheSize(it.expiredBytes)}" } ?: "—")
+        StatusValue("清空回收", memory?.let { "${it.clearedEntries} 项 · ${experienceCacheSize(it.clearedBytes)}" } ?: "—")
+        StatusValue("最近回收", memory?.let { sample -> sample.lastReclaimedAtMillis?.let {
+            cacheElapsedLabel((sample.sampledAtMillis - it).coerceAtLeast(0L)) + "前"
+        } ?: "尚无" } ?: "—")
+        if (idle > 0) StatusValue("下一到期", memory?.let { sample -> sample.nextExpiryAtMillis?.let {
+            cacheElapsedLabel((it - sample.sampledAtMillis).coerceAtLeast(0L))
+        } ?: "无待清条目" } ?: "—")
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("本次累计 · 不等于进程内存", Modifier.weight(1f),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            clearResult?.let { Text(it, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary) }
+            MotionIconButton(onClick = {
+                if (enabled && !clearing) {
+                    clearing = true; clearResult = null; clearError = null
+                    scope.launch {
+                        try { clearResult = "−" + experienceCacheSize(store.clearDecodedMemory().await()) }
+                        catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { clearError = "未能释放，请重试" }
+                        finally { clearing = false }
+                    }
+                }
+            }, enabled = enabled && !clearing && (cache.memoryBytes ?: 0L) > 0L,
+                tooltip = "释放可复用解码缓存，保留当前画面与磁盘原图") {
+                if (clearing) MotionBusyIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp)
+                else Icon(Icons.Outlined.CleaningServices, "释放可复用解码缓存", Modifier.size(19.dp),
+                    tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+        clearError?.let { StatusExplanation(it, error = true) }
+        StatusExplanation("新图进入时会淘汰旧图，占用可一直接近容量；当前画面仍可持有已移出缓存的图像。")
     }
     CacheWorkRow(Icons.Outlined.Storage, "图片磁盘", cache.diskBytes, cache.diskLimit,
         cache.pending, expanded == ReaderWork.DISK, enabled) { onToggle(ReaderWork.DISK) }
@@ -814,9 +854,62 @@ private fun CacheOverview(store: ExperiencePolicyStore, expanded: ReaderWork?, e
     cache.error?.let { StatusExplanation(it, error = true) }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CacheMemoryLifecycle(memory: ExperienceMemoryCacheUsage?, configuredIdleMinutes: Int,
+    enabled: Boolean, onInspect: () -> Unit) {
+    val idle = memory?.idleMinutes ?: configuredIdleMinutes
+    val expiry = if (idle > 0) "$idle min" else "∞"
+    val released = memory?.let { sample ->
+        listOf(sample.expiredBytes, sample.evictedBytes, sample.clearedBytes).fold(0L) { total, bytes ->
+            total + minOf(bytes.coerceAtLeast(0L), Long.MAX_VALUE - total)
+        }
+    }
+    val colors = MaterialTheme.colorScheme
+    MotionTextButton(onClick = onInspect, enabled = enabled,
+        contentPadding = PaddingValues(start = 24.dp, end = 0.dp, top = 4.dp, bottom = 4.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).semantics(mergeDescendants = true) {
+            contentDescription = (if (idle == 0) "闲置过期关闭，按容量淘汰" else "闲置 $idle 分钟后过期") +
+                "；当前解码缓存条目 ${memory?.entries ?: "未知"}；本次到期、容量与清空累计回收 " +
+                (released?.let(::experienceCacheSize) ?: "未知") + "；点击查看回收详情"
+        }) {
+        FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Icon(if (idle > 0) Icons.Outlined.Timer else Icons.Outlined.TimerOff, null, Modifier.size(15.dp),
+                    tint = if (idle > 0) colors.primary else colors.onSurfaceVariant)
+                Text(expiry, style = MaterialTheme.typography.labelSmall,
+                    color = if (idle > 0) colors.primary else colors.onSurfaceVariant)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Icon(Icons.Outlined.Cached, null, Modifier.size(15.dp), tint = colors.primary)
+                Text(released?.let(::experienceCacheSize) ?: "—", style = MaterialTheme.typography.labelSmall,
+                    color = colors.primary)
+            }
+        }
+        Icon(Icons.Outlined.Info, null, Modifier.size(16.dp), tint = colors.onSurfaceVariant)
+    }
+}
+
+private fun cacheElapsedLabel(millis: Long): String = when {
+    millis < 60_000L -> "${millis / 1_000L}s"
+    millis < 3_600_000L -> "${millis / 60_000L}min"
+    else -> "${millis / 3_600_000L}h"
+}
+
+@Composable
+private fun projectedMemoryLifecycle(store: ExperiencePolicyStore): ExperienceMemoryCacheUsage? {
+    val flow = remember(store) { store.usage.map { it.memoryCache }.distinctUntilChanged() }
+    val memory by flow.collectAsStateWithLifecycle(initialValue = store.usage.value.memoryCache)
+    return memory
+}
+
 private data class ReaderCacheUsage(val memoryBytes: Long?, val memoryLimit: Long?, val diskBytes: Long?,
-    val diskLimit: Long?, val pending: Boolean, val error: String?)
-private fun ExperienceUsage.cacheProjection() = ReaderCacheUsage(memoryBytes, memoryLimit, diskBytes, diskLimit, diskResizePending, cacheError)
+    val diskLimit: Long?, val pending: Boolean, val error: String?, val recentMemoryRelease: Boolean)
+private fun ExperienceUsage.cacheProjection() = ReaderCacheUsage(memoryBytes, memoryLimit, diskBytes, diskLimit,
+    diskResizePending, cacheError, memoryCache?.let { sample -> sample.lastReclaimedAtMillis?.let {
+        sample.sampledAtMillis - it in 0L..5_000L
+    } } == true)
 
 @Composable
 private fun projectedCacheUsage(store: ExperiencePolicyStore): ReaderCacheUsage {
@@ -847,15 +940,21 @@ private fun ReaderCacheEntry(store: ExperiencePolicyStore, enabled: Boolean, onO
     val disk = cacheState(cache.diskBytes, cache.diskLimit, cache.pending)
     MotionIconButton(onOpen, Modifier.width(70.dp).height(44.dp).semantics(mergeDescendants = true) {
         contentDescription = "共享图片缓存"
-        stateDescription = "解码内存${statusCacheUsage(cache.memoryBytes, cache.memoryLimit)}，${memory.label}；图片磁盘${statusCacheUsage(cache.diskBytes, cache.diskLimit)}，${disk.label}；${cache.error ?: "点击查看"}"
+        stateDescription = "解码内存${statusCacheUsage(cache.memoryBytes, cache.memoryLimit)}，${memory.label}；" +
+            (if (cache.recentMemoryRelease) "近期有解码缓存回收；" else "") +
+            "图片磁盘${statusCacheUsage(cache.diskBytes, cache.diskLimit)}，${disk.label}；${cache.error ?: "点击查看"}"
     }, enabled = enabled, tooltip = "共享内存 / 磁盘用量") {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            listOf(Icons.Outlined.Memory to memory, Icons.Outlined.Storage to disk).forEach { (icon, state) ->
+            listOf(Icons.Outlined.Memory to memory, Icons.Outlined.Storage to disk).forEachIndexed { index, (icon, state) ->
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Box(Modifier.size(21.dp), contentAlignment = Alignment.Center) {
-                        Icon(icon, null, Modifier.size(15.dp))
+                        Icon(icon, null, Modifier.size(15.dp), tint = if (state.occupancy != null)
+                            MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                         if (state.mark == ReaderStatusMark.UNKNOWN || state.mark == ReaderStatusMark.PAUSED)
                             StatusMark(state.mark, Modifier.align(Alignment.TopEnd).size(8.dp))
+                        else if (index == 0 && cache.recentMemoryRelease) Icon(Icons.Outlined.Cached,
+                            "近期有解码缓存回收", Modifier.align(Alignment.TopEnd).size(9.dp),
+                            tint = MaterialTheme.colorScheme.primary)
                     }
                     CacheOccupancy(state.occupancy, Modifier.width(22.dp).height(2.dp))
                 }
@@ -875,16 +974,16 @@ private fun CacheWorkRow(icon: ImageVector, title: String, used: Long?, limit: L
         contentPadding = PaddingValues(horizontal = 0.dp, vertical = 6.dp)) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                Icon(icon, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurface)
-                Text(title, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
-                Text(state.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    StatusNumber(used?.let(::experienceCacheSize) ?: "—")
+                    Text("/ " + (limit?.let(::experienceCacheSize) ?: "—"),
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (state.mark == ReaderStatusMark.UNKNOWN || state.mark == ReaderStatusMark.PAUSED)
+                    StatusMark(state.mark, Modifier.size(12.dp))
                 Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            FlowRow(Modifier.padding(start = 24.dp), horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                StatusNumber(used?.let(::experienceCacheSize) ?: "未知")
-                StatusNumber("/")
-                StatusNumber(limit?.let(::experienceCacheSize) ?: "未知")
             }
             CacheOccupancy(state.occupancy, Modifier.padding(start = 24.dp, end = 23.dp).fillMaxWidth().height(2.dp))
         }
@@ -895,7 +994,7 @@ private fun CacheWorkRow(icon: ImageVector, title: String, used: Long?, limit: L
 private fun CacheOccupancy(occupancy: Float?, modifier: Modifier) {
     Box(modifier.background(MaterialTheme.colorScheme.onSurface.copy(alpha = if (occupancy != null) .08f else 0f), CircleShape)) {
         if (occupancy != null) Box(Modifier.fillMaxHeight().fillMaxWidth(occupancy)
-            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = .45f), CircleShape))
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = .72f), CircleShape))
     }
 }
 

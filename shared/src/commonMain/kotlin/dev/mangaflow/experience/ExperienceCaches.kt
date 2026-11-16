@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import okio.FileSystem
 import okio.Path
@@ -22,42 +24,153 @@ internal class ExperienceMemoryCache(private val cache: MemoryCache, private val
     private var revision = -1L
     private var idleMillis = 0L
     private val accessed = mutableMapOf<MemoryCache.Key, Long>()
-    override val size: Long get() = cache.size
+    private val mutableExpiryDeadline = MutableStateFlow<Long?>(null)
+    internal val expiryDeadline = mutableExpiryDeadline.asStateFlow()
+    private var expiredEntries = 0L
+    private var expiredBytes = 0L
+    private var evictedEntries = 0L
+    private var evictedBytes = 0L
+    private var clearedEntries = 0L
+    private var clearedBytes = 0L
+    private var lastReclaimedAt: Long? = null
+    override val size: Long get() = synchronized(lock) { cache.size }
     override val maxSize: Long get() = synchronized(lock) { limit }
-    override val keys: Set<MemoryCache.Key> get() = cache.keys
+    override val keys: Set<MemoryCache.Key> get() = synchronized(lock) { cache.keys }
     override fun get(key: MemoryCache.Key): MemoryCache.Value? = synchronized(lock) {
         val now = monotonicTimeMillis()
         val last = accessed[key]
         if (idleMillis > 0L && last != null && now - last >= idleMillis) {
-            accessed.remove(key); cache.remove(key); null
-        } else cache[key]?.also { accessed[key] = now }
+            val before = cache.size
+            val removed = if (cache.remove(key)) 1 else 0
+            accessed.remove(key)
+            recordRemoval(Removal.EXPIRED, removed, before, now)
+            updateExpiryDeadline(now)
+            null
+        } else cache[key]?.also {
+            accessed[key] = now
+            updateExpiryDeadline(now)
+        } ?: run {
+            accessed.remove(key)
+            updateExpiryDeadline(now)
+            null
+        }
     }
     override fun set(key: MemoryCache.Key, value: MemoryCache.Value) = synchronized(lock) {
+        val now = monotonicTimeMillis()
+        trimExpired(now)
+        // Match Coil's oversized-entry rule at our live limit: one large decode must not
+        // flush the entire reusable LRU only to evict itself immediately afterwards.
+        if (limit == 0L || value.image.size > limit) {
+            val before = cache.size
+            val removed = if (cache.remove(key)) 1 else 0
+            accessed.remove(key)
+            recordRemoval(Removal.CAPACITY, removed, before, now)
+            updateExpiryDeadline(now)
+            return@synchronized
+        }
         cache[key] = value
-        accessed[key] = monotonicTimeMillis()
-        cache.trimToSize(limit)
-        accessed.keys.retainAll(cache.keys)
+        accessed[key] = now
+        trimCapacity(limit, now)
+        updateExpiryDeadline(now)
         Unit
     }
-    override fun remove(key: MemoryCache.Key) = synchronized(lock) { accessed.remove(key); cache.remove(key) }
-    override fun trimToSize(size: Long) = synchronized(lock) { cache.trimToSize(minOf(size, limit)) }
-    override fun clear() = synchronized(lock) { accessed.clear(); cache.clear() }
-    fun trimExpired(): Unit = synchronized(lock) {
+    override fun remove(key: MemoryCache.Key) = synchronized(lock) {
+        accessed.remove(key)
+        cache.remove(key).also { updateExpiryDeadline(monotonicTimeMillis()) }
+    }
+    override fun trimToSize(size: Long) = synchronized(lock) {
+        val now = monotonicTimeMillis()
+        trimCapacity(minOf(size, limit).coerceAtLeast(0L), now)
+        updateExpiryDeadline(now)
+    }
+    override fun clear() { clearAndMeasure() }
+    fun clearAndMeasure(): Long = synchronized(lock) {
+        val before = cache.size
+        val entries = cache.keys.size
+        cache.clear()
+        accessed.clear()
+        recordRemoval(Removal.CLEARED, entries, before, monotonicTimeMillis())
+        mutableExpiryDeadline.value = null
+        (before - cache.size).coerceAtLeast(0L)
+    }
+    fun snapshot(): ExperienceMemoryCacheUsage = synchronized(lock) {
+        val now = monotonicTimeMillis()
+        trimExpired(now)
+        ExperienceMemoryCacheUsage(cache.size, limit, cache.keys.size,
+            (idleMillis / 60_000L).toInt(), now, nextExpiry(), lastReclaimedAt,
+            expiredEntries, expiredBytes, evictedEntries, evictedBytes, clearedEntries, clearedBytes)
+    }
+    private fun trimExpired(now: Long) {
         if (idleMillis > 0L) {
-            val now = monotonicTimeMillis()
-            accessed.filterValues { now - it >= idleMillis }.keys.toList().forEach { cache.remove(it); accessed.remove(it) }
+            val before = cache.size
+            var removed = 0
+            val iterator = accessed.iterator()
+            while (iterator.hasNext()) {
+                val (key, last) = iterator.next()
+                if (now - last >= idleMillis) {
+                    if (cache.remove(key)) removed++
+                    iterator.remove()
+                }
+            }
+            recordRemoval(Removal.EXPIRED, removed, before, now)
         }
         accessed.keys.retainAll(cache.keys)
-        Unit
+        updateExpiryDeadline(now)
+    }
+    private fun trimCapacity(target: Long, now: Long) {
+        val before = cache.size
+        val entries = cache.keys.size
+        cache.trimToSize(target)
+        val retained = cache.keys
+        accessed.keys.retainAll(retained)
+        recordRemoval(Removal.CAPACITY, (entries - retained.size).coerceAtLeast(0), before, now)
+    }
+    private enum class Removal { EXPIRED, CAPACITY, CLEARED }
+    private fun recordRemoval(reason: Removal, count: Int, before: Long, now: Long) {
+        val bytes = (before - cache.size).coerceAtLeast(0L)
+        if (count == 0 && bytes == 0L) return
+        lastReclaimedAt = now
+        when (reason) {
+            Removal.EXPIRED -> {
+                expiredEntries = addCount(expiredEntries, count.toLong())
+                expiredBytes = addCount(expiredBytes, bytes)
+            }
+            Removal.CAPACITY -> {
+                evictedEntries = addCount(evictedEntries, count.toLong())
+                evictedBytes = addCount(evictedBytes, bytes)
+            }
+            Removal.CLEARED -> {
+                clearedEntries = addCount(clearedEntries, count.toLong())
+                clearedBytes = addCount(clearedBytes, bytes)
+            }
+        }
+    }
+    private fun addCount(value: Long, amount: Long): Long =
+        if (amount >= Long.MAX_VALUE - value) Long.MAX_VALUE else value + amount
+    private fun nextExpiry(): Long? = if (idleMillis == 0L) null else
+        accessed.values.minOrNull()?.let { if (it > Long.MAX_VALUE - idleMillis) Long.MAX_VALUE else it + idleMillis }
+    private fun updateExpiryDeadline(now: Long, reset: Boolean = false) {
+        if (idleMillis == 0L || accessed.isEmpty()) {
+            mutableExpiryDeadline.value = null
+            return
+        }
+        val scheduled = mutableExpiryDeadline.value
+        // Accesses and newer inserts can only postpone expiry. Leave the existing timer
+        // running; at its deadline one sweep computes the next deadline from real accesses.
+        if (reset || scheduled == null || scheduled <= now) mutableExpiryDeadline.value = nextExpiry()
     }
     fun applyBudget(fraction: Double, manualBytes: Long?, version: Long, idleMinutes: Int = 0) = synchronized(lock) {
         if (version < revision) return@synchronized
         revision = version
-        idleMillis = idleMinutes.coerceAtLeast(0) * 60_000L
+        val nextIdleMillis = idleMinutes.coerceAtLeast(0) * 60_000L
+        val retentionChanged = idleMillis != nextIdleMillis
+        idleMillis = nextIdleMillis
         val protectedLimit = (automaticTotal * fraction).toLong().coerceAtLeast(0L)
         limit = manualBytes?.coerceAtLeast(0L) ?: protectedLimit
-        cache.trimToSize(limit)
-        trimExpired()
+        val now = monotonicTimeMillis()
+        trimExpired(now)
+        trimCapacity(limit, now)
+        updateExpiryDeadline(now, reset = retentionChanged)
     }
 }
 

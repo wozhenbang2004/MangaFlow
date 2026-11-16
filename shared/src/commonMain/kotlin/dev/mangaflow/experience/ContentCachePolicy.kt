@@ -23,7 +23,7 @@ data class ContentCachePreferences(
     val snapshotMemoryEntries: Int = 24,
     val snapshotDiskMiB: Int = 8,
     /** Zero keeps the existing capacity/LRU policy without an additional idle/age limit. */
-    val memoryIdleMinutes: Int = 0,
+    val memoryIdleMinutes: Int = 2,
     val imageRetentionHours: Int = 0,
 ) {
     val enabled: Boolean get() = storage != ContentCacheStorage.DISABLED
