@@ -8,6 +8,7 @@ import dev.mangaflow.anime.AnimeSourceEpisode
 import dev.mangaflow.anime.AnimeSourceTitle
 import dev.mangaflow.anime.AnimeSubtitle
 import dev.mangaflow.json.JSONObject
+import dev.mangaflow.net.DownloadCategory
 import dev.mangaflow.net.DownloadRoutingStore
 import dev.mangaflow.net.HttpUrl
 import dev.mangaflow.platform.PlatformContext
@@ -264,7 +265,7 @@ private class AgeProvider : RoutedAnimeProvider() {
                     sourceCover(homeUrl, row.text("cover")), year = row.positiveInt("year"),
                     updateText = row.text("uptodate"), sourceRevision = revision)
             }.distinctBy { it.id }
-            if (DownloadRoutingStore.activeSourceSnapshot(id) != http.route)
+            if (DownloadRoutingStore.activeSourceSnapshot(id, DownloadCategory.ANIME) != http.route)
                 throw AnimeSourceException(id, AnimeSourceStage.CATALOG, "来源网络路由已改变，请重新读取最近更新。")
             titles
         } finally { http.close() }
