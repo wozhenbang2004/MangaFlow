@@ -13,6 +13,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -29,6 +30,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -51,6 +53,7 @@ import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionSlider
 import dev.mangaflow.ui.motion.MotionDialog
 import dev.mangaflow.ui.motion.MotionIconButton
+import dev.mangaflow.ui.motion.MotionButton
 import dev.mangaflow.ui.motion.MotionTextButton
 import dev.mangaflow.ui.motion.MotionSwap
 import dev.mangaflow.ui.motion.motionInputGate
@@ -78,6 +81,8 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     var draft by remember(store) { mutableStateOf(store.overrides.value) }
     var draftMode by remember(store) { mutableStateOf(store.state.value.mode) }
     var expanded by rememberSaveable { mutableStateOf<String?>(null) }
+    var deviceTab by rememberSaveable { mutableStateOf("device") }
+    var splitLayout by remember { mutableStateOf(false) }
     var pendingExit by remember { mutableStateOf<String?>(null) }
     var handoff by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -87,8 +92,8 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     val preview = remember(draft, draftMode, savedBudget) { store.previewBudget(draft, draftMode) }
     val overviewScroll = rememberScrollState()
     val detailScroll = rememberScrollState()
+    val navigationScroll = rememberScrollState()
     val focus = LocalFocusManager.current
-    val scroll = if (expanded == null) overviewScroll else detailScroll
     val colors = MaterialTheme.colorScheme
     fun reload() {
         baseline = store.overrides.value
@@ -118,6 +123,12 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
         if (!active || !settleEditor()) return
         focus.clearFocus(force = true)
         if (draft != baseline || draftMode != baselineMode) pendingExit = destination else finishExit(destination)
+    }
+    fun selectCategory(category: String, forecast: Boolean = false) {
+        if (!active || pendingExit != null || !settleEditor()) return
+        focus.clearFocus(force = true)
+        if (forecast) deviceTab = "forecast"
+        expanded = category
     }
     fun apply() {
         if (!active || !dirty || !settleEditor()) return
@@ -158,10 +169,11 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
     MotionDialog(visible, onDismissRequest = {
         if (!applying) {
             if (pendingExit != null) pendingExit = null
-            else if (expanded != null) { if (settleEditor()) expanded = null }
+            else if (expanded != null && !splitLayout) { if (settleEditor()) expanded = null }
             else requestExit()
         }
-    }, properties = DialogProperties(usePlatformDefaultWidth = false), maximumWidth = 560.dp,
+    }, properties = DialogProperties(usePlatformDefaultWidth = false),
+        maximumWidth = 1040.dp * LocalMangaWindow.current.fontScale,
         onClosed = {
             val destination = handoff
             handoff = null
@@ -171,72 +183,185 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
                 "source-checks" -> onOpenSourceChecks?.invoke()
             }
         }) {
-        val maximumHeight = minOf(LocalMangaWindow.current.height * .9f, 640.dp)
-        val panel: @Composable () -> Unit = {
-            Column(Modifier.fillMaxWidth().height(minOf(maximumHeight, 560.dp).coerceAtLeast(1.dp))
-                .padding(horizontal = 16.dp, vertical = 8.dp)) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (expanded != null) MotionIconButton(onClick = { if (settleEditor()) expanded = null }, enabled = active,
-                        modifier = Modifier.size(44.dp), tooltip = "返回资源总览") {
-                        Icon(Icons.Outlined.ArrowBack, "返回资源总览", Modifier.size(20.dp))
+        val window = LocalMangaWindow.current
+        BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 12.dp), contentAlignment = Alignment.Center) {
+            // The dialog's own constraints include split-screen, safe drawing and the IME.
+            val wide = maxWidth - 32.dp >= 840.dp * window.fontScale
+            val shownCategory = expanded ?: if (wide) "reading" else null
+            SideEffect {
+                splitLayout = wide
+                if (visible && wide && expanded == null) expanded = "reading"
+            }
+            LaunchedEffect(wide) { focus.clearFocus(force = true) }
+            val panelWidth = if (wide) maxWidth else minOf(maxWidth, 560.dp * window.fontScale)
+            val maximumHeight = minOf(window.height * .9f, if (wide) 680.dp else 560.dp).coerceAtLeast(1.dp)
+            val pinnedImpact = !wide && maximumHeight >= 420.dp * window.fontScale
+            val panel: @Composable () -> Unit = {
+                Column(Modifier.fillMaxWidth().height(maximumHeight)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (expanded != null && !wide) MotionIconButton(onClick = { if (settleEditor()) expanded = null }, enabled = active,
+                            modifier = Modifier.size(44.dp), tooltip = "返回资源总览") {
+                            Icon(Icons.Outlined.ArrowBack, "返回资源总览", Modifier.size(20.dp))
+                        }
+                        Text("体验与资源", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (onOpenStorage != null) MotionIconButton(onClick = { requestExit("storage") }, enabled = active,
+                            modifier = Modifier.size(44.dp), tooltip = "管理与清理缓存") {
+                            Icon(Icons.Outlined.CleaningServices, "管理与清理缓存", Modifier.size(20.dp))
+                        }
+                        MotionIconButton(onClick = { requestExit() }, enabled = active,
+                            modifier = Modifier.size(44.dp), tooltip = "关闭体验与资源") {
+                            Icon(Icons.Outlined.Close, "关闭体验与资源", Modifier.size(20.dp))
+                        }
                     }
-                    Text("体验与资源", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (onOpenStorage != null) MotionIconButton(onClick = { requestExit("storage") }, enabled = active,
-                        modifier = Modifier.size(44.dp), tooltip = "管理与清理缓存") {
-                        Icon(Icons.Outlined.CleaningServices, "管理与清理缓存", Modifier.size(20.dp))
+                    Row(Modifier.weight(1f).fillMaxWidth().padding(top = 6.dp, bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (wide) 24.dp else 0.dp)) {
+                        if (wide) Column(Modifier.width(280.dp * window.fontScale).fillMaxHeight()
+                            .verticalScroll(navigationScroll)) {
+                            SettingsChoices(ExperienceMode.entries.map { it to experienceModeLabel(it) }, draftMode) { mode ->
+                                if (active && pendingExit == null && settleEditor()) {
+                                    draftMode = mode
+                                    notice = null
+                                    focus.clearFocus(force = true)
+                                }
+                            }
+                            ExperienceResourceOverview(liveUsage, savedBudget, preview, dirty,
+                                active && pendingExit == null, editor.pending) { group ->
+                                selectCategory(group, forecast = group == "resources")
+                            }
+                            if (preview.protections.isNotEmpty()) ExperienceProtectionSummary(preview.protections)
+                            Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                                ExperienceCategoryNavigation(shownCategory, draft, active && pendingExit == null) { selectCategory(it) }
+                            }
+                        }
+                        Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(
+                            if (shownCategory == null) overviewScroll else detailScroll)) {
+                            if (dirty && shownCategory != null && !wide && !pinnedImpact)
+                                ExperienceDraftImpact(liveUsage, savedBudget, preview, editor.pending)
+                            ExperienceSettings(active && pendingExit == null, shownCategory, { expanded = it },
+                                store, preview, savedBudget, editor, draft, { draft = it; notice = null },
+                                currentDraft = { draft },
+                                mode = draftMode, onModeChange = { draftMode = it; notice = null }, draft = dirty,
+                                wide = wide, deviceTab = deviceTab, onDeviceTabChange = { deviceTab = it },
+                                onOpenNetwork = onOpenNetwork?.let { { requestExit("network") } },
+                                onOpenSourceChecks = onOpenSourceChecks?.let { { requestExit("source-checks") } })
+                        }
                     }
-                    MotionIconButton(onClick = { requestExit() }, enabled = active,
-                        modifier = Modifier.size(44.dp), tooltip = "关闭体验与资源") {
-                        Icon(Icons.Outlined.Close, "关闭体验与资源", Modifier.size(20.dp))
-                    }
-                }
-                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll)
-                    .padding(top = 6.dp, bottom = 8.dp)) {
-                    ExperienceSettings(active && pendingExit == null, expanded, { expanded = it },
-                        store, preview, savedBudget, editor, draft, { draft = it; notice = null },
-                        draftMode, { draftMode = it; notice = null }, dirty,
-                        onOpenNetwork = onOpenNetwork?.let { { requestExit("network") } },
-                        onOpenSourceChecks = onOpenSourceChecks?.let { { requestExit("source-checks") } })
-                }
-                if (dirty && expanded != null) ExperienceDraftImpact(liveUsage, preview)
-                if (notice != null || conflict) Text(notice ?: "设置已在其他入口改变，请重新载入",
-                    Modifier.fillMaxWidth().padding(vertical = 4.dp), style = MaterialTheme.typography.labelSmall,
-                    color = colors.error)
-                Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Icon(if (dirty) Icons.Outlined.Edit else Icons.Outlined.CheckCircle,
-                        null, Modifier.size(15.dp), tint = if (dirty) colors.primary else colors.onSurfaceVariant)
-                    Text(when { applying -> "正在应用"; pendingExit != null -> "尚未应用"; editor.pending -> "数值待确认"; dirty -> "草稿预览"; else -> "已应用" },
-                        Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
-                        color = if (dirty) colors.primary else colors.onSurfaceVariant)
-                    if (pendingExit != null) MotionIconButton(onClick = { pendingExit = null }, enabled = active,
-                        modifier = Modifier.size(44.dp), tooltip = "继续编辑") {
-                        Icon(Icons.Outlined.Edit, "继续编辑", Modifier.size(18.dp))
-                    }
-                    if (dirty || conflict) MotionIconButton(onClick = {
-                        val destination = pendingExit
-                        reload()
-                        if (destination != null) finishExit(destination)
-                    }, enabled = active, modifier = Modifier.size(44.dp),
-                        tooltip = if (pendingExit != null) "放弃草稿并关闭" else if (conflict) "重新载入设置" else "撤销所有未应用修改") {
-                        Icon(Icons.Outlined.Undo, if (pendingExit != null) "放弃草稿并关闭" else "撤销草稿", Modifier.size(18.dp))
-                    }
-                    MotionIconButton(onClick = { apply() }, enabled = active && dirty && !conflict,
-                        modifier = Modifier.size(44.dp), tooltip = if (pendingExit != null) "应用设置后关闭" else "应用全部设置") {
-                        Icon(Icons.Outlined.Check, "应用全部设置", Modifier.size(20.dp),
-                            tint = if (dirty && !conflict) colors.primary else colors.onSurfaceVariant.copy(alpha = .45f))
+                    if (dirty && expanded != null && pinnedImpact)
+                        ExperienceDraftImpact(liveUsage, savedBudget, preview, editor.pending)
+                    if (notice != null || conflict) Text(notice ?: "设置已在其他入口改变，请重新载入",
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp), style = MaterialTheme.typography.labelSmall,
+                        color = colors.error)
+                    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(if (dirty) Icons.Outlined.Edit else Icons.Outlined.CheckCircle,
+                            null, Modifier.size(15.dp), tint = if (dirty) colors.primary else colors.onSurfaceVariant)
+                        Text(when { applying -> "正在应用"; pendingExit != null -> "尚未应用"; editor.pending -> "数值编辑中"; dirty -> "草稿预览"; else -> "已应用" },
+                            Modifier.weight(1f), style = MaterialTheme.typography.labelSmall,
+                            color = if (dirty) colors.primary else colors.onSurfaceVariant,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (pendingExit != null) MotionIconButton(onClick = { pendingExit = null }, enabled = active,
+                            modifier = Modifier.size(44.dp), tooltip = "继续编辑") {
+                            Icon(Icons.Outlined.Edit, "继续编辑", Modifier.size(18.dp))
+                        }
+                        if (dirty || conflict) MotionIconButton(onClick = {
+                            val destination = pendingExit
+                            reload()
+                            if (destination != null) finishExit(destination)
+                        }, enabled = active, modifier = Modifier.size(44.dp),
+                            tooltip = if (pendingExit != null) "放弃草稿并继续" else if (conflict) "重新载入设置" else "撤销所有未应用修改") {
+                            Icon(if (conflict) Icons.Outlined.Refresh else Icons.Outlined.Undo,
+                                if (pendingExit != null) "放弃草稿并继续" else if (conflict) "重新载入设置" else "撤销草稿", Modifier.size(18.dp))
+                        }
+                        MotionButton(onClick = { apply() }, enabled = active && dirty && !conflict,
+                            modifier = Modifier.heightIn(min = 44.dp).semantics {
+                                contentDescription = if (pendingExit != null) "应用全部设置并继续" else "应用全部设置"
+                            }, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
+                            Text("应用")
+                        }
                     }
                 }
             }
-        }
-        Box(Modifier.padding(horizontal = 12.dp)) {
-            if (backdrop != null) LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
-                role = GlassSurfaceRole.PANEL, elevation = 0.dp) { panel() }
-            else Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
-                color = colors.surfaceContainerLow, tonalElevation = 0.dp) { panel() }
+            Box(Modifier.width(panelWidth)) {
+                if (backdrop != null) LiquidGlassSurface(backdrop, Modifier.fillMaxWidth(), cornerRadius = 22.dp,
+                    role = GlassSurfaceRole.PANEL, elevation = 0.dp) { panel() }
+                else Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
+                    color = colors.surfaceContainerLow, tonalElevation = 0.dp) { panel() }
+            }
         }
     }
+}
+
+@Composable
+private fun ExperienceProtectionSummary(protections: List<String>) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 36.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+        Icon(Icons.Outlined.Shield, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(protections.joinToString(" · "), Modifier.weight(1f),
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** The same motion buttons form the persistent category rail on a wide workspace. */
+@Composable
+private fun ExperienceCategoryNavigation(selectedCategory: String?, custom: ExperienceOverrides,
+    enabled: Boolean, onSelect: (String) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    listOf(
+        Triple("reading", "阅读", Icons.Outlined.AutoStories),
+        Triple("parallel", "并行", Icons.Outlined.AccountTree),
+        Triple("sources", "多源", Icons.Outlined.Layers),
+        Triple("downloads", "后台", Icons.Outlined.Download),
+        Triple("cache", "缓存", Icons.Outlined.Storage),
+        Triple("resources", "设备", Icons.Outlined.DeveloperBoard),
+    ).forEach { (id, title, icon) ->
+        val current = selectedCategory == id
+        val modified = when (id) {
+            "reading" -> experienceReadingCustom(custom)
+            "parallel" -> experienceParallelCustom(custom)
+            "sources" -> experienceSourceCustom(custom)
+            "downloads" -> experienceDownloadCustom(custom)
+            "cache" -> experienceCacheCustom(custom)
+            else -> experienceDeviceCustom(custom)
+        }
+        MotionTextButton(onClick = { onSelect(id) }, enabled = enabled,
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.textButtonColors(
+                containerColor = if (current) colors.primary.copy(alpha = .08f) else androidx.compose.ui.graphics.Color.Transparent,
+                contentColor = if (current) colors.primary else colors.onSurfaceVariant),
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).semantics {
+                selected = current
+                stateDescription = if (modified) "已自定义" else "默认设置"
+            }) {
+            Icon(icon, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(10.dp))
+            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            if (modified) Icon(Icons.Outlined.Edit, null, Modifier.size(13.dp))
+            Spacer(Modifier.width(6.dp))
+            Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp))
+        }
+    }
+}
+
+/** A selected wide category is a page; the narrow workspace retains its disclosure. */
+@Composable
+private fun ExperienceCategorySection(title: String, value: String, icon: ImageVector,
+    expanded: Boolean, onToggle: () -> Unit, standalone: Boolean, modified: Boolean,
+    content: @Composable ColumnScope.() -> Unit) {
+    if (standalone) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+            Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+            Text(value, Modifier.weight(1.4f, fill = false), style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        content()
+    } else SettingsDisclosure(title, value, icon, expanded, onToggle, compact = true,
+        modified = modified, content = content)
 }
 
 /** Existing Ovio selection and retained rows keep one reading-first workspace. */
@@ -244,8 +369,10 @@ internal fun ExperienceSettingsDialog(visible: Boolean, backdrop: HazeState?, on
 @OptIn(ExperimentalLayoutApi::class)
 private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedChange: (String?) -> Unit,
     store: ExperiencePolicyStore, budget: ExperienceBudget, appliedBudget: ExperienceBudget, editor: ExperienceEditor, custom: ExperienceOverrides,
-    onChange: (ExperienceOverrides) -> Unit, mode: ExperienceMode, onModeChange: (ExperienceMode) -> Unit,
-    draft: Boolean, onOpenNetwork: (() -> Unit)?, onOpenSourceChecks: (() -> Unit)?) {
+    onChange: (ExperienceOverrides) -> Unit, currentDraft: () -> ExperienceOverrides,
+    mode: ExperienceMode, onModeChange: (ExperienceMode) -> Unit,
+    draft: Boolean, wide: Boolean, deviceTab: String, onDeviceTabChange: (String) -> Unit,
+    onOpenNetwork: (() -> Unit)?, onOpenSourceChecks: (() -> Unit)?) {
     val context = LocalMangaContext.current
     val usage by store.usage.collectAsStateWithLifecycle()
     val appliedCustom by store.overrides.collectAsStateWithLifecycle()
@@ -260,12 +387,15 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
     var detail by rememberSaveable { mutableStateOf<String?>(null) }
     var cacheTab by rememberSaveable { mutableStateOf("images") }
     var cacheKind by rememberSaveable { mutableStateOf(ContentCacheKind.SEARCH) }
-    var deviceTab by rememberSaveable { mutableStateOf("device") }
-    val colors = MaterialTheme.colorScheme
     val cacheSampleSeconds by rememberUpdatedState(appliedBudget.runtime.cacheSampleSeconds)
     fun closeEditor() {
         editor.clear()
         focus.clearFocus(force = true)
+    }
+    fun finishEditor(): Boolean {
+        if (editor.pending && editor.accept?.invoke() != true) return false
+        closeEditor()
+        return true
     }
     fun change(value: ExperienceOverrides) {
         if (!active) return
@@ -276,7 +406,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
         if (editor.pending && editor.accept?.invoke() != true) return
         closeEditor()
         detail = null
-        onExpandedChange(if (expanded == key) null else key)
+        onExpandedChange(if (expanded == key && !wide) null else key)
     }
     fun toggleDetail(key: String) {
         if (!active) return
@@ -286,44 +416,37 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
     }
     LaunchedEffect(active, expanded) {
         closeEditor()
+    }
+    LaunchedEffect(expanded) { detail = null }
+    LaunchedEffect(active, expanded, wide) {
         if (!active) return@LaunchedEffect
         store.refreshResources()
-        if (expanded == null || expanded == "cache" || expanded == "resources") {
+        if (wide || expanded == null || expanded == "cache" || expanded == "resources") {
             while (true) { store.refreshCacheUsage(); delay(cacheSampleSeconds.toLong() * 1_000L) }
         }
     }
     Column(Modifier.fillMaxWidth().motionInputGate(active)) {
-        if (expanded == null) {
+        if (expanded == null && !wide) {
             SettingsChoices(ExperienceMode.entries.map { it to experienceModeLabel(it) }, mode) { selected ->
                 if (active) { closeEditor(); onModeChange(selected) }
             }
-            ExperienceResourceOverview(usage, budget, draft, active) { group ->
-                if (group == "resources") deviceTab = "forecast"
+            ExperienceResourceOverview(usage, appliedBudget, budget, draft, active, editor.pending) { group ->
+                if (group == "resources") onDeviceTabChange("forecast")
                 toggle(group)
             }
-            if (budget.protections.isNotEmpty()) {
-                Row(Modifier.fillMaxWidth().heightIn(min = 36.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Icon(Icons.Outlined.Shield, null, Modifier.size(15.dp), tint = colors.onSurfaceVariant)
-                    Text(budget.protections.joinToString(" · "), Modifier.weight(1f),
-                        style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-            }
+            if (budget.protections.isNotEmpty()) ExperienceProtectionSummary(budget.protections)
         }
         Spacer(Modifier.height(4.dp))
 
-        if (expanded == null || expanded == "reading") SettingsDisclosure("阅读",
+        if (expanded == null || expanded == "reading") ExperienceCategorySection("阅读",
             if (custom.prefetchMode == PrefetchMode.OFF) "已关闭"
             else budget.prefetchAhead.toString() + " 待读 · " + budget.prefetchBehind + " 回看",
             Icons.Outlined.AutoStories, expanded == "reading", { toggle("reading") },
-            compact = true, modified = experienceReadingCustom(custom)) {
+            standalone = wide, modified = experienceReadingCustom(custom)) {
             SettingsChoices(PrefetchMode.entries.map { it to when (it) {
                 PrefetchMode.SMART -> "智能"; PrefetchMode.OFF -> "关闭"; PrefetchMode.MANUAL -> "手动"
             } }, custom.prefetchMode) {
-                closeEditor()
-                change(custom.copy(prefetchMode = it))
+                if (finishEditor()) change(currentDraft().copy(prefetchMode = it))
             }
             ExperienceReveal(custom.prefetchMode == PrefetchMode.MANUAL) {
                 ExperienceNumber("待读窗口", custom.ahead, budget.goal.prefetchAhead, 0..40, "页",
@@ -360,10 +483,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        if (expanded == null || expanded == "parallel") SettingsDisclosure("并行",
+        if (expanded == null || expanded == "parallel") ExperienceCategorySection("并行",
             usage.activeReaderImages.toString() + " 读 · " + usage.activePrefetch + " 取 · " + usage.activeDecodes + " 解",
             Icons.Outlined.AccountTree, expanded == "parallel", { toggle("parallel") },
-            compact = true, modified = experienceParallelCustom(custom)) {
+            standalone = wide, modified = experienceParallelCustom(custom)) {
             ExperienceNumber("当前页请求", custom.readerRequests, budget.goal.readerRequests, 1..4, "个",
                 editor, active && expanded == "parallel", effective = appliedBudget.readerRequests) { change(custom.copy(readerRequests = it)) }
             ExperienceNumber("图址解析", custom.resolveRequests, budget.goal.resolveRequests, 1..8, "个",
@@ -395,12 +518,12 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        if (expanded == null || expanded == "sources") SettingsDisclosure("多源", when {
+        if (expanded == null || expanded == "sources") ExperienceCategorySection("多源", when {
             budget.sourceRecovery == SourceRecoveryMode.OFF -> "按需切源"
             budget.standbySources == 0 -> "预热暂停"
             else -> "备用 " + budget.standbySources + " 源"
         }, Icons.Outlined.Layers, expanded == "sources", { toggle("sources") },
-            compact = true, modified = experienceSourceCustom(custom)) {
+            standalone = wide, modified = experienceSourceCustom(custom)) {
             SettingsChoices(listOf<Pair<SourceRecoveryMode?, String>>(
                 null to "跟随", SourceRecoveryMode.OFF to "关闭",
                 SourceRecoveryMode.BALANCED to "稳健", SourceRecoveryMode.AGGRESSIVE to "积极"), custom.sourceRecovery) {
@@ -455,11 +578,11 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        if (expanded == null || expanded == "downloads") SettingsDisclosure("后台",
+        if (expanded == null || expanded == "downloads") ExperienceCategorySection("后台",
             if (budget.backgroundPages == 0) "暂缓新请求"
             else budget.backgroundPages.toString() + " 页 · " + budget.chapterParallelism + " 章",
             Icons.Outlined.Download, expanded == "downloads", { toggle("downloads") },
-            compact = true, modified = experienceDownloadCustom(custom)) {
+            standalone = wide, modified = experienceDownloadCustom(custom)) {
             SettingsToggle("阅读时下载让路", custom.yieldToReading, Icons.Outlined.AutoStories) { change(custom.copy(yieldToReading = it)) }
             SettingsToggle("允许后台下载", custom.allowBackgroundDownloads, Icons.Outlined.Download) { change(custom.copy(allowBackgroundDownloads = it)) }
             if (onOpenNetwork != null || onOpenSourceChecks != null) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -494,9 +617,9 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        if (expanded == null || expanded == "cache") SettingsDisclosure("缓存", usage.diskBytes?.let { "已用 " + experienceCacheSize(it) } ?: "用量未知",
+        if (expanded == null || expanded == "cache") ExperienceCategorySection("缓存", usage.diskBytes?.let { "已用 " + experienceCacheSize(it) } ?: "用量未知",
             Icons.Outlined.Storage, expanded == "cache", { toggle("cache") },
-            compact = true, modified = experienceCacheCustom(custom)) {
+            standalone = wide, modified = experienceCacheCustom(custom)) {
             SettingsToggle("磁盘自动回收", custom.runtime.automaticCleanup, Icons.Outlined.CleaningServices) {
                 change(custom.copy(runtime = custom.runtime.copy(automaticCleanup = it)))
             }
@@ -506,7 +629,7 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 change(custom.copy(runtime = custom.runtime.copy(evictionOrder = it)))
             }
             SettingsChoices(listOf("images" to "容量", "data" to "时效", "areas" to "组成"), cacheTab) {
-                closeEditor(); cacheTab = it
+                if (finishEditor()) cacheTab = it
             }
             if (cacheTab == "images") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -564,7 +687,10 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 val cache = custom.contentCache
                 SettingsChoices(listOf(ContentCacheStorage.MEMORY_AND_DISK to "内存＋磁盘",
                     ContentCacheStorage.MEMORY_ONLY to "仅内存", ContentCacheStorage.DISABLED to "关闭"), cache.storage) {
-                    closeEditor(); change(custom.copy(contentCache = cache.copy(storage = it)))
+                    if (finishEditor()) {
+                        val latest = currentDraft()
+                        change(latest.copy(contentCache = latest.contentCache.copy(storage = it)))
+                    }
                 }
                 SettingsToggle("打开页面即更新", cache.refreshOnOpen, Icons.Outlined.Refresh) {
                     change(custom.copy(contentCache = cache.copy(refreshOnOpen = it)))
@@ -572,12 +698,12 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
                 SettingsChoices(listOf(ContentCacheKind.SEARCH to "搜索", ContentCacheKind.DISCOVERY to "发现",
                     ContentCacheKind.RANKING to "榜单", ContentCacheKind.DETAILS to "目录"),
                     cacheKind) {
-                    closeEditor(); cacheKind = it
+                    if (finishEditor()) cacheKind = it
                 }
                 SettingsChoices(listOf(ContentCacheKind.PAGE_MANIFEST to "图址", ContentCacheKind.METRICS to "评分",
                     ContentCacheKind.POPULARITY to "热度", ContentCacheKind.COMMENTS to "评论"),
                     cacheKind) {
-                    closeEditor(); cacheKind = it
+                    if (finishEditor()) cacheKind = it
                 }
                 val minutes = when (cacheKind) {
                     ContentCacheKind.SEARCH -> cache.searchMinutes; ContentCacheKind.DISCOVERY -> cache.discoveryMinutes
@@ -635,17 +761,17 @@ private fun ExperienceSettings(active: Boolean, expanded: String?, onExpandedCha
             }
         }
 
-        if (expanded == null || expanded == "resources") SettingsDisclosure("设备",
+        if (expanded == null || expanded == "resources") ExperienceCategorySection("设备",
             (usage.resources.processorCount?.let { "$it 核" } ?: "CPU —") + " · " +
                 (usage.resources.totalMemoryBytes?.let(::experienceCacheSize) ?: "RAM —"),
             Icons.Outlined.DeveloperBoard, expanded == "resources", { toggle("resources") },
-            compact = true, modified = experienceDeviceCustom(custom)) {
+            standalone = wide, modified = experienceDeviceCustom(custom)) {
             SettingsChoices(listOf("device" to "设备", "forecast" to "情景", "live" to "观测", "protect" to "保护"), deviceTab) {
-                closeEditor(); deviceTab = it
+                if (finishEditor()) onDeviceTabChange(it)
             }
             when (deviceTab) {
                 "device" -> ExperienceDeviceDetails(usage)
-                "forecast" -> ExperienceForecastDetails(usage, budget)
+                "forecast" -> ExperienceForecastDetails(usage, appliedBudget, budget, draft, editor.pending)
                 "live" -> {
                     ExperienceBudgetRow("当前 · 章 / 下载 / 预取", usage.activeChapters.toString() + " / " + usage.activeBackgroundPages + " / " + usage.activePrefetch)
                     ExperienceBudgetRow("当前 · 页面 / 排队", usage.activeReaderImages.toString() + " / " + usage.queuedTasks)
@@ -785,6 +911,10 @@ internal class ExperienceEditor {
     var field by mutableStateOf<String?>(null)
     var pending by mutableStateOf(false)
     var accept: (() -> Boolean)? = null
+    // One edit buffer survives reparenting between narrow disclosure and wide detail.
+    val input = mutableStateOf("")
+    val position = mutableFloatStateOf(0f)
+    val invalidInput = mutableStateOf(false)
     fun clear() { field = null; pending = false; accept = null }
 }
 
@@ -817,9 +947,9 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
     val sliderMaximum = maxOf(range.last, current)
     val editing = active && editor.field == title
     val focus = LocalFocusManager.current
-    var draft by remember { mutableStateOf("") }
-    var sliding by remember { mutableFloatStateOf(current.toFloat()) }
-    var invalid by remember { mutableStateOf(false) }
+    var draft by editor.input
+    var sliding by editor.position
+    var invalid by editor.invalidInput
     fun acceptsInput() = active && editor.field == title
     fun commit(): Boolean {
         if (!acceptsInput()) return false
@@ -904,9 +1034,12 @@ internal fun ExperienceNumber(title: String, value: Int?, automatic: Int?, range
                         }
                     })
                 Text(unit, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                MotionIconButton(onClick = { commit() }, enabled = editing,
-                    modifier = Modifier.size(44.dp), tooltip = "应用" + title) {
-                    Icon(Icons.Outlined.Check, "应用" + title, Modifier.size(18.dp))
+                MotionTextButton(onClick = { commit() }, enabled = editing,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                    modifier = Modifier.heightIn(min = 44.dp).semantics {
+                        contentDescription = "完成" + title + "编辑，保留为草稿"
+                    }) {
+                    Text("完成")
                 }
                 MotionIconButton(onClick = {
                     if (acceptsInput()) { editor.clear(); focus.clearFocus(force = true) }

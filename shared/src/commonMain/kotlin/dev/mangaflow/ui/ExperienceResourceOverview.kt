@@ -24,25 +24,36 @@ import kotlin.math.roundToInt
 
 /** Adapts the reader's CacheWorkRow/CacheOccupancy into this same retained settings surface. */
 @Composable
-internal fun ExperienceResourceOverview(usage: ExperienceUsage, budget: ExperienceBudget,
-    draft: Boolean, enabled: Boolean, onOpen: (String) -> Unit) {
-    val forecast = remember(budget, usage) { estimateExperienceResources(budget, usage) }
+internal fun ExperienceResourceOverview(usage: ExperienceUsage, appliedBudget: ExperienceBudget,
+    previewBudget: ExperienceBudget, draft: Boolean, enabled: Boolean, editing: Boolean = false,
+    onOpen: (String) -> Unit) {
+    val forecast = remember(appliedBudget, usage) { estimateExperienceResources(appliedBudget, usage) }
+    val target = remember(previewBudget, usage, draft, forecast) {
+        if (draft) estimateExperienceResources(previewBudget, usage) else forecast
+    }
     val colors = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth().padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         ResourceMetricRow(Icons.Outlined.Memory, "应用 " + processMemoryLabel(forecast.processMemoryKind),
             resourceBytes(forecast.currentProcessBytes),
-            "↑ " + resourceBytes(forecast.observedProcessPeakBytes), enabled,
+            "观测峰值 " + resourceBytes(forecast.observedProcessPeakBytes), enabled,
             "当前应用占用 ${resourceBytes(forecast.currentProcessBytes)}，本次同口径观测峰值 ${resourceBytes(forecast.observedProcessPeakBytes)}") { onOpen("resources") }
-        ResourceMetricRow(Icons.Outlined.TrendingUp, if (draft) "情景 · 草稿" else "情景峰值",
+        if (draft) MotionTextButton(onClick = { onOpen("resources") }, enabled = enabled,
+            contentPadding = PaddingValues(0.dp), modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+            Box(Modifier.weight(1f)) { ExperienceDraftImpact(usage, appliedBudget, previewBudget, editing) }
+            Spacer(Modifier.width(6.dp))
+            Icon(Icons.Outlined.ChevronRight, null, Modifier.size(14.dp), tint = colors.onSurfaceVariant)
+        } else ResourceMetricRow(Icons.Outlined.TrendingUp, "情景峰值",
             resourceRange(forecast.estimatedProcessPeakLowBytes, forecast.estimatedProcessPeakHighBytes),
-            if (forecast.estimatedProcessPeakHighBytes != null) "≈" else if (forecast.decodeSampleCount == 0) "待样本" else "数据不足",
+            if (forecast.estimatedProcessPeakHighBytes != null) "非硬上限" else if (forecast.decodeSampleCount == 0) "待样本" else "数据不足",
             enabled, "配置情景估算 ${resourceRange(forecast.estimatedProcessPeakLowBytes, forecast.estimatedProcessPeakHighBytes)}，不是应用内存的硬上限",
             accent = colors.primary) { onOpen("resources") }
+        Text(if (draft) "当前占用 / 草稿预算" else "当前占用 / 现用预算",
+            Modifier.padding(top = 5.dp), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             ResourceAllocation(Icons.Outlined.Image, "图片内存", usage.memoryBytes,
-                forecast.imageMemoryBudgetBytes, Modifier.weight(1f), enabled) { onOpen("cache") }
+                target.imageMemoryBudgetBytes, Modifier.weight(1f), enabled, draft) { onOpen("cache") }
             ResourceAllocation(Icons.Outlined.Storage, "缓存磁盘", forecast.diskCurrentBytes,
-                forecast.diskBudgetBytes, Modifier.weight(1f), enabled) { onOpen("cache") }
+                target.diskBudgetBytes, Modifier.weight(1f), enabled, draft) { onOpen("cache") }
         }
     }
 }
@@ -55,7 +66,9 @@ private fun ResourceMetricRow(icon: ImageVector, title: String, value: String, t
         modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
             .semantics(mergeDescendants = true) { contentDescription = description }) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val stacked = maxWidth < 330.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f)
+            val scale = androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f)
+            val stacked = maxWidth < 330.dp * scale
+            val valuesStacked = maxWidth < 270.dp * scale
             Column(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -70,7 +83,12 @@ private fun ResourceMetricRow(icon: ImageVector, title: String, value: String, t
                     Icon(Icons.Outlined.ChevronRight, null, Modifier.size(14.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (stacked) Row(Modifier.fillMaxWidth().padding(start = 26.dp),
+                if (stacked && valuesStacked) Column(Modifier.fillMaxWidth().padding(start = 26.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(value, style = MaterialTheme.typography.bodyMedium, color = accent)
+                    Text(trailing, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else if (stacked) Row(Modifier.fillMaxWidth().padding(start = 26.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(value, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = accent)
                     Text(trailing, style = MaterialTheme.typography.labelSmall,
@@ -83,7 +101,7 @@ private fun ResourceMetricRow(icon: ImageVector, title: String, value: String, t
 
 @Composable
 private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, budget: Long?,
-    modifier: Modifier, enabled: Boolean, onClick: () -> Unit) {
+    modifier: Modifier, enabled: Boolean, draft: Boolean, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     val fraction = if (used != null && used >= 0L && budget != null && budget > 0L)
         (used.toDouble() / budget).coerceIn(0.0, 1.0).toFloat() else null
@@ -91,8 +109,10 @@ private fun ResourceAllocation(icon: ImageVector, title: String, used: Long?, bu
     val accent = if (overBudget) colors.tertiary else colors.primary
     MotionTextButton(onClick, enabled = enabled, contentPadding = PaddingValues(vertical = 6.dp),
         modifier = modifier.heightIn(min = 52.dp).semantics(mergeDescendants = true) {
-            contentDescription = "$title，当前 ${resourceBytes(used)}，配置预算 ${resourceBytes(budget)}" +
-                if (overBudget) "，当前高于预算，在用内容释放后回收" else ""
+            contentDescription = "$title，当前 ${resourceBytes(used)}，" + (if (draft) "草稿预算 " else "现用预算 ") + resourceBytes(budget) +
+                if (overBudget) {
+                    if (draft) "，低于当前占用，应用后按缓存规则回收" else "，当前高于预算，在用内容释放后回收"
+                } else ""
         }) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -149,20 +169,32 @@ internal fun ExperienceDeviceDetails(usage: ExperienceUsage) {
 }
 
 @Composable
-internal fun ExperienceForecastDetails(usage: ExperienceUsage, budget: ExperienceBudget) {
-    val f = remember(budget, usage) { estimateExperienceResources(budget, usage) }
+internal fun ExperienceForecastDetails(usage: ExperienceUsage, appliedBudget: ExperienceBudget,
+    previewBudget: ExperienceBudget, draft: Boolean, editing: Boolean = false) {
+    val applied = remember(appliedBudget, usage) { estimateExperienceResources(appliedBudget, usage) }
+    val f = remember(previewBudget, usage) { estimateExperienceResources(previewBudget, usage) }
     ResourceValue(Icons.Outlined.Memory, "应用 " + processMemoryLabel(f.processMemoryKind), resourceBytes(f.currentProcessBytes))
     ResourceValue(Icons.Outlined.TrendingUp, "本次观测峰值", resourceBytes(f.observedProcessPeakBytes))
-    ResourceValue(Icons.Outlined.Calculate, "配置情景峰值",
+    if (draft) ExperienceDraftImpact(usage, appliedBudget, previewBudget, editing)
+    else ResourceValue(Icons.Outlined.Calculate, "现用情景峰值",
         resourceRange(f.estimatedProcessPeakLowBytes, f.estimatedProcessPeakHighBytes))
-    ResourceValue(Icons.Outlined.Image, "可复用图片预算", resourceBytes(f.imageMemoryBudgetBytes))
-    ResourceValue(Icons.Outlined.Code, "原图处理预算", resourceBytes(f.encodedMemoryBudgetBytes))
+    if (draft) Text("预算变化 · 现用 → 草稿", Modifier.padding(top = 8.dp, bottom = 4.dp),
+        style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    ResourceValue(Icons.Outlined.Image, "可复用图片预算",
+        resourceBudgetChange(applied.imageMemoryBudgetBytes, f.imageMemoryBudgetBytes, draft))
+    ResourceValue(Icons.Outlined.Code, "原图处理预算",
+        resourceBudgetChange(applied.encodedMemoryBudgetBytes, f.encodedMemoryBudgetBytes, draft))
     ResourceValue(Icons.Outlined.PhotoSizeSelectLarge, "并行解码估算",
-        resourceRange(f.decodeWorkingLowBytes, f.decodeWorkingHighBytes))
-    ResourceValue(Icons.Outlined.Storage, "磁盘 · 当前 / 预算",
-        resourceBytes(f.diskCurrentBytes) + " / " + resourceBytes(f.diskBudgetBytes))
+        if (draft && (applied.decodeWorkingLowBytes != f.decodeWorkingLowBytes || applied.decodeWorkingHighBytes != f.decodeWorkingHighBytes))
+            resourceRange(applied.decodeWorkingLowBytes, applied.decodeWorkingHighBytes) + " → " +
+                resourceRange(f.decodeWorkingLowBytes, f.decodeWorkingHighBytes)
+        else resourceRange(f.decodeWorkingLowBytes, f.decodeWorkingHighBytes))
+    ResourceValue(Icons.Outlined.Storage, "磁盘预算",
+        resourceBudgetChange(applied.diskBudgetBytes, f.diskBudgetBytes, draft))
+    ResourceValue(Icons.Outlined.AutoStories, "原图窗口",
+        resourceBudgetChange(applied.originalWindowBytes, f.originalWindowBytes, draft))
+    ResourceValue(Icons.Outlined.Storage, "磁盘当前占用", resourceBytes(f.diskCurrentBytes))
     ResourceValue(Icons.Outlined.TrendingUp, "磁盘观测峰值", resourceBytes(f.diskObservedPeakBytes))
-    ResourceValue(Icons.Outlined.AutoStories, "原图窗口", resourceBytes(f.originalWindowBytes))
     ResourceValue(Icons.Outlined.Analytics, "真实解码样本", f.decodeSampleCount.toString())
     f.notes.forEach { note ->
         Text(note, Modifier.padding(vertical = 3.dp), style = MaterialTheme.typography.labelSmall,
@@ -207,20 +239,50 @@ internal fun ExperienceCacheBreakdown(usage: ExperienceUsage) {
 
 /** Keep the effect of a multi-field draft visible while its controls are being edited. */
 @Composable
-internal fun ExperienceDraftImpact(usage: ExperienceUsage, budget: ExperienceBudget) {
-    val forecast = remember(budget, usage) { estimateExperienceResources(budget, usage) }
-    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)
+internal fun ExperienceDraftImpact(usage: ExperienceUsage, appliedBudget: ExperienceBudget,
+    previewBudget: ExperienceBudget, editing: Boolean = false) {
+    val applied = remember(appliedBudget, usage) { estimateExperienceResources(appliedBudget, usage) }
+    val forecast = remember(previewBudget, usage) { estimateExperienceResources(previewBudget, usage) }
+    val currentEstimate = resourceRange(applied.estimatedProcessPeakLowBytes, applied.estimatedProcessPeakHighBytes)
+    val draftEstimate = resourceRange(forecast.estimatedProcessPeakLowBytes, forecast.estimatedProcessPeakHighBytes)
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)
         .semantics(mergeDescendants = true) {
-            contentDescription = "已确认的草稿预览，应用当前 ${resourceBytes(forecast.currentProcessBytes)}，已知部分的情景估算 " +
-                resourceRange(forecast.estimatedProcessPeakLowBytes, forecast.estimatedProcessPeakHighBytes) + "，不是硬上限"
-        }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Icon(Icons.Outlined.Memory, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(resourceBytes(forecast.currentProcessBytes), style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Icon(Icons.Outlined.ArrowForward, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Icon(Icons.Outlined.TrendingUp, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
-        Text("≈ " + resourceRange(forecast.estimatedProcessPeakLowBytes, forecast.estimatedProcessPeakHighBytes),
-            Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            contentDescription = "使用同一份实际观测计算的情景峰值，现用配置 $currentEstimate，草稿配置 $draftEstimate。" +
+                "只估算已知部分，不是硬上限。" + if (editing) "正在输入的数值尚未计入。" else ""
+        }, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val stacked = maxWidth < 420.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f)
+            if (stacked) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                ResourceEstimateLine("现用估算", currentEstimate, colors.onSurfaceVariant)
+                ResourceEstimateLine("草稿估算", draftEstimate, colors.primary)
+            } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("现用估算", style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    Text(currentEstimate, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("草稿估算", style = MaterialTheme.typography.labelSmall, color = colors.primary)
+                    Text(draftEstimate, style = MaterialTheme.typography.labelMedium, color = colors.primary)
+                }
+            }
+        }
+        Text(when {
+            editing -> "数值完成后更新峰值估算"
+            forecast.estimatedProcessPeakHighBytes == null && forecast.decodeSampleCount == 0 -> "待解码样本 · 峰值未知"
+            forecast.estimatedProcessPeakHighBytes == null -> "观测不足 · 峰值未知"
+            else -> "情景峰值 · 非硬上限"
+        }, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun ResourceEstimateLine(label: String, value: String, color: Color) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = color)
+        Text(value, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
+            color = color, textAlign = androidx.compose.ui.text.style.TextAlign.End)
     }
 }
 
@@ -243,6 +305,8 @@ private fun processMemoryLabel(kind: ExperienceProcessMemoryKind?) = when (kind)
     null -> "内存"
 }
 private fun resourceBytes(bytes: Long?) = bytes?.let(::experienceCacheSize) ?: "—"
+private fun resourceBudgetChange(applied: Long?, draft: Long?, changed: Boolean): String =
+    if (changed && applied != draft) resourceBytes(applied) + " → " + resourceBytes(draft) else resourceBytes(draft)
 private fun resourceRange(low: Long?, high: Long?): String = when {
     low == null || high == null -> "—"
     low == high -> resourceBytes(high)

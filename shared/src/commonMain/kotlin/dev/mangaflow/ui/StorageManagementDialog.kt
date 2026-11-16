@@ -116,10 +116,24 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
     val includeLegacy = area == null && book == null && selected.isEmpty() && snapshot?.legacyReclaimable == true
     val scopeBytes = reclaimable.sumOf { it.bytes } +
         (if (includeLegacy) snapshot?.coilUnclassifiedBytes ?: 0L else 0L)
+    val hasSelection = selectedInScope.isNotEmpty()
+    val bookTitle = book?.let { known[it]?.title ?: if (it == UNCLASSIFIED) "未归类图片" else "已缓存作品" }
+    val scopeLabel = if (hasSelection) "已选 ${selectedInScope.size} 项"
+        else bookTitle ?: area?.label ?: "全部缓存"
+    val scopedArea = area
+    val occupiedBytes = snapshot?.let { inventory ->
+        when {
+            hasSelection -> selectedInScope.sumOf { it.bytes }
+            book != null -> scoped.sumOf { it.bytes }
+            scopedArea != null -> inventory.areaBytes(scopedArea)
+            else -> inventory.totalBytes + offlineBytes + modelStates.values.sumOf { it.bytes } +
+                runtimeStates.values.sumOf { it.bytes }
+        }
+    }
     fun previewClear() {
         if (busy || loading || scopeBytes <= 0L) return
         plan = StorageClearPlan(reclaimable.toList(), includeLegacy, scopeBytes,
-            if (selectedInScope.isNotEmpty()) "已选内容" else book?.let { known[it]?.title ?: "当前作品" } ?: area?.label ?: "可回收缓存", snapshot?.legacyRevision, snapshot?.legacyStamp)
+            scopeLabel, snapshot?.legacyRevision, snapshot?.legacyStamp)
     }
     fun applyClear(reviewed: StorageClearPlan) {
         if (operations.find(UserOperationKeys.CACHE)?.active == true) return
@@ -175,7 +189,7 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                             modifier = Modifier.size(44.dp), tooltip = "返回") {
                             Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp))
                         }
-                        Text(if (plan != null) "清理预览" else book?.let { known[it]?.title ?: "未归类图片" }
+                        Text(if (plan != null) "清理预览" else bookTitle
                             ?: area?.label ?: "存储管理", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
                         MotionIconButton({ revision++ }, enabled = !busy && !loading && plan == null, modifier = Modifier.size(44.dp), tooltip = "刷新用量") {
@@ -201,13 +215,19 @@ internal fun StorageManagementDialog(visible: Boolean, backdrop: HazeState, libr
                         Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(snapshot?.let { storageBytes(it.totalBytes + offlineBytes + modelStates.values.sumOf { s -> s.bytes } +
-                                    runtimeStates.values.sumOf { s -> s.bytes }) } ?: "统计中…", style = MaterialTheme.typography.headlineSmall)
-                                Text(if (selectedInScope.isNotEmpty()) "已选 ${selectedInScope.size} 项 · 可释放 ${storageBytes(scopeBytes)}"
-                                    else "可回收 ${storageBytes(snapshot?.reclaimableBytes ?: 0L)}",
+                                Text(when {
+                                    hasSelection -> scopeLabel
+                                    area == null && book == null -> "本机已用"
+                                    else -> "已用"
+                                }, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                                Text(occupiedBytes?.let(::storageBytes) ?: "—", style = MaterialTheme.typography.headlineSmall)
+                                Text(if (snapshot == null) if (loading) "正在统计…" else "用量未就绪"
+                                    else "可释放 ${storageBytes(scopeBytes)}",
                                     style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                             }
-                            MotionButton(::previewClear, enabled = !busy && !loading && scopeBytes > 0L) { Text("释放空间") }
+                            MotionButton(::previewClear, enabled = !busy && !loading && scopeBytes > 0L) {
+                                Text(if (hasSelection) "清理所选" else "清理缓存")
+                            }
                         }
                     }
                     MotionTabContent(StoragePane(area, book, plan, snapshot),

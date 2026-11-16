@@ -8,6 +8,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
@@ -47,12 +49,14 @@ import dev.mangaflow.ui.CompactGlassPopover
 import dev.mangaflow.ui.ExperienceSettingsDialog
 import dev.mangaflow.ui.GlassSurfaceRole
 import dev.mangaflow.ui.LiquidGlassSurface
+import dev.mangaflow.ui.LocalMangaWindow
 import dev.mangaflow.ui.experienceCacheSize
 import dev.mangaflow.ui.motion.LocalMotionEnabled
 import dev.mangaflow.ui.motion.MangaMotion
 import dev.mangaflow.ui.motion.MotionBusyIndicator
 import dev.mangaflow.ui.motion.MotionIconButton
 import dev.mangaflow.ui.motion.MotionTextButton
+import dev.mangaflow.ui.motion.MotionTabContent
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
@@ -92,9 +96,13 @@ internal fun ReaderExperienceStatus(
     var changingSourceLock by remember(sessionKey) { mutableStateOf(false) }
     var sourceLockError by remember(sessionKey) { mutableStateOf<String?>(null) }
     val motion = LocalMotionEnabled.current
+    val window = LocalMangaWindow.current
     val placement = custom.readerStatusPlacement
     val shown = visible && placement != ReaderStatusPlacement.HIDDEN
     var selected by remember(sessionKey) { mutableStateOf<ReaderStatusSection?>(null) }
+    var retainedSection by remember(sessionKey) { mutableStateOf(ReaderStatusSection.PREPARATION) }
+    var showAllWork by remember(sessionKey) { mutableStateOf(false) }
+    val sectionHeader = remember(sessionKey) { BringIntoViewRequester() }
     var expandedWork by remember(sessionKey) { mutableStateOf<ReaderWork?>(null) }
     var popoverPresent by remember { mutableStateOf(false) }
     var pendingPolicy by remember(sessionKey) { mutableStateOf(false) }
@@ -116,6 +124,12 @@ internal fun ReaderExperienceStatus(
         if (!visible) { selected = null; pendingPolicy = false; showPolicy = false; pendingSources = false; pendingStandby = null }
     }
     LaunchedEffect(shown) { if (!shown) selected = null }
+    LaunchedEffect(selected, popoverPresent, showAllWork) {
+        if (selected != null && popoverPresent && !showAllWork) {
+            withFrameNanos { }
+            sectionHeader.bringIntoView()
+        }
+    }
     LaunchedEffect(pendingPolicy, popoverPresent, visible) {
         if (visible && pendingPolicy && !popoverPresent) {
             pendingPolicy = false
@@ -201,9 +215,11 @@ internal fun ReaderExperienceStatus(
                     softCard = true, trackPointer = true) {
                     FlowRow(Modifier.padding(horizontal = 2.dp), maxItemsInEachRow = 4) {
                         fun inspect(section: ReaderStatusSection) {
+                            retainedSection = section
                             selected = section
+                            showAllWork = false
                             expandedWork = when (section) { ReaderStatusSection.SOURCES -> ReaderWork.SOURCES
-                                ReaderStatusSection.CACHE -> ReaderWork.MEMORY; else -> null }
+                                else -> null }
                             expandedSource = null
                             showScope = false
                         }
@@ -220,7 +236,7 @@ internal fun ReaderExperienceStatus(
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Icon(Icons.Outlined.Download, null, Modifier.size(15.dp))
                                 StatusNumber(preparation.originals.active.toString())
-                                Icon(Icons.Outlined.Memory, null, Modifier.padding(start = 3.dp).size(15.dp))
+                                Icon(Icons.Outlined.PhotoSizeSelectLarge, null, Modifier.padding(start = 3.dp).size(15.dp))
                                 StatusNumber(preparation.decoding.active.toString())
                                 StatusMark(activityMark, Modifier.size(9.dp))
                             }
@@ -233,11 +249,12 @@ internal fun ReaderExperienceStatus(
                 }
             }
             CompactGlassPopover(visible = shown && selected != null, backdrop = backdrop,
-                aboveAnchor = !top, alignToStart = true, maximumWidth = 344.dp,
+                aboveAnchor = !top, alignToStart = true,
+                maximumWidth = if (window.width >= 720.dp) 480.dp else 344.dp,
                 onDismiss = { selected = null }, onPresenceChange = { popoverPresent = it }) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text("阅读工作", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                    Row(Modifier.fillMaxWidth().bringIntoViewRequester(sectionHeader), verticalAlignment = Alignment.CenterVertically) {
+                        Text(retainedSection.title, Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
                         MotionIconButton(onClick = { selected = null; pendingPolicy = true },
                             modifier = Modifier.size(44.dp), enabled = selected != null, tooltip = "配置体验策略") {
                             Icon(Icons.Outlined.Tune, "配置体验策略", Modifier.size(18.dp))
@@ -247,24 +264,40 @@ internal fun ReaderExperienceStatus(
                             Icon(Icons.Outlined.Close, "关闭状态详情", Modifier.size(18.dp))
                         }
                     }
-                    StatusValue("当前页", if (preparation.lastVisible >= preparation.firstVisible && preparation.pageCount > 0)
-                        "${pageRange(preparation.firstVisible, preparation.lastVisible)} / ${preparation.pageCount}" else "等待可见页")
-                    StatusValue("前方已备", if (preparation.aheadTarget > 0)
-                        "${preparation.aheadReady} / ${preparation.aheadTarget} 页" else aheadDetail)
                     fun toggle(work: ReaderWork) { expandedWork = if (expandedWork == work) null else work }
-                    listOf(ReaderWork.RESOLVE, ReaderWork.ORIGINAL, ReaderWork.PREVIEW).forEach { work ->
-                        val counts = work.counts(preparation)
-                        WorkDisclosure(work.icon, work.title, counts.active.toLong(), preparation.pages.size.toLong(),
-                            (if (work == ReaderWork.PREVIEW) "解码与核验 · " else "") + workSummary(preparation, work),
-                            expandedWork == work, selected != null, counts.failed > 0) { toggle(work) }
-                        if (expandedWork == work) PreparationDetails(preparation, work, budget)
+                    val currentPage = if (preparation.lastVisible >= preparation.firstVisible && preparation.pageCount > 0)
+                        "${pageRange(preparation.firstVisible, preparation.lastVisible)} / ${preparation.pageCount}" else "等待可见页"
+                    val preparationContent: @Composable () -> Unit = {
+                        if (retainedSection != ReaderStatusSection.SOURCES) StatusValue("当前页", currentPage)
+                        StatusValue("前方已备", if (preparation.aheadTarget > 0)
+                            "${preparation.aheadReady} / ${preparation.aheadTarget} 页" else aheadDetail)
+                        preparation.pauseReason?.let { StatusExplanation(it) }
+                        listOf(ReaderWork.RESOLVE, ReaderWork.ORIGINAL, ReaderWork.PREVIEW).forEach { work ->
+                            val counts = work.counts(preparation)
+                            WorkDisclosure(work.icon, work.title, counts.active.toLong(), preparation.pages.size.toLong(),
+                                (if (work == ReaderWork.PREVIEW) "解码与核验 · " else "") + workSummary(preparation, work),
+                                expandedWork == work, selected != null, counts.failed > 0) { toggle(work) }
+                            if (expandedWork == work) PreparationDetails(preparation, work, budget)
+                        }
+                        nextChapterPreparation?.let { next ->
+                            WorkDisclosure(Icons.AutoMirrored.Outlined.MenuBook, "下一话",
+                                next.activePages.toLong() + if (next.manifestActive) 1L else 0L,
+                                next.requestedPages.toLong() + 1L, nextWorkSummary(next), expandedWork == ReaderWork.NEXT,
+                                selected != null, next.failedPages > 0 || next.phase == ReaderNextChapterPreparationPhase.FAILED) { toggle(ReaderWork.NEXT) }
+                            if (expandedWork == ReaderWork.NEXT) NextChapterDetails(next)
+                        }
                     }
-                    val standbyActive = standbys.sumOf { it.activePages.toLong() + if (it.manifestActive) 1L else 0L }
-                    WorkDisclosure(Icons.Outlined.Layers, "多源备用", standbyActive,
-                        standbys.sumOf { it.requestedPages.toLong() + 1L }, standbyWorkSummary(standbys, sourceStatus),
-                        expandedWork == ReaderWork.SOURCES, selected != null,
-                        standbys.any { it.failedPages > 0 || it.phase == ReaderSourceStandbyPhase.FAILED }) { toggle(ReaderWork.SOURCES) }
-                    if (expandedWork == ReaderWork.SOURCES) {
+                    val sourcesContent: @Composable () -> Unit = {
+                        if (retainedSection == ReaderStatusSection.SOURCES) StatusValue("当前页", currentPage)
+                        val standbyActive = standbys.sumOf { it.activePages.toLong() + if (it.manifestActive) 1L else 0L }
+                        WorkDisclosure(Icons.Outlined.Layers, "多源备用", standbyActive,
+                            standbys.sumOf { it.requestedPages.toLong() + 1L },
+                            (if (custom.recovery.sourceLocked) "来源已锁定 · " else "") + standbyWorkSummary(standbys, sourceStatus),
+                            expandedWork == ReaderWork.SOURCES, selected != null,
+                            standbys.any { it.failedPages > 0 || it.phase == ReaderSourceStandbyPhase.FAILED }) { toggle(ReaderWork.SOURCES) }
+                        sourceLockError?.let { StatusExplanation(it, error = true) }
+                        repairReason?.let { StatusExplanation(it) }
+                        if (expandedWork == ReaderWork.SOURCES) {
                             StatusExplanation(sourceStatus.detail, error = sourceStatus.mark == ReaderStatusMark.ERROR)
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 if (onAlignPage != null) MotionTextButton(onClick = {
@@ -306,8 +339,6 @@ internal fun ReaderExperienceStatus(
                                         tint = if (custom.recovery.sourceLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
-                            sourceLockError?.let { StatusExplanation(it, error = true) }
-                            repairReason?.let { StatusExplanation(it) }
                             standbys.forEach { row ->
                                 StandbyDetails(row, expandedSource == row.variantId, selected != null,
                                     onToggle = { expandedSource = if (expandedSource == row.variantId) null else row.variantId },
@@ -332,29 +363,48 @@ internal fun ReaderExperienceStatus(
                                     style = MaterialTheme.typography.labelSmall)
                                 Icon(Icons.Outlined.ChevronRight, null, Modifier.size(16.dp))
                             }
+                        }
                     }
-                    nextChapterPreparation?.let { next ->
-                        WorkDisclosure(Icons.AutoMirrored.Outlined.MenuBook, "下一话",
-                            next.activePages.toLong() + if (next.manifestActive) 1L else 0L,
-                            next.requestedPages.toLong() + 1L, nextWorkSummary(next), expandedWork == ReaderWork.NEXT,
-                            selected != null, next.failedPages > 0 || next.phase == ReaderNextChapterPreparationPhase.FAILED) { toggle(ReaderWork.NEXT) }
-                        if (expandedWork == ReaderWork.NEXT) NextChapterDetails(next)
+                    val cacheContent: @Composable () -> Unit = {
+                        CacheOverview(store, expandedWork, selected != null, custom.contentCache.memoryIdleMinutes,
+                            custom.contentCache.imageRetentionHours, custom.memoryMiB, custom.diskMiB,
+                            focused = retainedSection == ReaderStatusSection.CACHE, onToggle = ::toggle)
                     }
-                    CacheOverview(store, expandedWork, selected != null, custom.contentCache.memoryIdleMinutes,
-                        custom.contentCache.imageRetentionHours, custom.memoryMiB, custom.diskMiB, onToggle = ::toggle)
-                    MotionTextButton(onClick = { showScope = !showScope }, enabled = selected != null,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
-                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 6.dp)) {
-                        Icon(Icons.Outlined.Info, null, Modifier.size(15.dp))
-                        Text("范围与策略", Modifier.padding(start = 6.dp).weight(1f), style = MaterialTheme.typography.labelSmall)
-                        Icon(if (showScope) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
+                    when (retainedSection) {
+                        ReaderStatusSection.PREPARATION -> preparationContent()
+                        ReaderStatusSection.SOURCES -> sourcesContent()
+                        ReaderStatusSection.CACHE -> cacheContent()
                     }
-                    if (showScope) {
-                        StatusExplanation("并发数是本次阅读工作实际进入处理的任务或请求数，不是系统线程数。各项共享资源名额；小图准备含解码与本地核验。")
-                        StatusExplanation("缓存行统计共享解码内存与网络图片磁盘用量。备用页按附近位置准备；确认画面后只替换这一页。自动补页只复用仍有效的精确对齐，多页真实失败后才按配置考虑整章切源。")
-                        StatusValue("配置窗口", "前 ${budget.prefetchAhead} · 后 ${budget.prefetchBehind} 页")
-                        StatusValue("备用配置", "${budget.standbySources} 源 · 每源 ${budget.standbyPages} 页")
-                        StatusExplanation(budget.reason)
+                    MotionTextButton(onClick = { showAllWork = !showAllWork }, enabled = selected != null,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).semantics(mergeDescendants = true) {
+                            contentDescription = if (showAllWork) "收起其他阅读工作与策略范围" else "展开全部阅读工作与策略范围"
+                        }, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 6.dp)) {
+                        Icon(Icons.Outlined.MoreHoriz, null, Modifier.size(17.dp))
+                        Text(if (showAllWork) "收起其他工作" else "全部工作", Modifier.padding(start = 7.dp).weight(1f),
+                            style = MaterialTheme.typography.labelSmall)
+                        Icon(if (showAllWork) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
+                    }
+                    MotionTabContent(selected = showAllWork, contentKey = { it }, order = { if (it) 1 else 0 },
+                        fillContent = false) { expanded ->
+                        if (expanded) Column(Modifier.fillMaxWidth()) {
+                            if (retainedSection != ReaderStatusSection.PREPARATION) preparationContent()
+                            if (retainedSection != ReaderStatusSection.SOURCES) sourcesContent()
+                            if (retainedSection != ReaderStatusSection.CACHE) cacheContent()
+                            MotionTextButton(onClick = { showScope = !showScope }, enabled = selected != null,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 6.dp)) {
+                                Icon(Icons.Outlined.Info, null, Modifier.size(15.dp))
+                                Text("范围与策略", Modifier.padding(start = 6.dp).weight(1f), style = MaterialTheme.typography.labelSmall)
+                                Icon(if (showScope) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
+                            }
+                            if (showScope) {
+                                StatusExplanation("并发数是本次阅读工作实际进入处理的任务或请求数，不是系统线程数。各项共享资源名额；小图准备含解码与本地核验。")
+                                StatusExplanation("缓存行统计共享解码内存与网络图片磁盘用量。备用页按附近位置准备；确认画面后只替换这一页。自动补页只复用仍有效的精确对齐，多页真实失败后才按配置考虑整章切源。")
+                                StatusValue("配置窗口", "前 ${budget.prefetchAhead} · 后 ${budget.prefetchBehind} 页")
+                                StatusValue("备用配置", "${budget.standbySources} 源 · 每源 ${budget.standbyPages} 页")
+                                StatusExplanation(budget.reason)
+                            }
+                        }
                     }
                 }
             }
@@ -364,11 +414,13 @@ internal fun ReaderExperienceStatus(
         onDismiss = { showPolicy = false })
 }
 
-private enum class ReaderStatusSection { PREPARATION, SOURCES, CACHE }
+private enum class ReaderStatusSection(val title: String) {
+    PREPARATION("阅读准备"), SOURCES("备用来源"), CACHE("图片缓存")
+}
 private enum class StandbyAction { RETRY, USE, ALIGN, UNDO_PAGE, UNDO_SOURCE }
 private enum class ReaderWork(val title: String, val icon: ImageVector) {
     RESOLVE("地址解析", Icons.Outlined.Link), ORIGINAL("原图准备", Icons.Outlined.Download),
-    PREVIEW("小图准备", Icons.Outlined.Memory), SOURCES("多源备用", Icons.Outlined.Layers),
+    PREVIEW("小图准备", Icons.Outlined.PhotoSizeSelectLarge), SOURCES("多源备用", Icons.Outlined.Layers),
     NEXT("下一话", Icons.AutoMirrored.Outlined.MenuBook), MEMORY("解码内存", Icons.Outlined.Memory), DISK("图片磁盘", Icons.Outlined.Storage);
     fun counts(state: ReaderPreparationState) = when (this) {
         RESOLVE -> state.resolving; ORIGINAL -> state.originals; else -> state.decoding
@@ -540,9 +592,9 @@ private val ReaderStatusMark.description get() = when (this) {
 private fun StatusMark(mark: ReaderStatusMark, modifier: Modifier = Modifier) {
     val color = MaterialTheme.colorScheme.onSurface
     when (mark) {
-        ReaderStatusMark.ACTIVE -> MotionBusyIndicator(modifier, color = color.copy(alpha = .82f), strokeWidth = 1.dp)
+        ReaderStatusMark.ACTIVE -> MotionBusyIndicator(modifier, color = MaterialTheme.colorScheme.primary, strokeWidth = 1.dp)
         ReaderStatusMark.READY -> Box(modifier.padding(2.dp).background(color.copy(alpha = .75f), CircleShape))
-        ReaderStatusMark.PAUSED -> Icon(Icons.Outlined.Pause, null, modifier, tint = color.copy(alpha = .65f))
+        ReaderStatusMark.PAUSED -> Icon(Icons.Outlined.Pause, null, modifier, tint = MaterialTheme.colorScheme.tertiary)
         ReaderStatusMark.UNKNOWN -> Icon(Icons.Outlined.HelpOutline, null, modifier, tint = color.copy(alpha = .65f))
         ReaderStatusMark.ERROR -> Icon(Icons.Outlined.ErrorOutline, null, modifier, tint = MaterialTheme.colorScheme.error)
         ReaderStatusMark.IDLE -> Spacer(modifier)
@@ -566,7 +618,6 @@ private fun PreparationDetails(state: ReaderPreparationState, work: ReaderWork, 
             StatusExplanation("本地核验不一定占用解码名额。")
         }
     }
-    state.pauseReason?.let { StatusExplanation(it) }
     val pages = state.pages.filter { work.step(it).phase != ReaderPreparationPhase.SKIPPED }
     if (pages.isNotEmpty()) {
         StatusSubheading("本窗口页进度", work.title)
@@ -620,7 +671,7 @@ private fun PreparationPages(pages: List<ReaderPreparationPage>, work: ReaderWor
                     .padding(horizontal = 4.dp, vertical = 2.dp))
                 StepMark(work.step(page).phase)
                 if (work == ReaderWork.ORIGINAL) PresenceMark(Icons.Outlined.Download, page.originalPresent)
-                if (work == ReaderWork.PREVIEW) PresenceMark(Icons.Outlined.Memory, page.previewResident)
+                if (work == ReaderWork.PREVIEW) PresenceMark(Icons.Outlined.PhotoSizeSelectLarge, page.previewResident)
             }
         }
     }
@@ -716,7 +767,7 @@ private fun StandbyDetails(row: ReaderSourceStandby, expanded: Boolean, enabled:
                     StatusMark(standbyMark(page.phase), Modifier.size(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         PresenceMark(Icons.Outlined.Download, page.originalPresent)
-                        PresenceMark(Icons.Outlined.Memory, page.previewResident)
+                        PresenceMark(Icons.Outlined.PhotoSizeSelectLarge, page.previewResident)
                     }
                 }
             }
@@ -740,9 +791,11 @@ private fun NextChapterDetails(next: ReaderNextChapterPreparation) {
 
 @Composable
 private fun CacheOverview(store: ExperiencePolicyStore, expanded: ReaderWork?, enabled: Boolean,
-    memoryIdleMinutes: Int, imageRetentionHours: Int, memoryMiB: Int?, diskMiB: Int?, onToggle: (ReaderWork) -> Unit) {
+    memoryIdleMinutes: Int, imageRetentionHours: Int, memoryMiB: Int?, diskMiB: Int?, focused: Boolean,
+    onToggle: (ReaderWork) -> Unit) {
     val cache = projectedCacheUsage(store)
-    StatusSubheading("共享图片缓存", "已用 / 当前容量")
+    if (focused) StatusExplanation("应用共享 · 已用 / 当前容量")
+    else StatusSubheading("共享图片缓存", "已用 / 当前容量")
     CacheWorkRow(Icons.Outlined.Memory, "解码内存", cache.memoryBytes, cache.memoryLimit,
         false, expanded == ReaderWork.MEMORY, enabled) { onToggle(ReaderWork.MEMORY) }
     if (expanded == ReaderWork.MEMORY) {
