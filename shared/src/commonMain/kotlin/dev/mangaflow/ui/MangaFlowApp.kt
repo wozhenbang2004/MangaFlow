@@ -343,8 +343,9 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         }
     }
     LaunchedEffect(account.profile?.username, account.busy, section, reading == null, detail == null, restrictedMode) {
-        if (!restrictedMode && section == Section.ACCOUNT && reading == null && detail == null &&
-            account.profile != null && !account.busy) model.refreshCopyShelfMetadata()
+        if (!restrictedMode && (section == Section.ACCOUNT || section == Section.LIBRARY) &&
+            reading == null && detail == null && account.profile != null && !account.busy)
+            model.refreshCopyShelfMetadata()
         else model.cancelCopyShelfMetadata()
     }
     LaunchedEffect(detail?.manga?.id, account.profile?.username, account.busy, reading == null, restrictedMode) {
@@ -353,6 +354,11 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
         else model.clearCopyProgress()
     }
     LaunchedEffect(detail?.detail, adoptedResumeTargets) { model.reconcileCopyProgress() }
+    LaunchedEffect(account.profile?.username, copyShelfSync.owner, section, restrictedMode) {
+        if (!restrictedMode && section == Section.LIBRARY && account.profile != null &&
+            copyShelfSync.owner == account.profile?.username && !copyShelfSync.favoritesReady &&
+            !copyShelfSync.busy) model.copyShelfSync.checkInBackground()
+    }
     val displayedAccount = if (account.profile != null && copyShelfSync.owner == account.profile?.username && copyShelfSync.favoritesReady)
         account.copy(favorites = copyShelfSync.cloudFavorites, favoritesHasMore = false,
             favoritesLoading = copyShelfSync.checking, favoritesRefreshing = copyShelfSync.checking)
@@ -1311,6 +1317,28 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         )
                                     }
                                     Section.LIBRARY -> LibraryScreen(
+                                        cloudFavorites = if (!restrictedMode && account.profile != null) {
+                                            if (copyShelfSync.owner == account.profile?.username && copyShelfSync.favoritesReady)
+                                                copyShelfSync.cloudFavorites else account.favorites
+                                        } else emptyList(),
+                                        cloudMetadata = copyShelfRemote.items.takeIf {
+                                            !restrictedMode && copyShelfRemote.owner == account.profile?.username
+                                        }.orEmpty(),
+                                        cloudLoading = !restrictedMode && account.profile != null &&
+                                            (copyShelfSync.checking || account.favoritesLoading),
+                                        cloudHasMore = !restrictedMode && account.profile != null &&
+                                            !copyShelfSync.favoritesReady && account.favoritesHasMore,
+                                        cloudError = copyShelfSync.favoritesError ?: account.favoritesError,
+                                        cloudComplete = restrictedMode || account.profile == null ||
+                                            copyShelfSync.owner == account.profile?.username && copyShelfSync.favoritesReady,
+                                        onAddCloudFavorite = if (restrictedMode || account.profile == null) null
+                                            else model::addCloudMangaToLibrary,
+                                        onMoreCloudFavorites = model::moreCloudFavorites,
+                                        onRefreshCloudFavorites = {
+                                            model.refreshCloudFavorites()
+                                            model.copyShelfSync.checkInBackground()
+                                            model.refreshCopyShelfMetadata()
+                                        },
                                         preferredResumeTargets = if (restrictedMode) emptyMap() else
                                             adoptedResumeTargets.filterValues { it.accountOwner == account.profile?.username },
                                         copySyncState = copyShelfSync.takeIf { !restrictedMode &&
@@ -1378,6 +1406,7 @@ fun MangaFlowApp(openUpdatesRequest: Int, openDownloadsRequest: Int, onRequestNo
                                         metadataError = copyShelfRemote.error,
                                         onRetryMetadata = model::refreshCopyShelfMetadata,
                                         onOpenSync = { openCopyComparison() },
+                                        onGoShelf = { changeSection(Section.LIBRARY) },
                                         onLoginWithPassword = model::loginWithPassword,
                                         onLoginWithCookie = model::loginWithCookie,
                                         onWebsiteBegin = model::beginWebsiteLogin,

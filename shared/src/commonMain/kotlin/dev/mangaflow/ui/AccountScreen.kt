@@ -91,6 +91,7 @@ fun AccountScreen(
     onWebsiteBegin: () -> Long = { 0L },
     onWebsiteCancel: (Long) -> Unit = {},
     onWebsiteCredential: (Long, String) -> Unit = { _, _ -> },
+    onGoShelf: () -> Unit = {},
 ) {
     val desktop = platformKind == PlatformKind.DESKTOP
     val profile = state.profile
@@ -289,16 +290,27 @@ fun AccountScreen(
         }
     } else {
         key(profile.username) {
-            CloudAccountLibrary(
-                state = state, repository = repository, backdrop = backdrop, active = active,
-                localFavorites = localFavorites, localHistory = localHistory,
-                contentTopPadding = contentTopPadding,
-                onOpen = onOpen, onAddToLibrary = onAddToLibrary,
-                onMoreFavorites = onMoreFavorites, onRefreshFavorites = onRefreshFavorites,
-                onRefreshAccount = onRefresh, onOpenSync = onOpenSync,
-                cloudMetadata = cloudMetadata, metadataLoading = metadataLoading,
-                metadataError = metadataError, onRetryMetadata = onRetryMetadata,
-            )
+            Box(Modifier.fillMaxSize().mangaHazeSource(backdrop).padding(top = contentTopPadding),
+                contentAlignment = Alignment.TopCenter) {
+                Column(Modifier.widthIn(max = 480.dp).fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("拷贝已连接", style = MaterialTheme.typography.titleMedium)
+                    Text("本机与拷贝收藏已汇入同一个书架；云端独有作品无需导入即可查看。删除、同步与阅读进度仍分别管理。",
+                        style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                    Button(onClick = onGoShelf, enabled = active,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        shape = RoundedCornerShape(16.dp)) { Text("打开统一书架") }
+                    if (onOpenSync != null) TextButton(onClick = onOpenSync, enabled = active,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)) {
+                        Text("查看拷贝同步差异")
+                    }
+                    if (state.favoritesError != null) TextButton(onClick = onRefreshFavorites,
+                        enabled = active && !state.favoritesLoading) {
+                        Text("拷贝收藏读取失败 · 重试", color = colors.error)
+                    }
+                }
+            }
         }
     }
     }

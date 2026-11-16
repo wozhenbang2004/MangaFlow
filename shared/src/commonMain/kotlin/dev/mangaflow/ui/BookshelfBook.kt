@@ -78,6 +78,7 @@ internal fun BookshelfBook(
     onDragCancel: () -> Unit,
     modifier: Modifier = Modifier,
     resumeTarget: SavedResumeTarget? = null,
+    dragEnabled: Boolean = true,
 ) {
     val interaction = remember(manga.id) { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -134,8 +135,8 @@ internal fun BookshelfBook(
 
     Box(modifier.widthIn(min = 48.dp).heightIn(min = 64.dp)
         .onGloballyPositioned { rootOrigin = it.positionInRoot() }
-        .pointerInput(manga.id) {
-            if (platformKind != PlatformKind.DESKTOP) detectDragGesturesAfterLongPress(
+        .pointerInput(manga.id, dragEnabled) {
+            if (dragEnabled && platformKind != PlatformKind.DESKTOP) detectDragGesturesAfterLongPress(
                 onDragStart = { local ->
                     val caught = if (returning) returnPosition.value else Offset.Zero
                     settleJob?.cancel()
