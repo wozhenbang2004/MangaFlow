@@ -50,7 +50,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
 enum class NetworkAutoRouteStatus { AVAILABLE, FAILED, NOT_CONFIGURED, LOGIN_REQUIRED, UNSUPPORTED, CANCELLED, PARTIAL }
-enum class NetworkAutoGroup { MANGA_SOURCES, RATING_SITES, DOWNLOADS }
+enum class NetworkAutoGroup { MANGA_SOURCES, ANIME_SOURCES, RATING_SITES, DOWNLOADS }
 
 data class NetworkAutoRouteResult(
     val status: NetworkAutoRouteStatus,
@@ -110,6 +110,8 @@ data class NetworkAutoScheduleState(
     val intervalMinutes: Int = 30,
     val concurrency: Int = 12,
     val autoApply: Boolean = true,
+    /** Explicit per-target veto. Measurements still run; automatic route writes skip these IDs. */
+    val lockedTargetIds: Set<String> = emptySet(),
     val lastAttemptAtMillis: Long = 0L,
     val lastCompletedAtMillis: Long = 0L,
     val lastApplied: Int = 0,
@@ -128,6 +130,8 @@ private class NetworkAutoScheduleStore(context: PlatformContext) {
         intervalMinutes = prefs.getInt("intervalMinutes", 30).takeIf { it > 0 } ?: 30,
         concurrency = prefs.getInt("concurrency", 12).takeIf { it > 0 } ?: 12,
         autoApply = prefs.getBoolean("autoApply", true),
+        lockedTargetIds = prefs.getString("lockedTargets")?.split('|')
+            ?.filter { it.matches(Regex("[A-Za-z0-9_.-]{1,160}")) }?.toSet().orEmpty(),
         lastAttemptAtMillis = prefs.getLong("lastAttemptAt", 0L),
         lastCompletedAtMillis = prefs.getLong("lastCompletedAt", 0L),
         lastApplied = prefs.getInt("lastApplied", 0),
@@ -138,12 +142,19 @@ private class NetworkAutoScheduleStore(context: PlatformContext) {
         if (!prefs.edit().putBoolean("enabled", next.enabled)
                 .putInt("intervalMinutes", next.intervalMinutes)
                 .putInt("concurrency", next.concurrency)
-                .putBoolean("autoApply", next.autoApply).commit()) return false
+                .putBoolean("autoApply", next.autoApply)
+                .putString("lockedTargets", next.lockedTargetIds.sorted().joinToString("|")).commit()) return false
         mutable.update { previous -> next.copy(
             lastAttemptAtMillis = previous.lastAttemptAtMillis,
             lastCompletedAtMillis = previous.lastCompletedAtMillis,
             lastApplied = previous.lastApplied, message = previous.message) }
         return true
+    }
+    fun lockTarget(id: String, locked: Boolean): Boolean {
+        if (!id.matches(Regex("[A-Za-z0-9_.-]{1,160}"))) return false
+        val current = mutable.value
+        return update(current.copy(lockedTargetIds =
+            if (locked) current.lockedTargetIds + id else current.lockedTargetIds - id))
     }
     fun started(now: Long) {
         prefs.edit().putLong("lastAttemptAt", now).apply()
@@ -208,9 +219,12 @@ private class NetworkAutoScheduler(
             !finished.complete -> "部分检查未完成，线路保持不变"
             else -> "检测完成，线路保持不变"
         }
+        val eligible = finished?.selection.orEmpty().filterKeys {
+            it !in schedule.state.value.lockedTargetIds
+        }
         if (finished?.complete == true && schedule.state.value.enabled && schedule.state.value.autoApply &&
-            finished.selection.isNotEmpty()) {
-            val result = engine.apply(finished.selection)
+            eligible.isNotEmpty()) {
+            val result = engine.apply(eligible)
             if (result.success) {
                 applied = result.applied
                 message = if (applied > 0) "已自动调整 $applied 项线路" else "线路无需调整"
@@ -236,6 +250,8 @@ class NetworkAutoCheckController internal constructor(
     val state: StateFlow<NetworkAutoCheckState> get() = engine.state
     val schedule: StateFlow<NetworkAutoScheduleState> get() = settings.state
     fun updateSchedule(next: NetworkAutoScheduleState): Boolean = settings.update(next)
+    /** A source lock does not stop checking and never changes a selected manual route. */
+    fun lockTarget(id: String, locked: Boolean): Boolean = settings.lockTarget(id, locked)
     suspend fun checkDue() = scheduler.checkDue()
     fun resume() = scheduler.resume()
     fun start(): Boolean = engine.start()
@@ -372,10 +388,12 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                 val gate = Semaphore(schedule.value.concurrency)
                 val mutableSources = targets.filterNot { it.parallelRoutes }.associate { it.id to Mutex() }
                 val mangaTargets = targets.filter { it.group == NetworkAutoGroup.MANGA_SOURCES }
+                val animeTargets = targets.filter { it.group == NetworkAutoGroup.ANIME_SOURCES }
                 val ratingTargets = targets.filter { it.group == NetworkAutoGroup.RATING_SITES }
                 val ordered = buildList {
-                    repeat(maxOf(mangaTargets.size, ratingTargets.size)) { index ->
+                    repeat(maxOf(mangaTargets.size, animeTargets.size, ratingTargets.size)) { index ->
                         mangaTargets.getOrNull(index)?.let { add(it) }
+                        animeTargets.getOrNull(index)?.let { add(it) }
                         ratingTargets.getOrNull(index)?.let { add(it) }
                     }
                     addAll(targets.filter { it.group == NetworkAutoGroup.DOWNLOADS })
@@ -467,6 +485,7 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
                 val row = before.rows.firstOrNull { it.id == id }
                 val result = when (mode) { DownloadRouteMode.DIRECT -> row?.direct; DownloadRouteMode.PROXY -> row?.proxy; else -> null }
                 if (mode == null || mode == row?.currentRoute?.mode) before.copy(selection = before.selection - id)
+                else if (id in schedule.value.lockedTargetIds) before
                 else if (row?.canApply == true && result?.usable == true && result.samples == 2 && !result.confirming)
                     before.copy(selection = before.selection + (id to mode)) else before
             }
@@ -480,6 +499,9 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
         } ?: return@withContext NetworkAutoApplyResult(0, "请先完成本轮检测后再确认设置", false, state.value.stale)
         val applyingRunId = state.value.runId
         try {
+            if (selected.keys.any { it in schedule.value.lockedTargetIds }) {
+                return@withContext NetworkAutoApplyResult(0, "锁定项目保持原线路，请先解除锁定", false)
+            }
             if (!fresh(frozen)) {
                 markApplyStale("设置、来源、联动会话或网络已变化，请重新检测")
                 return@withContext NetworkAutoApplyResult(0, "检测依据已变化，未修改任何配置", false, true)
@@ -511,6 +533,9 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
             if (!fresh(frozen)) {
                 markApplyStale("检测依据已变化，请重新检测")
                 return@withContext NetworkAutoApplyResult(0, "检测依据已变化，未修改配置", false, true)
+            }
+            if (selected.keys.any { it in schedule.value.lockedTargetIds }) {
+                return@withContext NetworkAutoApplyResult(0, "保存前有来源被锁定，未修改线路", false)
             }
             if (!store.applyBatch(frozen.fence.settings, default, categories, sources)) {
                 markApplyStale("网络配置已被其他操作修改，请重新检测")
@@ -595,7 +620,8 @@ private class NetworkAutoCheckEngine(context: PlatformContext, private val repos
     private fun suggestions(rows: List<NetworkAutoRow>): Map<String, DownloadRouteMode> = rows.mapNotNull { row ->
         val mode = row.recommendation
         val result = when (mode) { DownloadRouteMode.DIRECT -> row.direct; DownloadRouteMode.PROXY -> row.proxy; else -> null }
-        if (row.canApply && mode != null && mode != row.currentRoute?.mode && result?.usable == true &&
+        if (row.canApply && row.id !in schedule.value.lockedTargetIds &&
+            mode != null && mode != row.currentRoute?.mode && result?.usable == true &&
             result.samples == 2 && !result.confirming) row.id to mode else null
     }.toMap()
 
