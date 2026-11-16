@@ -9,45 +9,52 @@ data class LanercFilterOption(val value: String, val label: String)
 data class LanercFilter(val key: String, val title: String, val options: List<LanercFilterOption>)
 data class LanercCategory(val key: String, val title: String, val filters: List<LanercFilter>)
 
-internal suspend fun LanercSourceStore.readHomeSections(id: String): List<LanercBrowseSection> {
+internal suspend fun LanercSourceStore.readHomeSections(id: String, expectedRevision: String? = null): List<LanercBrowseSection> {
     val descriptor = browseDescriptor(id)
-    val result = runtime.call(id, "homeSections").value as? JSONArray
+    val reply = runtime.call(id, "homeSections", expectedRevision = expectedRevision)
+    val result = reply.value as? JSONArray
         ?: throw LanercCapabilityException("来源分区格式不兼容，请更新来源。")
     require(result.length() <= 64) { "来源分区数量过多。" }
-    return (0 until result.length()).mapNotNull { index ->
-        val section = result.optJSONObject(index) ?: return@mapNotNull null
+    return (0 until result.length()).map { index ->
+        val section = result.optJSONObject(index)
+            ?: throw LanercCapabilityException("来源分区格式不兼容，请更新来源。")
         val title = section.optString("title").ifBlank { section.optString("name") }
-        val items = section.optJSONArray("items") ?: return@mapNotNull null
-        if (title.isBlank()) return@mapNotNull null
-        LanercBrowseSection(section.optString("key"), title, lanercCards(descriptor, items))
+        val items = section.optJSONArray("items")
+            ?: throw LanercCapabilityException("来源分区缺少条目列表，请更新来源。")
+        if (title.isBlank()) throw LanercCapabilityException("来源分区缺少名称，请更新来源。")
+        LanercBrowseSection(section.optString("key"), title, lanercCards(descriptor, items, reply.revision))
     }
 }
 
-internal suspend fun LanercSourceStore.readCategories(id: String): List<LanercCategory> {
+internal suspend fun LanercSourceStore.readCategories(id: String, expectedRevision: String? = null): List<LanercCategory> {
     browseDescriptor(id)
-    val result = runtime.call(id, "categories").value as? JSONArray
+    val result = runtime.call(id, "categories", expectedRevision = expectedRevision).value as? JSONArray
         ?: throw LanercCapabilityException("来源分类格式不兼容，请更新来源。")
     require(result.length() <= 128)
-    return (0 until result.length()).mapNotNull { index ->
-        val item = result.optJSONObject(index) ?: return@mapNotNull null
+    return (0 until result.length()).map { index ->
+        val item = result.optJSONObject(index)
+            ?: throw LanercCapabilityException("来源分类格式不兼容，请更新来源。")
         val key = item.optString("key")
         val title = item.optString("title").ifBlank { key }
-        if (title.isBlank()) return@mapNotNull null
+        if (title.isBlank()) throw LanercCapabilityException("来源分类缺少名称，请更新来源。")
         LanercCategory(key, title, parseFilters(item.opt("filters")))
     }.distinctBy { it.key }
 }
 
-internal suspend fun LanercSourceStore.readFiltered(id: String, category: String, filtersJson: String, page: Int): List<AnimeSourceTitle> {
+internal suspend fun LanercSourceStore.readFiltered(id: String, category: String, filtersJson: String, page: Int,
+    expectedRevision: String? = null): List<AnimeSourceTitle> {
     val descriptor = browseDescriptor(id)
     require(category.length <= 1000 && filtersJson.length <= 16_384 && page >= 1)
     val filters = JSONObject(filtersJson).toString()
-    return lanercCards(descriptor, runtime.call(id, "searchFiltered", JSONArray(listOf(category, filters, page))).value)
+    val reply = runtime.call(id, "searchFiltered", JSONArray(listOf(category, filters, page)), expectedRevision)
+    return lanercCards(descriptor, reply.value, reply.revision)
 }
 
-internal suspend fun LanercSourceStore.readRelated(id: String, titleId: String): List<AnimeSourceTitle> {
+internal suspend fun LanercSourceStore.readRelated(id: String, titleId: String, expectedRevision: String? = null): List<AnimeSourceTitle> {
     val descriptor = browseDescriptor(id)
     require(titleId.length in 1..16_384)
-    return lanercCards(descriptor, runtime.call(id, "related", JSONArray(listOf(titleId))).value)
+    val reply = runtime.call(id, "related", JSONArray(listOf(titleId)), expectedRevision)
+    return lanercCards(descriptor, reply.value, reply.revision)
 }
 
 private fun LanercSourceStore.browseDescriptor(id: String): LanercSourceDescriptor = descriptor(id).also {

@@ -21,13 +21,16 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
     override val id: String = descriptor.id
     override val name: String = descriptor.name
     override val homeUrl: String = descriptor.homeUrl
+    override val revision: String get() = store.snapshot(id)?.revision
+        ?: throw LanercCapabilityException("该来源未安装或已停用，请先启用来源。")
     // A page argument in a function declaration alone is not pagination evidence.
     override val supportsSearchPagination: Boolean get() = id == "anime-lanerc-ani"
 
     override suspend fun search(query: String, page: Int): List<AnimeSourceTitle> {
         require(query.isNotBlank() && query.length <= 500 && page >= 1) { "请输入名称并使用有效页码。" }
         if (page > 1 && !supportsSearchPagination) return emptyList()
-        return lanercCards(descriptor, store.runtime.call(id, "search", JSONArray(listOf(query.trim(), page))).value)
+        val reply = store.runtime.call(id, "search", JSONArray(listOf(query.trim(), page)))
+        return lanercCards(descriptor, reply.value, reply.revision)
     }
 
     override suspend fun catalog(title: AnimeSourceTitle): AnimeSourceCatalog {
@@ -110,10 +113,11 @@ internal class LanercProvider(private val store: LanercSourceStore, private val 
     }
 }
 
-internal fun lanercCards(descriptor: LanercSourceDescriptor, value: Any?): List<AnimeSourceTitle> {
+internal fun lanercCards(descriptor: LanercSourceDescriptor, value: Any?, revision: String): List<AnimeSourceTitle> {
     val list = value as? JSONArray ?: throw LanercCapabilityException("来源列表格式不兼容，请更新来源。")
     require(list.length() <= 2000) { "来源单页结果过多。" }
-    return (0 until list.length()).mapNotNull { index ->
+    require(revision.isNotBlank()) { "来源列表缺少版本标识。" }
+    val cards = (0 until list.length()).mapNotNull { index ->
         val item = list.optJSONObject(index) ?: return@mapNotNull null
         val id = item.optString("id").trim()
         val name = item.optString("name").trim()
@@ -123,9 +127,15 @@ internal fun lanercCards(descriptor: LanercSourceDescriptor, value: Any?): List<
         }
         AnimeSourceTitle(descriptor.id, id, name, url, sourceCover(descriptor.homeUrl, item.optString("pic")),
             year = lanercYear(item.optString("year")),
+            episodeCount = item.opt("episodeCount")?.toString()?.toIntOrNull()?.takeIf { it >= 0 },
             externalIds = if (descriptor.id == "anime-lanerc-douban" && id.toLongOrNull()?.let { it > 0 } == true)
-                mapOf("douban" to id) else emptyMap())
+                mapOf("douban" to id) else emptyMap(),
+            updateText = item.optString("remarks").trim().ifBlank { item.optString("uptodate").trim() },
+            ratingText = item.optString("score").trim(), sourceRevision = revision)
     }.distinctBy { it.id }
+    if (list.length() > 0 && cards.isEmpty())
+        throw LanercCapabilityException("来源列表缺少有效条目标识或名称，请更新来源。")
+    return cards
 }
 
 private fun checkedMedia(url: String): String = try { animePublicUrl(url).toString() }

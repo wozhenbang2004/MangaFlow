@@ -40,6 +40,7 @@ internal data class AnimeLibraryState(
     val searchHistory: List<String> = emptyList(),
     val dismissedResume: Map<String, Long> = emptyMap(),
     val clearedHistoryAt: Map<String, Long> = emptyMap(),
+    val discoveryColumns: Int? = null,
     /** Process-local authority. Old playback cannot write through a backup replacement. */
     val restoreEpoch: Long = 0L,
 )
@@ -149,6 +150,11 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
 
     suspend fun setSettings(settings: AnimePlaybackSettings) = update { it.copy(settings = settings.validate()) }
 
+    suspend fun setDiscoveryColumns(columns: Int) = update {
+        require(columns >= 0) { "列数不能小于零。" }
+        it.copy(discoveryColumns = columns)
+    }
+
     suspend fun rememberSearch(query: String) = update {
         val text = query.trim()
         if (text.isEmpty()) it else it.copy(searchHistory = listOf(text) + it.searchHistory.filterNot { old -> old == text })
@@ -245,6 +251,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("searchHistory", JSONArray(state.searchHistory))
         .put("dismissedResume", JSONObject(state.dismissedResume))
         .put("clearedHistoryAt", JSONObject(state.clearedHistoryAt))
+        .put("discoveryColumns", state.discoveryColumns)
         .apply {
             state.undo?.let { undo ->
                 put("undo", JSONObject().put("subjectId", undo.subjectId)
@@ -289,7 +296,9 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             settings = json.optJSONObject("settings")?.let(::decodeSettings) ?: AnimePlaybackSettings(),
             searchHistory = strings(json.optJSONArray("searchHistory") ?: JSONArray()).filter { it.isNotBlank() }.distinct(),
             dismissedResume = dismissed.keys().asSequence().associateWith { dismissed.getLong(it) },
-            clearedHistoryAt = cleared.keys().asSequence().associateWith { cleared.getLong(it) })
+            clearedHistoryAt = cleared.keys().asSequence().associateWith { cleared.getLong(it) },
+            discoveryColumns = if (json.isNull("discoveryColumns")) null else json.getInt("discoveryColumns")
+                .also { require(it >= 0) { "发现页列数无效。" } })
     }
 
     private fun encodeEntry(entry: AnimeLibraryEntry) = JSONObject()
@@ -316,6 +325,7 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
         .put("title", binding.catalog.title).put("url", binding.catalog.url)
         .put("cover", binding.catalog.coverUrl).put("year", binding.catalog.year)
         .put("count", binding.catalog.episodeCount).put("externalIds", JSONObject(binding.catalog.externalIds))
+        .put("updateText", binding.catalog.updateText).put("ratingText", binding.catalog.ratingText)
         .put("episodes", JSONObject(binding.episodeMappings)).put("preferred", binding.preferred)
         .put("group", binding.selectedGroup)
 
@@ -326,7 +336,8 @@ internal class AnimeLibraryStore private constructor(context: PlatformContext, s
             json.getString("source"), json.getString("id"), json.getString("title"), json.getString("url"),
             json.optString("cover"), if (json.isNull("year")) null else json.getInt("year"),
             if (json.isNull("count")) null else json.getInt("count"),
-            ids.keys().asSequence().associateWith { ids.getString(it) }),
+            ids.keys().asSequence().associateWith { ids.getString(it) },
+            updateText = json.optString("updateText"), ratingText = json.optString("ratingText")),
             mappings.keys().asSequence().associateWith { mappings.getString(it) },
             json.optBoolean("preferred"), json.optString("group", null))
     }

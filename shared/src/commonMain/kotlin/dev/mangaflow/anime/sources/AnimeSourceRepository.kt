@@ -19,7 +19,11 @@ interface AnimeProvider {
     val id: String
     val name: String
     val homeUrl: String
+    val revision: String
     val supportsSearchPagination: Boolean get() = true
+    val supportsLatest: Boolean get() = false
+    suspend fun latest(page: Int = 1): List<AnimeSourceTitle> =
+        throw AnimeSourceException(id, AnimeSourceStage.CATALOG, "此来源尚未提供最近更新目录。")
     suspend fun search(query: String, page: Int = 1): List<AnimeSourceTitle>
     suspend fun catalog(title: AnimeSourceTitle): AnimeSourceCatalog
     suspend fun resolve(catalog: AnimeSourceCatalog, episode: AnimeSourceEpisode): AnimePlaybackAsset
@@ -45,7 +49,7 @@ class AnimeSourceRepository(context: PlatformContext) {
  * A rule's presence is not evidence that its remote site is currently reachable or playable.
  */
 private abstract class RoutedAnimeProvider : AnimeProvider {
-    protected open val revision: String = "2026-11-16"
+    override val revision: String = "2026-11-16"
     protected fun titleUrl(title: AnimeSourceTitle): HttpUrl {
         require(title.sourceId == id) { "该条目不属于所选动漫来源。" }
         return animePublicUrl(title.url).also {
@@ -229,8 +233,42 @@ private class AgeProvider : RoutedAnimeProvider() {
     override val id = "anime-age"
     override val name = "AGE 动漫"
     override val homeUrl = "https://www.agedm.io/"
+    override val supportsLatest = true
     private val api = animePublicUrl("https://api.agedm.io/v2/")
     private val referer = "https://m.agedm.io/"
+
+    // Miru's pinned MIT agedm.io v0.0.4 contract: catalogue order=time, 50 items/page.
+    // uptodate is source display text; it does not establish a playable episode count.
+    override suspend fun latest(page: Int): List<AnimeSourceTitle> {
+        require(page >= 1) { "页码必须从 1 开始。" }
+        val http = AnimeHttp(id)
+        return try {
+            val url = api.newBuilder().addPathSegment("catalog")
+                .addQueryParameter("genre", "all").addQueryParameter("label", "all")
+                .addQueryParameter("letter", "all").addQueryParameter("order", "time")
+                .addQueryParameter("region", "all").addQueryParameter("resource", "all")
+                .addQueryParameter("season", "all").addQueryParameter("status", "all")
+                .addQueryParameter("year", "all").addQueryParameter("page", page.toString())
+                .addQueryParameter("size", "50").build()
+            val rows = http.json(url, AnimeSourceStage.CATALOG, referer = referer)
+                .requiredArray("videos", id, AnimeSourceStage.CATALOG)
+            val titles = (0 until rows.length()).map { index ->
+                val row = rows.optJSONObject(index)
+                    ?: throw AnimeSourceException(id, AnimeSourceStage.CATALOG, "AGE 最近更新条目格式已变化。")
+                val key = row.text("id")
+                val title = row.text("name")
+                if (key.isBlank() || title.isBlank())
+                    throw AnimeSourceException(id, AnimeSourceStage.CATALOG, "AGE 最近更新缺少条目标识或名称。")
+                AnimeSourceTitle(id, key, title,
+                    animePublicUrl(homeUrl).newBuilder().addPathSegment("detail").addPathSegment(key).build().toString(),
+                    sourceCover(homeUrl, row.text("cover")), year = row.positiveInt("year"),
+                    updateText = row.text("uptodate"), sourceRevision = revision)
+            }.distinctBy { it.id }
+            if (DownloadRoutingStore.activeSourceSnapshot(id) != http.route)
+                throw AnimeSourceException(id, AnimeSourceStage.CATALOG, "来源网络路由已改变，请重新读取最近更新。")
+            titles
+        } finally { http.close() }
+    }
 
     override suspend fun search(query: String, page: Int): List<AnimeSourceTitle> {
         val keyword = validateQuery(query, page)

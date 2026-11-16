@@ -42,6 +42,11 @@ data class AnimeSourceTitle(
     val year: Int? = null,
     val episodeCount: Int? = null,
     val externalIds: Map<String, String> = emptyMap(),
+    /** Source-provided display text, not proof of a playable or canonical episode count. */
+    val updateText: String = "",
+    val ratingText: String = "",
+    /** Discovery snapshot only; never used to rewrite a saved binding's native identity. */
+    val sourceRevision: String? = null,
 )
 
 data class AnimeSourceEpisode(
@@ -214,6 +219,10 @@ data class AnimePlaybackSettings(
 }
 
 data class AnimeScreenState(
+    val discoveryTab: AnimeDiscoveryTab = AnimeDiscoveryTab.HOME,
+    val discoverySections: List<AnimeDiscoverySection> = emptyList(),
+    val discoveryFeeds: Map<String, AnimeDiscoveryFeed> = emptyMap(),
+    val discoveryColumns: Int? = null,
     val query: String = "",
     val catalog: List<AnimeSubject> = emptyList(),
     val catalogLoading: Boolean = false,
@@ -245,6 +254,7 @@ data class AnimeScreenState(
     val catalogPage: Int = 0,
     val catalogHasMore: Boolean = false,
     val catalogLoadingMore: Boolean = false,
+    val catalogMoreError: String? = null,
     val catalogYear: Int? = null,
     val catalogTag: String = "",
     val calendarDay: Int? = null,

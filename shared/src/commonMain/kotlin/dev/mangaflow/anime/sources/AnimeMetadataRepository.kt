@@ -29,7 +29,7 @@ class AnimeMetadataRepository(context: PlatformContext) {
         }
 
     suspend fun browse(mode: AnimeBrowseMode = AnimeBrowseMode.POPULAR, query: String = "", page: Int = 1,
-        year: Int? = null, tag: String = "", weekday: Int? = null): AnimeMetadataPage {
+        year: Int? = null, tag: String = "", weekday: Int? = null, forceRefresh: Boolean = false): AnimeMetadataPage {
         require(page > 0 && (page - 1L) * PAGE_SIZE <= Int.MAX_VALUE) { "分页位置无效。" }
         require(year == null || year in 1..9998) { "请输入有效年份。" }
         require(weekday == null || weekday in 1..7)
@@ -39,7 +39,7 @@ class AnimeMetadataRepository(context: PlatformContext) {
             mode == AnimeBrowseMode.POPULAR -> ContentCacheKind.RANKING
             else -> ContentCacheKind.DISCOVERY
         }
-        cache.read(key)?.takeIf { cache.isFresh(it, kind) }?.let {
+        cache.read(key)?.takeIf { !forceRefresh && cache.isFresh(it, kind) }?.let {
             runCatching { decodePage(it.text) }.getOrNull()?.let { cached -> return cached }
         }
         val cacheGeneration = cache.generation
@@ -165,7 +165,7 @@ internal fun bangumiSubject(json: JSONObject): AnimeSubject? {
         externalIds = mapOf("bangumi" to id.toString()),
         airWeekday = json.optInt("air_weekday").takeIf { it in 1..7 },
         rating = json.optJSONObject("rating")?.finiteNumber("score"),
-        rank = json.positiveInt("rank"),
+        rank = json.optJSONObject("rating")?.positiveInt("rank") ?: json.positiveInt("rank"),
     )
 }
 

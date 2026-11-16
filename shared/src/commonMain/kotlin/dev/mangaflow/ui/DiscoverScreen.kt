@@ -958,7 +958,7 @@ private fun BrowseListRow(
 }
 
 @Composable
-private fun DiscoveryLayoutControl(
+internal fun DiscoveryLayoutControl(
     columns: Int,
     actualColumns: Int,
     backdrop: HazeState,

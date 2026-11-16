@@ -1,14 +1,12 @@
 package dev.mangaflow.anime.ui
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
@@ -18,231 +16,221 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
 import dev.mangaflow.anime.*
-import dev.mangaflow.anime.sources.lanerc.*
-import dev.mangaflow.json.JSONObject
+import dev.mangaflow.anime.sources.AnimeSourceBrowseState
+import dev.mangaflow.anime.sources.lanerc.LanercCategory
+import dev.mangaflow.anime.sources.lanerc.LanercFilter
 import dev.mangaflow.ui.*
 import dev.mangaflow.ui.motion.*
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 
-/** Source-owned cards stay outside the canonical library until the user identifies a subject. */
+/** Only disclosure and scroll live here; the application owner retains requests and native identities. */
 @Composable
-internal fun AnimeSourceBrowsePanel(
-    visible: Boolean,
-    state: AnimeScreenState,
-    controller: AnimeController,
-    backdrop: HazeState,
-    onDismiss: () -> Unit,
-    onManageSources: () -> Unit,
-    onChooseTitle: (AnimeSourceTitle, Boolean) -> Unit,
-) {
-    val available = state.sourceExtensions.filter {
-        it.installed && it.enabled && it.kind in setOf(LanercSourceKind.BROWSE, LanercSourceKind.VIDEO)
-    }
-    var selectedSourceId by remember { mutableStateOf<String?>(null) }
-    val source = available.firstOrNull { it.id == selectedSourceId }
-        ?: available.firstOrNull { it.kind == LanercSourceKind.BROWSE } ?: available.firstOrNull()
+internal fun AnimeSourceBrowsePane(controller: AnimeController, backdrop: HazeState,
+    scrolls: AnimeDiscoveryScrolls, columns: Int?, active: Boolean, onManageSources: () -> Unit,
+    onChooseTitle: (AnimeSourceTitle, Boolean) -> Unit) {
+    val owner = controller.sourceBrowse
+    val state by owner.state.collectAsStateWithLifecycle()
+    val source = state.sources.firstOrNull { it.id == state.sourceId && it.revision == state.sourceRevision }
     var sourceMenu by remember { mutableStateOf(false) }
-    var categoryKey by remember(source?.id, source?.revision) { mutableStateOf<String?>(null) }
-    var filters by remember(source?.id, source?.revision) { mutableStateOf<Map<String, String>>(emptyMap()) }
-    var selectedTitle by remember(source?.id, source?.revision) { mutableStateOf<AnimeSourceTitle?>(null) }
-    var home by remember(source?.id, source?.revision) { mutableStateOf<List<LanercBrowseSection>>(emptyList()) }
-    var categories by remember(source?.id, source?.revision) { mutableStateOf<List<LanercCategory>>(emptyList()) }
-    var homeLoading by remember(source?.id, source?.revision) { mutableStateOf(false) }
-    var categoriesLoading by remember(source?.id, source?.revision) { mutableStateOf(false) }
-    var homeError by remember(source?.id, source?.revision) { mutableStateOf<String?>(null) }
-    var categoryError by remember(source?.id, source?.revision) { mutableStateOf<String?>(null) }
-    var refresh by remember { mutableIntStateOf(0) }
-    var requestedPage by remember(source?.id, source?.revision) { mutableIntStateOf(1) }
-    var page by remember(source?.id, source?.revision) { mutableIntStateOf(0) }
-    var rows by remember(source?.id, source?.revision) { mutableStateOf<List<AnimeSourceTitle>>(emptyList()) }
-    var loading by remember(source?.id, source?.revision) { mutableStateOf(false) }
-    var pageError by remember(source?.id, source?.revision) { mutableStateOf<String?>(null) }
-    var more by remember(source?.id, source?.revision) { mutableStateOf(false) }
-    var pageRetry by remember { mutableIntStateOf(0) }
-    var related by remember(selectedTitle?.sourceId, selectedTitle?.id) { mutableStateOf<List<AnimeSourceTitle>>(emptyList()) }
-    var relatedLoading by remember(selectedTitle?.sourceId, selectedTitle?.id) { mutableStateOf(false) }
-    var relatedError by remember(selectedTitle?.sourceId, selectedTitle?.id) { mutableStateOf<String?>(null) }
-    var relatedRetry by remember { mutableIntStateOf(0) }
-    val scroll = rememberLazyListState()
-    val filtersJson = JSONObject().apply { filters.forEach { (key, value) -> put(key, value) } }.toString()
-    val category = categories.firstOrNull { it.key == categoryKey }
-
-    LaunchedEffect(visible, source?.id, source?.revision, refresh) {
-        val selected = source ?: return@LaunchedEffect
-        if (!visible) return@LaunchedEffect
-        homeError = null; categoryError = null
-        coroutineScope {
-            if ("homeSections" in selected.capabilities) launch {
-                homeLoading = true
-                try { home = controller.extensions.homeSections(selected.id) }
-                catch (cancel: CancellationException) { throw cancel }
-                catch (failure: Exception) { homeError = animeBrowseError(failure) }
-                finally { homeLoading = false }
+    var categoryMenu by remember { mutableStateOf(false) }
+    var filtersVisible by remember { mutableStateOf(false) }
+    val category = state.categories.firstOrNull { it.key == state.categoryKey }
+    LaunchedEffect(active, state.sourceId, state.sourceRevision) {
+        if (!active) { sourceMenu = false; categoryMenu = false; filtersVisible = false }
+    }
+    LaunchedEffect(state.sourceId, state.sourceRevision, state.categoryKey) { filtersVisible = false }
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (state.selectedTitle != null) MotionIconButton(onClick = owner::closeTitle,
+                modifier = Modifier.size(44.dp), tooltip = "返回来源列表") {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回来源列表", Modifier.size(20.dp))
             }
-            if ("categories" in selected.capabilities && "searchFiltered" in selected.capabilities) launch {
-                categoriesLoading = true
-                try { categories = controller.extensions.categories(selected.id) }
-                catch (cancel: CancellationException) { throw cancel }
-                catch (failure: Exception) { categoryError = animeBrowseError(failure) }
-                finally { categoriesLoading = false }
+            Box(Modifier.weight(1f)) {
+                MotionTextButton(onClick = { sourceMenu = true }, modifier = Modifier.heightIn(min = 44.dp)) {
+                    Text(source?.name ?: "选择来源", Modifier.weight(1f, fill = false),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Icon(Icons.Outlined.ExpandMore, null, Modifier.size(17.dp))
+                }
+                CompactGlassPopover(sourceMenu, backdrop, onDismiss = { sourceMenu = false }, alignToStart = true) {
+                    state.sources.forEach { item ->
+                        CompactMenuAction(if (source?.id == item.id) Icons.Outlined.Check else Icons.Outlined.Public,
+                            item.name, onClick = { owner.selectSource(item.id); sourceMenu = false })
+                    }
+                    CompactMenuAction(Icons.Outlined.Extension, "管理来源", onClick = { sourceMenu = false; onManageSources() })
+                }
+            }
+            if (state.selectedTitle == null && state.categories.isNotEmpty()) Box(Modifier.widthIn(max = 120.dp)) {
+                MotionTextButton(onClick = { categoryMenu = true }, modifier = Modifier.heightIn(min = 44.dp)) {
+                    Text(category?.title ?: "推荐", Modifier.weight(1f, fill = false),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
+                }
+                CompactGlassPopover(categoryMenu, backdrop, onDismiss = { categoryMenu = false }) {
+                    if (source?.capabilities?.contains("homeSections") == true) CompactMenuAction(
+                        if (state.categoryKey == null) Icons.Outlined.Check else Icons.Outlined.Explore, "推荐",
+                        onClick = { owner.selectCategory(null); categoryMenu = false })
+                    state.categories.forEach { item ->
+                        CompactMenuAction(if (state.categoryKey == item.key) Icons.Outlined.Check else Icons.Outlined.Category,
+                            item.title, onClick = { owner.selectCategory(item.key); categoryMenu = false })
+                    }
+                }
+            }
+            if (state.selectedTitle == null && category?.filters?.isNotEmpty() == true) {
+                MotionIconButton(onClick = { filtersVisible = true }, modifier = Modifier.size(44.dp), tooltip = "来源筛选") {
+                    Icon(Icons.Outlined.FilterList, "来源筛选", Modifier.size(20.dp),
+                        tint = if (state.filters.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            MotionIconButton(onClick = onManageSources, modifier = Modifier.size(44.dp), tooltip = "管理来源") {
+                Icon(Icons.Outlined.Extension, "管理来源", Modifier.size(20.dp))
+            }
+        }
+        if (source == null) AnimeMessage("还没有可浏览的来源", action = "管理来源", onAction = onManageSources)
+        else MotionTabContent(source to state,
+            contentKey = { (selected, snapshot) -> selected.id + ":" + selected.revision + ":" + (snapshot.selectedTitle?.id ?: "catalog") },
+            order = { (_, snapshot) -> if (snapshot.selectedTitle == null) 0 else 1 }, modifier = Modifier.weight(1f)) { (shownSource, snapshot) ->
+            val title = snapshot.selectedTitle
+            if (title != null) AnimeSourcePreview(title, shownSource.name, shownSource.videoSource, snapshot,
+                columns, scrolls, onChooseTitle, onOpen = owner::openTitle, onRetry = owner::retryRelated)
+            else AnimeSourceCatalogue(snapshot, columns, scrolls, onOpen = owner::openTitle,
+                onRetry = owner::retryPage, onMore = owner::loadMore)
+        }
+    }
+    AnimeSourceFilters(filtersVisible, category, state.filters, backdrop,
+        onDismiss = { filtersVisible = false }, onSelect = owner::setFilter)
+}
+
+@Composable
+private fun AnimeSourceCatalogue(state: AnimeSourceBrowseState, preferred: Int?, scrolls: AnimeDiscoveryScrolls,
+    onOpen: (AnimeSourceTitle) -> Unit, onRetry: () -> Unit, onMore: () -> Unit) {
+    val source = state.sources.firstOrNull { it.id == state.sourceId && it.revision == state.sourceRevision }
+    val latest = source?.capabilities?.contains("latest") == true
+    val filterKey = state.filters.entries.sortedBy { it.key }.joinToString("&") { it.key + "=" + it.value }
+    val scroll = scrolls.grid("source:${state.sourceId}:${state.sourceRevision}:${state.categoryKey}:$filterKey")
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val columns = animeDiscoveryColumns(maxWidth, preferred)
+        LazyVerticalGrid(GridCells.Fixed(columns), state = scroll, modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 108.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (state.categoryError != null) item(key = "category-error", span = { GridItemSpan(maxLineSpan) }) {
+                AnimeDiscoveryInlineStatus(state.categoryError, onRetry)
+            }
+            if (latest || state.categoryKey != null) {
+                item(key = "caption", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeQuietLabel(if (latest) "最近更新 · 来源标注" else state.categories.firstOrNull { it.key == state.categoryKey }?.title.orEmpty(),
+                        Modifier.padding(vertical = 6.dp))
+                }
+                if (state.error != null) item(key = "error", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeDiscoveryInlineStatus(state.error, onRetry)
+                }
+                if (state.items.isEmpty()) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeDiscoveryInlineStatus(if (state.loading) "正在读取来源内容" else if (state.error == null) "没有符合条件的内容" else "")
+                }
+                else items(state.items, key = { it.sourceId + ":" + it.id }) { title ->
+                    AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = { onOpen(title) })
+                }
+                if (state.loading && state.items.isNotEmpty()) item(key = "refresh", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeQuietLabel("更新中")
+                }
+                if (state.moreError != null) item(key = "more-error", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeDiscoveryInlineStatus(state.moreError, onRetry)
+                }
+                if (state.hasMore) item(key = "more", span = { GridItemSpan(maxLineSpan) }) {
+                    MotionTextButton(onClick = onMore, enabled = !state.loadingMore,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(if (state.loadingMore) "正在加载" else "加载更多") }
+                }
+            } else {
+                if (state.homeError != null) item(key = "home-error", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeDiscoveryInlineStatus(state.homeError, onRetry)
+                }
+                if (state.home.isEmpty()) item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeDiscoveryInlineStatus(if (state.homeLoading || state.categoriesLoading) "正在读取来源内容"
+                        else if (state.homeError == null && state.categoryError == null)
+                            if (state.categories.isNotEmpty()) "选择分类继续浏览" else "来源暂无推荐" else "")
+                }
+                state.home.forEachIndexed { index, section ->
+                    item(key = "heading:$index", span = { GridItemSpan(maxLineSpan) }) {
+                        AnimeDiscoverySectionHeading(section.title, source?.name.orEmpty(), refreshing = state.homeLoading)
+                    }
+                    items(section.items.distinctBy { it.sourceId to it.id }, key = { "section:$index:${it.sourceId}:${it.id}" }) { title ->
+                        AnimeSourceDiscoveryCard(title, list = columns == 1, onOpen = { onOpen(title) })
+                    }
+                }
             }
         }
     }
-    LaunchedEffect(visible, source?.id, source?.revision, categoryKey, filtersJson, requestedPage, pageRetry) {
-        val selected = source ?: return@LaunchedEffect
-        val key = categoryKey ?: return@LaunchedEffect
-        if (!visible) return@LaunchedEffect
-        if (requestedPage == 1) { rows = emptyList(); page = 0; more = false; scroll.scrollToItem(0) }
-        loading = true; pageError = null
-        try {
-            val result = controller.extensions.searchFiltered(selected.id, key, filtersJson, requestedPage)
-                .distinctBy { it.sourceId to it.id }
-            val merged = if (requestedPage == 1) result else (rows + result).distinctBy { it.sourceId to it.id }
-            more = result.isNotEmpty() && (requestedPage == 1 || merged.size > rows.size)
-            rows = merged; page = requestedPage
-        } catch (cancel: CancellationException) { throw cancel }
-        catch (failure: Exception) { pageError = animeBrowseError(failure) }
-        finally { loading = false }
+}
+
+@Composable
+private fun AnimeSourcePreview(title: AnimeSourceTitle, sourceName: String, videoSource: Boolean,
+    state: AnimeSourceBrowseState, preferred: Int?, scrolls: AnimeDiscoveryScrolls,
+    onChooseTitle: (AnimeSourceTitle, Boolean) -> Unit, onOpen: (AnimeSourceTitle) -> Unit, onRetry: () -> Unit) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val columns = animeDiscoveryColumns(maxWidth, preferred)
+        LazyVerticalGrid(GridCells.Fixed(columns),
+            state = scrolls.grid("preview:${title.sourceId}:${title.sourceRevision}:${title.id}"), modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 108.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item(key = "subject", span = { GridItemSpan(maxLineSpan) }) {
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    AnimePoster(title.coverUrl, Modifier.width(80.dp).height(114.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Text(title.title, style = MaterialTheme.typography.titleMedium)
+                        AnimeQuietLabel(sourceName)
+                        listOfNotNull(title.year?.toString(), title.updateText.takeIf(String::isNotBlank),
+                            title.ratingText.takeIf(String::isNotBlank)).joinToString(" · ").takeIf(String::isNotBlank)
+                            ?.let { AnimeQuietLabel(it) }
+                    }
+                }
+            }
+            item(key = "open", span = { GridItemSpan(maxLineSpan) }) {
+                MotionButton(onClick = { onChooseTitle(title, videoSource) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Icon(Icons.Outlined.Search, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (videoSource) "选择对应番剧与播放来源" else "选择对应番剧")
+                }
+            }
+            if (state.related.isNotEmpty() || state.relatedLoading || state.relatedError != null) {
+                item(key = "related-heading", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeDiscoverySectionHeading("相关内容", sourceName, refreshing = state.relatedLoading)
+                }
+                if (state.relatedError != null) item(key = "related-error", span = { GridItemSpan(maxLineSpan) }) {
+                    AnimeDiscoveryInlineStatus(state.relatedError, onRetry)
+                }
+                items(state.related, key = { "related:${it.sourceId}:${it.id}" }) { related ->
+                    AnimeSourceDiscoveryCard(related, list = columns == 1, onOpen = { onOpen(related) })
+                }
+            }
+        }
     }
-    LaunchedEffect(visible, source?.id, source?.revision, selectedTitle?.id, relatedRetry) {
-        val selected = source ?: return@LaunchedEffect
-        val title = selectedTitle ?: return@LaunchedEffect
-        if (!visible || "related" !in selected.capabilities) return@LaunchedEffect
-        relatedLoading = true; relatedError = null
-        try { related = controller.extensions.related(selected.id, title.id).filter { it.id != title.id }
-            .distinctBy { it.sourceId to it.id } }
-        catch (cancel: CancellationException) { throw cancel }
-        catch (failure: Exception) { relatedError = animeBrowseError(failure) }
-        finally { relatedLoading = false }
-    }
-    MotionDialog(visible, onDismissRequest = onDismiss, maximumWidth = 720.dp,
-        onClosed = { selectedTitle = null; sourceMenu = false; requestedPage = 1 }) {
+}
+
+@Composable
+private fun AnimeSourceFilters(visible: Boolean, category: LanercCategory?, selected: Map<String, String>,
+    backdrop: HazeState, onDismiss: () -> Unit, onSelect: (String, String?) -> Unit) {
+    var retained by remember { mutableStateOf<LanercCategory?>(null) }
+    if (category != null && visible) SideEffect { retained = category }
+    MotionDialog(visible && category != null, onDismissRequest = onDismiss, maximumWidth = 480.dp,
+        onClosed = { retained = null }) {
+        val shown = category ?: retained
         LiquidGlassSurface(backdrop, role = GlassSurfaceRole.PANEL, cornerRadius = 24.dp) {
-            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)) {
-                Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 6.dp, top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    if (selectedTitle != null) MotionIconButton(onClick = { selectedTitle = null }, modifier = Modifier.size(44.dp),
-                        tooltip = "返回来源发现") { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回", Modifier.size(20.dp)) }
-                    Text(selectedTitle?.title ?: "来源发现", Modifier.weight(1f).padding(start = if (selectedTitle == null) 8.dp else 0.dp),
-                        style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭来源发现") {
+            Column(Modifier.fillMaxWidth().heightIn(max = LocalMangaWindow.current.panelHeight)
+                .verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                AnimeSectionTitle(shown?.title ?: "来源筛选", action = {
+                    MotionIconButton(onClick = onDismiss, modifier = Modifier.size(44.dp), tooltip = "关闭筛选") {
                         Icon(Icons.Outlined.Close, "关闭", Modifier.size(20.dp))
                     }
+                })
+                shown?.filters?.forEach { filter ->
+                    AnimeBrowseFilter(filter, selected[filter.key], backdrop,
+                        onSelect = { onSelect(filter.key, it) })
                 }
-                if (source == null) {
-                    AnimeMessage("选择你的发现来源", "安装并启用浏览或视频来源后，可在这里查看它的推荐与分类。",
-                        action = "管理来源", onAction = onManageSources)
-                } else {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.weight(1f)) {
-                            MotionTextButton(onClick = { sourceMenu = true }, modifier = Modifier.heightIn(min = 44.dp)) {
-                                Text(source.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Icon(Icons.Outlined.ExpandMore, null, Modifier.size(18.dp))
-                            }
-                            CompactGlassPopover(sourceMenu, backdrop, onDismiss = { sourceMenu = false }, alignToStart = true) {
-                                available.forEach { item -> CompactMenuAction(
-                                    if (source.id == item.id) Icons.Outlined.Check else Icons.Outlined.Tv,
-                                    item.name, onClick = { selectedSourceId = item.id; sourceMenu = false }) }
-                                CompactMenuAction(Icons.Outlined.Extension, "管理来源", onClick = {
-                                    sourceMenu = false; onManageSources()
-                                })
-                            }
-                        }
-                        if (selectedTitle == null) MotionIconButton(onClick = {
-                            refresh++; requestedPage = 1; pageRetry++
-                        }, modifier = Modifier.size(44.dp), enabled = !homeLoading && !categoriesLoading && !loading, tooltip = "刷新来源内容") {
-                            Icon(Icons.Outlined.Refresh, "刷新", Modifier.size(20.dp))
-                        }
-                    }
-                    val title = selectedTitle
-                    if (title != null) {
-                        LazyColumn(Modifier.weight(1f, fill = false), contentPadding = PaddingValues(20.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            item {
-                                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                                    AnimePoster(title.coverUrl, Modifier.width(86.dp).height(122.dp))
-                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Text(title.title, style = MaterialTheme.typography.titleMedium)
-                                        AnimeQuietLabel(animeBrowseSummary(title))
-                                        AnimeQuietLabel("来自 " + source.name)
-                                    }
-                                }
-                            }
-                            item {
-                                AnimeQuietLabel("先选对应的番剧资料，再核对季度、版本与播放来源。")
-                                MotionButton(onClick = { onChooseTitle(title, source.kind == LanercSourceKind.VIDEO) },
-                                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 48.dp)) {
-                                    Text(if (source.kind == LanercSourceKind.VIDEO) "搜索并关联番剧" else "搜索对应番剧")
-                                }
-                            }
-                            if (related.isNotEmpty()) item { AnimeSectionTitle("来源推荐") }
-                            items(related, key = { it.sourceId + ":" + it.id }) { item ->
-                                AnimeBrowseTitleRow(item, onOpen = { selectedTitle = item })
-                            }
-                            if (relatedLoading) item { AnimeQuietLabel("正在读取相关内容") }
-                            if (relatedError != null) item { AnimeMessage("相关内容未取得", relatedError,
-                                action = "重试", onAction = { relatedRetry++ }) }
-                        }
-                    } else {
-                        if (categories.isNotEmpty()) BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-                            val labels = listOf("推荐") + categories.map { it.title }
-                            val tabsWidth = maxWidth.coerceAtLeast((labels.size * 88).dp)
-                            Box(Modifier.horizontalScroll(rememberScrollState())) {
-                                MotionTabs(categories.indexOfFirst { it.key == categoryKey } + 1, labels,
-                                    onSelect = {
-                                        categoryKey = categories.getOrNull(it - 1)?.key
-                                        filters = emptyMap(); requestedPage = 1
-                                    }, modifier = Modifier.width(tabsWidth), controlHeight = 44.dp,
-                                    treatment = MotionTabTreatment.Underline)
-                            }
-                        }
-                        LazyColumn(Modifier.weight(1f, fill = false), state = scroll,
-                            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 20.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (categoryKey == null) {
-                                if (homeLoading && home.isEmpty()) item { AnimeMessage("正在读取来源发现") }
-                                else if (categoriesLoading && home.isEmpty()) item { AnimeMessage("正在读取来源分类") }
-                                if (homeError != null) item { AnimeMessage("发现内容未取得", homeError,
-                                    action = "重试", onAction = { refresh++ }) }
-                                if (categoryError != null) item { AnimeMessage("分类未取得", categoryError,
-                                    action = "重试", onAction = { refresh++ }) }
-                                home.forEachIndexed { sectionIndex, section ->
-                                    item(key = "section:$sectionIndex") { AnimeSectionTitle(section.title) }
-                                    items(section.items.distinctBy { it.sourceId to it.id },
-                                        key = { "home:$sectionIndex:" + it.sourceId + ":" + it.id }) { item ->
-                                        AnimeBrowseTitleRow(item, onOpen = { selectedTitle = item })
-                                    }
-                                }
-                                if (!homeLoading && !categoriesLoading && home.isEmpty() && homeError == null) item {
-                                    AnimeMessage("暂无推荐内容", if (categories.isNotEmpty()) "可以切换上方分类继续浏览。" else "这个来源尚未返回发现内容。")
-                                }
-                            } else {
-                                category?.filters?.forEach { filter -> item(key = "filter:" + filter.key) {
-                                    AnimeBrowseFilter(filter, filters[filter.key], backdrop, onSelect = { value ->
-                                        filters = if (value == null) filters - filter.key else filters + (filter.key to value)
-                                        requestedPage = 1
-                                    })
-                                } }
-                                items(rows, key = { it.sourceId + ":" + it.id }) { item ->
-                                    AnimeBrowseTitleRow(item, onOpen = { selectedTitle = item })
-                                }
-                                if (loading) item { AnimeQuietLabel("正在读取第 " + requestedPage + " 页", Modifier.padding(12.dp)) }
-                                if (pageError != null) item { AnimeMessage("这页内容未取得", pageError,
-                                    action = "重试这一页", onAction = { pageRetry++ }) }
-                                else if (!loading && rows.isEmpty()) item { AnimeMessage("没有匹配的内容", "试试其他分类或筛选。") }
-                                if (more && pageError == null) item { MotionTextButton(onClick = { requestedPage = page + 1 }, enabled = !loading,
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("加载更多") } }
-                            }
-                        }
-                    }
-                }
+                MotionButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("完成") }
             }
         }
     }
@@ -261,34 +249,11 @@ private fun AnimeBrowseFilter(filter: LanercFilter, value: String?, backdrop: Ha
             CompactGlassPopover(menu, backdrop, onDismiss = { menu = false }) {
                 CompactMenuAction(if (value == null) Icons.Outlined.Check else Icons.Outlined.FilterList, "来源默认",
                     onClick = { onSelect(null); menu = false })
-                filter.options.distinctBy { it.value }.forEach { option -> CompactMenuAction(
-                    if (option.value == value) Icons.Outlined.Check else Icons.Outlined.FilterList,
-                    option.label.ifBlank { "不限" }, onClick = { onSelect(option.value); menu = false }) }
+                filter.options.distinctBy { it.value }.forEach { option ->
+                    CompactMenuAction(if (value == option.value) Icons.Outlined.Check else Icons.Outlined.FilterList,
+                        option.label.ifBlank { "不限" }, onClick = { onSelect(option.value); menu = false })
+                }
             }
         }
     }
 }
-
-/** Reuses the canonical row's cover geometry and shared press, without inventing a canonical id. */
-@Composable
-private fun AnimeBrowseTitleRow(title: AnimeSourceTitle, onOpen: () -> Unit) {
-    val interaction = remember(title.sourceId, title.id) { MutableInteractionSource() }
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-        .motionPress(interaction, pressedScale = .99f)
-        .clickable(interactionSource = interaction, indication = null, onClick = onOpen)
-        .padding(vertical = 10.dp, horizontal = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        AnimePoster(title.coverUrl, Modifier.width(52.dp).height(72.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(title.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            AnimeQuietLabel(animeBrowseSummary(title))
-        }
-        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-private fun animeBrowseSummary(title: AnimeSourceTitle): String = listOfNotNull(title.year?.toString(),
-    title.episodeCount?.takeIf { it > 0 }?.let { "$it 集" }).joinToString(" · ").ifBlank { "查看来源条目" }
-
-private fun animeBrowseError(failure: Exception): String = if (failure is LanercCapabilityException)
-    failure.message ?: "来源暂不支持这个操作。" else "来源内容未能读取，可重试或在来源管理中更新脚本。"
