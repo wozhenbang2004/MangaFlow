@@ -239,6 +239,7 @@ data class AccountUiState(
     val error: String? = null,
     val canRetryConnection: Boolean = false,
     val savedCredentialPresent: Boolean = false,
+    val autoRestorePending: Boolean = false,
     val favorites: List<Manga> = emptyList(),
     val favoritesLoading: Boolean = false,
     val favoritesRefreshing: Boolean = false,
@@ -3199,6 +3200,7 @@ class MangaViewModel(context: PlatformContext) : ViewModel() {
                     _account.value = AccountUiState(profile = accountRepository.profile.value, busy = false,
                         error = accountError(failure, "登录暂时未完成，请稍后重试。"),
                         savedCredentialPresent = saved,
+                        autoRestorePending = retryAllowed,
                         canRetryConnection = accountRepository.canRetryLogin || (restoring && saved))
                     if (retryAllowed) scheduleAccountRestore(requestId, failure)
                 }
